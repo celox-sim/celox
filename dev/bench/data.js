@@ -355527,6 +355527,212 @@ window.BENCHMARK_DATA = {
             "value": 69420.63333333333
           }
         ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "d8a6d72765aabb378ae5ae4cc39afb0c1b0d08f3",
+          "message": "perf(x86): use popcnt for wide xor reductions (#2384)",
+          "timestamp": "2026-10-28T07:06:03Z",
+          "url": "https://github.com/celox-sim/celox/commit/d8a6d72765aabb378ae5ae4cc39afb0c1b0d08f3"
+        },
+        "date": 1793175865031,
+        "cpu": "AMD EPYC 7763",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "verilator/simulation_build_top_n1000",
+            "unit": "us",
+            "value": 8466017.658
+          },
+          {
+            "name": "verilator/simulation_build_linear_sec_p6",
+            "unit": "us",
+            "value": 1175223.293
+          },
+          {
+            "name": "verilator/simulation_build_countones_w64",
+            "unit": "us",
+            "value": 1151025.533
+          },
+          {
+            "name": "verilator/simulation_build_std_counter_w32",
+            "unit": "us",
+            "value": 1084621.701
+          },
+          {
+            "name": "verilator/simulation_build_gray_counter_w32",
+            "unit": "us",
+            "value": 1078881.101
+          },
+          {
+            "name": "verilator/simulation_build_fifo_w8_d16",
+            "unit": "us",
+            "value": 1184082.743
+          },
+          {
+            "name": "verilator/simulation_build_gray_codec_w32",
+            "unit": "us",
+            "value": 1108308.905
+          },
+          {
+            "name": "verilator/simulation_build_edge_detector_w32",
+            "unit": "us",
+            "value": 1094733.621
+          },
+          {
+            "name": "verilator/simulation_build_onehot_w64",
+            "unit": "us",
+            "value": 1318267.083
+          },
+          {
+            "name": "verilator/simulation_build_lfsr_w32",
+            "unit": "us",
+            "value": 1129900.948
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1",
+            "unit": "us",
+            "value": 0.41722400640429047
+          },
+          {
+            "name": "verilator/simulation_tick_top_n1000_x1000000",
+            "unit": "us",
+            "value": 417792.2656666667
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1",
+            "unit": "us",
+            "value": 0.416957784207007
+          },
+          {
+            "name": "verilator/testbench_tick_top_n1000_x1000000",
+            "unit": "us",
+            "value": 418112.3763333333
+          },
+          {
+            "name": "verilator/simulation_eval_linear_sec_p6_x1",
+            "unit": "us",
+            "value": 0.04194396324191827
+          },
+          {
+            "name": "verilator/simulation_eval_linear_sec_p6_x1000000",
+            "unit": "us",
+            "value": 42341.86566666667
+          },
+          {
+            "name": "verilator/testbench_eval_linear_sec_p6_x1000000",
+            "unit": "us",
+            "value": 42346.692
+          },
+          {
+            "name": "verilator/simulation_eval_countones_w64_x1",
+            "unit": "us",
+            "value": 0.06911794749997364
+          },
+          {
+            "name": "verilator/simulation_eval_countones_w64_x1000000",
+            "unit": "us",
+            "value": 69584.94566666667
+          },
+          {
+            "name": "verilator/simulation_tick_std_counter_w32_x1",
+            "unit": "us",
+            "value": 0.06238125779398093
+          },
+          {
+            "name": "verilator/simulation_tick_std_counter_w32_x1000000",
+            "unit": "us",
+            "value": 62401.837
+          },
+          {
+            "name": "verilator/testbench_tick_std_counter_w32_x1000000",
+            "unit": "us",
+            "value": 62481.549333333336
+          },
+          {
+            "name": "verilator/simulation_tick_gray_counter_w32_x1",
+            "unit": "us",
+            "value": 0.06262427425287033
+          },
+          {
+            "name": "verilator/simulation_tick_gray_counter_w32_x1000000",
+            "unit": "us",
+            "value": 62774.104666666666
+          },
+          {
+            "name": "verilator/testbench_tick_gray_counter_w32_x1000000",
+            "unit": "us",
+            "value": 62786.95933333333
+          },
+          {
+            "name": "verilator/simulation_tick_fifo_w8_d16_x1",
+            "unit": "us",
+            "value": 0.08228832836040438
+          },
+          {
+            "name": "verilator/simulation_tick_fifo_w8_d16_x1000000",
+            "unit": "us",
+            "value": 82252.63333333333
+          },
+          {
+            "name": "verilator/testbench_tick_fifo_w8_d16_x1000000",
+            "unit": "us",
+            "value": 82753.27266666667
+          },
+          {
+            "name": "verilator/simulation_eval_gray_codec_w32_x1",
+            "unit": "us",
+            "value": 0.04367604018019145
+          },
+          {
+            "name": "verilator/simulation_eval_gray_codec_w32_x1000000",
+            "unit": "us",
+            "value": 43662.58133333333
+          },
+          {
+            "name": "verilator/simulation_tick_edge_detector_w32_x1",
+            "unit": "us",
+            "value": 0.06988717365943
+          },
+          {
+            "name": "verilator/testbench_tick_edge_detector_w32_x1000000",
+            "unit": "us",
+            "value": 69850.731
+          },
+          {
+            "name": "verilator/simulation_eval_onehot_w64_x1",
+            "unit": "us",
+            "value": 0.10112510724413974
+          },
+          {
+            "name": "verilator/simulation_eval_onehot_w64_x1000000",
+            "unit": "us",
+            "value": 101482.59433333333
+          },
+          {
+            "name": "verilator/simulation_tick_lfsr_w32_x1",
+            "unit": "us",
+            "value": 0.0676627829141792
+          },
+          {
+            "name": "verilator/simulation_tick_lfsr_w32_x1000000",
+            "unit": "us",
+            "value": 67442.65866666666
+          },
+          {
+            "name": "verilator/testbench_tick_lfsr_w32_x1000000",
+            "unit": "us",
+            "value": 67675.44866666668
+          }
+        ]
       }
     ],
     "Heliodor Benchmarks": [
