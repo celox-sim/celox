@@ -1,0 +1,1 @@
+Codex review: events declared through typedefs are created at declaration; @(sel ? a : b) waits for the selected event; a wait for only null events stays blocked across suspend/resume; event records without waiters expire once time advances.
