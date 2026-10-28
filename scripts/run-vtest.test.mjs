@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { executorPath, prepareCi, run } from "./run-vtest.mjs";
+import { executorPath, executorScope, prepareCi, run, workspaceFeatures } from "./run-vtest.mjs";
 
 const artifact = JSON.stringify({
   reason: "compiler-artifact", target: { name: "vtest-exec", kind: ["example"] },
@@ -47,10 +47,11 @@ test("CI preparation only builds and exports the executor for later test steps",
   assert.equal(prepareCi((...args) => {
     calls.push(args);
     return { status: 0, stdout: artifact };
-  }, { GITHUB_ENV: "/job/environment" }, (...args) => writes.push(args)), 0);
+  }, { GITHUB_ENV: "/job/environment", CELOX_RUST_FULL: "true" }, (...args) => writes.push(args)), 0);
   assert.equal(calls.length, 1);
   assert.equal(calls[0][1][0], "build");
   assert.ok(calls[0][1].includes("vtest"));
+  assert.ok(calls[0][1].includes("--workspace"));
   assert.equal(writes.length, 1);
   assert.equal(writes[0][0], "/job/environment");
   assert.match(writes[0][1], /^CELOX_VTEST_RUNNER=\/managed target\/vtest\/examples\/vtest-exec\n/);
@@ -60,13 +61,14 @@ test("CI preparation only builds and exports the executor for later test steps",
 test("failed CI preparation cannot export a stale executor or silently skip setup", () => {
   const unexpected = () => assert.fail("unexpected build or environment export");
   assert.throws(() => prepareCi(unexpected, {}, unexpected), /requires GITHUB_ENV/);
-  assert.equal(prepareCi(() => ({ status: 17 }), { GITHUB_ENV: "/job/env" }, unexpected), 17);
+  assert.throws(() => prepareCi(unexpected, { GITHUB_ENV: "/job/env" }, unexpected), /requires CELOX_RUST_FULL/);
+  assert.equal(prepareCi(() => ({ status: 17 }), { GITHUB_ENV: "/job/env", CELOX_RUST_FULL: "true" }, unexpected), 17);
   assert.throws(() => prepareCi(() => ({ status: 0, stdout: "" }),
-    { GITHUB_ENV: "/job/env" }, unexpected), /one vtest executor/);
+    { GITHUB_ENV: "/job/env", CELOX_RUST_FULL: "true" }, unexpected), /one vtest executor/);
   const message = JSON.parse(artifact);
   message.executable += "\nUNRELATED=value";
   assert.throws(() => prepareCi(() => ({ status: 0, stdout: JSON.stringify(message) }),
-    { GITHUB_ENV: "/job/env" }, unexpected), /Invalid executor environment/);
+    { GITHUB_ENV: "/job/env", CELOX_RUST_FULL: "true" }, unexpected), /Invalid executor environment/);
 });
 
 test("local tests leave heavy backends off unless explicitly requested", () => {
@@ -81,4 +83,28 @@ test("local tests leave heavy backends off unless explicitly requested", () => {
     assert.equal(features[0], "celox/systemverilog,celox-test-suite/runtime-cases"
       + (extra ? `,${extra}` : ""));
   }
+});
+
+test("the CI executor is built in the scope of the test build it serves", () => {
+  // Same packages, features and profile: the tests reuse its compilation.
+  assert.deepEqual(executorScope({ CELOX_RUST_FULL: "true" }),
+    ["--workspace", "--exclude", "lydite*", "--features", workspaceFeatures, "--tests"]);
+  const builds = [
+    { packages: ["celox-heap"], targets: [], features: [] },
+    { packages: ["celox", "celox-test-suite"], targets: ["systemverilog"], features: ["celox/systemverilog", "celox/cranelift"] },
+  ];
+  assert.deepEqual(executorScope({ CELOX_RUST_FULL: "false", BUILDS: JSON.stringify(builds) }), [
+    "-p", "celox", "-p", "celox-test-suite",
+    "--features", "celox/systemverilog,celox/cranelift,celox-test-suite/runtime-cases",
+    "--test", "systemverilog",
+  ]);
+  assert.deepEqual(executorScope({ CELOX_RUST_FULL: "false",
+    BUILDS: JSON.stringify([{ packages: ["celox"], targets: [], features: [] }]) }),
+  ["-p", "celox", "--features", "celox-test-suite/runtime-cases", "--tests"]);
+  assert.throws(() => executorScope({ CELOX_RUST_FULL: "false", BUILDS: JSON.stringify([builds[0]]) }),
+    /does not test Celox/);
+  assert.throws(() => executorScope({ CELOX_RUST_FULL: "false",
+    BUILDS: JSON.stringify([{ packages: ["celox"], targets: [], features: ["x;y"] }]) }),
+  /Invalid Cargo scope/);
+  assert.deepEqual(executorScope({}), ["-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases"]);
 });
