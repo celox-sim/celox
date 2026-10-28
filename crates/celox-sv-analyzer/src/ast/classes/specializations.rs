@@ -309,12 +309,13 @@ pub(in crate::ast) fn specialize(
 ) -> Converted<String> {
     match bind_specialization(tree, generic, arguments, context)? {
         Binding::Ready(name) => Ok(name),
-        Binding::Deferred(parameter) => Err(unresolved_parameter(&parameter)),
+        Binding::Deferred(error) => Err(error),
     }
 }
 
 /// Initial typedef discovery runs before enclosing constants are collected.
-/// A missing value may be retried after that collection; actual type uses and
+/// A missing value, or a type argument whose bounds need such a constant, may
+/// be retried after that collection; actual type uses and
 /// subsequent typedef passes still require every parameter to be constant.
 pub(in crate::ast) fn specialize_if_ready(
     tree: &AnalysisContext<'_>,
@@ -332,7 +333,8 @@ pub(in crate::ast) fn specialize_if_ready(
 
 enum Binding {
     Ready(String),
-    Deferred(String),
+    /// Waiting for enclosing constants, with the error a use reports.
+    Deferred(AnalyzerError),
 }
 
 fn unresolved_parameter(name: &str) -> AnalyzerError {
@@ -378,7 +380,7 @@ struct PendingSpecialization {
 
 enum Preparation {
     Existing(String),
-    Deferred(String),
+    Deferred(AnalyzerError),
     Pending(Box<PendingSpecialization>),
 }
 
@@ -452,9 +454,16 @@ fn prepare(
             continue;
         };
         match parameter.kind {
-            ParameterKind::Type { .. } => {
-                types.insert(name, type_argument(tree, value, context)?);
-            }
+            ParameterKind::Type { .. } => match type_argument(tree, value, context)? {
+                Some(ty) => {
+                    types.insert(name, ty);
+                }
+                None => {
+                    return Ok(Preparation::Deferred(unsupported(
+                        "class type parameter value",
+                    )));
+                }
+            },
             ParameterKind::Value { .. } => {
                 values.insert(name, value_argument(tree, value, context)?);
             }
@@ -476,7 +485,7 @@ fn prepare(
     if let Some(id) = declaration.parameter_ports
         && let Some(name) = parameters.bind(tree, declaration, id, true, &mut env, &mut aliases)?
     {
-        return Ok(Preparation::Deferred(name));
+        return Ok(Preparation::Deferred(unresolved_parameter(&name)));
     }
     if let Some(name) = parameters
         .values
@@ -816,12 +825,13 @@ fn declaration_scope(
         .cloned()
 }
 
-/// The type that argument `id` of a type parameter names.
+/// The type that argument `id` of a type parameter names, or `None` while a
+/// bound of it needs a constant that `context` does not know yet.
 fn type_argument(
     tree: &AnalysisContext<'_>,
     id: celox_sv_syntax::ExprId,
     context: &PackedDimensions,
-) -> Converted<Type> {
+) -> Converted<Option<Type>> {
     let native = tree.declarations();
     let ty = match &native.expression(id).kind {
         ExprKind::Type(ty) => type_binding::bind(*ty, tree, context)?,
@@ -917,11 +927,12 @@ fn finish(
     ty: Option<Type>,
     context: &PackedDimensions,
     tree: &AnalysisContext<'_>,
-) -> Converted<Type> {
+) -> Converted<Option<Type>> {
     let ty = ty.ok_or_else(|| unsupported("class type parameter value"))?;
     // The bounds are those of the scope that assigns the type.
-    let ty = type_parameters::resolve(&tree.state, ty, &context.const_env)
-        .ok_or_else(|| unsupported("class type parameter value"))?;
+    let Some(ty) = type_parameters::resolve(&tree.state, ty, &context.const_env) else {
+        return Ok(None);
+    };
     // Each enumeration declaration is a type of its own, which the bound
     // type does not tell apart from another of the same base (6.19).
     if ty.is_enum {
@@ -936,7 +947,7 @@ fn finish(
             "struct or union type as a class type parameter value",
         ));
     }
-    Ok(ty)
+    Ok(Some(ty))
 }
 
 /// The constant value of argument `id` of a value parameter, as a literal
