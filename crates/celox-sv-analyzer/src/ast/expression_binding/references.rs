@@ -134,6 +134,15 @@ pub(super) fn check_actual(
         .subroutine_param_shapes
         .get(name)
         .and_then(|shapes| shapes.get(position));
+    // The members of a structure are separate variables, which one reference
+    // cannot alias.
+    if formal.is_some_and(|formal| formal.unpacked_struct.is_some())
+        || shape.unpacked_struct.is_some()
+    {
+        return Err(unsupported(format!(
+            "ref argument of `{name}` of unpacked structure type"
+        )));
+    }
     // Bounded and unbounded queues are equivalent (6.22.2), but a formal's
     // operations would apply its own bound to the actual.
     if let (Some(formal), Some(actual)) = (

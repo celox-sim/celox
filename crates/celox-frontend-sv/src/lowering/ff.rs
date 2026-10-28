@@ -3139,10 +3139,23 @@ impl<'p, 'a> Ff<'p, 'a> {
         lhs: &sv::ir::LValue,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        self.assign_value(lhs, rhs, true)
+    }
+
+    /// Assign `rhs` to `lhs`; `convert` turns an integral value assigned to
+    /// a string variable into its bytes. The parts of a concatenation target
+    /// take the bits of the value instead: a part that is a string is a
+    /// member of an unpacked structure, and its bits are a handle.
+    fn assign_value(
+        &mut self,
+        lhs: &sv::ir::LValue,
+        rhs: &sv::ir::Expr,
+        convert: bool,
+    ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
         let lhs = self.hoist_lvalue(&lhs)?;
         let converted = match self.m.id(lhs.name()) {
-            Some(id) if matches!(lhs, sv::ir::LValue::Ident(_)) => {
+            Some(id) if convert && matches!(lhs, sv::ir::LValue::Ident(_)) => {
                 self.string_conversion(id, rhs.clone())
             }
             _ => rhs.clone(),
@@ -3622,7 +3635,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
                 signed: false,
             };
-            self.assign(part, &slice)?;
+            self.assign_value(part, &slice, false)?;
         }
         Ok(())
     }
@@ -4744,7 +4757,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                     })?;
                     let guards = tagged_actual_guards(reference);
                     self.check_tagged_guards(&guards)?;
-                    outputs.push((param.name.clone(), id, lvalues, guards));
+                    // The members of an unpacked structure take the formal's
+                    // bits, even a single string or handle member.
+                    let concat = matches!(reference, sv::ir::Expr::Concat(_));
+                    outputs.push((param.name.clone(), id, lvalues, guards, concat));
                 }
             }
             if param.direction.is_read() {
@@ -4855,10 +4871,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.jump(return_block);
         }
         self.b.switch_to_block(return_block);
-        for (formal, id, lvalues, guards) in outputs {
+        for (formal, id, lvalues, guards, concat) in outputs {
             self.check_tagged_guards(&guards)?;
             let signed = self.m.var(id).signed;
-            if let [lvalue] = lvalues.as_slice() {
+            if let [lvalue] = lvalues.as_slice()
+                && !concat
+            {
                 self.assign(lvalue, &sv::ir::Expr::Ident(formal))?;
             } else {
                 let _ = signed;

@@ -27,7 +27,8 @@
     "icarus/tagged_unions.json",
     "icarus/timing.json",
     "icarus/types.json",
-    "icarus/unions.json"
+    "icarus/unions.json",
+    "icarus/unpacked_structs.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

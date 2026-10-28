@@ -155,6 +155,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 ),
                 members: port.r#type().members.clone(),
                 signed_element_depth: port.r#type().signed_element_depth,
+                unpacked_struct: port.r#type().unpacked_struct.clone(),
             },
         );
     }
@@ -186,6 +187,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                 ),
                 members: signal.r#type().members.clone(),
                 signed_element_depth: signal.r#type().signed_element_depth,
+                unpacked_struct: signal.r#type().unpacked_struct.clone(),
             },
         );
     }
@@ -377,6 +379,7 @@ fn extend_variable_dimensions_from_const_env(
             signed_element_depth: None,
             class: None,
             nominal: Nominal::default(),
+            unpacked_struct: None,
         };
         let mut shape = procedural::dimensions_from_type(&ty);
         if let Some(existing) = context.get(name) {
@@ -565,6 +568,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                     is_2state: parameter.declared_is_2state,
                     members: parameter.members.clone(),
                     signed_element_depth: parameter.signed_element_depth,
+                    unpacked_struct: None,
                 },
             )
         })

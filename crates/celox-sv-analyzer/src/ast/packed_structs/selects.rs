@@ -87,6 +87,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             is_2state: r#type.kind == TypeKind::Bit,
             members: r#type.members.clone(),
             signed_element_depth: r#type.signed_element_depth,
+            unpacked_struct: None,
         },
     );
     result

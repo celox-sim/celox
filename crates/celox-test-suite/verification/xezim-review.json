@@ -762,6 +762,30 @@
     "sv_associative_index_cast": {
       "title": "An associative index is evaluated at its own width instead of as a cast to the index type",
       "standard": "IEEE 1800-2023 7.8.4, 6.24.1"
+    },
+    "sv_rest-X80": {
+      "title": "A conditional operator whose operands are unpacked structures yields the false operand",
+      "standard": "IEEE 1800-2023 11.4.11, 7.2"
+    },
+    "sv_rest-X81": {
+      "title": "A structure assignment pattern item that is an unpacked structure value sets the member to its default",
+      "standard": "IEEE 1800-2023 10.9.2"
+    },
+    "sv_rest-X82": {
+      "title": "A whole unpacked-structure assignment in always_comb leaves the target members at their defaults",
+      "standard": "IEEE 1800-2023 7.2, 9.2.2.2"
+    },
+    "sv_rest-X83": {
+      "title": "An object constructed with `new(s)` in an always procedure keeps an empty string property",
+      "standard": "IEEE 1800-2023 8.7, 9.2.2.1"
+    },
+    "sv_rest-X85": {
+      "title": "A structure assignment pattern as the default of a subroutine argument loses its named members",
+      "standard": "IEEE 1800-2023 13.5.3, 10.9.2"
+    },
+    "sv_rest-X88": {
+      "title": "An automatic output argument of unpacked structure type that is not written is copied out as X for a 2-state member",
+      "standard": "IEEE 1800-2023 13.5.2, 6.8"
     }
   },
   "cases": [
@@ -4547,6 +4571,54 @@
       "classification": "xezim_bug",
       "bug": "sv_associative_index_cast",
       "note": "With int unsigned x = 32'hffffffff and string wide[bit [63:0]], wide[x + 32'd1] = ... stores key 0 in xezim 0.11.3 (prints 0 1); 7.8.4 evaluates the index as a cast to bit [63:0], so the key is 64'h100000000 (expected 1 0). See verification/repros/sv_associative_index_cast.json."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::assignment_patterns",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X81",
+      "note": "o = '{r: b, tag: \"w\"} with a row_t variable b prints \"member 0  w\": xezim stores the default for the structure-valued member instead of b's members (-2, \"typed\"). Reproduced by verification/repros/sv_xezim_unpacked_structs.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::subroutine_arguments_and_results",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X80",
+      "note": "b = a.level > 5 ? a : b with a.level = 6 keeps b (\"-1:five!\") instead of copying a (\"6:five\"). Reproduced by verification/repros/sv_xezim_unpacked_structs.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::module_variables",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X82",
+      "note": "always_comb begin q = p; q.b = p.b + 1; end leaves q.a = 0, so c.a = q.a + 1 and next_a read 0 instead of a + 1 (0x11). Reproduced by verification/repros/sv_xezim_unpacked_structs.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::handle_members_survive_heap_collections",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X83",
+      "note": "node = new(number) in always @(posedge clk) gives an object whose text property is empty, so last.m_type.text prints \"[ ]\" instead of \"[2999]\"; the same happens without the structure. Reproduced by verification/repros/sv_xezim_constructor_argument_in_always.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::initializers_results_and_defaults",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X85",
+      "note": "f() with the default '{default: 0, s: \"d\"} sees an empty s and returns 0 instead of 1; the same pattern assigned to a variable keeps s. Reproduced by verification/repros/sv_xezim_struct_default_argument.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::results_and_outputs",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X88",
+      "note": "outz(r) does not write its output formal, so r.a must become the int default 0; xezim prints \"outz x\". Reproduced by verification/repros/sv_xezim_struct_output_default.sv."
     }
   ]
 }
