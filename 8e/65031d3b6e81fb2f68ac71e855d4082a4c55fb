@@ -1,0 +1,1 @@
+Review fixes: 4-state property and record member loads are not two-state; equal records share one handle (OBJECT_FINISH_RECORD), so equal element updates keep the container.
