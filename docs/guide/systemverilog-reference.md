@@ -872,8 +872,22 @@ stateful function require `Simulation` or a native testbench to execute the
 initialization process. Constant function calls use
 fresh values and do not affect runtime storage (13.4.3).
 
-Task locals that keep their values and nonconstant static initializers remain
-unsupported; declare those locals `automatic`. Package function state is a
+A static local of a process may have a run-time initializer. It runs once,
+in declaration order, before any procedure starts (IEEE 1800-2023 6.8), and
+may read module variables and other static locals but no automatic variable.
+IEEE 1800-2023 6.21 states that "an explicit static keyword shall be required
+when an initialization value is specified as part of a static variable's
+declaration". Celox also accepts the declaration without the keyword, as
+existing sources often omit it (for example `string s = v.name();` in an
+`initial` block): with a constant initializer in any procedure, and with a
+run-time initializer in a procedure that runs once, such as `initial`. In an
+`always` procedure a run-time initializer without the keyword is rejected,
+because its author likely meant it to run on every entry; declare the local
+`static` or `automatic` to state which.
+
+Task locals that keep their values and nonconstant initializers of static
+function locals remain unsupported; declare those locals `automatic`. Package
+function state is a
 package variable, which the processes of every instance may write.
 An interface whose default lifetime (`interface automatic`) differs from that of the
 module it is used in is rejected.
