@@ -1289,10 +1289,6 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
     }
 }
 
-fn value_bits(id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
-    with_host(|host| value_bits_at(host, id))
-}
-
 fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
     borrow_cell(&host.runtime, |runtime| {
         let runtime = runtime.as_ref()?.state();
@@ -1301,9 +1297,13 @@ fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUin
             return None;
         }
         let width = id.width(runtime)?;
-        let identity = id.identity(runtime)?;
-        if let Some(forced) = host.forced_values.borrow().get(&identity) {
-            return Some((forced.value.clone(), forced.mask.clone(), width));
+        {
+            let forced_values = host.forced_values.borrow();
+            if !forced_values.is_empty()
+                && let Some(forced) = forced_values.get(&id.identity(runtime)?)
+            {
+                return Some((forced.value.clone(), forced.mask.clone(), width));
+            }
         }
         let (value, mask) = id.read(runtime)?;
         Some((value, mask, width))
@@ -1583,8 +1583,14 @@ pub unsafe extern "C" fn vpi_put_value(
     when: *const c_void,
     flags: i32,
 ) -> VpiHandle {
+    if reference.is_null() {
+        return ptr::null_mut();
+    }
+    let Some(host) = selected_host() else {
+        return ptr::null_mut();
+    };
     // A ReadOnly callback may not write (IEEE 1800-2023 38.36.2, Table 38-6).
-    if callbacks::in_read_only() {
+    if borrow_cell(&host.callbacks, |state| state.read_only) {
         return ptr::null_mut();
     }
     let inertial_is_immediate = flags == VPI_INERTIAL_DELAY
@@ -1604,14 +1610,16 @@ pub unsafe extern "C" fn vpi_put_value(
     {
         return ptr::null_mut();
     }
-    // Safety: reference follows the VPI handle contract.
-    let Some(ObjectRef::Signal(id)) = (unsafe { object_ref(reference) }) else {
+    // Safety: the owner-thread check above selected and retained this host
+    // before accessing the caller's live, non-null handle.
+    let HandleKind::Object(ObjectRef::Signal(id)) = (unsafe { &*reference }).kind else {
         return ptr::null_mut();
     };
     if id.depth != 0 && matches!(flags, VPI_FORCE_FLAG | VPI_RELEASE_FLAG) {
         return ptr::null_mut();
     }
-    let signal_info = with_runtime(|runtime| {
+    let signal_info = borrow_cell(&host.runtime, |runtime| {
+        let runtime = runtime.as_ref()?.state();
         let root = runtime.reflection().signal(id.root)?;
         if root.is_parameter || id.depth != root.unpacked_dims.len() {
             return None;
@@ -1621,8 +1629,7 @@ pub unsafe extern "C" fn vpi_put_value(
             id.width(runtime)?,
             id.signal(runtime)?.is_4state && runtime.four_state(),
         ))
-    })
-    .flatten();
+    });
     let Some((identity, width, is_4state)) = signal_info else {
         return ptr::null_mut();
     };
@@ -1696,16 +1703,14 @@ pub unsafe extern "C" fn vpi_put_value(
         }
     }
     if flags == VPI_INERTIAL_DELAY {
-        with_host(|host| {
-            host.inertial_writes.borrow_mut().insert(
-                identity,
-                PendingDeposit {
-                    id,
-                    value: bits,
-                    mask,
-                },
-            );
-        });
+        host.inertial_writes.borrow_mut().insert(
+            identity,
+            PendingDeposit {
+                id,
+                value: bits,
+                mask,
+            },
+        );
         return reference;
     }
     if apply_signal_value(id, identity, bits, mask, flags) {
