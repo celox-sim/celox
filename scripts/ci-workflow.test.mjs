@@ -4,6 +4,7 @@ import { readFileSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { workspaceFeatures } from "./run-vtest.mjs";
 
 const workflow = readFileSync(
   new URL("../.github/workflows/ci.yml", import.meta.url),
@@ -378,7 +379,7 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   assert.match(warm, /"scripts\/run-vtest.mjs"/);
   assert.match(
     warm,
-    /cargo nextest list --locked --workspace --exclude 'lydite\*' --message-format json/,
+    /cargo nextest list --locked --workspace --exclude 'lydite\*' --cargo-profile vtest --message-format json/,
   );
   const features = job("rust-tests").match(/--features (\S+)/)[1];
   assert.ok(warm.includes(`--features ${features}`));
@@ -419,7 +420,7 @@ test("scoped Cargo commands build only the selected integration targets", () => 
     TARGETS: "flip_flop systemverilog", FILTER: "binary_id(celox::flip_flop) | binary_id(celox::systemverilog)",
   };
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
-    "nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
+    "nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
     "-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases",
     "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
   ]);
@@ -446,7 +447,7 @@ test("CI prepares one executor for full runs and scopes containing Celox", () =>
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", {
     PACKAGES: "celox-heap", FEATURES: "", TARGETS: "", FILTER: "package(celox-heap)",
     CELOX_VTEST_RUNNER: "",
-  }), ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
+  }), ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
     "-p", "celox-heap", "-E", "package(celox-heap)"]);
 });
 
@@ -487,7 +488,7 @@ test("cocotb reuses the original scoped Cargo build", () => {
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
     RUST_FULL: "false", BUILDS: JSON.stringify(builds),
   });
-  assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci",
+  assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest",
     "-p", "celox", "-p", "celox-vpi", "-p", "celox-test-suite", "--features",
     "celox/systemverilog,celox-test-suite/icarus,celox-test-suite/runtime-cases",
     "-E", 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
@@ -519,9 +520,17 @@ test("default-feature validation is parallel and mandatory when selected", () =>
   assert.match(job("report-full-validation"), /rust-default-tests,/);
 });
 
-test("CI retains the normal test profile and warms each platform's cache", () => {
+test("CI builds tests with the executor's profile and warms each platform's cache", () => {
   const rust = job("rust-tests");
-  assert.doesNotMatch(rust, /--cargo-profile/);
+  assert.match(rust, /--profile ci --cargo-profile vtest -E "\$CELOX_BACKEND_FILTER"/);
+  // The executor build shares the test build's packages and features.
+  assert.match(rust, /CELOX_RUST_FULL: \$\{\{ needs\.changes\.outputs\.rust_full \}\}\n          BUILDS: \$\{\{ needs\.changes\.outputs\.rust_builds \}\}\n        run: node scripts\/run-vtest\.mjs --prepare-ci/);
+  const full = rust.match(/--cargo-profile vtest -E "\$CELOX_BACKEND_FILTER"\n          --features (\S+)/);
+  assert.equal(full?.[1], workspaceFeatures);
+  // Documentation tests reuse the libraries of that build.
+  assert.match(rust, /cargo test --locked --workspace --exclude 'lydite\*' --doc --profile vtest\n          --features (\S+)/);
+  assert.equal(rust.match(/--doc --profile vtest\n          --features (\S+)/)?.[1], workspaceFeatures);
+  assert.match(rust, /cargo test --locked --doc --profile vtest "\$\{args\[@\]\}"/);
   assert.match(rust, /cargo test --locked --workspace/);
   const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
   const windows = warm.split("  napi-windows:")[1];

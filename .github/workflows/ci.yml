@@ -269,6 +269,9 @@ jobs:
 
       - name: Build the optimized vtest executor
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_packages), ' celox '))
+        env:
+          CELOX_RUST_FULL: ${{ needs.changes.outputs.rust_full }}
+          BUILDS: ${{ needs.changes.outputs.rust_builds }}
         run: node scripts/run-vtest.mjs --prepare-ci
 
       # Enable the frontend and suite features together so common integration
@@ -282,7 +285,7 @@ jobs:
         id: workspace-tests
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
-          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci -E "$CELOX_BACKEND_FILTER"
+          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci --cargo-profile vtest -E "$CELOX_BACKEND_FILTER"
           --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
@@ -334,11 +337,12 @@ jobs:
           job_name: rust-tests
           test_step_outcome: ${{ steps.queue-tests.outcome != 'skipped' && steps.queue-tests.outcome || steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
 
-      # nextest does not run documentation tests.
+      # nextest does not run documentation tests. They build with the tests'
+      # profile, so they reuse the libraries the test build compiled.
       - name: Run workspace documentation tests with CI features
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
-          cargo test --locked --workspace --exclude 'lydite*' --doc
+          cargo test --locked --workspace --exclude 'lydite*' --doc --profile vtest
           --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
@@ -350,7 +354,7 @@ jobs:
           args=()
           for package in $LIBRARIES; do args+=(-p "$package"); done
           if [ -n "$FEATURES" ]; then args+=(--features "$FEATURES"); fi
-          cargo test --locked --doc "${args[@]}"
+          cargo test --locked --doc --profile vtest "${args[@]}"
   rust-default-tests:
     name: Rust default-feature tests
     needs: changes
