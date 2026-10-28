@@ -320,12 +320,13 @@ impl Item {
                     Arc::new(self.function_aliases((*dimensions.subroutine_directions).clone()));
             }
             if !dimensions.function_return_types.is_empty() {
-                local.function_return_types =
-                    self.function_aliases(dimensions.function_return_types.clone());
+                local.function_return_types = self
+                    .function_aliases((*dimensions.function_return_types).clone())
+                    .into();
             }
         }
         if let Cow::Owned(aliases) = self.type_aliases(&dimensions.type_aliases) {
-            local.type_aliases = aliases;
+            local.type_aliases = aliases.into();
         }
         let mut signedness = dimensions.expression_signedness.clone();
         for name in self.shadowed.iter() {

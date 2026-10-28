@@ -17,6 +17,23 @@ struct Key {
 #[derive(Default)]
 pub(in crate::ast) struct State {
     partial: RefCell<HashMap<Key, PackedDimensions>>,
+    /// The class method signatures that discovery last published in each
+    /// scope, by arena and scope.
+    class_signatures:
+        RefCell<HashMap<(usize, crate::source_tree::ScopeHandle), std::rc::Rc<ClassSignatures>>>,
+}
+
+/// The signature entries that discovering a scope's own declarations added
+/// or changed, and the tables of the context they were bound in, held so
+/// that their identities stay unique.
+struct ClassSignatures {
+    const_env: SharedMap<i128>,
+    type_aliases: SharedMap<Type>,
+    function_return_types: SharedMap<FunctionReturnMetadata>,
+    specializations: usize,
+    shapes: Vec<(String, Vec<VariableDimensions>)>,
+    names: Vec<(String, Vec<String>)>,
+    returns: Vec<(String, FunctionReturnMetadata)>,
 }
 struct Guard<'a>(&'a State, Key);
 impl Drop for Guard<'_> {
@@ -443,13 +460,13 @@ fn class_signatures(
     };
     // Formals and results are bound in the scope of the specialization.
     let mut scope = context.clone();
-    let (env, aliases) = classes::specializations::scope(
+    let (env, aliases) = classes::specializations::shared_scope(
         tree,
         class_name,
         &context.const_env,
         &context.type_aliases,
     );
-    scope.const_env = env.into();
+    scope.const_env = env;
     scope.type_aliases = aliases;
     let this = (
         FunctionArgumentMetadata {
@@ -578,6 +595,198 @@ pub(in crate::ast) fn all_class_signatures(
     }
     tree.state.class_specializations_frozen.set(true);
 }
+/// The signatures of the classes of the current scope and of its other
+/// subroutines, bound once from `base` and the scope's own declarations
+/// `scope`, without those around a query, and kept while `base` and the set
+/// of specializations stay the same. Each query and each of its discovery
+/// passes publishes them again instead of binding every class again.
+fn scope_class_signatures(
+    tree: &AnalysisContext<'_>,
+    scope: &[BodyItemId],
+    key: &Key,
+    base: &PackedDimensions,
+) -> Converted<std::rc::Rc<ClassSignatures>> {
+    let cache_key = (
+        tree.declarations() as *const _ as usize,
+        tree.scope_handle(),
+    );
+    let specializations = tree.state.class_specializations.borrow().len();
+    if let Some(cached) = tree
+        .state
+        .dimensions
+        .class_signatures
+        .borrow()
+        .get(&cache_key)
+        .filter(|cached| {
+            cached.specializations == specializations
+                && (cached.const_env.identity() == base.const_env.identity()
+                    || *cached.const_env == *base.const_env)
+                && (cached.type_aliases.identity() == base.type_aliases.identity()
+                    || *cached.type_aliases == *base.type_aliases)
+                && (cached.function_return_types.identity()
+                    == base.function_return_types.identity()
+                    || *cached.function_return_types == *base.function_return_types)
+        })
+    {
+        return Ok(cached.clone());
+    }
+    #[cfg(test)]
+    super::CLASS_SIGNATURE_BINDINGS.with(|count| count.set(count.get() + 1));
+    let mut bound = base.clone();
+    settle(&[scope.to_vec()], tree, key, &mut bound, Classes::Bind)?;
+    // Only the methods of the scope's classes, `class::method`: the scope's
+    // other subroutines are discovered with each query, where a generate
+    // block may hide them.
+    let classes = classes::scope_declarations(tree)
+        .flat_map(|class| classes::specializations_of(tree, class))
+        .collect::<HashSet<_>>();
+    fn changed<V: Clone + PartialEq>(
+        classes: &HashSet<String>,
+        before: &HashMap<String, V>,
+        after: &HashMap<String, V>,
+    ) -> Vec<(String, V)> {
+        after
+            .iter()
+            .filter(|(name, value)| {
+                name.rsplit_once("::")
+                    .is_some_and(|(owner, _)| classes.contains(owner))
+                    && before.get(*name) != Some(*value)
+            })
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    }
+    let signatures = std::rc::Rc::new(ClassSignatures {
+        const_env: base.const_env.clone(),
+        type_aliases: base.type_aliases.clone(),
+        function_return_types: base.function_return_types.clone(),
+        specializations: tree.state.class_specializations.borrow().len(),
+        shapes: changed(
+            &classes,
+            &base.subroutine_param_shapes,
+            &bound.subroutine_param_shapes,
+        ),
+        names: changed(
+            &classes,
+            &base.subroutine_param_names,
+            &bound.subroutine_param_names,
+        ),
+        returns: changed(
+            &classes,
+            &base.function_return_types,
+            &bound.function_return_types,
+        ),
+    });
+    tree.state
+        .dimensions
+        .class_signatures
+        .borrow_mut()
+        .insert(cache_key, signatures.clone());
+    Ok(signatures)
+}
+
+impl ClassSignatures {
+    fn publish(&self, tree: &AnalysisContext<'_>, context: &mut PackedDimensions) {
+        if !self.shapes.is_empty() {
+            Arc::make_mut(&mut context.subroutine_param_shapes).extend(self.shapes.iter().cloned());
+        }
+        if !self.names.is_empty() {
+            Arc::make_mut(&mut context.subroutine_param_names).extend(self.names.iter().cloned());
+        }
+        if !self.returns.is_empty() {
+            context
+                .function_return_types
+                .extend(self.returns.iter().cloned());
+        }
+        tree.state.class_specializations_frozen.set(true);
+    }
+}
+
+/// Discover the declarations of `frames` in `context` until they settle,
+/// with the class signatures `classes` gives.
+fn settle(
+    frames: &[Vec<BodyItemId>],
+    tree: &AnalysisContext<'_>,
+    key: &Key,
+    context: &mut PackedDimensions,
+    classes: Classes<'_>,
+) -> Converted<()> {
+    // Resolve forward return-range dependencies using the same published prefix
+    // as value declarations. Each pass publishes useful metadata before queries
+    // in subsequent ranges recurse; no native call stack follows dependency depth.
+    let native = tree.declarations();
+    let declarations = frames.iter().map(Vec::len).sum::<usize>();
+    for _ in 0..=declarations {
+        let before = context.clone();
+        for frame in frames {
+            for id in frame {
+                if let BodyItemKind::Subroutine(id) = native.body_item(*id).kind
+                    && native.subroutine(id).scope.is_empty()
+                {
+                    let _ = signature(id, tree, context);
+                    publish(&tree.state.dimensions, key, context);
+                } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
+                    && let Ok(import) = dpi::import(id, native)
+                    && let Some(ty) = import.return_type()
+                {
+                    context.function_return_types.insert(
+                        import.name().to_string(),
+                        FunctionReturnMetadata {
+                            arguments: Some(dpi_argument_metadata(&import)),
+                            width: Some(ty.width()),
+                            first_packed_dimension_width: (ty.width() > 1).then_some(ty.width()),
+                            dimensions: Some(usize::from(ty.width() > 1)),
+                            signed: ty.is_signed(),
+                            is_2state: !ty.is_4state(),
+                            string: false,
+                            pattern_type: None,
+                        },
+                    );
+                    publish(&tree.state.dimensions, key, context);
+                }
+            }
+        }
+        match classes {
+            Classes::Bind => all_class_signatures(tree, context),
+            Classes::Published(signatures) => signatures.publish(tree, context),
+        }
+        publish(&tree.state.dimensions, key, context);
+        if let Ok(unit) = tree.root_unit() {
+            if let Some(parameters) = &unit.parameters {
+                for parameter_node in parameters {
+                    let _ = parameter(parameter_node, tree, context, key, false);
+                }
+            }
+            for index in tree.header_port_ids()? {
+                let port = &unit.ports[index];
+                if let Some(id) = port.data_type
+                    && let Ok(Some(base)) = type_binding::bind(id, tree, context)
+                    && let Ok(ty) = type_with_dimensions(base, &port.dimensions, tree, context)
+                    && let celox_sv_syntax::PortKind::Named(n) = &port.kind
+                {
+                    publish_shape(tree, key, context, name(n), &ty, false);
+                }
+            }
+        }
+        for frame in frames {
+            for id in frame {
+                let _ = declaration(*id, tree, context, key);
+            }
+        }
+        if *context == before {
+            break;
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy)]
+enum Classes<'a> {
+    /// Bind the signatures of the scope's classes in each pass.
+    Bind,
+    /// Publish signatures bound before.
+    Published(&'a ClassSignatures),
+}
+
 fn publish_signature(
     n: String,
     formals: Vec<(FunctionArgumentMetadata, Type)>,
@@ -604,10 +813,8 @@ fn publish_signature(
             .collect(),
     );
     if let Some(ty) = result {
-        context.function_return_types.insert(
-            n,
-            return_metadata(&tree.state, ty.as_ref(), arguments, context),
-        );
+        let metadata = return_metadata(&tree.state, ty.as_ref(), arguments, context);
+        context.function_return_types.insert(n, metadata);
     }
 }
 fn local_declaration(
@@ -787,68 +994,17 @@ pub(in crate::ast) fn query_operand_dimensions_id(
         .iter()
         .map(|items| direct(items, tree))
         .collect::<Converted<Vec<_>>>()?;
-    // Resolve forward return-range dependencies using the same published prefix
-    // as value declarations. Each pass publishes useful metadata before queries
-    // in subsequent ranges recurse; no native call stack follows dependency depth.
-    let declarations = frames.iter().map(Vec::len).sum::<usize>();
-    for _ in 0..=declarations {
-        let before = context.clone();
-        for frame in &frames {
-            for id in frame {
-                if let BodyItemKind::Subroutine(id) = native.body_item(*id).kind
-                    && native.subroutine(id).scope.is_empty()
-                {
-                    let _ = signature(id, tree, &mut context);
-                    publish(&tree.state.dimensions, &key, &context);
-                } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
-                    && let Ok(import) = dpi::import(id, native)
-                    && let Some(ty) = import.return_type()
-                {
-                    context.function_return_types.insert(
-                        import.name().to_string(),
-                        FunctionReturnMetadata {
-                            arguments: Some(dpi_argument_metadata(&import)),
-                            width: Some(ty.width()),
-                            first_packed_dimension_width: (ty.width() > 1).then_some(ty.width()),
-                            dimensions: Some(usize::from(ty.width() > 1)),
-                            signed: ty.is_signed(),
-                            is_2state: !ty.is_4state(),
-                            string: false,
-                            pattern_type: None,
-                        },
-                    );
-                    publish(&tree.state.dimensions, &key, &context);
-                }
-            }
-        }
-        all_class_signatures(tree, &mut context);
-        publish(&tree.state.dimensions, &key, &context);
-        if let Ok(unit) = tree.root_unit() {
-            if let Some(parameters) = &unit.parameters {
-                for parameter_node in parameters {
-                    let _ = parameter(parameter_node, tree, &mut context, &key, false);
-                }
-            }
-            for index in tree.header_port_ids()? {
-                let port = &unit.ports[index];
-                if let Some(id) = port.data_type
-                    && let Ok(Some(base)) = type_binding::bind(id, tree, &context)
-                    && let Ok(ty) = type_with_dimensions(base, &port.dimensions, tree, &context)
-                    && let celox_sv_syntax::PortKind::Named(n) = &port.kind
-                {
-                    publish_shape(tree, &key, &mut context, name(n), &ty, false);
-                }
-            }
-        }
-        for frame in &frames {
-            for id in frame {
-                let _ = declaration(*id, tree, &mut context, &key);
-            }
-        }
-        if context == before {
-            break;
-        }
-    }
+    // A class's signatures are bound in the scope that declares it, from
+    // that scope's declarations alone, once for all of its queries.
+    let base = context.clone();
+    let classes = scope_class_signatures(tree, &frames[0], &key, &base)?;
+    settle(
+        &frames,
+        tree,
+        &key,
+        &mut context,
+        Classes::Published(&classes),
+    )?;
     overlay(&mut context, input);
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);

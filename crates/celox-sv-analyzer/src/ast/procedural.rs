@@ -144,7 +144,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         state: &'s mut BodyState<'a>,
         body: system_functions::Body,
     ) -> Self {
-        let type_aliases = dims.type_aliases.clone();
+        let type_aliases = (*dims.type_aliases).clone();
         let automatic = state.automatic;
         Self {
             automatic,

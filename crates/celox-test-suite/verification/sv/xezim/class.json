@@ -200,6 +200,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::method_ranges_of_scope_declarations at 2808:27: assert_eq a: expected 0x8, got 0x1",
+      "expectation": "Simulation",
+      "name": "class::method_ranges_of_scope_declarations",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::methods_called_through_interface_class_handles",
