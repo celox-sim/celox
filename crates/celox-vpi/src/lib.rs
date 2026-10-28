@@ -1317,7 +1317,11 @@ fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUin
         if id.depth != signal.unpacked_dims.len() {
             return None;
         }
-        let width = id.width(runtime)?;
+        let width = if id.depth == 0 {
+            signal.signal.width
+        } else {
+            id.width(runtime)?
+        };
         {
             let forced_values = host.forced_values.borrow();
             if !forced_values.is_empty()
@@ -1326,7 +1330,11 @@ fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUin
                 return Some((forced.value.clone(), forced.mask.clone(), width));
             }
         }
-        let (value, mask) = id.read(runtime)?;
+        let (value, mask) = if id.depth == 0 {
+            runtime.get_four_state(signal.signal)
+        } else {
+            id.read(runtime)?
+        };
         Some((value, mask, width))
     })
 }
@@ -1907,18 +1915,18 @@ fn flush_pending_writes_for_host(host: &VpiHost) -> bool {
                     .into_iter()
                     .filter_map(|identity| {
                         let deposit = batch.deposits.get(&identity)?;
-                        let signal = deposit.id.resolve(runtime)?;
+                        let signal = deposit.id.signal(runtime)?;
                         if overridden.contains(&identity) {
-                            let (old_value, old_mask) = runtime.get_four_state(signal.signal);
+                            let (old_value, old_mask) = runtime.get_four_state(signal);
                             if !is_active_edge(
-                                signal.domain_kind,
+                                deposit.id.domain_kind(runtime)?,
                                 logic_level(&old_value, &old_mask),
                                 logic_level(&deposit.value, &deposit.mask),
                             ) {
                                 return None;
                             }
                         }
-                        Some(signal.state_address)
+                        Some(runtime.reflection().signal(deposit.id.root)?.state_address)
                     })
                     .collect::<Vec<_>>();
                 apply_pending_deposits(runtime, &batch.deposits);
