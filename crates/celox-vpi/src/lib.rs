@@ -529,6 +529,16 @@ struct PendingWrites {
     settle: bool,
 }
 
+impl PendingWrites {
+    // An open batch follows the current deposits. Freeze its map only when a
+    // member transitions again or before replay, rather than after every write.
+    fn close_edge_batch(&mut self) {
+        if let Some(index) = self.open_edge_batch.take() {
+            self.edge_batches[index].deposits = self.deposits.clone();
+        }
+    }
+}
+
 struct PendingEdgeBatch {
     active_signals: Vec<VpiSignalIdentity>,
     transition_signals: Vec<VpiSignalIdentity>,
@@ -598,7 +608,7 @@ fn record_pending_write(
     });
 
     if open_contains_signal && event_transition {
-        pending.open_edge_batch = None;
+        pending.close_edge_batch();
     }
 
     pending
@@ -612,17 +622,14 @@ fn record_pending_write(
             if active {
                 pending.edge_batches[index].active_signals.push(identity);
             }
-            pending.edge_batches[index].deposits = pending.deposits.clone();
         } else {
             pending.edge_batches.push(PendingEdgeBatch {
                 active_signals: active.then_some(identity).into_iter().collect(),
                 transition_signals: vec![identity],
-                deposits: pending.deposits.clone(),
+                deposits: HashMap::default(),
             });
             pending.open_edge_batch = Some(pending.edge_batches.len() - 1);
         }
-    } else if let Some(index) = pending.open_edge_batch {
-        pending.edge_batches[index].deposits = pending.deposits.clone();
     }
     pending.settle = true;
 }
@@ -2021,7 +2028,10 @@ fn flush_inertial_writes_for_host(host: &VpiHost) -> bool {
 }
 
 fn flush_pending_writes_for_host(host: &VpiHost) -> bool {
-    let pending = borrow_cell_mut(&host.pending_writes, std::mem::take);
+    let pending = borrow_cell_mut(&host.pending_writes, |pending| {
+        pending.close_edge_batch();
+        std::mem::take(pending)
+    });
     if !pending.settle {
         return true;
     }
