@@ -800,6 +800,42 @@ fn finish_specialization(
                     });
                 if let Some(mut ty) = ty {
                     let alias = instances::normalize_identifier(&alias.name.spelling);
+                    // The members of an enumeration the class declares are
+                    // constants of the class scope (IEEE 1800-2023 6.19,
+                    // 8.18), with their type, which a derived class inherits
+                    // too. A typedef of another enumeration declares none.
+                    if matches!(
+                        native.data_type(target).kind,
+                        celox_sv_syntax::DataTypeKind::Enum { .. }
+                    ) && let Some(domain) = ty.enum_domain.clone()
+                    {
+                        for member in &domain.members {
+                            let mut constants = HashMap::default();
+                            constants.insert(member.name.clone(), member.value);
+                            constants.insert(dimensions::enum_marker(&member.name), member.value);
+                            dimensions::insert_parameter_type_markers(
+                                &mut constants,
+                                &member.name,
+                                ExprType {
+                                    width: domain.width,
+                                    signed: domain.signed,
+                                },
+                            );
+                            for (key, value) in constants {
+                                env.insert(key.clone(), value);
+                                parameters.own_env.insert(key, Some(value));
+                            }
+                            // `C::NAME` reads it as a parameter of the class.
+                            parameters.literals.insert(
+                                member.name.clone(),
+                                Expr::Literal(format_typed_parameter_literal(
+                                    member.value,
+                                    domain.width,
+                                    domain.signed,
+                                )),
+                            );
+                        }
+                    }
                     ty.name_declaration(|| format!("{name}::{alias}"));
                     parameters.own_aliases.insert(alias.clone(), ty.clone());
                     aliases.insert(alias, ty);

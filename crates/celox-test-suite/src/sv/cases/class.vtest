@@ -3181,3 +3181,57 @@ module Top(output int got);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq got 2))
+(case enumeration_constants_of_classes
+  (source "package.sv" #"
+package p;
+    class C;
+        typedef bit [1:0] mode_t;
+        typedef enum mode_t {STRICT = 2'b00, HIGHEST = 2'b01, CHECK = 2'b10} mode_e;
+        localparam mode_t DEFAULT = CHECK;
+        mode_e m = HIGHEST;
+        function int f();
+            return DEFAULT + 10 * m;
+        endfunction
+        static function int g();
+            return C::CHECK;
+        endfunction
+    endclass
+    class P #(int N = 1);
+        typedef enum {A = N, B} e;
+        static function int b();
+            return B;
+        endfunction
+    endclass
+    typedef P#(5) P5;
+    typedef P#() P1;
+    typedef enum {OTHER = 1} other_e;
+    class Q;
+        localparam int OTHER = 7;
+        typedef other_e alias_e;
+        static function int f();
+            return OTHER;
+        endfunction
+    endclass
+    class Base;
+        typedef enum bit [1:0] {FIRST = 2'b01} base_e;
+    endclass
+    class Derived extends Base;
+        typedef enum bit [1:0] {SECOND = FIRST} derived_e;
+        static function int f();
+            return SECOND;
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic C c = new();
+        sum = c.f() + 100 * C::g() + 1000 * C::CHECK + 10000 * C::DEFAULT
+            + 100000 * P5::b() + 1000000 * P1::b() + 10000000 * Q::f()
+            + 100000000 * Derived::f();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 172622212))

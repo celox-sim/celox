@@ -1278,3 +1278,22 @@ the [standalone source](verification/repros/sv_verilator_property_reference_cons
 reproduces it. These are executed compile failures. xezim 0.11.3 gives copy
 semantics in the suspended-task case (`sv_ref_copy_semantics`) and the padded
 string members of class properties (`sv_rest-X84`) in the heap case.
+
+### Enumeration constants of classes
+
+`class::enumeration_constants_of_classes` uses the members of enumerations
+that classes declare: by name in a method, a property initializer and a
+`localparam`, as `C::NAME` from a module, with values that depend on a
+class parameter, and in an enumeration of a derived class; a typedef of a
+package enumeration in a class leaves a class constant of the same name in
+place (IEEE 1800-2023 6.19, 8.13, 8.23 and 8.25); the sum is 172622212.
+Verilator 5.052 passes. Icarus 13.0 rejects the class scope references; its
+exact compile diagnostic remains an executed failure in
+[the Icarus class report](verification/sv/icarus/class.json). The pinned
+xezim 0.11.3 numbers the parameterized enumeration from 0 (171122212), recorded
+in [the review](verification/xezim-review.json) with an
+[adapter-free source](verification/repros/sv_class_enum_constants_xezim.sv)
+and [observations](verification/repros/sv_class_enum_constants_xezim.json)
+for Top and Wrapped; its exact mismatch remains an executed failure in
+[the xezim class report](verification/sv/xezim/class.json).
+No assertions or exclusions are weakened.

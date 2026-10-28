@@ -679,6 +679,10 @@
       "title": "`$bits` of a static class method call is 1 when the method's return range uses `$bits` of a module variable, also in a declaration range",
       "standard": "IEEE 1800-2023 8.10, 20.6.2"
     },
+    "sv_class-X17": {
+      "title": "A member of an enumeration declared in a parameterized class whose value uses a class parameter (`A = N`) evaluates the parameter as 0, so the following members are numbered from 0",
+      "standard": "IEEE 1800-2023 6.19, 8.25"
+    },
     "sv_iff_order": {
       "title": "iff conditions see writes after the event instead of the value at the triggering write",
       "standard": "IEEE 1800-2023 9.4.2.3, 10.4.2"
@@ -4151,6 +4155,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X4",
       "note": "Derived is declared in generate block g, whose localparam K = 3 hides the module's K = 2; `typedef bit [K-1:0] T` must use K = 3 (23.9: names resolve from the declaration scope upward), so $bits = 3. xezim prints 1 (as top and non-top); in a reduction with another class it uses the module K (2). It does not depend on `extends`: a plain class in g behaves the same, while a static function in the same class returns K = 3. Repro: work/review5/xezim/r/c3c.sv, work/review5/xezim/r/c3_genscope.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::enumeration_constants_of_classes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X17",
+      "note": "Class C declares typedef enum mode_t {STRICT, HIGHEST, CHECK} with base typedef mode_t, localparam DEFAULT = CHECK and property m = HIGHEST; P #(N) declares typedef enum {A = N, B}. f() = DEFAULT + 10*m = 12, C::g() = C::CHECK = 2, C::DEFAULT = 2, P#(5)::b() = B = 6 and P#()::b() = 2 (6.19, 8.25); Q's localparam OTHER = 7 stays in place beside typedef other_e alias_e, and Derived's SECOND = FIRST of Base is 1 (8.13), so the sum is 172622212. The pinned xezim returns 171122212: the adapter-free source prints p5=1 p1=1 as both Top and Wrapped, numbering A from 0 regardless of N; Verilator 5.052 and Celox print p5=6 p1=2. See verification/repros/sv_class_enum_constants_xezim.{sv,json}."
     },
     {
       "suite": "sv",
