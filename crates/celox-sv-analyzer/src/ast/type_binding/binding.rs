@@ -146,6 +146,26 @@ fn bind_in_mode(
                                 continue;
                             }
                         }
+                        if let [package, class, member] = path.as_slice() {
+                            let name = scope::qualified_name(
+                                &tree.state,
+                                &normalize_identifier(&package.name.spelling),
+                                &normalize_identifier(&class.name.spelling),
+                            );
+                            if let Some(class) =
+                                class_scope_named(class, tree, context, mode, name)?
+                            {
+                                let member = normalize_identifier(&member.name.spelling);
+                                let ty = super::super::classes::specializations::member_type(
+                                    tree, &class, &member,
+                                )
+                                .ok_or_else(|| {
+                                    unsupported(format!("type `{member}` of class `{class}`"))
+                                })?;
+                                values.push(types::enclose_aliased_packed_type(ty, ranges));
+                                continue;
+                            }
+                        }
                         // A type that a class declares, `C::T` (IEEE 1800-2023
                         // 8.23, 8.25.1).
                         if let [scope, member] = path.as_slice()
@@ -177,6 +197,25 @@ fn bind_in_mode(
                                 )),
                                 _ => None,
                             };
+                            if let Some(class) = class
+                                .as_ref()
+                                .filter(|class| tree.state.foreign.contains(class))
+                            {
+                                let arguments = path
+                                    .last()
+                                    .and_then(|part| part.arguments.as_deref())
+                                    .unwrap_or_default();
+                                let Some(name) =
+                                    mode.specialize(tree, class, arguments, context)?
+                                else {
+                                    return Ok(None);
+                                };
+                                values.push(types::enclose_aliased_packed_type(
+                                    super::super::classes::handle(&name),
+                                    ranges,
+                                ));
+                                continue;
+                            }
                             if let Some(class) = class.filter(|class| {
                                 imported
                                     .classes
@@ -436,7 +475,22 @@ fn class_scope(
     context: &PackedDimensions,
     mode: BindingMode,
 ) -> Converted<Option<String>> {
-    let name = normalize_identifier(&scope.name.spelling);
+    class_scope_named(
+        scope,
+        tree,
+        context,
+        mode,
+        normalize_identifier(&scope.name.spelling),
+    )
+}
+
+fn class_scope_named(
+    scope: &celox_sv_syntax::TypeSegment,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+    mode: BindingMode,
+    name: String,
+) -> Converted<Option<String>> {
     if scope.arguments.is_none()
         && let Some(class) = context
             .type_aliases

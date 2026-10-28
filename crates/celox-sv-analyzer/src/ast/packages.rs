@@ -1,11 +1,13 @@
 //! Packages (IEEE 1800-2023 26) and compilation units (3.12.1).
 //!
-//! A package is analyzed once, after the packages it depends on, with the
+//! A package is analyzed after the packages it depends on, with the
 //! collectors that analyze a module: its declarations form a scope of their
 //! own. Its symbols are exported under their qualified names `p::x`, with the
 //! references among them bound to those names (see the `scope` module). A
 //! module or package that uses packages starts from their symbols, and from
-//! an alias for each name its imports bind (see the `imports` module).
+//! an alias for each name its imports bind (see the `imports` module). Importing
+//! scopes can request additional class specializations; their declarations and
+//! bodies are bound in the retained package scope (see `classes::foreign`).
 //!
 //! Each source file is a compilation unit of its own. Its declarations
 //! outside any module or package form the compilation-unit scope `$unit`,
@@ -21,6 +23,7 @@ use super::*;
 /// The analyzed packages of a design.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
+    pub(super) foreign: std::rc::Rc<classes::foreign::Registry>,
     /// Source-call identities shared with modules importing these package bodies.
     pub(super) call_sites: std::rc::Rc<std::cell::Cell<usize>>,
     pub(crate) interface_plan: Arc<interfaces::NativeInterfacePlan>,
@@ -91,7 +94,7 @@ pub(super) struct Package {
     pub symbols: ScopeSymbols,
     /// The package as a module, when it has variables: the module the
     /// package's one instance holds them in.
-    state_module: Option<crate::ir::Module>,
+    pub(super) state_module: Option<crate::ir::Module>,
 }
 
 impl Package {
@@ -181,6 +184,28 @@ impl Packages {
                     .filter_map(|unit| unit.scope.as_ref().ok()),
             )
             .filter_map(|package| package.state_module.as_ref())
+    }
+
+    /// Package state after specialization requests made by importing scopes.
+    pub fn specialized_state_modules(&self) -> Vec<crate::ir::Module> {
+        let specialized = self.foreign.states();
+        // Different compilation units may each have a state module named
+        // `$unit`; preserve every one rather than indexing them by name.
+        let mut states = self
+            .state_modules()
+            .filter(|module| !specialized.contains_key(module.name()))
+            .cloned()
+            .collect::<Vec<_>>();
+        states.extend(specialized.into_values());
+        states.sort_by(|left, right| {
+            left.name().cmp(right.name()).then_with(|| {
+                left.signals()
+                    .first()
+                    .map(|signal| signal.name())
+                    .cmp(&right.signals().first().map(|signal| signal.name()))
+            })
+        });
+        states
     }
 
     pub(super) fn get(&self, name: &str) -> Option<&Package> {
@@ -338,6 +363,7 @@ impl Packages {
         }
         if declarations.is_empty() {
             return Ok(Self {
+                foreign: state.foreign.clone(),
                 timescales,
                 ..Self::default()
             });
@@ -364,6 +390,7 @@ impl Packages {
         // Package bodies can query selected hierarchy roots while they are
         // collected, before any module is analyzed.
         let mut packages = Self {
+            foreign: state.foreign.clone(),
             timescales,
             ..Self::default()
         };
@@ -497,9 +524,28 @@ fn analyze_package_scope(
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
     let imports::ResolvedImports {
-        symbols: mut imported,
+        symbols: imported,
         exports,
     } = imports::resolve_imports(tree, packages, None)?;
+    if own_items.is_none() && name != UNIT {
+        tree.state.foreign.register(
+            name,
+            tree.syntax_tree,
+            &imported,
+            tree.state.next_call_site.clone(),
+            packages.timescales.clone(),
+        );
+    }
+    analyze_package_with_symbols(name, tree, imported, exports, own_items)
+}
+
+pub(super) fn analyze_package_with_symbols(
+    name: &str,
+    tree: &AnalysisContext<'_>,
+    mut imported: ScopeSymbols,
+    exports: HashMap<String, String>,
+    own_items: Option<&ScopeSymbols>,
+) -> Result<Package, AnalyzerError> {
     if let Some(own_items) = own_items {
         imported.extend(own_items);
     }

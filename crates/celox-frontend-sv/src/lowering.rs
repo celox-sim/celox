@@ -936,7 +936,8 @@ fn lower_package_states(
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
-    let mut states = packages.state_modules().collect::<Vec<_>>();
+    let states = packages.specialized_state_modules();
+    let mut states = states.iter().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
     states
         .into_iter()
