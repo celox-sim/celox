@@ -1,0 +1,1 @@
+Rebased onto master. Review fixes: class compatibility of associative keys and traversal variables; pops of nested queues are containers.
