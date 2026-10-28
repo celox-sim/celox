@@ -5,13 +5,29 @@ use celox_sv_syntax::{BodyItemKind, ParameterKind, TypeAliasTarget};
 pub(super) fn type_aliases_from_scope(
     tree: &AnalysisContext<'_>,
 ) -> Converted<HashMap<String, Type>> {
-    type_aliases_from_scope_with_env(tree, &HashMap::default())
+    // Constants of this scope are not available until parameter collection.
+    // The subsequent pass with an environment requires complete defaults.
+    type_aliases_in_scope(
+        tree,
+        &HashMap::default(),
+        &HashMap::default(),
+        true,
+        None,
+        true,
+    )
 }
 pub(super) fn type_aliases_from_scope_with_env(
     syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
 ) -> Converted<HashMap<String, Type>> {
-    type_aliases_in_scope(syntax_tree, const_env, &HashMap::default(), true, None)
+    type_aliases_in_scope(
+        syntax_tree,
+        const_env,
+        &HashMap::default(),
+        true,
+        None,
+        false,
+    )
 }
 
 /// Resolve a selected body while retaining its enclosing lexical type bindings.
@@ -21,7 +37,7 @@ pub(super) fn type_aliases_from_body_with_env(
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
 ) -> Converted<HashMap<String, Type>> {
-    type_aliases_in_scope(syntax_tree, const_env, inherited, false, Some(items))
+    type_aliases_in_scope(syntax_tree, const_env, inherited, false, Some(items), false)
 }
 
 fn type_aliases_in_scope(
@@ -30,6 +46,7 @@ fn type_aliases_in_scope(
     inherited: &HashMap<String, Type>,
     include_header: bool,
     items: Option<&[celox_sv_syntax::BodyItemId]>,
+    defer_class_defaults: bool,
 ) -> Converted<HashMap<String, Type>> {
     let mut aliases = scope::imported(&syntax_tree.state).type_aliases.clone();
     aliases.extend(
@@ -84,6 +101,7 @@ fn type_aliases_in_scope(
                     syntax_tree,
                     const_env,
                     &aliases,
+                    defer_class_defaults,
                 )?
                 else {
                     continue;

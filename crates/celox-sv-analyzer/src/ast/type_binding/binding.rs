@@ -16,26 +16,64 @@ pub(in crate::ast) fn bind_in(
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    bind_in_with_validation(root, native, tree, context, true)
+    bind_in_mode(root, native, tree, context, BindingMode::Use)
 }
 
 /// Typedef discovery precedes enum constant resolution, so dependent aliases
-/// may still have provisional widths. Validate them when collecting members.
+/// may still have provisional widths. The initial pass can also wait for
+/// enclosing constants before specializing a class default.
 pub(in crate::ast) fn bind_alias_in(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
+    defer_defaults: bool,
 ) -> Converted<Option<Type>> {
-    bind_in_with_validation(root, native, tree, context, false)
+    bind_in_mode(
+        root,
+        native,
+        tree,
+        context,
+        BindingMode::Alias { defer_defaults },
+    )
 }
 
-fn bind_in_with_validation(
+#[derive(Clone, Copy)]
+enum BindingMode {
+    Use,
+    Alias { defer_defaults: bool },
+}
+
+impl BindingMode {
+    fn specialize(
+        self,
+        tree: &AnalysisContext<'_>,
+        generic: &str,
+        arguments: &[celox_sv_syntax::Argument],
+        context: &PackedDimensions,
+    ) -> Converted<Option<String>> {
+        if matches!(
+            self,
+            Self::Alias {
+                defer_defaults: true
+            }
+        ) {
+            super::super::classes::specializations::specialize_if_ready(
+                tree, generic, arguments, context,
+            )
+        } else {
+            super::super::classes::specializations::specialize(tree, generic, arguments, context)
+                .map(Some)
+        }
+    }
+}
+
+fn bind_in_mode(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
-    validate_enums: bool,
+    mode: BindingMode,
 ) -> Converted<Option<Type>> {
     enum Job {
         Enter(TypeId),
@@ -91,12 +129,15 @@ fn bind_in_with_validation(
                                 && let Some(name) = super::super::classes::resolve(tree, &name)
                                 && super::super::classes::is_parameterized(tree, &name)
                             {
-                                let name = super::super::classes::specializations::specialize(
+                                let Some(name) = mode.specialize(
                                     tree,
                                     &name,
                                     part.arguments.as_deref().unwrap_or_default(),
                                     context,
-                                )?;
+                                )?
+                                else {
+                                    return Ok(None);
+                                };
                                 values.push(super::super::classes::handle(&name));
                                 continue;
                             }
@@ -104,7 +145,7 @@ fn bind_in_with_validation(
                         // A type that a class declares, `C::T` (IEEE 1800-2023
                         // 8.23, 8.25.1).
                         if let [scope, member] = path.as_slice()
-                            && let Some(class) = class_scope(scope, tree, context)?
+                            && let Some(class) = class_scope(scope, tree, context, mode)?
                         {
                             let member = normalize_identifier(&member.name.spelling);
                             let ty = super::super::classes::specializations::member_type(
@@ -181,7 +222,7 @@ fn bind_in_with_validation(
                         } else {
                             let mut ty = builtin_type("int", None).unwrap();
                             ty.is_enum = true;
-                            if validate_enums {
+                            if matches!(mode, BindingMode::Use) {
                                 validate_enum_initializers(id, native, tree, context, &ty)?;
                             }
                             ty.enum_values = enum_values(id, native, tree, context, &ty);
@@ -278,7 +319,7 @@ fn bind_in_with_validation(
                 let Some(mut ty) = values.pop() else {
                     return Err(unsupported("enum base type"));
                 };
-                if validate_enums {
+                if matches!(mode, BindingMode::Use) {
                     validate_enum_initializers(id, native, tree, context, &ty)?;
                 }
                 let mut outer = ranges;
@@ -389,6 +430,7 @@ fn class_scope(
     scope: &celox_sv_syntax::TypeSegment,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
+    mode: BindingMode,
 ) -> Converted<Option<String>> {
     let name = normalize_identifier(&scope.name.spelling);
     if scope.arguments.is_none()
@@ -424,15 +466,16 @@ fn class_scope(
         if super::super::classes::handle_type(tree, &name).is_some()
             && super::super::classes::specializations::lookup(tree, &name).is_none()
             && super::super::classes::is_declared(tree, &name)
+            && mode.specialize(tree, &name, &[], context)?.is_none()
         {
-            super::super::classes::specializations::specialize(tree, &name, &[], context)?;
+            return Ok(None);
         }
         return Ok(Some(name));
     }
     let Some(arguments) = &scope.arguments else {
         return Err(AnalyzerError::UnspecializedClassScope { class: name });
     };
-    super::super::classes::specializations::specialize(tree, &name, arguments, context).map(Some)
+    mode.specialize(tree, &name, arguments, context)
 }
 
 pub(in crate::ast) fn expression_type(

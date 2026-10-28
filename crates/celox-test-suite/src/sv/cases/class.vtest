@@ -2638,3 +2638,28 @@ module Top(output int sum, output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 165) (assert_eq done 1))
+(case package_constant_class_defaults
+  (source "package.sv" #"
+package p;
+    parameter int WIDTH = 5;
+    class Box #(int N = WIDTH, int M = N + 2);
+        function int get(); return WIDTH + 10 * N + M; endfunction
+    endclass
+    typedef Box#() Small;
+    typedef Box Implicit;
+    typedef Box#(9) Wide;
+    function automatic int read();
+        Small defaulted = new();
+        Implicit normal = new();
+        Wide wide = new();
+        return defaulted.get() + normal.get() + wide.get();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    localparam int WIDTH = 29;
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 230))
