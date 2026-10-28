@@ -2791,3 +2791,18 @@ endmodule
 "#)
   (top Top) (run_until 5) (assert_eq done 1)
   (expect_output "init x xxxx 7 x 0000 xxxxxxxxxxxxxxxx\nset 5 1z0x 8 -3 deadbeef01234567\ncopy 1z0x 1110 5 1\nx xxxxxxxxxxxxxxxx 1\n"))
+(case method_ranges_of_scope_declarations
+  (source "top.sv" #"
+module Top(output int a, output int b);
+    logic [7:0] data;
+    class C;
+        static function logic [$bits(data)-1:0] f();
+            return '1;
+        endfunction
+    endclass
+    logic [$bits(C::f())-1:0] y;
+    assign a = $bits(y);
+    assign b = $bits(C::f());
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq a 8) (assert_eq b 8))

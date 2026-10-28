@@ -532,6 +532,7 @@ pub(super) fn parameter_type_from_lookup(
 thread_local! {
     static SYNTAX_TYPE_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_TYPE_SCAN_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static CLASS_SIGNATURE_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]

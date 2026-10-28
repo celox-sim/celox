@@ -1,0 +1,35 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source_revision": "5eab5f276c9062cfd17db4987a1e91de74fdbe5d",
+  "core_revision": "1947ac68859f823610c63833f61d52d6d7695342",
+  "build": "Pinned upstream sources, built with the existing Nix package recipe and a regenerated dependency lock in an isolated validation package; no simulator source changes. The repository lock itself still refers to a different core revision.",
+  "source": "sv_class_method_scope_ranges_xezim.sv",
+  "standard": "IEEE 1800-2023 8.10, 20.6.2",
+  "expected_output": "y=8 f=8",
+  "observations": [
+    {
+      "top": "Top",
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\ny=1 f=1\nSimulation finished at time 0\n"
+    },
+    {
+      "top": "Wrapped",
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\ny=1 f=1\nSimulation finished at time 0\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "top": "Top",
+      "exit_code": 0,
+      "output": "y=8 f=8\n"
+    },
+    {
+      "top": "Wrapped",
+      "exit_code": 0,
+      "output": "y=8 f=8\n"
+    }
+  ]
+}

@@ -309,6 +309,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::package_constant_class_defaults") => {
                             ("compile_error", "compile", "source_0.sv:4: syntax error")
                         }
+                        ("icarus", "class::method_ranges_of_scope_declarations") => {
+                            ("compile_error", "compile", "source_0.sv:9: syntax error")
+                        }
                         ("icarus", "class::generate_scope_enum_type_arguments") => {
                             ("compile_error", "compile", "source_0.sv:3: syntax error")
                         }

@@ -157,15 +157,32 @@ pub(in crate::ast) fn scope(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> (HashMap<String, i128>, HashMap<String, Type>) {
+    let (env, aliases) = shared_scope(tree, name, &env.clone().into(), &aliases.clone().into());
+    (env.into_iter().collect(), aliases.into_iter().collect())
+}
+
+/// [`scope`] of shared tables, which are copied only when the class adds
+/// parameters or inherited types to them.
+pub(in crate::ast) fn shared_scope(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    env: &SharedMap<i128>,
+    aliases: &SharedMap<Type>,
+) -> (SharedMap<i128>, SharedMap<Type>) {
     let mut env = env.clone();
     let mut aliases = aliases.clone();
     let own = generic(tree, name);
     for specialization in lineage(tree, name) {
-        env.extend(specialization.env.clone());
-        for key in &specialization.hidden {
-            env.remove(key);
+        if !specialization.env.is_empty() || !specialization.hidden.is_empty() {
+            env.extend(specialization.env.clone());
+            for key in &specialization.hidden {
+                env.remove(key);
+            }
         }
-        aliases.extend(inherited(&own, &specialization));
+        let mut inherited = inherited(&own, &specialization).peekable();
+        if inherited.peek().is_some() {
+            aliases.extend(inherited);
+        }
     }
     (env, aliases)
 }
@@ -471,8 +488,12 @@ fn prepare(
     }
     // The declarations of the class are bound in the scope that declares it,
     // the actuals in the scope that names the specialization.
-    let (mut env, mut aliases) = declaration_scope(tree, generic)
-        .unwrap_or_else(|| ((*context.const_env).clone(), context.type_aliases.clone()));
+    let (mut env, mut aliases) = declaration_scope(tree, generic).unwrap_or_else(|| {
+        (
+            (*context.const_env).clone(),
+            (*context.type_aliases).clone(),
+        )
+    });
     let mut parameters = Parameters {
         values,
         types,
@@ -1182,7 +1203,10 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
                 (*item.env).clone(),
                 item.type_aliases(&context.type_aliases).into_owned(),
             ),
-            None => ((*context.const_env).clone(), context.type_aliases.clone()),
+            None => (
+                (*context.const_env).clone(),
+                (*context.type_aliases).clone(),
+            ),
         };
         let name = super::declared_name(tree, class);
         if item.is_some_and(|item| items.iter().filter(|other| other.id == item.id).count() > 1) {
@@ -1223,7 +1247,7 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             .map(|item| {
                 let mut scope = context.clone();
                 scope.const_env = (*item.env).clone().into();
-                scope.type_aliases = item.type_aliases(&context.type_aliases).into_owned();
+                scope.type_aliases = item.type_aliases(&context.type_aliases).into_owned().into();
                 scope
             })
             .collect::<Vec<_>>();
@@ -1259,7 +1283,7 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
                 let (env, aliases) =
                     self::scope(tree, &scope, &context.const_env, &context.type_aliases);
                 context.const_env = env.into();
-                context.type_aliases = aliases;
+                context.type_aliases = aliases.into();
                 let _ = specialize(tree, name, arguments, &context);
             }
         }

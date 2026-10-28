@@ -1064,3 +1064,18 @@ Observed predicate, suppressing the latter. Its mismatch remains executed
 evidence, not an exclusion. [Top/Wrapped reproductions](verification/repros/sv_concurrent_regions.json)
 identify the actual installed xezim binary; the current flake pin's stale dependency
 lock prevented building that pin. No current-pin conformance is claimed.
+
+### Class method ranges of module declarations
+
+`class::method_ranges_of_scope_declarations` declares a module variable whose
+class method return range uses `$bits` of it, and a module variable sized by
+`$bits` of that method's result (IEEE 1800-2023 8.10 and 20.6.2): both read 8.
+Verilator 5.052 passes. Icarus 13.0 rejects the class method call in the
+declaration range. The pinned xezim 0.11.3 gives 1 for both, `sv_class-X16` in
+[the review](verification/xezim-review.json); the
+[adapter-free source](verification/repros/sv_class_method_scope_ranges_xezim.sv)
+and [observations](verification/repros/sv_class_method_scope_ranges_xezim.json)
+reproduce it as both Top and Wrapped. The two exact failures remain executed
+evidence in the [Icarus](verification/sv/icarus/class.json) and
+[xezim](verification/sv/xezim/class.json) class reports.
+No assertions or exclusions are weakened.

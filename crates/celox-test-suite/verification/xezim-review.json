@@ -675,6 +675,10 @@
       "title": "An enumeration typedef declared in a loop generate block names one type for all iterations, so a class specialized with it shares static members across iterations",
       "standard": "IEEE 1800-2023 6.22.1, 8.25, 27.4"
     },
+    "sv_class-X16": {
+      "title": "`$bits` of a static class method call is 1 when the method's return range uses `$bits` of a module variable, also in a declaration range",
+      "standard": "IEEE 1800-2023 8.10, 20.6.2"
+    },
     "sv_iff_order": {
       "title": "iff conditions see writes after the event instead of the value at the triggering write",
       "standard": "IEEE 1800-2023 9.4.2.3, 10.4.2"
@@ -4163,6 +4167,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X2",
       "note": "Other::T must be the bound bit[6:0] type (7 bits), and Tiny::item_t must be the inherited Base#(bit[2:0]) typedef (3 bits). Sub::copied_t correctly follows the local item_t override (5 bits). Expected all-one sum is 31+127+7=165; xezim gives b/c 32-bit signed types and sum 29. Both adapter-free Top and Wrapped reproduce widths 5/32/32 and sum 29. Source 5eab5f2/core 1947ac68, with an isolated regenerated lock. Repro and observations: verification/repros/sv_imported_member_types_inheritance_xezim.sv and .json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::method_ranges_of_scope_declarations",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X16",
+      "note": "C::f returns logic [$bits(data)-1:0] with the module variable logic [7:0] data, so $bits(C::f()) is 8, and so is $bits(y) for logic [$bits(C::f())-1:0] y (20.6.2). The pinned xezim gives 1 for both: the adapter-free source prints y=1 f=1 as both Top and Wrapped, where Verilator 5.052 and Celox print y=8 f=8. See verification/repros/sv_class_method_scope_ranges_xezim.{sv,json}."
     },
     {
       "suite": "sv",
