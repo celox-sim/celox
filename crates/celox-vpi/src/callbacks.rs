@@ -8,7 +8,7 @@ use fxhash::FxHashMap as HashMap;
 
 use super::{
     HandleKind, ObjectRef, VpiHandle, VpiValue, borrow_cell, borrow_cell_mut, handle_mut,
-    host_is_active, new_callback_handle, object_ref, value_bits, vpi_get_value, with_host,
+    host_is_active, new_callback_handle, object_ref, vpi_get_value, with_host,
     write_snapshot_value,
 };
 
@@ -129,50 +129,65 @@ fn callback_delay(data: &VpiCbData) -> u64 {
 }
 
 fn registration_ids(reason: i32) -> Vec<u64> {
-    with_host(|host| {
-        borrow_cell(&host.callbacks, |state| {
-            state
-                .callbacks
-                .iter()
-                .filter_map(|(&id, registration)| {
-                    (registration.data.reason == reason).then_some(id)
-                })
-                .collect()
-        })
+    with_host(|host| registration_ids_for_host(host, reason))
+}
+
+fn registration_ids_for_host(host: &super::VpiHost, reason: i32) -> Vec<u64> {
+    borrow_cell(&host.callbacks, |state| {
+        state
+            .callbacks
+            .iter()
+            .filter_map(|(&id, registration)| (registration.data.reason == reason).then_some(id))
+            .collect()
     })
 }
 
-fn changed_values() -> Vec<(u64, celox::BigUint, celox::BigUint)> {
-    with_host(|host| {
-        borrow_cell(&host.callbacks, |state| {
-            state
-                .callbacks
-                .iter()
-                .filter_map(|(&id, registration)| {
-                    let signal = registration.signal?;
-                    let (value, mask, _) = super::value_bits_at(host, signal)?;
-                    registration
-                        .snapshot
-                        .as_ref()
-                        .is_none_or(|(previous_value, previous_mask)| {
-                            previous_value != &value || previous_mask != &mask
-                        })
-                        .then_some((id, value, mask))
-                })
-                .collect()
-        })
+fn same_value(previous: &celox::BigUint, current: &celox::BigUint) -> bool {
+    // Clock/reset watches usually fit one word. Avoid byte-slice comparison
+    // there, checking both lengths on every read so growing values and X/Z
+    // masks still compare every digit.
+    let mut previous_words = previous.iter_u64_digits();
+    let mut current_words = current.iter_u64_digits();
+    if previous_words.len() <= 1 && current_words.len() <= 1 {
+        previous_words.next().unwrap_or(0) == current_words.next().unwrap_or(0)
+    } else {
+        previous == current
+    }
+}
+
+fn changed_values(host: &super::VpiHost) -> Vec<(u64, celox::BigUint, celox::BigUint)> {
+    borrow_cell(&host.callbacks, |state| {
+        state
+            .callbacks
+            .iter()
+            .filter_map(|(&id, registration)| {
+                let signal = registration.signal?;
+                let (value, mask, _) = super::value_bits_at(host, signal)?;
+                registration
+                    .snapshot
+                    .as_ref()
+                    .is_none_or(|(previous_value, previous_mask)| {
+                        !same_value(previous_value, &value) || !same_value(previous_mask, &mask)
+                    })
+                    .then_some((id, value, mask))
+            })
+            .collect()
     })
 }
 
 pub(super) fn dispatch_value_changes() -> bool {
-    if finish_requested() {
+    with_host(dispatch_value_changes_for_host)
+}
+
+fn dispatch_value_changes_for_host(host: &super::VpiHost) -> bool {
+    if borrow_cell(&host.callbacks, |state| state.finish) {
         return false;
     }
-    let changed = changed_values();
+    let changed = changed_values(host);
     let progressed = !changed.is_empty();
     for (id, value, mask) in changed {
-        fire_with_snapshot(id, Some((value, mask)));
-        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+        fire_with_snapshot_for_host(host, id, Some((value, mask)));
+        if borrow_cell(&host.callbacks, |state| state.finish) {
             break;
         }
     }
@@ -180,18 +195,20 @@ pub(super) fn dispatch_value_changes() -> bool {
 }
 
 fn due_ids() -> Vec<u64> {
-    with_host(|host| {
-        borrow_cell(&host.callbacks, |state| {
-            state
-                .callbacks
-                .iter()
-                .filter_map(|(&id, registration)| {
-                    (registration.data.reason == CB_AFTER_DELAY
-                        && registration.due.is_some_and(|due| due <= state.time))
-                    .then_some(id)
-                })
-                .collect()
-        })
+    with_host(due_ids_for_host)
+}
+
+fn due_ids_for_host(host: &super::VpiHost) -> Vec<u64> {
+    borrow_cell(&host.callbacks, |state| {
+        state
+            .callbacks
+            .iter()
+            .filter_map(|(&id, registration)| {
+                (registration.data.reason == CB_AFTER_DELAY
+                    && registration.due.is_some_and(|due| due <= state.time))
+                .then_some(id)
+            })
+            .collect()
     })
 }
 
@@ -286,11 +303,15 @@ fn fire_with_snapshot_for_host(
 }
 
 fn fire_all(reason: i32) -> bool {
-    let ids = registration_ids(reason);
+    with_host(|host| fire_all_for_host(host, reason))
+}
+
+fn fire_all_for_host(host: &super::VpiHost, reason: i32) -> bool {
+    let ids = registration_ids_for_host(host, reason);
     let progressed = !ids.is_empty();
     for id in ids {
-        fire(id);
-        if with_host(|host| borrow_cell(&host.callbacks, |state| state.finish)) {
+        fire_with_snapshot_for_host(host, id, None);
+        if borrow_cell(&host.callbacks, |state| state.finish) {
             break;
         }
     }
@@ -303,7 +324,7 @@ pub(super) fn run() -> bool {
 
 fn run_with_host(host: &super::VpiHost) -> bool {
     borrow_cell_mut(&host.callbacks, |state| state.running = true);
-    fire_all(CB_START_OF_SIMULATION);
+    fire_all_for_host(host, CB_START_OF_SIMULATION);
     if !borrow_cell(&host.callbacks, |state| state.finish) {
         super::flush_pending_writes();
     }
@@ -322,8 +343,8 @@ fn run_with_host(host: &super::VpiHost) -> bool {
         }
 
         let mut progressed = false;
-        for id in due_ids() {
-            progressed |= fire(id);
+        for id in due_ids_for_host(host) {
+            progressed |= fire_with_snapshot_for_host(host, id, None);
             if borrow_cell(&host.callbacks, |state| state.finish) {
                 break 'scheduler;
             }
@@ -335,7 +356,7 @@ fn run_with_host(host: &super::VpiHost) -> bool {
             break;
         }
         loop {
-            if dispatch_value_changes() {
+            if dispatch_value_changes_for_host(host) {
                 progressed = true;
                 if borrow_cell(&host.callbacks, |state| state.finish) {
                     break 'scheduler;
@@ -363,10 +384,10 @@ fn run_with_host(host: &super::VpiHost) -> bool {
                 }
                 continue;
             }
-            let read_write = registration_ids(CB_READ_WRITE_SYNCH);
+            let read_write = registration_ids_for_host(host, CB_READ_WRITE_SYNCH);
             if !read_write.is_empty() {
                 for id in read_write {
-                    progressed |= fire(id);
+                    progressed |= fire_with_snapshot_for_host(host, id, None);
                     if borrow_cell(&host.callbacks, |state| state.finish) {
                         break 'scheduler;
                     }
@@ -381,7 +402,7 @@ fn run_with_host(host: &super::VpiHost) -> bool {
             }
             break;
         }
-        progressed |= fire_read_only();
+        progressed |= fire_read_only_for_host(host);
 
         if borrow_cell(&host.callbacks, |state| state.finish) {
             break;
@@ -390,27 +411,23 @@ fn run_with_host(host: &super::VpiHost) -> bool {
             continue;
         }
 
-        let next_time = with_host(|host| {
-            borrow_cell(&host.callbacks, |state| {
-                state
-                    .callbacks
-                    .values()
-                    .filter_map(|registration| registration.due)
-                    .min()
-            })
+        let next_time = borrow_cell(&host.callbacks, |state| {
+            state
+                .callbacks
+                .values()
+                .filter_map(|registration| registration.due)
+                .min()
         });
         let Some(next_time) = next_time else {
             break;
         };
-        with_host(|host| {
-            borrow_cell_mut(&host.callbacks, |state| {
-                if next_time > state.time {
-                    iterations = 0;
-                }
-                state.time = next_time;
-            })
+        borrow_cell_mut(&host.callbacks, |state| {
+            if next_time > state.time {
+                iterations = 0;
+            }
+            state.time = next_time;
         });
-        fire_all(CB_NEXT_SIM_TIME);
+        fire_all_for_host(host, CB_NEXT_SIM_TIME);
         if !borrow_cell(&host.callbacks, |state| state.finish) {
             super::flush_pending_writes();
         }
@@ -418,8 +435,8 @@ fn run_with_host(host: &super::VpiHost) -> bool {
     let finished = borrow_cell(&host.callbacks, |state| state.finish);
     // End-of-simulation callbacks are the one region intentionally dispatched
     // after finish has already been requested.
-    for id in registration_ids(CB_END_OF_SIMULATION) {
-        fire(id);
+    for id in registration_ids_for_host(host, CB_END_OF_SIMULATION) {
+        fire_with_snapshot_for_host(host, id, None);
     }
     borrow_cell_mut(&host.callbacks, |state| state.running = false);
     finished
@@ -482,15 +499,14 @@ fn charge_round() -> bool {
 /// Fire the ReadOnly callbacks, with VPI writes rejected (IEEE 1800-2023
 /// 38.36.2).
 fn fire_read_only() -> bool {
-    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only = true));
-    let progressed = fire_all(CB_READ_ONLY_SYNCH);
-    with_host(|host| borrow_cell_mut(&host.callbacks, |state| state.read_only = false));
-    progressed
+    with_host(fire_read_only_for_host)
 }
 
-/// Whether ReadOnly callbacks are running.
-pub(super) fn in_read_only() -> bool {
-    with_host(|host| borrow_cell(&host.callbacks, |state| state.read_only))
+fn fire_read_only_for_host(host: &super::VpiHost) -> bool {
+    borrow_cell_mut(&host.callbacks, |state| state.read_only = true);
+    let progressed = fire_all_for_host(host, CB_READ_ONLY_SYNCH);
+    borrow_cell_mut(&host.callbacks, |state| state.read_only = false);
+    progressed
 }
 
 fn current_time() -> u64 {
@@ -782,9 +798,9 @@ pub(super) fn remove(id: u64, handle: VpiHandle) -> i32 {
 ///
 /// `data` and its selected pointers must satisfy the VPI callback ABI.
 pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
-    if !host_is_active() {
+    let Some(host) = super::selected_host() else {
         return ptr::null_mut();
-    }
+    };
     if data.is_null() {
         return ptr::null_mut();
     }
@@ -833,29 +849,28 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
     data.value = value_storage
         .as_deref_mut()
         .map_or(ptr::null_mut(), std::ptr::from_mut);
-    with_host(|host| {
-        borrow_cell_mut(&host.callbacks, |state| {
-            let id = state.next_id;
-            state.next_id += 1;
-            let handle = new_callback_handle(id);
-            let due = (data.reason == CB_AFTER_DELAY)
-                .then(|| state.time.saturating_add(callback_delay(&data)));
-            let snapshot =
-                signal.and_then(|signal| value_bits(signal).map(|(value, mask, _)| (value, mask)));
-            state.callbacks.insert(
-                id,
-                Registration {
-                    data,
-                    signal,
-                    _time_storage: time_storage,
-                    _value_storage: value_storage,
-                    handle,
-                    due,
-                    snapshot,
-                },
-            );
-            handle
-        })
+    borrow_cell_mut(&host.callbacks, |state| {
+        let id = state.next_id;
+        state.next_id += 1;
+        let handle = new_callback_handle(id);
+        let due = (data.reason == CB_AFTER_DELAY)
+            .then(|| state.time.saturating_add(callback_delay(&data)));
+        let snapshot = signal.and_then(|signal| {
+            super::value_bits_at(&host, signal).map(|(value, mask, _)| (value, mask))
+        });
+        state.callbacks.insert(
+            id,
+            Registration {
+                data,
+                signal,
+                _time_storage: time_storage,
+                _value_storage: value_storage,
+                handle,
+                due,
+                snapshot,
+            },
+        );
+        handle
     })
 }
 
