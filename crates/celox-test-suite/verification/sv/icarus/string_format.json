@@ -2,6 +2,52 @@
   "cases": [
     {
       "category": "Types",
+      "detail": "Icarus 13.0 compiles %p of queues and dynamic arrays, but vvp stops with \"$display does not support argument type (116).\" IEEE 1800-2023 21.2.1.6 prints them as assignment patterns.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/pattern-format.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_pattern_format",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 compiles %p of queues and dynamic arrays, but vvp stops with \"$display does not support argument type (116).\" IEEE 1800-2023 21.2.1.6 prints them as assignment patterns.",
+        "upstream": []
+      },
+      "name": "string_format::pattern_format",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects associative arrays declared with int and string indices (\"Type names are not valid expressions here\") and queues of class handles (\"Queue of type class ... is not yet supported\", \"Class/null r-value not allowed in this context\"), which IEEE 1800-2023 7.8 and 7.10 define.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/pattern-format.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_associative_arrays_and_class_queues",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects associative arrays declared with int and string indices (\"Type names are not valid expressions here\") and queues of class handles (\"Queue of type class ... is not yet supported\", \"Class/null r-value not allowed in this context\"), which IEEE 1800-2023 7.8 and 7.10 define.",
+        "upstream": []
+      },
+      "name": "string_format::pattern_format_keys_and_handles",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 compiles $sformat with a string class property as its output, but vvp stops with \"$sformat's first argument must be a register or SV string.\" IEEE 1800-2023 21.3.3 permits a string variable as the output, and a class property is one (8.5). Verilator 5.052 and xezim pass the case.",
       "expectation": "Simulation",
       "known_issue": {

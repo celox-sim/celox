@@ -1185,7 +1185,16 @@ is available, with the same field widths, X/Z digits and `%t` scaling.
 function results, arguments, concatenations and conditional operands. The format
 can be a string literal or, evaluated when the call runs, a `string` or integral
 value. The output of `$sformat` and `$swrite` must be a `string` variable or
-class property; integral outputs and `%p` are unsupported.
+class property; integral outputs are unsupported.
+
+`%p` of a literal format, in these functions and in `$display`, `$write`,
+the file output and the severity tasks, prints an integral value as `%0d`
+does, a real as an unformatted real, a string or string literal in quotes, a
+class handle as `null` or `@` and its handle, and a queue, dynamic array or
+associative array of such elements as an assignment pattern, `'{1, 2}` or
+`'{"key":1}` (IEEE 1800-2023 21.2.1.6). `%p` of enums, structures, unpacked
+arrays and containers of them is rejected. A `%p` of a format read at run time
+prints a string in quotes and any other value as `%0d`.
 
 Each call with conversions is a host request of a timed `Simulation`, like the
 file output tasks below; a format without conversions and arguments is a

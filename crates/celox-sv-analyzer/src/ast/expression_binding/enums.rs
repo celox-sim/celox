@@ -171,17 +171,9 @@ pub(super) fn domain(
                 })
             }
         }
-        ExprKind::Cast { target, .. } => {
-            let target = ungroup(*target, native);
-            let ty = if let Some(name) = call_name(&tree.state, target, native) {
-                dimensions.type_aliases.get(&name).cloned()
-            } else if let ExprKind::Type(id) = native.expression(target).kind {
-                type_binding::binding::bind_in(id, native, tree, dimensions)?
-            } else {
-                None
-            };
-            ty.as_ref().and_then(scalar)
-        }
+        ExprKind::Cast { target, .. } => cast_type(tree, *target, native, dimensions)?
+            .as_ref()
+            .and_then(scalar),
         ExprKind::Conditional {
             then_expression,
             else_expression,
@@ -192,6 +184,24 @@ pub(super) fn domain(
             then_domain.filter(|domain| else_domain.as_ref() == Some(domain))
         }
         _ => None,
+    })
+}
+
+/// The type a cast to native `target` converts to, when `target` names a
+/// type rather than a width or signedness.
+pub(super) fn cast_type(
+    tree: &AnalysisContext<'_>,
+    target: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Type>> {
+    let target = ungroup(target, native);
+    Ok(if let Some(name) = call_name(&tree.state, target, native) {
+        dimensions.type_aliases.get(&name).cloned()
+    } else if let ExprKind::Type(id) = native.expression(target).kind {
+        type_binding::binding::bind_in(id, native, tree, dimensions)?
+    } else {
+        None
     })
 }
 

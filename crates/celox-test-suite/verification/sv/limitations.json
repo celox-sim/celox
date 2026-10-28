@@ -3043,5 +3043,57 @@
         "containers::nested_updates_evaluate_indices_once"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_pattern_format",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/pattern-format.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "string_format::pattern_format",
+        "string_format::pattern_format_keys_and_handles"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_pattern_format",
+    "category": "simulator_unsupported",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 compiles %p of queues and dynamic arrays, but vvp stops with \"$display does not support argument type (116).\" IEEE 1800-2023 21.2.1.6 prints them as assignment patterns.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/pattern-format.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::pattern_format"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_associative_arrays_and_class_queues",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects associative arrays declared with int and string indices (\"Type names are not valid expressions here\") and queues of class handles (\"Queue of type class ... is not yet supported\", \"Class/null r-value not allowed in this context\"), which IEEE 1800-2023 7.8 and 7.10 define.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/pattern-format.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::pattern_format_keys_and_handles"
+      ]
+    }
   }
 ]

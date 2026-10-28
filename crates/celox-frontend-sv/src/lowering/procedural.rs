@@ -1543,7 +1543,7 @@ fn template_arguments(template: &str) -> usize {
             while chars.next_if(char::is_ascii_digit).is_some() {}
         }
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsStTeEfFgG".contains(spec)
+            && "bBoOhHxXdDiIcCsStTeEfFgGpP".contains(spec)
         {
             count += 1;
         }
@@ -1582,7 +1582,7 @@ pub(super) fn prepare_time_operands(
         let Some(spec) = chars.next() else {
             break;
         };
-        if !"bBoOhHxXdDiIcCsStTeEfFgG".contains(spec) {
+        if !"bBoOhHxXdDiIcCsStTeEfFgGpP".contains(spec) {
             continue;
         }
         if matches!(spec, 't' | 'T')

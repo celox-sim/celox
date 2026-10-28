@@ -2,6 +2,52 @@
   "cases": [
     {
       "category": "Types",
+      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/pattern-format.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_pattern_format",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal.",
+        "upstream": []
+      },
+      "name": "string_format::pattern_format",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/pattern-format.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_pattern_format",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal.",
+        "upstream": []
+      },
+      "name": "string_format::pattern_format_keys_and_handles",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "four-state expectations",
       "expectation": "Simulation",
       "name": "string_format::sformatf_four_state_values",

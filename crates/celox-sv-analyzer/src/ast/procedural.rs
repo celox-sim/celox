@@ -858,6 +858,59 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         ids.extend(kept_ids);
     }
 
+    /// Rewrite each `%p` of the format of a display or write task into a
+    /// conversion of the value it prints (IEEE 1800-2023 21.2.1.6).
+    fn rewrite_display_patterns(
+        &self,
+        task: SystemTask,
+        args: &mut [SystemTaskArg<Expr>],
+        ids: &[Option<celox_sv_syntax::ExprId>],
+    ) -> Result<(), AnalyzerError> {
+        let Some(template) = template_index(task, args) else {
+            return Ok(());
+        };
+        let Some(SystemTaskArg::Str(text)) = args.get(template) else {
+            return Ok(());
+        };
+        if !expression_binding::has_pattern(text.as_bytes()) {
+            return Ok(());
+        }
+        let text = text.clone();
+        let native = self.tree.declarations();
+        let rewritten = expression_binding::rewrite_template(text.as_bytes(), |index| {
+            let position = template + 1 + index;
+            Ok(match args.get_mut(position) {
+                Some(SystemTaskArg::Expr(value)) => {
+                    let id = ids
+                        .get(position)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| unsupported("omitted %p argument"))?;
+                    let pattern = expression_binding::format_pattern(
+                        self.tree, id, value, native, &self.dims,
+                    )?;
+                    let (conversion, argument) = expression_binding::format_pattern_argument(
+                        pattern,
+                        std::mem::replace(value, Expr::Literal("0".into())),
+                        &self.dims,
+                    );
+                    *value = argument;
+                    conversion
+                }
+                // A string literal prints in quotes.
+                Some(SystemTaskArg::Str(literal)) => {
+                    *literal = format!("\\\"{literal}\\\"");
+                    b"%s"
+                }
+                Some(SystemTaskArg::Empty) | None => b"%0d",
+            })
+        })?;
+        args[template] = SystemTaskArg::Str(
+            String::from_utf8(rewritten).map_err(|_| unsupported("non-UTF-8 format"))?,
+        );
+        Ok(())
+    }
+
     /// `output = value` for the string `value` of `$sformat`, which assigns
     /// its output as a string literal is assigned (IEEE 1800-2023 21.3.3,
     /// 5.9).
@@ -1767,8 +1820,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     detail: "expected an output argument".into(),
                 }
             })?;
+            let ids = expression_binding::format_arguments(name, &arguments[1..])?;
             let mut values = Vec::new();
-            for id in expression_binding::format_arguments(name, &arguments[1..])? {
+            for &id in &ids {
                 values.push(expression_binding::bind_value(
                     id,
                     declarations,
@@ -1777,12 +1831,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     None,
                 )?);
             }
-            let value = expression_binding::string_call(
-                StringOp::Format {
-                    ticks_per_unit: timescales::time_divisor(root, self.tree)?,
-                },
+            let value = expression_binding::format_call(
+                timescales::time_divisor(root, self.tree)?,
+                &ids,
                 values,
-            );
+                self.tree,
+                declarations,
+                &self.dims,
+            )?;
             return Ok(vec![self.format_assignment(output, value)?]);
         }
         // `$swrite(output, args...)` assigns what `$write(args...)` would
@@ -1801,6 +1857,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             // continues the format, and a value without a conversion of its
             // own is written in the radix of the task (21.2.1.1).
             let mut text = Vec::new();
+            let mut ids = Vec::new();
             let mut values = Vec::new();
             let mut pending = 0;
             for (position, arg) in arguments.iter().enumerate().skip(1) {
@@ -1838,13 +1895,20 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         .as_bytes(),
                     );
                 }
+                ids.push(id);
                 values.push(value);
             }
-            let format = Expr::Literal(format!(
-                "{}'h{}",
-                (text.len() * 8).max(8),
-                num_bigint::BigUint::from_bytes_be(&text).to_str_radix(16)
-            ));
+            if expression_binding::has_pattern(&text) {
+                text = expression_binding::rewrite_format(
+                    &text,
+                    &ids,
+                    &mut values,
+                    self.tree,
+                    declarations,
+                    &self.dims,
+                )?;
+            }
+            let format = expression_binding::bytes_literal(&text);
             let value = expression_binding::string_call(
                 StringOp::Format {
                     ticks_per_unit: timescales::time_divisor(root, self.tree)?,
@@ -1937,6 +2001,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         // The native expression of each argument, kept in step with `args`.
         let mut ids = arguments.iter().map(|arg| arg.value).collect::<Vec<_>>();
         self.merge_display_formats(task, &mut args, &mut ids);
+        self.rewrite_display_patterns(task, &mut args, &ids)?;
         for arg in &mut args {
             if let SystemTaskArg::Expr(value) = arg {
                 self.rename_expr(value);
@@ -4122,7 +4187,7 @@ fn format_conversions(text: &str) -> Vec<char> {
             while chars.next_if(char::is_ascii_digit).is_some() {}
         }
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsStTeEfFgG".contains(spec)
+            && "bBoOhHxXdDiIcCsStTeEfFgGpP".contains(spec)
         {
             conversions.push(spec);
         }

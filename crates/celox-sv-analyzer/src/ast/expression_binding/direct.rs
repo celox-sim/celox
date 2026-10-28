@@ -246,6 +246,11 @@ enum Finish {
         domain: std::sync::Arc<crate::ast::enums::EnumDomain>,
         count: bool,
     },
+    /// `$sformatf` of the bound children, whose native expressions are `ids`.
+    Format {
+        ticks_per_unit: u64,
+        ids: Vec<ExprId>,
+    },
     /// A read of property `property` of the object handle child.
     ObjectLoad(Box<crate::ast::classes::Property>),
     /// A call of method subroutine `name` with `formals` formals; the first
@@ -735,9 +740,10 @@ pub(in crate::ast) fn bind_value(
                         } else if name == "$sformatf" {
                             let actuals = format_arguments(&name, args)?;
                             (
-                                Finish::StringCall(StringOp::Format {
+                                Finish::Format {
                                     ticks_per_unit: timescales::time_divisor(id, tree)?,
-                                }),
+                                    ids: actuals.clone(),
+                                },
                                 actuals.into_iter().map(|id| (id, None)).collect(),
                             )
                         } else if name.starts_with('$') && !name.contains("::") {
@@ -1228,6 +1234,17 @@ pub(in crate::ast) fn bind_value(
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
                     }
+                    Finish::Format {
+                        ticks_per_unit,
+                        ids,
+                    } => format_patterns::format(
+                        ticks_per_unit,
+                        &ids,
+                        operands,
+                        tree,
+                        native,
+                        dimensions,
+                    )?,
                     Finish::ScopeRandomize(domains) => {
                         // Preserve the original call when no enum is present.
                         // Every scalar operation succeeds and returns signed int 1;
@@ -1976,13 +1993,10 @@ pub(in crate::ast) fn format_arguments(
 /// String literals in integral contexts are unsigned packed arrays of bytes
 /// (IEEE 1800-2023 5.9). Keep the semantic IR integral, including escapes.
 fn packed_string_literal(text: &str) -> Option<String> {
-    let bytes = string_literal_bytes(text)?;
-    let width = (bytes.len() * 8).max(8);
-    Some(format!(
-        "{}'h{}",
-        width,
-        num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(16)
-    ))
+    match format_patterns::bytes_literal(&string_literal_bytes(text)?) {
+        Expr::Literal(literal) => Some(literal),
+        _ => unreachable!("a packed literal"),
+    }
 }
 
 /// The bytes of string literal `text`, written with its quotes, after its
