@@ -1031,6 +1031,8 @@ fn vpi_discovers_hierarchy_and_reads_and_writes_values() {
         assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, top)), c"Top");
 
         let modules = vpi_iterate(VPI_MODULE, top);
+        assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, modules)), c"");
+        assert_eq!(CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, modules)), c"");
         let child = vpi_scan(modules);
         assert!(!child.is_null());
         assert_eq!(
@@ -1940,6 +1942,11 @@ fn callback_registration_owns_copied_time_and_value_records() {
         let a = vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut());
         let value_change = register_stack_value_callback(a);
         assert!(!value_change.is_null());
+        assert_eq!(CStr::from_ptr(vpi_get_str(VPI_NAME, value_change)), c"");
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, value_change)),
+            c""
+        );
         register_stack_timer(a);
 
         // Reuse the caller stack after both registration functions returned.
