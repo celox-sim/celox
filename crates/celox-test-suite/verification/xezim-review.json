@@ -671,6 +671,10 @@
       "title": "Imported class member typedefs sized by a value parameter lose their specialization dimensions for the default specialization and in a non-top module",
       "standard": "IEEE 1800-2023 6.18, 8.23, 8.25, 20.6.2"
     },
+    "sv_class-X15": {
+      "title": "An enumeration typedef declared in a loop generate block names one type for all iterations, so a class specialized with it shares static members across iterations",
+      "standard": "IEEE 1800-2023 6.22.1, 8.25, 27.4"
+    },
     "sv_iff_order": {
       "title": "iff conditions see writes after the event instead of the value at the triggering write",
       "standard": "IEEE 1800-2023 9.4.2.3, 10.4.2"
@@ -1685,6 +1689,14 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X4",
       "note": "The out-of-block Accumulator::add body does total += value; in a non-top module xezim's extern method body does not see the object's properties, so total stays 100 (expected 109). The same source run as the top module (-s M) gives 109."
+    },
+    {
+      "suite": "sv",
+      "name": "class::generate_scope_enum_type_arguments",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X15",
+      "note": "Each iteration of the loop generate block g declares its own typedef e_t, and a generate block is a separate scope (27.4), so g[0].e_t and g[1].e_t are different types: a typedef matches itself only within the scope of its identifier, unlike a package typedef (6.22.1 d, h). Box#(e_t) is therefore a separate specialization in each iteration (8.25), while alias_e renames the module-scope shared_e and is one specialization. Each iteration reads 10*1 + 2, so sum is 1212. The pinned xezim returns 2222: the adapter-free source prints counts=22 22 instead of 12 12 as both Top and Wrapped, so the per-iteration enums share one specialization. Verilator 5.052 shares them the same way. See verification/repros/sv_class_generate_enum_arguments.{sv,json}."
     },
     {
       "suite": "sv",
@@ -4147,6 +4159,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X2",
       "note": "Other::T must be the bound bit[6:0] type (7 bits), and Tiny::item_t must be the inherited Base#(bit[2:0]) typedef (3 bits). Sub::copied_t correctly follows the local item_t override (5 bits). Expected all-one sum is 31+127+7=165; xezim gives b/c 32-bit signed types and sum 29. Both adapter-free Top and Wrapped reproduce widths 5/32/32 and sum 29. Source 5eab5f2/core 1947ac68, with an isolated regenerated lock. Repro and observations: verification/repros/sv_imported_member_types_inheritance_xezim.sv and .json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::named_aggregate_type_arguments",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X6",
+      "note": "Package p declares the same-structure enums first_e and second_e, alias_e = first_e, and the same-structure packed structs s1_t and s2_t. Box#(alias_e) is the specialization Box#(first_e), since a typedef names the same type (6.18, 8.25), while each enum and struct declaration is a type of its own (6.19, 6.22.1). Constructing first, alias, second, s1, s2 and s2 again gives counts 2, 1, 1, 2 and $bits(s1_t)=4, so read() returns 21124. The pinned xezim returns 11124: it prints first=1 alias=1 second=1 s1=1 s2=2 as both Top and Wrapped without the adapter, so the typedef alias makes a separate specialization, sv_class-X6. See verification/repros/sv_class_named_aggregate_arguments_xezim.{sv,json}; Verilator passes the shared case."
     },
     {
       "suite": "sv",

@@ -552,6 +552,17 @@ method definitions. Qualified references such as `TYPE::value` and typedefs
 using `TYPE::word_t` do not require a package named `TYPE`, including in
 unused generic classes (6.20.3, 8.25.1).
 
+A type argument can be an enumeration, struct or union type that a typedef
+names. Each such declaration is a type of its own, so two of the same
+structure give different specializations, while a typedef of one
+(`typedef A B`) gives the same specialization as `A` (6.18, 6.19, 6.22.1). A
+typedef of a generate block declares a type in each instance of the block,
+also in each iteration of a loop (27.4); one of a package is the same type
+wherever it is imported. An
+anonymous enumeration, struct or union type is rejected as a type argument.
+Package typedefs of specializations, such as `typedef C#(word_t) word_c` with
+`word_t` bounded by a package parameter, use the package's constants.
+
 A class declared in a package or the compilation unit is laid out and its
 methods are lowered where it is declared, once (IEEE 1800-2023 3.12.1, 26.3):
 a module uses it through an import, as `p::C`, or by its name when the

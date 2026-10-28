@@ -285,8 +285,10 @@ test("every retained baseline accepts only its existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "class::generate_scope_enum_type_arguments",
                 "class::imported_member_type_dimensions",
                 "class::imported_member_type_inheritance",
+                "class::named_aggregate_type_arguments",
                 "class::package_constant_class_defaults",
                 "class::package_constant_type_arguments",
                 "class::type_alias_lexical_scopes",
@@ -330,6 +332,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "unions::soft_wide_four_state",
               ]
             : [
+                "class::generate_scope_enum_type_arguments",
                 "fork::compound_event_activations_outlive_parent",
                 "fork_deferred::disable_fork_flushes_live_children_only",
                 "fork_deferred::reactive_wakeup_preserves_mature_observed_only",
