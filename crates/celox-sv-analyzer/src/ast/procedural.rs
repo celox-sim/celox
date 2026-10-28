@@ -78,8 +78,9 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
         container: r#type.container.clone(),
         randomizable: r#type.container.is_none()
-            && (!r#type.is_enum || r#type.enum_values.is_some()),
-        enum_values: r#type.enum_values.clone(),
+            && (!r#type.is_enum || r#type.enum_domain.is_some()),
+        enum_domain: r#type.enum_domain.clone(),
+        packed_enum: r#type.packed_enum,
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         string: matches!(r#type.kind(), TypeKind::String),
         class: r#type.class().map(str::to_owned),
@@ -122,7 +123,8 @@ pub(super) fn int_type() -> Type {
     Type {
         container: None,
         is_enum: false,
-        enum_values: None,
+        enum_domain: None,
+        packed_enum: false,
         kind: TypeKind::Bit,
         is_signed: true,
         packed_ranges: vec![PackedRange::new(

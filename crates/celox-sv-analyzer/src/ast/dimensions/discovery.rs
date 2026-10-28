@@ -395,6 +395,9 @@ fn return_metadata(
         signed: ty.is_some_and(Type::is_signed),
         is_2state: ty.is_some_and(|ty| ty.kind() == TypeKind::Bit),
         string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
+        enum_domain: ty
+            .filter(|ty| ty.unpacked_ranges.is_empty())
+            .and_then(|ty| ty.enum_domain.clone()),
         pattern_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()
@@ -739,6 +742,7 @@ fn settle(
                             is_2state: !ty.is_4state(),
                             string: false,
                             pattern_type: None,
+                            enum_domain: None,
                         },
                     );
                     publish(&tree.state.dimensions, key, context);

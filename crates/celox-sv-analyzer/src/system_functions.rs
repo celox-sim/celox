@@ -1068,6 +1068,15 @@ pub enum Callee {
         width: usize,
         signed: bool,
     },
+    /// A table lookup with the arguments `selector, key, value, ...,
+    /// default`: the value of the first key the selector matches with case
+    /// equality, else the default, resized to `width` and `signed`. The
+    /// selector is evaluated once. Used for enumerated type methods
+    /// (IEEE 1800-2023 6.19.5).
+    Lookup {
+        width: usize,
+        signed: bool,
+    },
     /// A user function or a DPI import, by its resolved name.
     Subroutine(String),
     System(SystemFunction),
@@ -1083,14 +1092,22 @@ impl Callee {
     pub fn subroutine(&self) -> Option<&str> {
         match self {
             Self::Subroutine(name) => Some(name),
-            Self::System(_) | Self::String(_) | Self::Object(_) | Self::Checked { .. } => None,
+            Self::System(_)
+            | Self::String(_)
+            | Self::Object(_)
+            | Self::Checked { .. }
+            | Self::Lookup { .. } => None,
         }
     }
 
     /// The system function, if this is one.
     pub fn system(&self) -> Option<SystemFunction> {
         match self {
-            Self::Subroutine(_) | Self::String(_) | Self::Object(_) | Self::Checked { .. } => None,
+            Self::Subroutine(_)
+            | Self::String(_)
+            | Self::Object(_)
+            | Self::Checked { .. }
+            | Self::Lookup { .. } => None,
             Self::System(function) => Some(*function),
         }
     }
@@ -1099,7 +1116,9 @@ impl Callee {
     /// lowered as an integral operation; see [`SystemFunction::result_type`].
     pub fn result_type(&self) -> Option<(usize, bool)> {
         match self {
-            Self::Checked { width, signed } => Some((*width, *signed)),
+            Self::Checked { width, signed } | Self::Lookup { width, signed } => {
+                Some((*width, *signed))
+            }
             Self::String(op) => Some(op.result_type()),
             Self::Object(op) => Some(op.result_type()),
             _ => self.system()?.result_type(),
@@ -1109,7 +1128,7 @@ impl Callee {
     /// Rename a user subroutine with `rename`.
     pub fn map_subroutine(self, rename: impl FnOnce(String) -> String) -> Self {
         match self {
-            Self::Checked { .. } => self,
+            Self::Checked { .. } | Self::Lookup { .. } => self,
             Self::Subroutine(name) => Self::Subroutine(rename(name)),
             Self::System(function) => Self::System(function),
             Self::String(op) => Self::String(op),
@@ -1121,7 +1140,8 @@ impl Callee {
     /// the analyzer must not run it twice: user subroutines may have side
     /// effects, as do the random number functions.
     pub fn is_effectful(&self) -> bool {
-        self.system().is_none_or(SystemFunction::is_effectful)
+        !matches!(self, Self::Lookup { .. })
+            && self.system().is_none_or(SystemFunction::is_effectful)
     }
 }
 
@@ -1129,6 +1149,7 @@ impl fmt::Display for Callee {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Checked { .. } => f.write_str("tagged union access"),
+            Self::Lookup { .. } => f.write_str("enumeration lookup"),
             Self::Subroutine(name) => f.write_str(name),
             Self::System(function) => f.write_str(function.name()),
             Self::String(op) => op.fmt(f),

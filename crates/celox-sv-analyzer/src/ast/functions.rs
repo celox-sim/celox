@@ -268,6 +268,10 @@ fn native_signature(
         }),
         return_signed: result.is_some_and(|ty| ty.signed),
         return_is_2state: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Bit),
+        return_enum_domain: ty
+            .as_ref()
+            .filter(|ty| ty.unpacked_ranges.is_empty())
+            .and_then(|ty| ty.enum_domain.clone()),
         return_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()
