@@ -225,6 +225,12 @@ impl<B: SimBackend> SimulationState<B> {
                     self.charge(*returns, Some(process))?;
                     return Ok(true);
                 }
+                Some(ProcessStatus::AssertionObserved) => {
+                    self.process_state.observed.insert(process);
+                }
+                Some(ProcessStatus::AssertionReactive) => {
+                    self.process_state.reactive.insert(process);
+                }
                 Some(ProcessStatus::HostRequest) => {
                     let (kind, index) = HostRequestKind::decode(delay())
                         .ok_or(SimulatorErrorCode::InternalError)?;
@@ -314,6 +320,34 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         Ok(true)
+    }
+
+    pub(super) fn run_observed_assertions<E>(
+        &mut self,
+        executor: &mut E,
+        time: u64,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        let mut returns = 0;
+        while let Some(&process) = self.process_state.observed.first() {
+            self.charge_pass()?;
+            self.process_state.observed.remove(&process);
+            loop {
+                match self.run_process(executor, time, process, &mut returns) {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(halt) => {
+                        if matches!(halt, Halt::Stop) {
+                            self.process_state.observed.insert(process);
+                        }
+                        return Err(halt);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The processes ready in the Reactive region if `reactive`, otherwise in

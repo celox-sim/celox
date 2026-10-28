@@ -662,6 +662,7 @@ impl<B: SimBackend> Simulator<B> {
             host_pending: parts.host_pending,
             finished: parts.finished,
             reactive: state.reactive.iter().map(|&index| process(index)).collect(),
+            observed: state.observed.iter().map(|&index| process(index)).collect(),
             re_inactive: state
                 .re_inactive
                 .iter()
@@ -738,7 +739,7 @@ impl<B: SimBackend> Simulator<B> {
         &self,
         record: &ProcessRecord,
         signals: &HashMap<String, SignalRef>,
-        strings: &[Vec<u8>],
+        file: &celox_runtime::StateFile,
     ) -> Result<(Vec<(usize, u64)>, ProcessState), Vec<String>> {
         let statuses = self.process_statuses();
         let mut processes: HashMap<ProcessRef, usize> = statuses
@@ -753,7 +754,7 @@ impl<B: SimBackend> Simulator<B> {
             })
             .collect();
         let (activations, cells) =
-            self.resolve_activation_values(record, strings, &mut processes)?;
+            self.resolve_activation_values(record, &file.strings, &mut processes)?;
         let kernel = |index: usize| activations.get(index).map_or(index, |a| a.kernel);
         let mut unknown: Vec<String> = record
             .wakeups
@@ -762,6 +763,7 @@ impl<B: SimBackend> Simulator<B> {
             .chain(&record.ready)
             .chain(&record.inactive)
             .chain(&record.reactive)
+            .chain(&record.observed)
             .chain(&record.re_inactive)
             .chain(record.waiters.iter().map(|waiter| &waiter.process))
             .filter(|name| !processes.contains_key(*name))
@@ -776,6 +778,7 @@ impl<B: SimBackend> Simulator<B> {
         let ready = record.ready.iter().filter_map(process).collect();
         let inactive = record.inactive.iter().filter_map(process).collect();
         let reactive = record.reactive.iter().filter_map(process).collect();
+        let observed = record.observed.iter().filter_map(process).collect();
         let re_inactive = record.re_inactive.iter().filter_map(process).collect();
         let mut waiters = celox_runtime::timing::Waiters::default();
         for waiter in &record.waiters {
@@ -939,6 +942,54 @@ impl<B: SimBackend> Simulator<B> {
                 None => unknown.push(name.clone()),
             }
         }
+        // Static assertion kernels have no activation frame: validate their
+        // queued region against the file's global status, not the live backend.
+        let schema = self.state_schema();
+        for (ids, observed) in [(&record.observed, true), (&record.reactive, false)] {
+            for id in ids {
+                let Some(&index) = processes.get(id) else {
+                    continue;
+                };
+                let slots = &self.program.runtime_schema.processes[kernel(index)];
+                if !observed && slots.program.is_some() {
+                    continue;
+                }
+                let expected = if observed {
+                    celox_design::ProcessStatus::AssertionObserved
+                } else {
+                    celox_design::ProcessStatus::AssertionReactive
+                }
+                .code();
+                let status = if let Some(frame) =
+                    &self.program.runtime_schema.process_frames[kernel(index)]
+                {
+                    frame
+                        .private
+                        .iter()
+                        .position(|slot| slot == &slots.status)
+                        .and_then(|slot| activations.get(index)?.private.get(slot))
+                        .map(|value| {
+                            value.1 == BigUint::default() && value.0 == BigUint::from(expected)
+                        })
+                } else {
+                    let signal = self.backend.resolve_signal(&slots.status);
+                    schema
+                        .objects
+                        .iter()
+                        .find(|object| object.signal == signal)
+                        .and_then(|object| {
+                            file.objects.iter().find(|saved| saved.path == object.path)
+                        })
+                        .map(|saved| {
+                            saved.mask.iter().flatten().all(|&byte| byte == 0)
+                                && BigUint::from_bytes_le(&saved.value) == BigUint::from(expected)
+                        })
+                };
+                if status != Some(true) {
+                    unknown.push(format!("wrong assertion region for {id}"));
+                }
+            }
+        }
         self.validate_activation_schedule(record, &processes, &activations, &mut unknown);
         if !unknown.is_empty() {
             return Err(unknown);
@@ -953,6 +1004,7 @@ impl<B: SimBackend> Simulator<B> {
                 inactive,
                 nba_queue,
                 reactive,
+                observed,
                 re_inactive,
                 re_nba_queue,
                 domain_counters,
@@ -965,7 +1017,7 @@ impl<B: SimBackend> Simulator<B> {
     pub(crate) fn resolve_schedule(
         &self,
         record: &ScheduleRecord,
-        strings: &[Vec<u8>],
+        file: &celox_runtime::StateFile,
     ) -> Result<ScheduleParts<B>, StateError> {
         let events: HashMap<String, B::Event> = self
             .backend
@@ -998,7 +1050,7 @@ impl<B: SimBackend> Simulator<B> {
             )
             .cloned()
             .collect();
-        let processes = self.resolve_processes(&record.processes, &signals, strings);
+        let processes = self.resolve_processes(&record.processes, &signals, file);
         if let Err(names) = &processes {
             unknown.extend(names.iter().cloned());
         }

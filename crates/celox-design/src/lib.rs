@@ -475,6 +475,10 @@ pub enum ProcessStatus {
     DisableFork,
     /// A side-effect-free event-expression probe completed; no HDL continuation ran.
     EventProbe,
+    /// Resume an assertion predicate in Observed after Active/NBA quiescence.
+    AssertionObserved,
+    /// Resume an assertion action in Reactive after every Observed predicate.
+    AssertionReactive,
 }
 
 impl ProcessStatus {
@@ -498,6 +502,8 @@ impl ProcessStatus {
             Self::WaitFork => 14,
             Self::DisableFork => 15,
             Self::EventProbe => 16,
+            Self::AssertionObserved => 17,
+            Self::AssertionReactive => 18,
         }
     }
 
@@ -519,6 +525,8 @@ impl ProcessStatus {
             14 => Some(Self::WaitFork),
             15 => Some(Self::DisableFork),
             16 => Some(Self::EventProbe),
+            17 => Some(Self::AssertionObserved),
+            18 => Some(Self::AssertionReactive),
             _ => None,
         }
     }

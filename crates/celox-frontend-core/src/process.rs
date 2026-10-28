@@ -208,6 +208,16 @@ impl ProcessKernelBuilder {
         self.suspend(ProcessStatus::InactiveDelay)
     }
 
+    /// A concurrent assertion's Observed predicate / Reactive action boundary.
+    pub fn assertion_region(&mut self, reactive: bool) -> Result<(), ProcessKernelError> {
+        self.slots.const_delays = false;
+        self.suspend(if reactive {
+            ProcessStatus::AssertionReactive
+        } else {
+            ProcessStatus::AssertionObserved
+        })
+    }
+
     fn note_delay(&mut self, constant: Option<u64>) {
         self.slots.const_delays &= constant.is_some_and(|amount| amount > 0);
     }

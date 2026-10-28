@@ -135,6 +135,10 @@ pub enum StmtBase<E, L> {
     WaitImplicit(Vec<StmtBase<E, L>>),
     WaitFork,
     DisableFork,
+    /// Internal region boundary of a concurrent assertion monitor.
+    AssertionRegion {
+        reactive: bool,
+    },
     /// `wait (condition)`: suspend the process until the condition is true
     /// (9.4.3).
     Wait(E),
@@ -377,6 +381,7 @@ impl<E, L> StmtBase<E, L> {
                     })
                     .collect(),
             ),
+            StmtBase::AssertionRegion { reactive } => StmtBase::AssertionRegion { reactive },
             StmtBase::WaitFork => StmtBase::WaitFork,
             StmtBase::DisableFork => StmtBase::DisableFork,
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
@@ -500,7 +505,7 @@ impl<E, L> StmtBase<E, L> {
                     }
                 }
             }
-            StmtBase::WaitFork | StmtBase::DisableFork => {}
+            StmtBase::WaitFork | StmtBase::DisableFork | StmtBase::AssertionRegion { .. } => {}
             StmtBase::Wait(condition) => fe(condition),
             StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
         }

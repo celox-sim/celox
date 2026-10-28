@@ -307,7 +307,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, specializations of a parameterized class outside the package or compilation unit that declares it, properties that are `real`, arrays or wider than 64 bits, and randomization or constraints over 4-state properties. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
-  named events and `->`, `wait fork` / `disable fork`, concurrent assertions, `force` / `release`.
+  named events and `->`, `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
 - Timing controls in processes: impure function calls in event expressions, and
   `wait` or event expressions reading a static task argument.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
@@ -1332,3 +1332,27 @@ The cases that remain excluded fall into these groups:
 - Testbench modules (`initial` blocks with clocking and `$finish` scheduling,
   hierarchical assignments) are not emitted as simulatable SystemVerilog
   modules.
+
+### Concurrent assertions
+
+Module and generate items support single-cycle Boolean `assert property`,
+`assume property`, and `cover property` with an explicit clock:
+
+```systemverilog
+check_valid: assert property (@(posedge clk) disable iff (reset) valid)
+    else $error("valid was not set at the clock tick");
+```
+
+Predicates use Preponed sampled values. After Active/NBA work completes, the
+Observed region evaluates the unsampled `disable iff` condition and the sampled
+predicate. Pass/fail actions run in Reactive, after all assertion predicates
+have been evaluated, and read current values. Unknown predicates fail; unknown
+disable conditions do not disable the assertion. These rules follow IEEE
+1800-2023 16.5, 16.5.1 and 16.14.1. Clause 16.5 leaves multiple clocking-event transitions within one time step
+undefined.
+
+This subset supports untimed blocking actions and report/severity tasks.
+Procedural concurrent assertions, implicit/default clocking, named properties
+and sequences, delays/repetition/implication, sampled-history and user-function
+predicates, and timed/NBA/subroutine action statements remain unsupported.
+Explicit `disable iff` follows the clock in the supported syntax.

@@ -123,6 +123,7 @@ impl<B: SimBackend> Simulator<B> {
     ) -> Result<(), StateError> {
         if record.activations.is_empty()
             && record.reactive.is_empty()
+            && record.observed.is_empty()
             && record.re_inactive.is_empty()
             && record.re_nba_queue.is_empty()
         {
@@ -625,6 +626,7 @@ impl<B: SimBackend> Simulator<B> {
             .chain(&record.ready)
             .chain(&record.inactive)
             .chain(&record.reactive)
+            .chain(&record.observed)
             .chain(&record.re_inactive)
         {
             if let Some(&index) = processes.get(id) {
@@ -639,7 +641,6 @@ impl<B: SimBackend> Simulator<B> {
         for (ids, reactive) in [
             (&record.ready, false),
             (&record.inactive, false),
-            (&record.reactive, true),
             (&record.re_inactive, true),
         ] {
             for id in ids {

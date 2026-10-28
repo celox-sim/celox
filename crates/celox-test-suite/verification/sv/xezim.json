@@ -4,6 +4,7 @@
     "xezim/always_comb.json",
     "xezim/binary_file_io.json",
     "xezim/class.json",
+    "xezim/concurrent_assertions.json",
     "xezim/distributions.json",
     "xezim/edges.json",
     "xezim/file_core.json",

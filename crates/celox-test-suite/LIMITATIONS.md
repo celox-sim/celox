@@ -1052,3 +1052,15 @@ exact failures remain executed evidence in the
 [Icarus](verification/sv/icarus/class.json) and
 [xezim](verification/sv/xezim/class.json) class reports.
 No assertions or exclusions are weakened.
+
+### Boolean concurrent assertion scheduling
+
+The five `concurrent_assertions::*` cases retain their strict sampling and
+region-order assertions (IEEE 1800-2023 16.5, 16.5.1, 16.12 and 16.14.1).
+Icarus 13.0 rejects these property constructs. Verilator 5.052 reads the action
+value before NBA and checks a newly asserted disable condition too early.
+The installed xezim 0.11.3 instead executes one Reactive action before another
+Observed predicate, suppressing the latter. Its mismatch remains executed
+evidence, not an exclusion. [Top/Wrapped reproductions](verification/repros/sv_concurrent_regions.json)
+identify the actual installed xezim binary; the current flake pin's stale dependency
+lock prevented building that pin. No current-pin conformance is claimed.
