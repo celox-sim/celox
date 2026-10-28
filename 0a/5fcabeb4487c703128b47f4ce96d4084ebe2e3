@@ -4,3 +4,5 @@ rev 2 (rebase) 2026-10-28 16:13 UTC
 rev 1 (initial) 2026-10-28 16:13 UTC
 
 <!-- mergify-revision-data: {"schema_version":1,"pull_number":2462,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f591ca907a6e732cbbedc492b17d72536be990c3","timestamp_iso":"2026-10-28T16:13:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"f591ca907a6e732cbbedc492b17d72536be990c3","new_sha":"0a5fcabeb4487c703128b47f4ce96d4084ebe2e3","timestamp_iso":"2026-10-28T16:13:57Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f591ca907a6e732cbbedc492b17d72536be990c3...0a5fcabeb4487c703128b47f4ce96d4084ebe2e3"}]} -->
+
+Address review discussion r4403105634: update the partial publication consumer test for exactly one tiered total metric, preserving synchronous compilation/execution checks. All 352 repository script tests pass.
