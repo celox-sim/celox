@@ -288,7 +288,7 @@ fn overlapping_slots(
                 .filter_map(|(location, slot)| location.overlaps(access).then_some(*slot))
                 .collect()
         }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
+        SIROffset::Dynamic(_) | SIROffset::Element { .. } | SIROffset::ElementRun { .. } => {
             locations.iter().map(|(_, slot)| *slot).collect()
         }
     }
@@ -622,6 +622,7 @@ impl StateSsa {
                                     dynamic: true,
                                 })
                                 .copied(),
+                            SIROffset::ElementRun { .. } => None,
                         };
                         if eligible_load_blocks.is_none_or(|blocks| blocks.contains(&block_id))
                             && eligible_loads.is_none_or(|loads| loads.contains(destination))
@@ -656,7 +657,9 @@ impl StateSsa {
                                     dynamic: false,
                                 })
                                 .copied(),
-                            SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+                            SIROffset::Dynamic(_)
+                            | SIROffset::Element { .. }
+                            | SIROffset::ElementRun { .. } => None,
                         };
                         if let Some(slot) = exact {
                             facts[slot].has_store = true;
@@ -697,7 +700,9 @@ impl StateSsa {
                                         dynamic: false,
                                     })
                                     .copied(),
-                                SIROffset::Dynamic(_) | SIROffset::Element { .. } => None,
+                                SIROffset::Dynamic(_)
+                                | SIROffset::Element { .. }
+                                | SIROffset::ElementRun { .. } => None,
                             };
                             for slot in
                                 overlapping_slots(&locations_by_address, *source, offset, *width)
