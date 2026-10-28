@@ -1,0 +1,1 @@
+Address review: register enumerators only for enum declarations, inherit their type markers through own_env; extend regression case
