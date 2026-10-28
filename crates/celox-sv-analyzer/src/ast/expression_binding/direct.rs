@@ -488,12 +488,23 @@ pub(in crate::ast) fn bind_value(
                         if let objects::Receiver::Handle(handle) = receiver {
                             children.push((handle, None));
                         }
-                        for arg in args.iter().filter(|_| selection.is_none()) {
+                        let first = usize::from(receiver != objects::Receiver::Static);
+                        for (position, arg) in
+                            args.iter().filter(|_| selection.is_none()).enumerate()
+                        {
                             let Some(value) = arg.value else {
                                 return Err(unsupported(format!(
                                     "omitted argument of method `{name}`"
                                 )));
                             };
+                            references::check_actual(
+                                &name,
+                                first + position,
+                                value,
+                                native,
+                                tree,
+                                dimensions,
+                            )?;
                             children.push((value, None));
                         }
                         (
@@ -743,6 +754,11 @@ pub(in crate::ast) fn bind_value(
                         } else {
                             let (actuals, order) = arguments(&name, args, dimensions)?;
                             for (position, id) in actuals.iter().enumerate() {
+                                if let Some(id) = id {
+                                    references::check_actual(
+                                        &name, position, *id, native, tree, dimensions,
+                                    )?;
+                                }
                                 if let Some(id) = id
                                     && let Some(shape) = dimensions
                                         .subroutine_param_shapes

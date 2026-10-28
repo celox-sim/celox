@@ -471,6 +471,55 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Unsupported: tristate in top-level IO",
                         ),
+                        ("verilator", "references::ref_actual_of_an_equivalent_type") => (
+                            "compile_error",
+                            "compile",
+                            "Ref argument requires matching types",
+                        ),
+                        (
+                            "verilator",
+                            "references::ref_array_element_index_is_fixed_at_the_call"
+                            | "references::ref_class_property_names_the_object_of_the_call",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "External variable referenced by non-inlined function/task",
+                        ),
+                        (
+                            "icarus",
+                            "references::const_ref_in_a_continuous_assignment"
+                            | "references::const_ref_reads_the_current_value"
+                            | "references::ref_static_class_properties",
+                        ) => ("compile_error", "compile", "syntax error"),
+                        (
+                            "icarus",
+                            "references::ref_actual_of_an_equivalent_type"
+                            | "references::ref_array_element_index_is_fixed_at_the_call"
+                            | "references::ref_default_and_named_arguments"
+                            | "references::ref_element_select_past_the_element"
+                            | "references::ref_formals_of_one_actual_alias_each_other"
+                            | "references::ref_writes_are_seen_before_the_return",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Reference ports not supported yet",
+                        ),
+                        (
+                            "icarus",
+                            "references::ref_class_property_names_the_object_of_the_call"
+                            | "references::ref_element_after_an_input_in_forked_activations"
+                            | "references::ref_elements_of_concurrent_task_activations"
+                            | "references::ref_fills_caller_queues"
+                            | "references::ref_property_forwarded_to_output_and_inout"
+                            | "references::ref_property_of_this"
+                            | "references::ref_replaces_a_class_handle"
+                            | "references::ref_task_keeps_a_property_while_suspended"
+                            | "references::ref_task_keeps_the_reference_while_suspended",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Overriding the default variable lifetime is not yet supported",
+                        ),
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };
                     assert_eq!(status, expected_status, "{name}");

@@ -45,7 +45,7 @@ synthesis and is tested at the design level.
 | Sequential processes | `always_ff @(posedge clk)`, `always @(posedge clk or negedge rst_n)` and the like, blocking and nonblocking assignments, concatenated targets, four-state clock and reset signals, one asynchronous reset shared by several clock domains, processes at both edges of one clock or reset, and one signal as the clock of some processes and the asynchronous reset of others (a timed `Simulation` runs every edge; `Simulator::tick` is the rising edge of its event only) |
 | Initial blocks | `initial` blocks and variable declaration initializers (`logic [7:0] v = 8'h5a;`, also of interface members); initializers take effect before the `initial` blocks. One whose writes have constant values, with constant `if`, `$readmemh` / `$readmemb`, and loops whose trip count is known before they run (`repeat`, and `for`, `while` or `do`-`while` loops that step one variable by a constant up to a fixed bound), defines the initial state. Any other, such as one that reads design state or calls a system task, runs as a process from time zero in a timed `Simulation`; a `Simulator` does not run processes, so building one for such a design fails with `SimulatorErrorKind::ProcessRequiresSimulation` |
 | Statements | `if` / `else`, `case`, `casez`, `casex`, `case ... inside`, `unique` / `priority`, `for`, `while`, `do ... while`, `repeat`, `forever` and `foreach` (unrolled when the trip count is constant, otherwise executed at run time), `break` / `continue` / `return`, immediate and deferred immediate assertions |
-| Functions | `function` and `task` with `input`, `output` and `inout` arguments, `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
+| Functions | `function` and `task` with `input`, `output`, `inout`, `ref` and `const ref` arguments (see [reference arguments](#reference-arguments)), `return` or assignment to the function name, local variables and `localparam`s, selected and composite assignments; calls are inlined. Calls with constant arguments in constant expressions (parameters, ranges) are evaluated during elaboration |
 
 ### Timing controls {#timing-controls}
 
@@ -331,7 +331,7 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, specializations of a parameterized class outside the package or compilation unit that declares it, properties that are `real`, arrays or wider than 64 bits, and randomization or constraints over 4-state properties. Timed tasks with static local declarations, recursive calls and `ref` arguments remain unsupported.
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, specializations of a parameterized class outside the package or compilation unit that declares it, properties that are `real`, arrays or wider than 64 bits, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
@@ -712,6 +712,33 @@ Whole-union operations use the declared signedness (unsigned by default).
 Mixed `bit`/`logic` unions retain four-state storage, with X/Z converted to zero
 when reading or writing a two-state member. Tagged and unpacked unions remain
 unsupported.
+
+### Reference arguments {#reference-arguments}
+
+A `ref` or `const ref` formal is the actual itself, not a copy (IEEE 1800-2023
+13.5.2). Writes through it are visible at once, other names of the actual
+alias it, and a task keeps the reference while it is suspended. The actual can
+be a variable, including a string, class handle, queue, dynamic or associative
+array, or unpacked array; a property of a class object, whose handle is
+evaluated at the call; or an element of a fixed-size unpacked array, whose
+index is evaluated at the call. A `const` qualifier, like the direction, carries
+over to the following formals (13.3).
+
+These are rejected as the standard requires: `ref` formals of subroutines with
+static lifetime; actuals that are expressions, constants, part-selects, nets,
+or of a type not equivalent to the formal's (6.22.2); writes to a `const ref`
+formal; nonblocking assignments to a `ref` formal (6.21); a `ref` formal used
+in a `fork ... join_any` or `join_none` block other than in the initializer of
+a fork variable (9.3.2); and calls of a function with a `ref` argument in a
+continuous assignment or an event expression (13.4.1; `const ref` is allowed).
+
+`ref static`, elements of dynamic arrays, queues and associative arrays (whose
+references would have to outlive a resize, 13.5.2), elements of class
+properties, members of unpacked structures, writes to part of a formal bound to
+a class property, and selects of a formal bound to an array element at a
+position only known at run time (positions of unrolled loops are known) are
+unsupported and rejected. A formal bound to a class property can be passed on
+to an `output` or `inout` argument; it is written back when that call returns.
 
 ### Named subroutine arguments
 
