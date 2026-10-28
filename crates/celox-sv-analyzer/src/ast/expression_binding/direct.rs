@@ -239,6 +239,13 @@ enum Finish {
     Inside(Vec<bool>),
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
+    /// An enumerated type method; the children are the receiver, then the
+    /// count when one is given.
+    EnumMethod {
+        method: enums::Method,
+        domain: std::sync::Arc<crate::ast::enums::EnumDomain>,
+        count: bool,
+    },
     /// A read of property `property` of the object handle child.
     ObjectLoad(Box<crate::ast::classes::Property>),
     /// A call of method subroutine `name` with `formals` formals; the first
@@ -300,6 +307,53 @@ pub(in crate::ast) fn bind_value(
                             "assignment to a tagged union requires the same union type or a tagged expression",
                         ));
                     }
+                }
+                let enum_method = match &native.expression(id).kind {
+                    ExprKind::Call {
+                        expression,
+                        arguments,
+                    } => enums::method(tree, *expression, native, dimensions)?
+                        .map(|method| (method, arguments.as_slice())),
+                    ExprKind::Member { .. } => {
+                        enums::method(tree, id, native, dimensions)?.map(|method| (method, &[][..]))
+                    }
+                    _ => None,
+                };
+                if let Some(((method, receiver, domain), arguments)) = enum_method {
+                    // `v.next()` lists one empty argument.
+                    let arguments = match arguments {
+                        [argument] if argument.name.is_none() && argument.value.is_none() => &[],
+                        arguments => arguments,
+                    };
+                    let counts = arguments
+                        .iter()
+                        .map(|argument| argument.value.filter(|_| argument.name.is_none()))
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|counts| counts.len() <= method.formals())
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "arguments of enumerated type method `{}`",
+                                native.token_text(native.expression(id).tokens).trim()
+                            ))
+                        })?;
+                    let mut children = vec![receiver];
+                    children.extend(&counts);
+                    jobs.push(Job::Finish(
+                        Finish::EnumMethod {
+                            method,
+                            domain,
+                            count: !counts.is_empty(),
+                        },
+                        children.len(),
+                        scope.clone(),
+                    ));
+                    jobs.extend(
+                        children
+                            .into_iter()
+                            .rev()
+                            .map(|id| Job::Enter(id, None, scope.clone())),
+                    );
+                    continue;
                 }
                 if let Some(call) =
                     super::super::processes::value(tree, id, native, dimensions, false)?
@@ -589,7 +643,8 @@ pub(in crate::ast) fn bind_value(
                                         "scope randomize requires a packed variable with a supported enum domain",
                                     ));
                                 }
-                                domains.push(shape.enum_values.clone());
+                                domains
+                                    .push(shape.enum_domain.as_ref().map(|domain| domain.values()));
                                 if !expressions::query_actual_is_writable(
                                     &Expr::Ident(name),
                                     dimensions,
@@ -1089,6 +1144,21 @@ pub(in crate::ast) fn bind_value(
                         strings::call(StringOp::Concat, operands)
                     }
                     Finish::Concat => Expr::Concat(operands),
+                    Finish::EnumMethod {
+                        method,
+                        domain,
+                        count,
+                    } => {
+                        let count = count.then(|| operands.pop()).flatten();
+                        enums::call(
+                            &tree.state,
+                            method,
+                            &domain,
+                            operands.pop(),
+                            count,
+                            dimensions,
+                        )?
+                    }
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
                     }

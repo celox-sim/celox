@@ -171,7 +171,10 @@ pub(in crate::ast) fn native_string(
         }
         ExprKind::Call { expression, .. } => {
             method(tree, *expression, native, dimensions).is_some_and(|(op, _)| op.returns_string())
+                || enum_name(tree, *expression, native, dimensions)
         }
+        // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
+        ExprKind::Member { .. } if enum_name(tree, id, native, dimensions) => true,
         // A string property of a class object.
         _ => objects::property(tree, id, native, dimensions)
             .ok()
@@ -180,6 +183,20 @@ pub(in crate::ast) fn native_string(
                 property.field.handle == Some(crate::system_functions::HandleProperty::String)
             }),
     }
+}
+
+/// Whether native callee expression `id` names the `name` method of an
+/// enumerated type (6.19.5.6).
+fn enum_name(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    enums::method(tree, id, native, dimensions)
+        .ok()
+        .flatten()
+        .is_some_and(|(method, _, _)| method.returns_string())
 }
 
 /// The string method that native callee expression `id` names, with the

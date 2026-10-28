@@ -218,7 +218,7 @@ fn check_formal(
                         .is_none_or(|direction| direction.is_written()),
                     Callee::System(function) => function.writes_argument(position),
                     Callee::Object(op) => op.writes_argument(position),
-                    Callee::String(_) | Callee::Checked { .. } => false,
+                    Callee::String(_) | Callee::Checked { .. } | Callee::Lookup { .. } => false,
                 }
         })
     };

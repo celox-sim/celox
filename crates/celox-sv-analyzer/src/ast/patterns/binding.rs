@@ -139,7 +139,8 @@ fn select<'a>(
         let sub = Shape::Owned(Rc::new(VariableDimensions {
             container: None,
             randomizable: true,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             real: false,
             string: false,
             class: None,
@@ -250,7 +251,8 @@ fn select<'a>(
     let bit = Shape::Owned(Rc::new(VariableDimensions {
         container: None,
         randomizable: true,
-        enum_values: None,
+        enum_domain: None,
+        packed_enum: false,
         real: false,
         string: false,
         class: None,

@@ -160,7 +160,7 @@ pub(super) fn check_actual(
 
 /// Whether variables of shapes `a` and `b` have equivalent types (IEEE
 /// 1800-2023 6.22.2). Integral types compare by total width, signedness and
-/// state count; an enumeration only by its values.
+/// state count; an enumeration only by its members.
 fn equivalent(
     state: &AnalysisState,
     a: &VariableDimensions,
@@ -210,7 +210,7 @@ fn equivalent(
     if a.real != b.real || a.string != b.string || a.class != b.class {
         return false;
     }
-    if (a.enum_values.is_some() || b.enum_values.is_some()) && a.enum_values != b.enum_values {
+    if (a.enum_domain.is_some() || b.enum_domain.is_some()) && a.enum_domain != b.enum_domain {
         return false;
     }
     let width = |shape: &VariableDimensions| {
