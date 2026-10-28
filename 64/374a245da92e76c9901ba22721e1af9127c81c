@@ -1,1 +1,1 @@
-Resolve master conflicts between process handles and four-state class properties; preserve both validation records.
+Preserve null-initialized two-state process fields during four-state class integration; add checkpoint regression and record synchronization validation.
