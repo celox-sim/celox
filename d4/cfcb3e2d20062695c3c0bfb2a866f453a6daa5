@@ -1,0 +1,1 @@
+Rebase onto #2322: guard process handles in method lookup, keep record operands flat in object calls
