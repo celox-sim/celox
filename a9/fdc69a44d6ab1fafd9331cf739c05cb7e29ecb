@@ -1,0 +1,1 @@
+Address review: module declaration initializers, results assigned through the function name, return values before inout copy-back, struct defaults of formals, one-time static initializers
