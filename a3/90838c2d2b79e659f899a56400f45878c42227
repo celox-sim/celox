@@ -1,0 +1,6 @@
+Revision history for #2407:
+
+rev 2 (rebase) 2026-10-28 08:30 UTC — Initial version: run-time static initializers in process blocks (6.8/6.21).
+rev 1 (initial) 2026-10-28 08:30 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2407,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3ac11988a8baca252b788362b6820628b4174f98","timestamp_iso":"2026-10-28T08:30:51Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"3ac11988a8baca252b788362b6820628b4174f98","new_sha":"b693107e967acc3176366cd0e2cc1a8a25bba49c","timestamp_iso":"2026-10-28T08:30:51Z","reason":"Initial version: run-time static initializers in process blocks (6.8/6.21).","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3ac11988a8baca252b788362b6820628b4174f98...b693107e967acc3176366cd0e2cc1a8a25bba49c"}]} -->
