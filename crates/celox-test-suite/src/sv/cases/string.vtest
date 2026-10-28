@@ -171,3 +171,22 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq same 1)
   (expect_output "[a longer name] [ab] [a longer name] 13\n"))
+
+; 6.16, 6.16.3: a character of a string is a `byte`, which is signed: a
+; character code above 127 reads as a negative value.
+(case characters_are_signed_bytes
+  (source "string_bytes.sv" #"
+module Top(output bit done);
+    string s;
+    int n, m;
+    initial begin
+        s = {string'(8'hff), "A"};
+        n = s[0];
+        m = s.getc(0);
+        $display("%0d %0d %0d %0d %0d", n, m, s[0], s.getc(1), s[0] < 0);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "-1 -1 -1 65 1\n"))
