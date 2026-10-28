@@ -1,1 +1,6 @@
-Fix WASM CI: collect native TB hardware dependency metadata only on host targets
+Revision history for #2357:
+
+rev 2 (rebase) 2026-10-28 04:30 UTC — Fix WASM CI: collect native TB hardware dependency metadata only on host targets
+rev 1 (initial) 2026-10-28 04:30 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2357,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"eea3f0f5df08fbb16a13d1f4f91f4f7e53a974ef","timestamp_iso":"2026-10-28T04:30:55Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"eea3f0f5df08fbb16a13d1f4f91f4f7e53a974ef","new_sha":"7d88e27571d7b7065df0cfe2a9e2e006b7597c6c","timestamp_iso":"2026-10-28T04:30:55Z","reason":"Fix WASM CI: collect native TB hardware dependency metadata only on host targets","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/eea3f0f5df08fbb16a13d1f4f91f4f7e53a974ef...7d88e27571d7b7065df0cfe2a9e2e006b7597c6c"}]} -->
