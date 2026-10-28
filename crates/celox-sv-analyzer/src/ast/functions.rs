@@ -73,7 +73,7 @@ pub(super) fn native_functions(
         let _constants = item.enter();
         let mut signature_context = item.dimensions(dimensions);
         signature_context.const_env = item.env.clone();
-        signature_context.type_aliases = aliases.as_ref().clone();
+        signature_context.type_aliases = aliases.as_ref().clone().into();
         let mut function =
             native_signature(tree.declarations().subroutine(id), tree, &signature_context)?;
         let mut locals = Vec::new();

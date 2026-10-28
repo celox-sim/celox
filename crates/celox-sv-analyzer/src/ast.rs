@@ -1436,7 +1436,7 @@ impl Module {
                 .collect(),
             enum_constants: enum_constants.clone(),
             functions: functions.clone(),
-            function_return_types: packed_dimensions.function_return_types.clone(),
+            function_return_types: (*packed_dimensions.function_return_types).clone(),
             constant_functions: const_functions::installed(&syntax_tree.state.const_functions),
             subroutine_params: subroutine_params.clone(),
             subroutine_shapes: subroutine_shapes.clone(),
@@ -3040,8 +3040,8 @@ struct FunctionReturnMetadata {
 struct PackedDimensions {
     variables: ScopedMap<VariableDimensions>,
     const_env: SharedMap<i128>,
-    type_aliases: HashMap<String, Type>,
-    function_return_types: HashMap<String, FunctionReturnMetadata>,
+    type_aliases: SharedMap<Type>,
+    function_return_types: SharedMap<FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
     parameter_values: SharedMap<Expr>,
     /// Constant array initializers for binding child parameter values.
@@ -3071,8 +3071,8 @@ impl PackedDimensions {
         Self {
             variables: variables.into(),
             const_env: const_env.clone().into(),
-            type_aliases: type_aliases.clone(),
-            function_return_types: HashMap::default(),
+            type_aliases: type_aliases.clone().into(),
+            function_return_types: SharedMap::default(),
             functions: Arc::default(),
             parameter_values: SharedMap::default(),
             array_parameter_values: SharedMap::default(),
