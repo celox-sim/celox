@@ -191,6 +191,9 @@ impl<B: SimBackend> SimulationState<B> {
         backend.set(scheduler.limit, limit);
         backend.set(scheduler.exit, 0u8);
         backend.set(scheduler.finish, 0u8);
+        // State may have been restored or a prior slot may have exited early.
+        // Only hosts that prove their input state settled may enter clean.
+        backend.set(scheduler.dirty, 1u8);
         backend.set(scheduler.count, 0u64);
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);

@@ -53,8 +53,8 @@ publication preserves both sets of results. Only `master` publishes history.
 
 Heliodor uses an additional fixed-input acceptance workload. Its methodology is
 described in [Heliodor Linux Benchmark](./heliodor.md). The dashboard compares
-the native backend with synchronous Veryl-CC, and shows startup and end-to-end
-time separately for Celox and Veryl-CC tiered execution. Standalone Cranelift boot
+the native backend with synchronous Veryl-CC, and compares Celox and Veryl-CC
+tiered execution by total time through completion, including compilation. Standalone Cranelift boot
 results are excluded because their much longer runtime makes this chart
 ineffective for that comparison.
 Heliodor charts are separated by CPU architecture because results from different

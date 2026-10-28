@@ -254,7 +254,7 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
         }
-        let live_cancelled = cancelled
+        let live_cancelled: Vec<usize> = cancelled
             .iter()
             .enumerate()
             .filter_map(|(id, &cancelled)| {

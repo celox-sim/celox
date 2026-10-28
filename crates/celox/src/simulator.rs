@@ -147,7 +147,9 @@ mod host {
         pub(crate) declaration_phase: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
-        pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
+        // Temporarily detached while advancing the simulator. Keep the queue
+        // in place instead of copying its entire state at every clock edge.
+        pub(crate) component_simulation: Option<Box<celox_runtime::SimulationState<B>>>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
         pub(super) comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
@@ -1581,6 +1583,17 @@ mod host {
         ) -> Vec<RuntimeEvent> {
             let queue = Arc::clone(&self.pending_host_events);
             let mut pending = queue.lock().unwrap();
+            // Most clock boundaries produce no reports. Preserve queued host
+            // records, losses and deferred string snapshots, but avoid the
+            // collector and formatter when neither queue has any new work.
+            if pending.events.is_empty()
+                && pending.missed == 0
+                && pending.deferred.waiting.is_empty()
+                && self.runtime_event_read_seq.load(Ordering::Acquire)
+                    == self.runtime_event_write_seq()
+            {
+                return Vec::new();
+            }
             pending.extend(
                 self.collect_backend_runtime_events(),
                 self.backend.layout().runtime_event_capacity,

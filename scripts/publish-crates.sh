@@ -26,16 +26,16 @@ crates=(
   celox-frontend-sdk
   celox-macros
   celox-ts-gen
-  celox-testbench
   celox-sir
   celox-state-layout
   celox-slt
   celox-backend-cranelift
   celox-backend-wasm
   celox-frontend-core
-  celox-runtime
   celox-sir-opt
   celox-backend-x86
+  celox-testbench
+  celox-runtime
   celox-backend-arm64
   celox-frontend-sv
   celox-frontend-veryl

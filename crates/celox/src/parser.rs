@@ -369,7 +369,7 @@ pub(crate) fn project_scheduled_rtl(
         diagnostics,
     )?;
     scheduled.scheduled.inject_triggers();
-    let testbench = if let Some(testbench_source) = testbench_source {
+    let mut testbench = if let Some(testbench_source) = testbench_source {
         testbench_source.component_libraries = component_libraries;
         testbench_source.component_file_base = component_file_base;
         crate::testbench_compile::project_observability(
@@ -386,10 +386,36 @@ pub(crate) fn project_scheduled_rtl(
     } else {
         None
     };
-    let (sir, mut runtime) =
+    let (mut sir, mut runtime) =
         RuntimeProgram::from_scheduled(scheduled.scheduled).map_err(|error| {
             ParserError::illegal_context("runtime design projection", error.to_string(), None)
         })?;
+    if let Some(testbench) = &mut testbench {
+        crate::testbench_compile::lower_expressions(&mut sir, &mut runtime, testbench)
+            .and_then(|()| {
+                testbench.fold_clock_waits();
+                crate::testbench_compile::lower_processes(&mut sir, &mut runtime, testbench)
+            })
+            .map_err(|error| ParserError::illegal_context("testbench SIR lowering", error, None))?;
+    }
+    // TB expressions and processes are appended after symbolic scheduling.
+    // Keep its per-process control arrays aligned with the final kernel list.
+    if let Some(scheduler) = &mut runtime.runtime_schema.scheduler {
+        while scheduler.slots.wake.len() < runtime.runtime_schema.processes.len() {
+            scheduler
+                .slots
+                .wake
+                .push(runtime.design.allocate_testbench_slot(64, false));
+            scheduler
+                .slots
+                .waiting
+                .push(runtime.design.allocate_testbench_slot(8, false));
+            scheduler
+                .slots
+                .baseline
+                .push(runtime.design.allocate_testbench_slot(8, false));
+        }
+    }
     runtime.testbench = testbench;
     dump_addr_map_if_requested(&runtime, diagnostics);
     Ok((sir, runtime))
