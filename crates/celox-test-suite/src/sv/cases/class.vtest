@@ -2693,3 +2693,67 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 672))
+(case named_aggregate_type_arguments
+  (source "package.sv" #"
+package p;
+    typedef enum {A0, A1} first_e;
+    typedef enum {B0, B1} second_e;
+    typedef first_e alias_e;
+    typedef struct packed { bit [3:0] a; } s1_t;
+    typedef struct packed { bit [3:0] a; } s2_t;
+    class Box #(type T = int);
+        static int count;
+        function new();
+            count++;
+        endfunction
+        static function int width();
+            T v;
+            return $bits(v);
+        endfunction
+    endclass
+    function automatic int read();
+        Box#(first_e) a = new();
+        Box#(alias_e) b = new();
+        Box#(second_e) c = new();
+        Box#(s1_t) d = new();
+        Box#(s2_t) e = new();
+        Box#(s2_t) f = new();
+        return 10000 * Box#(first_e)::count + 1000 * Box#(second_e)::count
+            + 100 * Box#(s1_t)::count + 10 * Box#(s2_t)::count + Box#(s1_t)::width();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 21124))
+(case generate_scope_enum_type_arguments
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    class Box #(type T = int);
+        static int count;
+        function new();
+            count++;
+        endfunction
+    endclass
+    typedef enum {C0, C1} shared_e;
+    int counts[2];
+    for (genvar i = 0; i < 2; i++) begin : g
+        typedef enum {A, B} e_t;
+        typedef shared_e alias_e;
+        initial begin
+            automatic Box#(e_t) local_box = new();
+            automatic Box#(alias_e) shared_box = new();
+            #1 counts[i] = 10 * Box#(e_t)::count + Box#(alias_e)::count;
+        end
+    end
+    initial begin
+        #2;
+        sum = 100 * counts[0] + counts[1];
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq sum 1212) (assert_eq done 1))

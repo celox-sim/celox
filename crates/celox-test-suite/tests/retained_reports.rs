@@ -309,6 +309,17 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::package_constant_class_defaults") => {
                             ("compile_error", "compile", "source_0.sv:4: syntax error")
                         }
+                        ("icarus", "class::generate_scope_enum_type_arguments") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("verilator", "class::generate_scope_enum_type_arguments") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq sum: expected 0x4bc, got 0x8ae",
+                        ),
+                        ("icarus", "class::named_aggregate_type_arguments") => {
+                            ("compile_error", "compile", "source_0.sv:8: syntax error")
+                        }
                         ("icarus", "class::package_constant_type_arguments") => {
                             ("compile_error", "compile", "source_0.sv:5: syntax error")
                         }
