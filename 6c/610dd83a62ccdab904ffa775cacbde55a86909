@@ -1,0 +1,1 @@
+Rebased on master (unpacked structures): built-in process/event handles have no aggregate properties or methods. Codex review: typedef'd events are created at declaration; @(sel ? a : b) waits for the selected event; null waits stay blocked across suspend/resume; event records without waiters expire when time advances.
