@@ -1,1 +1,6 @@
-Update the NAPI inactive-edge regression for wiring-only clock projection: copied aliases now remain settled, while non-wiring consumers and pre-existing dirty state still require settling.
+Revision history for #2420:
+
+rev 2 (content) 2026-10-28 11:29 UTC — Update the NAPI inactive-edge regression for wiring-only clock projection: copied aliases now remain settled, while non-wiring consumers and pre-existing dirty state still require settling.
+rev 1 (initial) 2026-10-28 11:29 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2420,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"eae40207b57a81f5a2d5a7b23132240d0b0da94f","timestamp_iso":"2026-10-28T11:29:55Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"eae40207b57a81f5a2d5a7b23132240d0b0da94f","new_sha":"45fd807ca4a4bbc0fd2186e34be5852086154a17","timestamp_iso":"2026-10-28T11:29:55Z","reason":"Update the NAPI inactive-edge regression for wiring-only clock projection: copied aliases now remain settled, while non-wiring consumers and pre-existing dirty state still require settling.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/eae40207b57a81f5a2d5a7b23132240d0b0da94f...45fd807ca4a4bbc0fd2186e34be5852086154a17"}]} -->
