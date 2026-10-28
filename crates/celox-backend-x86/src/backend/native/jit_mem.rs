@@ -1,6 +1,10 @@
 //! JIT memory: load emitted machine code into executable memory and call it.
 
-use std::{io::Write, sync::Mutex};
+use std::{
+    any::Any,
+    io::Write,
+    sync::{Arc, Mutex},
+};
 
 use memmap2::{Mmap, MmapMut};
 
@@ -24,7 +28,9 @@ pub struct JitSymbol {
 /// Executable code region holding JIT-compiled machine code.
 /// The code can be called as `fn(*mut u8) -> i64`.
 pub struct JitCode {
-    _mmap: Mmap,
+    _mmap: Option<Mmap>,
+    _external_owner: Option<Arc<dyn Any + Send + Sync>>,
+    code_len: usize,
     pub fn_ptr: JitFn,
 }
 
@@ -85,8 +91,41 @@ impl JitCode {
             write_perf_map_entries(mmap.as_ptr() as usize, code.len().max(1), name, symbols)?;
         }
 
+        let code_len = mmap.len();
         Ok(Self {
-            _mmap: mmap,
+            _mmap: Some(mmap),
+            _external_owner: None,
+            code_len,
+            fn_ptr,
+        })
+    }
+
+    /// Retain an existing immutable executable region without copying it.
+    ///
+    /// # Safety
+    /// `code` must point to `len` readable, executable bytes of valid target
+    /// code. The bytes must remain immutable and accessible while `owner` is
+    /// alive, and the entry must follow this backend's function ABI.
+    pub unsafe fn from_executable_owner(
+        owner: Arc<dyn Any + Send + Sync>,
+        code: *const u8,
+        len: usize,
+        name: &str,
+        symbols: &[JitSymbol],
+        perf_map: bool,
+    ) -> Result<Self, std::io::Error> {
+        if code.is_null() || len == 0 || len > isize::MAX as usize {
+            return Err(std::io::Error::other("invalid executable code region"));
+        }
+        if perf_map {
+            write_perf_map_entries(code as usize, len, name, symbols)?;
+        }
+        // Safety: the caller supplies a live region with this entry ABI.
+        let fn_ptr: JitFn = unsafe { std::mem::transmute(code) };
+        Ok(Self {
+            _mmap: None,
+            _external_owner: Some(owner),
+            code_len: len,
             fn_ptr,
         })
     }
@@ -124,14 +163,16 @@ impl JitCode {
     /// trailing constant tables are copied together, so the runtime can retain
     /// entry offsets and resolve them after placing the combined image.
     pub fn entry_ptr(&self, offset: usize) -> Option<*const u8> {
-        (offset < self._mmap.len()).then(|| unsafe { self._mmap.as_ptr().add(offset) })
+        (offset < self.code_len).then(|| unsafe { (self.fn_ptr as *const u8).add(offset) })
     }
 
     /// Bytes of the executable image, including alignment padding and constant
     /// tables. This is the exact image that can later be copied into an AOT
     /// container.
     pub fn image(&self) -> &[u8] {
-        &self._mmap
+        // Safety: either owned mapping or external owner keeps this immutable
+        // executable region alive for the lifetime of this borrow.
+        unsafe { std::slice::from_raw_parts(self.fn_ptr as *const u8, self.code_len) }
     }
 }
 
@@ -189,6 +230,33 @@ fn sanitize_perf_symbol(name: &str) -> String {
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_executable_owner_survives_until_last_code_user() {
+        let bytes = [0xb8, 42, 0, 0, 0, 0xc3];
+        let owner = Arc::new(JitCode::new(&bytes).unwrap());
+        let weak = Arc::downgrade(&owner);
+        // Safety: the source is an immutable executable JitCode and the clone
+        // retained by this new region owns its complete backing allocation.
+        let borrowed = unsafe {
+            JitCode::from_executable_owner(
+                owner.clone(),
+                owner.image().as_ptr(),
+                owner.image().len(),
+                "owned_test_code",
+                &[],
+                false,
+            )
+        }
+        .unwrap();
+        drop(owner);
+        assert!(weak.upgrade().is_some());
+        assert_eq!(borrowed.image(), bytes);
+        assert!(borrowed.entry_ptr(bytes.len()).is_none());
+        assert_eq!(unsafe { borrowed.call(&mut []) }, 42);
+        drop(borrowed);
+        assert!(weak.upgrade().is_none());
+    }
 
     #[test]
     fn large_images_preserve_bytes_bounds_and_entry_points() {
