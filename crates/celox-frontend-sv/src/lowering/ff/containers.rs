@@ -18,6 +18,13 @@ impl Ff<'_, '_> {
                     .ok_or_else(|| unsupported("omitted container operand"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // An update of an element of an outer container reads that element
+        // and writes it back: evaluate the indices on the way once.
+        if op.mutates()
+            && let Some(receiver) = args.first_mut()
+        {
+            *receiver = self.freeze_receiver(receiver)?;
+        }
         let original_key_width = args
             .get(1)
             .and_then(|key| self.m.comparison_width(key, key));
@@ -41,9 +48,11 @@ impl Ff<'_, '_> {
                     )?;
                 }
             }
+            // An element of an outer container is written back through its
+            // read, whose indices `freeze_receiver` has evaluated.
             if !value_receiver
                 && self.m.calls(&args[0])
-                && !matches!(&args[0], sv::ir::Expr::Call { callee: sv::ir::Callee::Object(op), .. } if matches!(**op, sv::ir::ObjectOp::Load(_)))
+                && !matches!(&args[0], sv::ir::Expr::Call { callee: sv::ir::Callee::Object(op), .. } if matches!(**op, sv::ir::ObjectOp::Load(_) | sv::ir::ObjectOp::Container { op: Get, .. }))
             {
                 args[0] = self.heap_operand(
                     &args[0],
@@ -85,10 +94,15 @@ impl Ff<'_, '_> {
                 *arg = self.heap_operand(arg, context, kind)?;
             }
         }
-        let (kind, capacity, signed_key, string_key) = match layout.kind {
-            ContainerKind::Dynamic => (0, 0, false, false),
-            ContainerKind::Queue { capacity } => (1, capacity, false, false),
-            ContainerKind::Associative { signed, string, .. } => (2, 0, signed, string),
+        let (kind, capacity, signed_key, string_key, object_key) = match layout.kind {
+            ContainerKind::Dynamic => (0, 0, false, false, false),
+            ContainerKind::Queue { capacity } => (1, capacity, false, false, false),
+            ContainerKind::Associative {
+                signed,
+                string,
+                object,
+                ..
+            } => (2, 0, signed, string, object),
         };
         let parameter = heap::parameter(
             layout.width,
@@ -102,6 +116,7 @@ impl Ff<'_, '_> {
             capacity,
             signed_key,
             string_key,
+            object_key,
         );
         let code = |opcode| encode(opcode, parameter);
         if op.reduction().is_some() {
@@ -381,13 +396,7 @@ impl Ff<'_, '_> {
                             let narrow = this.b.alloc_bit(32, false);
                             this.b.emit(SIRInstruction::Slice(narrow, updated, 0, 32));
                             this.store(id, SIROffset::Static(0), 32, narrow);
-                            let sv::ir::Expr::Ident(receiver) = receiver else {
-                                return Err(unsupported("container receiver must be a variable"));
-                            };
-                            this.assign(
-                                &sv::ir::LValue::Ident(receiver),
-                                &sv::ir::Expr::Ident(updated_name),
-                            )
+                            this.container_write_back(&receiver, sv::ir::Expr::Ident(updated_name))
                         })?;
                     }
                     zero
@@ -400,6 +409,88 @@ impl Ff<'_, '_> {
             self.store(temp, SIROffset::Static(0), width, narrow);
         }
         Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// `receiver` with the indices of the outer containers it reads, and the
+    /// objects of their properties, evaluated into temporaries.
+    fn freeze_receiver(
+        &mut self,
+        receiver: &sv::ir::Expr,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(op),
+            args,
+            arg_order,
+        } = receiver
+        else {
+            return Ok(receiver.clone());
+        };
+        let frozen = match **op {
+            sv::ir::ObjectOp::Container {
+                op: ContainerOp::Get,
+                ..
+            } => {
+                let [Some(outer), Some(index)] = args.as_slice() else {
+                    return Ok(receiver.clone());
+                };
+                let outer = self.freeze_receiver(outer)?;
+                let index = self.hoist(index)?;
+                vec![Some(outer), Some(index)]
+            }
+            sv::ir::ObjectOp::Load(_) => {
+                let [Some(owner)] = args.as_slice() else {
+                    return Ok(receiver.clone());
+                };
+                vec![Some(self.hoist(owner)?)]
+            }
+            _ => return Ok(receiver.clone()),
+        };
+        Ok(sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(op.clone()),
+            args: frozen,
+            arg_order: arg_order.clone(),
+        })
+    }
+
+    /// Store the updated container `updated` where `receiver` read it: a
+    /// variable, or an element of an outer container (`m[a]` of `m[a][b]`),
+    /// which is set in turn (IEEE 1800-2023 7.4.5).
+    fn container_write_back(
+        &mut self,
+        receiver: &sv::ir::Expr,
+        updated: sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        match receiver {
+            sv::ir::Expr::Ident(name) => {
+                self.assign(&sv::ir::LValue::Ident(name.clone()), &updated)
+            }
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                args,
+                ..
+            } if matches!(
+                **op,
+                sv::ir::ObjectOp::Container {
+                    op: ContainerOp::Get,
+                    ..
+                }
+            ) =>
+            {
+                let sv::ir::ObjectOp::Container { layout, .. } = **op else {
+                    unreachable!("matched a container read")
+                };
+                let [Some(outer), Some(index)] = args.as_slice() else {
+                    return Err(unsupported("container element receiver"));
+                };
+                self.container_call(
+                    ContainerOp::Set,
+                    layout,
+                    &[Some(outer.clone()), Some(index.clone()), Some(updated)],
+                )?;
+                Ok(())
+            }
+            _ => Err(unsupported("container receiver must be a variable")),
+        }
     }
 
     fn container_reduction(

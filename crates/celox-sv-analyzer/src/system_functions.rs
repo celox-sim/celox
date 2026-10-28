@@ -901,6 +901,8 @@ pub enum ContainerKind {
         key_width: u32,
         signed: bool,
         string: bool,
+        /// Keys are class handles, which keep their objects alive.
+        object: bool,
     },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
