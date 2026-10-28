@@ -1391,6 +1391,23 @@ impl SimBackend for TieredBackend {
         }
     }
 
+    fn eval_clock_aliases(&mut self, event: TieredEventRef) -> Result<bool, SimulatorErrorCode> {
+        // Do not promote during a partial settle: normal evaluation boundaries
+        // continue to own tier changes and their accounting.
+        match &mut self.phase {
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                let event = native.id_to_event_slice()[event.id()];
+                native.eval_clock_aliases(event)
+            }
+            _ => Ok(false),
+        }
+    }
+
     fn eval_apply_ff_at(&mut self, event: TieredEventRef) -> Result<(), SimulatorErrorCode> {
         self.maybe_promote();
         self.maybe_upgrade();
