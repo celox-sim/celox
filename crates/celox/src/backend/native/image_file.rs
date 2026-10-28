@@ -205,7 +205,7 @@ impl NativeProgramImage {
         if found != expected {
             return Err(NativeImageContainerError::ArchitectureMismatch { expected, found });
         }
-        let image: NativeProgramImage = postcard::from_bytes(appended.payload)?;
+        let image = NativeProgramImage::from_postcard_bytes(appended.payload)?;
         image
             .validate()
             .map_err(NativeImageContainerError::InvalidImage)?;
@@ -218,6 +218,12 @@ impl NativeProgramImage {
     /// Read the running executable and discover an image attached at EOF.
     pub fn discover_in_current_executable()
     -> Result<Option<AppendedNativeImage>, NativeImageContainerError> {
+        #[cfg(target_os = "linux")]
+        if let Ok(mapping) = super::executable_mapping::ExecutableMapping::current() {
+            // The decoder returns owned metadata/code, so the temporary input
+            // mapping can be released immediately after decoding.
+            return Self::discover_appended(mapping.as_bytes());
+        }
         let executable = std::env::current_exe()?;
         let mut file = std::fs::File::open(executable)?;
         discover_reader(&mut file)
