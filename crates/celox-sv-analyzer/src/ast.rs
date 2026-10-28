@@ -1311,6 +1311,7 @@ impl Module {
             subroutine_directions: &subroutine_directions,
             automatic: lifetimes::automatic_by_default(syntax_tree),
             statics: Vec::new(),
+            explicit_statics: HashSet::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
         };
@@ -1378,18 +1379,25 @@ impl Module {
             &subroutine_directions,
             comb_processes
                 .iter_mut()
-                .map(|process| &mut process.body)
-                .chain(ff_processes.iter_mut().map(|process| &mut process.body))
+                .map(|process| (&mut process.body, false))
+                .chain(
+                    ff_processes
+                        .iter_mut()
+                        .map(|process| (&mut process.body, false)),
+                )
                 .chain(
                     initial_processes
                         .iter_mut()
-                        .map(|process| &mut process.body),
+                        .map(|process| (&mut process.body, !process.repeats)),
                 ),
+            Some(&body_state.explicit_statics),
         )?;
         for subroutine in &subroutines {
             kept.extend(subroutine.persistent_locals.iter().cloned());
         }
-        static_initializers.append(&mut body_state.static_initializers);
+        // Statics of subroutines are initialized first: a run-time
+        // initializer of a process local may call the subroutine.
+        static_initializers.splice(0..0, body_state.static_initializers.drain(..));
         locals.retain(|local| !kept.contains(&local.name));
         for name in kept {
             signals.push(Signal::new(name.clone(), statics[&name].clone()));
@@ -1400,10 +1408,18 @@ impl Module {
                 .iter()
                 .position(|process| !process.is_initializer())
                 .unwrap_or(initial_processes.len());
+            // They may read module variables, so they also stay after those
+            // initializers when processes are reordered by creation.
+            let creation_order = initial_processes
+                .iter()
+                .filter(|process| process.is_initializer())
+                .map(|process| process.creation_order)
+                .max()
+                .unwrap_or(0);
             initial_processes.insert(
                 first_block,
                 InitialProcess {
-                    creation_order: 0,
+                    creation_order,
                     site: None,
                     condition: None,
                     body: static_initializers,

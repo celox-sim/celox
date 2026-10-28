@@ -468,7 +468,18 @@ static な output 引数も、代入しない経路では以前の値を保持�
 定数関数としての呼び出しは
 毎回新しい値を使い、実行時の状態に影響しません（13.4.3）。
 
-値を保持する task ローカル変数と、定数でない static 初期化子は引き続き未対応です。
+プロセスの static なローカル変数には実行時の値を使う初期化子も書けます。初期化子は宣言順に、
+どの手続きよりも先に 1 回だけ実行し（IEEE 1800-2023 6.8）、モジュールの変数とほかの static な
+ローカル変数を読めますが、automatic 変数は読めません。IEEE 1800-2023 6.21 は "an explicit static
+keyword shall be required when an initialization value is specified as part of a static variable's
+declaration" と定め、手続きブロック内で初期化子を持つ static 変数に `static` キーワードを要求します。
+既存のソースはこのキーワードを省くことが多いため（`initial` ブロック内の `string s = v.name();` など）、
+Celox はキーワードのない宣言も受け付けます。定数の初期化子はどの手続きでも、実行時の値を使う初期化子は
+`initial` のように 1 回だけ実行する手続きで受け付けます。`always` 手続きでキーワードなしに実行時の値で
+初期化すると、入るたびに実行する意図の可能性が高いためエラーになります。`static` か `automatic` を
+指定して意図を示してください。
+
+値を保持する task ローカル変数と、関数の static なローカル変数の定数でない初期化子は引き続き未対応です。
 これらには `automatic` を指定してください。package 関数の状態は package 変数で、
 すべてのインスタンスのプロセスが書き込めます。既定の寿命（`interface automatic`）が
 使用先のモジュールと異なる interface は拒否します。
