@@ -1514,6 +1514,27 @@ fn decode_digit(digit: u8, radix_bits: u32) -> Option<(u8, u8)> {
     }
 }
 
+fn decode_digits<T>(string: &str, radix_bits: u32) -> Option<(BigUint, BigUint)>
+where
+    T: Default + From<u8> + std::ops::ShlAssign<u32> + std::ops::BitOrAssign,
+    BigUint: From<T>,
+{
+    let mut bits = T::default();
+    let mut mask = T::default();
+    for digit in string.bytes() {
+        if digit == b'_' {
+            continue;
+        }
+        // Validate even the prefix discarded by native-width truncation.
+        let (value_digit, mask_digit) = decode_digit(digit, radix_bits)?;
+        bits <<= radix_bits;
+        mask <<= radix_bits;
+        bits |= T::from(value_digit);
+        mask |= T::from(mask_digit);
+    }
+    Some((BigUint::from(bits), BigUint::from(mask)))
+}
+
 unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint, BigUint)> {
     if value.is_null() {
         return None;
@@ -1526,8 +1547,8 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
             let integer = unsafe { value.value.integer };
             let mut bits = BigUint::from(integer as u32);
             if integer < 0 && width > 32 {
-                if width <= 64 {
-                    bits = BigUint::from(integer as i64 as u64);
+                if width <= 128 {
+                    bits = BigUint::from(integer as i128 as u128);
                 } else {
                     bits |= ((BigUint::from(1u8) << (width - 32)) - BigUint::from(1u8)) << 32;
                 }
@@ -1553,12 +1574,12 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
             let words = width.div_ceil(32);
             // Safety: the VPI caller supplies at least ceil(width / 32) words.
             let vector = unsafe { std::slice::from_raw_parts(vector, words) };
-            if width <= 64 {
-                let mut bits = 0u64;
-                let mut mask = 0u64;
+            if width <= 128 {
+                let mut bits = 0u128;
+                let mut mask = 0u128;
                 for word in vector.iter().rev() {
-                    bits = (bits << 32) | u64::from(word.aval as u32);
-                    mask = (mask << 32) | u64::from(word.bval as u32);
+                    bits = (bits << 32) | u128::from(word.aval as u32);
+                    mask = (mask << 32) | u128::from(word.bval as u32);
                 }
                 return Some((BigUint::from(bits), BigUint::from(mask)));
             }
@@ -1587,36 +1608,12 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
                 4
             };
             if width <= 64 {
-                let mut bits = 0u64;
-                let mut mask = 0u64;
-                for digit in string.bytes() {
-                    if digit == b'_' {
-                        continue;
-                    }
-                    // Truncation to the destination width is performed by
-                    // the caller. Still validate every digit, including an
-                    // overlong string's discarded prefix.
-                    bits <<= radix_bits;
-                    mask <<= radix_bits;
-                    let (value_digit, mask_digit) = decode_digit(digit, radix_bits)?;
-                    bits |= u64::from(value_digit);
-                    mask |= u64::from(mask_digit);
-                }
-                return Some((BigUint::from(bits), BigUint::from(mask)));
+                decode_digits::<u64>(string, radix_bits)
+            } else if width <= 128 {
+                decode_digits::<u128>(string, radix_bits)
+            } else {
+                decode_digits::<BigUint>(string, radix_bits)
             }
-            let mut bits = BigUint::from(0u8);
-            let mut mask = BigUint::from(0u8);
-            for digit in string.bytes() {
-                if digit == b'_' {
-                    continue;
-                }
-                let (value_digit, mask_digit) = decode_digit(digit, radix_bits)?;
-                bits <<= radix_bits;
-                mask <<= radix_bits;
-                bits |= BigUint::from(value_digit);
-                mask |= BigUint::from(mask_digit);
-            }
-            Some((bits, mask))
         }
         _ => None,
     }
