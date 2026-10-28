@@ -1,0 +1,1 @@
+Preserve directly written asynchronous reset transitions before the native TB direct-edge fast path rebases the timed scheduler.
