@@ -2770,6 +2770,23 @@
     }
   },
   {
+    "id": "sv_icarus_static_property_wait",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 compiles a `wait` on a static class property in a class task but vvp cannot load the result (\"unresolved vvp_net reference\", \"Program not runnable\"). IEEE 1800-2023 8.9 and 9.4.3 make the property one variable that the wait watches. Verilator 5.052 and xezim 0.11.3 pass the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_static_property_wait_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::waits_on_static_properties"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_iff_late_conditions",
     "category": "simulator_disagreement",
     "phase": "execute",
