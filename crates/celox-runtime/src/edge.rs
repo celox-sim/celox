@@ -358,7 +358,9 @@ where
     };
     let new = edge.level();
     let fires = info.fires(known(from), edge);
-    let settle = dirty || info.comb_read;
+    let comb_read =
+        info.comb_read && (dirty || !executor.backend_mut().eval_clock_aliases(event)?);
+    let settle = dirty || comb_read;
     if let Some(plan) = plan {
         // A gated clock is judged from the lever's real level before the
         // edge, x and z included.
@@ -381,11 +383,11 @@ where
         return Ok(if settled {
             EdgeOutcome::Settled
         } else {
-            moved_only(info.comb_read)
+            moved_only(comb_read)
         });
     }
     if !fires {
-        return Ok(moved_only(info.comb_read));
+        return Ok(moved_only(comb_read));
     }
     if settle {
         executor.eval_comb_apply_ff_at(event)?;
@@ -552,7 +554,8 @@ where
         any_moved = true;
         write.write(executor.backend_mut(), info.signal, new);
         transitions.push((info.signal, (old, new)));
-        comb_read |= info.comb_read;
+        comb_read |=
+            info.comb_read && (dirty || !executor.backend_mut().eval_clock_aliases(event)?);
         let fires = info.fires(known(old), edge);
         if cached {
             changed.push((event, fires));

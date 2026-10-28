@@ -166,6 +166,7 @@ impl super::super::EventHandle for NativeEventRef {
 /// that share the same compiled machine code.
 pub struct SharedNativeCode {
     comb_func: NativeSimFunc,
+    clock_alias_funcs: Vec<Option<NativeSimFunc>>,
     comb_unit_funcs: Vec<NativeSimFunc>,
     /// One function per process kernel.
     process_funcs: Vec<NativeSimFunc>,
@@ -308,8 +309,25 @@ impl SharedNativeCode {
             .map(materialize)
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Optional named exports keep older images usable: absence requests a
+        // full settle. Export names are part of the native runtime contract.
+        let mut clock_alias_funcs = vec![None; id_to_event.len()];
+        for entry in &program_image.code_entries {
+            if let Some(id) = entry.name.strip_prefix(super::clock_aliases::EXPORT_PREFIX) {
+                let id = id
+                    .strip_suffix(']')
+                    .and_then(|id| id.parse::<usize>().ok())
+                    .filter(|&id| id < clock_alias_funcs.len())
+                    .ok_or_else(|| codegen_message("invalid clock alias export"))?;
+                if clock_alias_funcs[id].is_some() {
+                    return Err(codegen_message("duplicate clock alias export"));
+                }
+                clock_alias_funcs[id] = Some(native_function_at(&jit_image, entry.offset)?);
+            }
+        }
         Ok(Self {
             comb_func,
+            clock_alias_funcs,
             comb_unit_funcs,
             process_funcs,
             lane_kernels,
@@ -359,7 +377,8 @@ impl SharedNativeCode {
 /// One callable function in a packed native code image.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeCodeEntry {
-    /// Stable diagnostic name for the emitted function.
+    /// Stable name for the emitted function. `clock_alias_update[N]` names
+    /// an optional clock-wiring update entry for event N; other names are diagnostic.
     pub name: String,
     /// Byte offset from the start of the native image.
     pub offset: usize,
@@ -2656,6 +2675,26 @@ fn compile_program_with_outlining_threshold(
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
     let lane_kernels = super::lanes::compile_lane_kernels(sir, options, cancel)?;
+    let mut clock_alias_jits = Vec::new();
+    if !options.four_state && !options.native_force_support && force_bindings.is_empty() {
+        let (_, clocks) = crate::backend::event_ids(sir);
+        for (id, clock) in clocks.into_iter().enumerate() {
+            if let Some(units) = super::clock_aliases::extract(sir, clock) {
+                let name = format!("{}{}]", super::clock_aliases::EXPORT_PREFIX, id);
+                let compiled = compile_units(
+                    &units,
+                    layout,
+                    false,
+                    &name,
+                    &options.x86_options,
+                    false,
+                    &options.optimize_options.diagnostics,
+                    cancel,
+                )?;
+                clock_alias_jits.push((name, compiled));
+            }
+        }
+    }
     let codegen_trace = capture_trace
         .then(|| format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks));
     let semantic_memory_size = layout
@@ -2663,6 +2702,11 @@ fn compile_program_with_outlining_threshold(
         .checked_add(layout.triggered_bits_total_size)
         .expect("native semantic-memory size overflow");
     let native_memory_size = std::iter::once(comb_jit.required_state_size)
+        .chain(
+            clock_alias_jits
+                .iter()
+                .map(|(_, code)| code.required_state_size),
+        )
         .chain(comb_chunk_jits.iter().map(|code| code.required_state_size))
         .chain(
             compiled_ff_codes
@@ -2683,6 +2727,11 @@ fn compile_program_with_outlining_threshold(
         )
         .fold(semantic_memory_size, usize::max);
     let required_native_features = std::iter::once(comb_jit.required_native_features)
+        .chain(
+            clock_alias_jits
+                .iter()
+                .map(|(_, code)| code.required_native_features),
+        )
         .chain(
             comb_chunk_jits
                 .iter()
@@ -2767,6 +2816,15 @@ fn compile_program_with_outlining_threshold(
             &compiled_ff_codes[&task_id],
         )?;
         task_offsets.insert(task_id, offset);
+    }
+    for (name, compiled) in &clock_alias_jits {
+        append_native_code(
+            &mut packed_image,
+            &mut code_entries,
+            &mut image_symbols,
+            name.clone(),
+            compiled,
+        )?;
     }
     let lane_image = lane_kernels
         .map(|kernels| kernels.pack(&mut packed_image, &mut code_entries, &mut image_symbols))
@@ -3695,6 +3753,14 @@ impl super::super::SimBackend for NativeBackend {
         self.call_func_timed(func)
     }
 
+    fn eval_clock_aliases(&mut self, event: NativeEventRef) -> Result<bool, SimulatorErrorCode> {
+        let Some(func) = self.compiled.clock_alias_funcs[event.id] else {
+            return Ok(false);
+        };
+        self.call_func_timed(func)?;
+        Ok(true)
+    }
+
     fn eval_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
         if self.lane_event_kernel(event) {
             let compiled = Arc::clone(&self.compiled);
@@ -4084,6 +4150,45 @@ mod tests {
     use crate::ir::{
         BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, SIRValue,
     };
+
+    #[test]
+    fn image_without_clock_alias_exports_uses_full_settle() {
+        let source = r#"
+            module Child (clk: input clock, d: input bit<8>, q: output bit<8>) {
+                always_ff (clk) { q = d; }
+            }
+            module Top (clk: input clock, d: input bit<8>, q: output bit<8>) {
+                inst child: Child (clk, d, q);
+            }
+        "#;
+        let mut image = crate::Simulator::builder(source, "Top")
+            .four_state(false)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        let previous = image.code_entries.len();
+        image.code_entries.retain(|entry| {
+            !entry
+                .name
+                .starts_with(super::super::clock_aliases::EXPORT_PREFIX)
+        });
+        assert_eq!(previous, image.code_entries.len() + 1);
+        let image =
+            NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap()).unwrap();
+        let mut sim = crate::Simulator::from_sources(Vec::new(), "Top")
+            .build_native_from_image(image)
+            .unwrap();
+        let event = sim.event("clk");
+        let d = sim.signal("d");
+        sim.set(d, 42u8);
+        sim.active_edge(event).unwrap();
+        sim.inactive_edge(event).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 42u8.into());
+        assert_eq!(
+            sim.get(sim.child_signal(&[("child", 0)], "clk")),
+            0u8.into()
+        );
+    }
 
     /// A unit of `blocks` blocks loading `value`, with its maps filled in
     /// forward or reverse order.
