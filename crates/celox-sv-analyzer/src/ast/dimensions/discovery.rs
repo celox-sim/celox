@@ -309,14 +309,10 @@ fn formal_types(
     for ports in groups {
         for port in ports {
             if let Some(d) = port.direction {
-                direction = match d {
-                    celox_sv_syntax::Direction::Input => ParamDirection::Input,
-                    celox_sv_syntax::Direction::Output => ParamDirection::Output,
-                    celox_sv_syntax::Direction::Inout => ParamDirection::Inout,
-                    celox_sv_syntax::Direction::Ref => {
-                        return Err(unsupported("ref subroutine argument"));
-                    }
-                };
+                if port.static_reference {
+                    return Err(unsupported("ref static subroutine argument"));
+                }
+                direction = ParamDirection::declared(d, port.constant);
             }
             let data = tree.declarations().data_type(port.data_type);
             let omitted = matches!(data.kind, DataTypeKind::Implicit)
