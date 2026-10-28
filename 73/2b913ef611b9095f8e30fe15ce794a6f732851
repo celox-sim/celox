@@ -1,8 +1,7 @@
-Retain the xezim diagnostic at the case's location after the rebase (2665:27), per review 4397090170.
-
 Revision history for #2365:
 
+rev 3 (content) 2026-10-28 05:24 UTC
 rev 2 (rebase) 2026-10-28 05:22 UTC
 rev 1 (initial) 2026-10-28 05:22 UTC
 
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2365,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3de71f6e1dbae009f7d6acb59c2ac38edebe0b39","timestamp_iso":"2026-10-28T05:22:09Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"3de71f6e1dbae009f7d6acb59c2ac38edebe0b39","new_sha":"8e41c29102e0e7b3f280d4a60fe8326d07aadb0d","timestamp_iso":"2026-10-28T05:22:09Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3de71f6e1dbae009f7d6acb59c2ac38edebe0b39...8e41c29102e0e7b3f280d4a60fe8326d07aadb0d"}]} -->
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2365,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3de71f6e1dbae009f7d6acb59c2ac38edebe0b39","timestamp_iso":"2026-10-28T05:22:09Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"3de71f6e1dbae009f7d6acb59c2ac38edebe0b39","new_sha":"8e41c29102e0e7b3f280d4a60fe8326d07aadb0d","timestamp_iso":"2026-10-28T05:22:09Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3de71f6e1dbae009f7d6acb59c2ac38edebe0b39...8e41c29102e0e7b3f280d4a60fe8326d07aadb0d"},{"number":3,"change_type":"content","old_sha":"8e41c29102e0e7b3f280d4a60fe8326d07aadb0d","new_sha":"732b913ef611b9095f8e30fe15ce794a6f732851","timestamp_iso":"2026-10-28T05:24:06Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/8e41c29102e0e7b3f280d4a60fe8326d07aadb0d...732b913ef611b9095f8e30fe15ce794a6f732851"}]} -->
