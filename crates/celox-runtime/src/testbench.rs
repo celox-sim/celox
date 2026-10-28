@@ -10,19 +10,35 @@ use celox_testbench::{
 
 use crate::{SignalRef, backend::SimBackend};
 
+struct Binding<'a, B> {
+    backend: &'a B,
+    hardware: Vec<std::ops::Range<usize>>,
+}
+
+impl<B> std::ops::Deref for Binding<'_, B> {
+    type Target = B;
+    fn deref(&self) -> &B {
+        self.backend
+    }
+}
+
 fn bind_expr<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     expr: ExprBytecode<StateLocation<AbsoluteAddr>>,
 ) -> Option<CompiledExpr> {
     let layout = backend.layout();
     let bytecode = expr
         .bind_with(|address| layout.offsets.get(address).copied())
         .ok()?;
-    Some(CompiledExpr::new(bytecode))
+    Some(
+        CompiledExpr::new(bytecode).classify_hardware_access(|offset| {
+            backend.hardware.iter().any(|range| range.contains(&offset))
+        }),
+    )
 }
 
 fn bind_component<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     component: SemanticComponentBinding<AbsoluteAddr>,
     rtl_writes: &fxhash::FxHashSet<VarAtomBase<AbsoluteAddr>>,
 ) -> Option<celox_testbench::ExecutableComponentBinding<B::Event, SignalRef>> {
@@ -82,7 +98,7 @@ fn bind_component<B: SimBackend>(
 }
 
 fn bind_assert_arg<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     arg: SemanticArgument<AbsoluteAddr>,
 ) -> Option<ExecutableArgument> {
     Some(ExecutableArgument {
@@ -95,7 +111,7 @@ fn bind_assert_arg<B: SimBackend>(
 }
 
 fn bind_assert_message<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     message: GenericAssertMessage<SemanticArgument<AbsoluteAddr>>,
 ) -> Option<ExecutableAssertMessage> {
     match message {
@@ -117,7 +133,7 @@ fn bind_assert_message<B: SimBackend>(
 }
 
 fn bind_clock_count<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     count: GenericClockCount<ExprBytecode<StateLocation<AbsoluteAddr>>>,
 ) -> Option<ExecutableClockCount> {
     match count {
@@ -129,7 +145,7 @@ fn bind_clock_count<B: SimBackend>(
 }
 
 fn bind_loop_bound<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     bound: GenericLoopBound<ExprBytecode<StateLocation<AbsoluteAddr>>>,
 ) -> Option<ExecutableLoopBound> {
     match bound {
@@ -147,7 +163,7 @@ fn bind_loop_bound<B: SimBackend>(
 }
 
 fn bind_target<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     target: TestbenchTarget<
         celox_testbench::SemanticSignal<AbsoluteAddr>,
         ExprBytecode<StateLocation<AbsoluteAddr>>,
@@ -167,7 +183,7 @@ fn bind_target<B: SimBackend>(
 }
 
 fn bind_optional_target<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     target: Option<
         TestbenchTarget<
             celox_testbench::SemanticSignal<AbsoluteAddr>,
@@ -182,7 +198,7 @@ fn bind_optional_target<B: SimBackend>(
 }
 
 fn bind_statement<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     statement: SemanticStatement<AbsoluteAddr>,
 ) -> Option<ExecutableStatement<B::Event, SignalRef>> {
     match statement {
@@ -261,21 +277,59 @@ fn bind_statement<B: SimBackend>(
             step_op,
             reverse,
             body,
-        } => Some(GenericTestbenchStatement::For {
-            loop_var: loop_var.map(|(signal, width, signed)| {
-                (backend.resolve_signal(&signal.address), width, signed)
-            }),
-            start: bind_loop_bound(backend, start)?,
-            end: bind_loop_bound(backend, end)?,
-            inclusive,
-            step,
-            step_op,
-            reverse,
-            body: body
+        } => {
+            let start = bind_loop_bound(backend, start)?;
+            let end = bind_loop_bound(backend, end)?;
+            let body = body
                 .into_iter()
                 .map(|statement| bind_statement(backend, statement))
-                .collect::<Option<Vec<_>>>()?,
-        }),
+                .collect::<Option<Vec<_>>>()?;
+            // A constant loop that only waits does not need a host wakeup at
+            // each iteration. clock_gen keeps running while this process
+            // sleeps; the induction variable is scoped to the empty body.
+            if !inclusive
+                && !reverse
+                && step == 1
+                && step_op.is_none()
+                && let (Some(0), Some(iterations)) = (constant_bound(&start), constant_bound(&end))
+                && let [
+                    GenericTestbenchStatement::ClockNext {
+                        clock_event,
+                        count,
+                        period,
+                    },
+                ] = body.as_slice()
+                && let Some(count) = match count {
+                    GenericClockCount::Static(n) => Some(*n),
+                    GenericClockCount::Dynamic(expr) => expr.constant_u64(),
+                }
+                && count != 0
+                && iterations != 0
+                && loop_var.as_ref().is_none_or(|(_, width, signed)| {
+                    let bits = width.saturating_sub(usize::from(*signed));
+                    bits >= 64 || iterations < (1u64 << bits)
+                })
+                && let Some(count) = iterations.checked_mul(count)
+            {
+                return Some(GenericTestbenchStatement::ClockNext {
+                    clock_event: *clock_event,
+                    count: GenericClockCount::Static(count),
+                    period: *period,
+                });
+            }
+            Some(GenericTestbenchStatement::For {
+                loop_var: loop_var.map(|(signal, width, signed)| {
+                    (backend.resolve_signal(&signal.address), width, signed)
+                }),
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                body,
+            })
+        }
         GenericTestbenchStatement::Assign { dst, expr } => {
             Some(GenericTestbenchStatement::Assign {
                 dst: bind_target(backend, dst)?,
@@ -351,11 +405,44 @@ fn bind_statement<B: SimBackend>(
     }
 }
 
+fn constant_bound(bound: &ExecutableLoopBound) -> Option<u64> {
+    match bound {
+        GenericLoopBound::Static(value) => u64::try_from(*value).ok(),
+        GenericLoopBound::Dynamic {
+            expr,
+            width,
+            signed,
+        } if *width <= 64 => {
+            let value = expr.constant_u64()?;
+            if *signed && (*width == 0 || value >> (*width - 1) != 0) {
+                None
+            } else {
+                Some(value)
+            }
+        }
+        _ => None,
+    }
+}
+
 pub fn bind_testbench_program<B: SimBackend>(
     backend: &B,
     program: TestbenchProgram<AbsoluteAddr>,
     rtl_writes: &fxhash::FxHashSet<VarAtomBase<AbsoluteAddr>>,
 ) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
+    // Resolve whole objects, including aliases, rather than comparing source
+    // addresses: a TB read through a port alias still observes its RTL driver.
+    let mut hardware = rtl_writes
+        .iter()
+        .map(|write| {
+            let signal = backend.resolve_signal(&write.id);
+            let start = signal.offset;
+            let bytes = backend.layout().plane_size(&write.id);
+            start..start + bytes
+        })
+        .collect::<Vec<_>>();
+    hardware.sort_unstable_by_key(|range| (range.start, range.end));
+    hardware.dedup();
+    let backend = &Binding { backend, hardware };
     let lengths = program.process_lengths().to_vec();
     if lengths
         .iter()
