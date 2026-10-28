@@ -1,0 +1,1 @@
+Review fixes: the traced builder seeds the UVM arguments (set_plusargs); freed regex handles release their registry entries (maps keyed by never-reused handles); `.` matches newlines as without REG_NEWLINE.
