@@ -582,6 +582,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         native: (celox_sv_syntax::ExprId, celox_sv_syntax::ExprId),
     ) -> Result<Stmt, AnalyzerError> {
         let (left, right) = native;
+        if containers::element_member(left, self.tree.declarations(), self.tree, &self.dims)?
+            .is_some()
+        {
+            return Err(unsupported(
+                "assignment to a member of a dynamic container element",
+            ));
+        }
         if let Some(mut stmt) =
             containers::set(left, right, op, nonblocking, self.tree, &self.dims)?
         {
@@ -1151,6 +1158,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             _ => return Err(unsupported("increment or decrement operator")),
         };
         let native = self.tree.declarations();
+        if containers::element_member(*expression, native, self.tree, &self.dims)?.is_some() {
+            return Err(unsupported(
+                "assignment to a member of a dynamic container element",
+            ));
+        }
         if let Some((property, receiver)) =
             expression_binding::object_property(self.tree, *expression, native, &self.dims)?
         {
@@ -3214,6 +3226,7 @@ fn dispatch_body(
             signed: false,
             handle: None,
             four_state: false,
+            nullable: false,
         }),
         vec![this.clone()],
     );

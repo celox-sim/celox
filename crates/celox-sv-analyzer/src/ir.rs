@@ -9,7 +9,7 @@ pub use crate::procedural::{
 };
 pub use crate::system_functions::{
     ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, HandleProperty, MemoryFormat,
-    ObjectField, ObjectOp, Radix, Severity, StringOp, SystemFunction, SystemTask, VcdTask,
+    ObjectField, ObjectOp, Radix, Record, Severity, StringOp, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
