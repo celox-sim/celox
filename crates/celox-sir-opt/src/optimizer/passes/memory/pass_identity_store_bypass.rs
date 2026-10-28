@@ -348,18 +348,27 @@ fn proven_alias_store(
         return None;
     }
 
-    let identity_copy = store.identity_source.is_some_and(|source| {
-        source.region == STABLE_REGION && source.absolute_addr() == canonical
-    });
-    let duplicate_store = facts.stores.iter().any(|other| {
-        other.address.absolute_addr() == canonical
-            && other.eu_index == store.eu_index
-            && other.block == store.block
-            && other.source == store.source
-            && other.width == store.width
-            && other.shape_is_aliasable
-            && other.effects_are_removable
-    });
+    // A fused comb+FF unit can publish a new FF value after the copy has
+    // captured the old one. Sharing their homes would turn a later alias
+    // read into a read of that new value instead of the captured value.
+    let canonical_writes = facts
+        .accesses
+        .get(&canonical)
+        .map_or(0, |access| access.writes);
+    let identity_copy = canonical_writes == 0
+        && store.identity_source.is_some_and(|source| {
+            source.region == STABLE_REGION && source.absolute_addr() == canonical
+        });
+    let duplicate_store = canonical_writes == 1
+        && facts.stores.iter().any(|other| {
+            other.address.absolute_addr() == canonical
+                && other.eu_index == store.eu_index
+                && other.block == store.block
+                && other.source == store.source
+                && other.width == store.width
+                && other.shape_is_aliasable
+                && other.effects_are_removable
+        });
     (identity_copy || duplicate_store).then_some(Some(store))
 }
 
@@ -2564,6 +2573,53 @@ mod tests {
         assert_eq!(
             units[0].blocks[&BlockId(0)].instructions,
             vec![load(0, source, 8)]
+        );
+    }
+
+    #[test]
+    fn final_alias_revalidation_preserves_a_copy_before_ff_publication() {
+        let source = address(0);
+        let destination = address(1);
+        // The comb copy captures 42 before a fused FF update publishes 0.
+        // Redirecting the final load to source would read the new FF value.
+        let units = vec![single_block_unit(
+            vec![
+                load(0, source, 6),
+                store(destination, 0, 6),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(0u8)),
+                store(source, 1, 6),
+                load(2, destination, 6),
+            ],
+            &[(0, 6), (1, 6), (2, 6)],
+        )];
+        let metadata = metadata(&[(source, 6), (destination, 6)]);
+        let facts = collect_global_facts(&units, &metadata, false, None);
+        assert!(
+            proven_alias_store(&facts, destination.absolute_addr(), source.absolute_addr())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn final_duplicate_alias_revalidation_rejects_a_later_canonical_overwrite() {
+        let source = address(0);
+        let destination = address(1);
+        let units = vec![single_block_unit(
+            vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(42u8)),
+                store(source, 0, 6),
+                store(destination, 0, 6),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(0u8)),
+                store(source, 1, 6),
+                load(2, destination, 6),
+            ],
+            &[(0, 6), (1, 6), (2, 6)],
+        )];
+        let metadata = metadata(&[(source, 6), (destination, 6)]);
+        let facts = collect_global_facts(&units, &metadata, false, None);
+        assert!(
+            proven_alias_store(&facts, destination.absolute_addr(), source.absolute_addr())
+                .is_none()
         );
     }
 
