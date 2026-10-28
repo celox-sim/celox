@@ -335,8 +335,12 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
-- Timing controls in processes: impure function calls in event expressions, and
-  `wait` or event expressions reading a static task argument.
+- Timing controls in processes: impure function calls in event expressions,
+  `wait` or event expressions reading a static task argument, and `wait`
+  conditions or event expressions reading a class property (directly, through
+  a handle or a function, or a container held in one), since a write of the
+  property does not wake the waiting process. Static class properties are
+  module variables and may be waited on.
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port expressions such as `module m({a, b}, c[3:0], .p(d))` ([#1953](https://github.com/celox-sim/celox/issues/1953)), `ref` ports

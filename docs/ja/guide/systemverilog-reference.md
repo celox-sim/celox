@@ -218,7 +218,9 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
   named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、下記のBoolean部分集合を超える並行アサーション、`force` / `release`。
 - プロセス内のタイミング制御：イベント式と `iff` 条件内の impure な関数呼び出し、
-  static task 引数を読む `wait` 条件、イベント式、`iff` 条件。
+  static task 引数を読む `wait` 条件、イベント式、`iff` 条件。クラスのプロパティを（直接、ハンドルや関数を通じて、
+  またはプロパティが持つコンテナとして）読む `wait` 条件とイベント式。プロパティへの書き込みで待機中のプロセスが
+  起きないためです。static プロパティはモジュールの変数なので待機できます。
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
