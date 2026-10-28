@@ -79,6 +79,10 @@ fn has_timing_control(
         if matches!(
             statement.kind,
             StatementKind::Timing { .. }
+                | StatementKind::Assertion {
+                    header: celox_sv_syntax::AssertionHeader::Concurrent { .. },
+                    ..
+                }
                 | StatementKind::Parallel { .. }
                 | StatementKind::Wait { .. }
                 | StatementKind::WaitFork

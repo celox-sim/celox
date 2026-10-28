@@ -1791,6 +1791,7 @@ impl<'a> Frame<'a> {
                 return None;
             }
             Stmt::Fork { .. }
+            | Stmt::AssertionRegion { .. }
             | Stmt::WaitFork
             | Stmt::DisableFork
             | Stmt::AssignConcat { .. }

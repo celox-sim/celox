@@ -676,7 +676,9 @@ impl Flow<'_> {
                 self.read(expr, written)?;
                 Ok(Exits::next(written))
             }
-            Stmt::WaitFork | Stmt::DisableFork => Ok(Exits::next(written)),
+            Stmt::AssertionRegion { .. } | Stmt::WaitFork | Stmt::DisableFork => {
+                Ok(Exits::next(written))
+            }
             Stmt::WaitEvent(items) => {
                 for item in items {
                     self.read(&item.expr, written)?;
@@ -840,6 +842,7 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             .collect(),
         // The statements of an `@*` describe its reads and do not run.
         Stmt::Fork { .. }
+        | Stmt::AssertionRegion { .. }
         | Stmt::WaitFork
         | Stmt::DisableFork
         | Stmt::WaitImplicit(_)

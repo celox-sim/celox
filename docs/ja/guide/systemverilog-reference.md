@@ -192,7 +192,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
-  named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、並行アサーション、`force` / `release`。
+  named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、下記のBoolean部分集合を超える並行アサーション、`force` / `release`。
 - プロセス内のタイミング制御：イベント式と `iff` 条件内の impure な関数呼び出し、
   static task 引数を読む `wait` 条件、イベント式、`iff` 条件。
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
@@ -783,3 +783,25 @@ Veryl の適合性スイートは、Veryl が出力する SystemVerilog に対�
 - テストベンチ用のモジュール（クロックや `$finish` のスケジューリングを伴う `initial`
   ブロック、階層代入）は、シミュレーション可能な SystemVerilog モジュールとして
   出力されません。
+
+### 並行アサーション
+
+moduleとgenerate内の、明示的なクロックを持つ単一サイクルのBoolean
+`assert property`、`assume property`、`cover property`に対応します。
+
+```systemverilog
+check_valid: assert property (@(posedge clk) disable iff (reset) valid)
+    else $error("valid was not set at the clock tick");
+```
+
+判定式にはPreponedのサンプリング値を使います。Active/NBA完了後のObservedで、
+現在値の`disable iff`とサンプリング済みの判定式を評価します。すべての判定が終わった後、
+Reactiveで成功・失敗アクションを実行し、アクションは現在値を読みます。
+判定式のX/Zは失敗、disable条件のX/Zは無効化しない扱いです
+（IEEE 1800-2023 16.5、16.5.1、16.14.1）。16.5に従い、クロックは同一時刻内で
+グリッチを発生させないものとします。
+
+タイミング制御のないblocking代入と表示・severity taskのアクションに対応します。
+手続き内の並行アサーション、暗黙/default clocking、名前付きproperty/sequence、
+遅延・反復・含意、履歴関数やユーザー関数を含む判定式、タイミング制御・NBA・
+サブルーチン文のアクションは未対応です。対応する構文では`disable iff`をクロックの後に置きます。

@@ -253,3 +253,6 @@ mod tagged_unions;
 
 #[path = "frontends/systemverilog/containers.rs"]
 mod containers;
+
+#[path = "frontends/systemverilog/concurrent_assertions.rs"]
+mod concurrent_assertions;

@@ -3599,6 +3599,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.wait_level(condition)?;
                 Ok(true)
             }
+            sv::ir::Stmt::AssertionRegion { reactive } => {
+                self.with_kernel(|kernel| kernel.assertion_region(*reactive))
+                    .map_err(kernel_error)?;
+                Ok(true)
+            }
             sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork => {
                 if self.kernel.is_none() {
                     return if matches!(stmt, sv::ir::Stmt::DisableFork) {

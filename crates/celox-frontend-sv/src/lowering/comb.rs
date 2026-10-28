@@ -2041,7 +2041,9 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<Store, sv::AnalyzerError> {
         match stmt {
             sv::ir::Stmt::DisableFork => Ok(store),
-            sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => {
+            sv::ir::Stmt::Fork { .. }
+            | sv::ir::Stmt::WaitFork
+            | sv::ir::Stmt::AssertionRegion { .. } => {
                 Err(unsupported("fork control outside a timed process"))
             }
             sv::ir::Stmt::Assign {

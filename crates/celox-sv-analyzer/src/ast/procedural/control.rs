@@ -76,6 +76,7 @@ enum Job {
         sensitivity: usize,
     },
     AssertionThen {
+        concurrent: Option<Option<Expr>>,
         condition: Expr,
         keyword: String,
         assertion: celox_design::AssertionSite,
@@ -84,6 +85,7 @@ enum Job {
         start: usize,
     },
     AssertionFinish {
+        concurrent: Option<Option<Expr>>,
         condition: Expr,
         then_body: Vec<Stmt>,
         assertion: celox_design::AssertionSite,
@@ -345,14 +347,46 @@ impl BodyBuilder<'_, '_, '_> {
                     // forms retain their established binders and diagnostics.
                     StatementKind::Assertion {
                         keyword,
-                        header: header @ celox_sv_syntax::AssertionHeader::Immediate { .. },
+                        header:
+                            header @ (celox_sv_syntax::AssertionHeader::Immediate { .. }
+                            | celox_sv_syntax::AssertionHeader::Concurrent { .. }),
                         success,
                         failure,
                     } => {
-                        let condition = self.native_assertion_condition(keyword, header)?;
-                        let celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } = header
-                        else {
-                            unreachable!("matched an immediate header");
+                        let (condition, deferred, concurrent) = match header {
+                            celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } => (
+                                self.native_assertion_condition(keyword, header)?,
+                                deferred,
+                                None,
+                            ),
+                            celox_sv_syntax::AssertionHeader::Concurrent {
+                                condition,
+                                disable,
+                                module_item,
+                                ..
+                            } => {
+                                if !module_item {
+                                    return Err(unsupported("procedural concurrent assertion"));
+                                }
+                                if !matches!(keyword.as_str(), "assert" | "assume" | "cover") {
+                                    return Err(unsupported("concurrent assertion directive"));
+                                }
+                                let operand = self.native_value(*condition)?;
+                                assertions::concurrent_operand(&operand)?;
+                                let condition = procedural_truth_condition(Expr::Call {
+                                    callee: Callee::System(SystemFunction::Sampled),
+                                    args: vec![Some(operand)],
+                                    arg_order: Vec::new(),
+                                });
+                                let disable = disable
+                                    .map(|id| self.native_value(id).map(procedural_truth_condition))
+                                    .transpose()?;
+                                if let Some(disable) = &disable {
+                                    assertions::concurrent_operand(disable)?;
+                                }
+                                (condition, &None, Some(disable))
+                            }
+                            _ => unreachable!(),
                         };
                         let statement = native.statement(id);
                         // The action of a deferred assertion is one
@@ -370,6 +404,7 @@ impl BodyBuilder<'_, '_, '_> {
                             ));
                         }
                         jobs.push(Job::AssertionThen {
+                            concurrent,
                             condition,
                             keyword: keyword.clone(),
                             assertion: celox_design::AssertionSite {
@@ -430,6 +465,7 @@ impl BodyBuilder<'_, '_, '_> {
                     output.insert(start, wait);
                 }
                 Job::AssertionThen {
+                    concurrent,
                     condition,
                     keyword,
                     assertion,
@@ -439,6 +475,7 @@ impl BodyBuilder<'_, '_, '_> {
                 } => {
                     let then_body = output.split_off(start);
                     jobs.push(Job::AssertionFinish {
+                        concurrent,
                         condition,
                         then_body,
                         assertion,
@@ -454,6 +491,7 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                 }
                 Job::AssertionFinish {
+                    concurrent,
                     condition,
                     mut then_body,
                     assertion,
@@ -478,11 +516,29 @@ impl BodyBuilder<'_, '_, '_> {
                         &assertion,
                         celox_design::AssertionOutcome::Fail,
                     );
-                    output.push(Stmt::If {
+                    if concurrent.is_some() {
+                        assertions::concurrent_action(&then_body)?;
+                        assertions::concurrent_action(&else_body)?;
+                        // Evaluate every predicate in Observed; neither action can run
+                        // until all the monitors have made that decision.
+                        then_body.insert(0, Stmt::AssertionRegion { reactive: true });
+                        else_body.insert(0, Stmt::AssertionRegion { reactive: true });
+                        output.push(Stmt::AssertionRegion { reactive: false });
+                    }
+                    let decision = Stmt::If {
                         condition,
                         then_body,
                         else_body,
-                    });
+                    };
+                    if let Some(Some(disable)) = concurrent {
+                        output.push(Stmt::If {
+                            condition: disable,
+                            then_body: Vec::new(),
+                            else_body: vec![decision],
+                        });
+                    } else {
+                        output.push(decision);
+                    }
                 }
                 Job::IfNext(state) => {
                     let StatementKind::Conditional {

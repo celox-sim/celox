@@ -72,6 +72,7 @@ impl<B: SimBackend> SimulationState<B> {
             || self.suspended.is_some()
             || self.declarations_pending
             || self.host_pending
+            || !pending.observed.is_empty()
             || !pending.ready.is_empty()
             || !pending.inactive.is_empty()
             || !pending.nba_queue.is_empty()

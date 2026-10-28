@@ -247,6 +247,7 @@ impl<B: SimBackend> SimulationState<B> {
                 state.waiters.remove(id);
                 state.ready.remove(&id);
                 state.reactive.remove(&id);
+                state.observed.remove(&id);
                 state.inactive.remove(&id);
                 state.re_inactive.remove(&id);
             }

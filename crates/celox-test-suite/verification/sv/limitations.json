@@ -2807,5 +2807,44 @@
         "timing::iff_automatic_clock_preserves_enabled_pulses"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_boolean_concurrent_assertions",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_concurrent_regions.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "concurrent_assertions::assume_cover_and_generate",
+        "concurrent_assertions::disable_iff_after_nba",
+        "concurrent_assertions::predicates_before_all_actions",
+        "concurrent_assertions::sampled_predicate_live_action",
+        "concurrent_assertions::unknown_predicates_and_disable_conditions"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_concurrent_regions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_concurrent_regions.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "concurrent_assertions::sampled_predicate_live_action",
+        "concurrent_assertions::disable_iff_after_nba"
+      ]
+    }
   }
 ]

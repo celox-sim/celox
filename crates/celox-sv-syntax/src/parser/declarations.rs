@@ -792,7 +792,7 @@ impl Parser<'_> {
             // assertion in an `always_comb` (IEEE 1800-2023 16.4.3).
             let deferred_assertion = |at: usize| {
                 matches!(self.nth(at), "assert" | "assume" | "cover")
-                    && matches!(self.nth(at + 1), "#" | "final")
+                    && matches!(self.nth(at + 1), "#" | "final" | "property")
             };
             // A module item, also in a generate region or block.
             let static_deferred = frame.item_start
@@ -826,7 +826,7 @@ impl Parser<'_> {
                 let assigns = self.assign_statements.len();
                 let start = self.at;
                 let id = if static_deferred {
-                    self.static_deferred_assertion()?
+                    self.module_assertion()?
                 } else {
                     self.procedure()?
                 };
