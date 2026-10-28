@@ -1,1 +1,6 @@
-Reject 4-state properties selected by randomize(x) arguments (review 4397415180)
+Revision history for #2381:
+
+rev 2 (content) 2026-10-28 06:15 UTC — Reject 4-state properties selected by randomize(x) arguments (review 4397415180)
+rev 1 (initial) 2026-10-28 06:15 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2381,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"6d7ff7f071f23fc907d3ec9d5f86ef0df9bc0300","timestamp_iso":"2026-10-28T06:15:37Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"6d7ff7f071f23fc907d3ec9d5f86ef0df9bc0300","new_sha":"ccaa4437dc383f55276a2aebb69f3900b9de4273","timestamp_iso":"2026-10-28T06:15:37Z","reason":"Reject 4-state properties selected by randomize(x) arguments (review 4397415180)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/6d7ff7f071f23fc907d3ec9d5f86ef0df9bc0300...ccaa4437dc383f55276a2aebb69f3900b9de4273"}]} -->
