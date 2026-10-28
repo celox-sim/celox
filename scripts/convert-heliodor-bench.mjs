@@ -118,7 +118,7 @@ function convertPartial() {
     if (row.runner.endsWith("-tiered")) {
       const total = ns(row, "reported_elapsed_ns");
       if (compile + execute > total) throw new Error(`${key}: startup and execution exceed total`);
-      return [milliseconds(`${base}_startup`, compile), milliseconds(`${base}_execution`, execute), milliseconds(`${base}_end_to_end`, total)];
+      return [milliseconds(`${base}_end_to_end`, total)];
     }
     const metrics = [milliseconds(`${base}_compilation`, compile), milliseconds(`${base}_execution`, execute)];
     if (row.runner === "celox" && arch === "x86_64") {
@@ -216,11 +216,6 @@ function convertResults(rows, arm64Rows) {
     }
     results.push(
       milliseconds(`heliodor-${platform}/heliodor_linux_boot_end_to_end`, total),
-      milliseconds(`heliodor-${platform}/heliodor_linux_boot_startup`, startup),
-      milliseconds(
-        `heliodor-${platform}/heliodor_linux_boot_execution`,
-        execution,
-      ),
     );
   }
 
