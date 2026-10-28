@@ -22,6 +22,15 @@ impl<B: SimBackend> SimulationState<B> {
         self.record_all_levels(backend);
     }
 
+    /// Whether an event signal changed outside the queue since its last sample.
+    /// Callers must settle pending combinational writes before treating `false`
+    /// as permission to bypass the queue's transition detection.
+    pub fn has_unsampled_event_changes(&self, backend: &B) -> bool {
+        self.model.topo_signals.iter().any(|&(signal, id)| {
+            id != usize::MAX && self.level(backend, signal) != self.last_level(id)
+        })
+    }
+
     // The four-state paths of the level helpers stay out of line, so that a
     // two-state design's callers keep the size and inlining they had before.
 
