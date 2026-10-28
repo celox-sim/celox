@@ -692,6 +692,14 @@ pub(in crate::ast) fn bind_value(
                                 },
                                 vec![(destination, None), (source, None)],
                             )
+                        } else if name == "$sformatf" {
+                            let actuals = format_arguments(&name, args)?;
+                            (
+                                Finish::StringCall(StringOp::Format {
+                                    ticks_per_unit: timescales::time_divisor(id, tree)?,
+                                }),
+                                actuals.into_iter().map(|id| (id, None)).collect(),
+                            )
                         } else if name.starts_with('$') && !name.contains("::") {
                             let presence = args
                                 .iter()
@@ -1838,6 +1846,34 @@ pub(in crate::ast) fn selected_lvalue(
         )?
     };
     Ok(lvalue)
+}
+
+/// The actuals of `$sformatf` (IEEE 1800-2023 21.3.3): a format followed by
+/// any values, all given and positional.
+pub(in crate::ast) fn format_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+) -> Converted<Vec<ExprId>> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(unsupported(format!("named arguments of `{name}`")));
+    }
+    let actuals = args
+        .iter()
+        .enumerate()
+        .map(|(position, arg)| {
+            arg.value.ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
+                name: name.to_string(),
+                detail: format!("argument {} is omitted", position + 1),
+            })
+        })
+        .collect::<Converted<Vec<_>>>()?;
+    if actuals.is_empty() {
+        return Err(AnalyzerError::InvalidSystemTfCall {
+            name: name.to_string(),
+            detail: "expected a format argument".into(),
+        });
+    }
+    Ok(actuals)
 }
 
 /// String literals in integral contexts are unsigned packed arrays of bytes

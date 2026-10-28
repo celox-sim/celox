@@ -64,6 +64,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("binary_file_io.vtest"),
     },
     Group {
+        file: "src/sv/cases/string_format.vtest",
+        text: include_str!("string_format.vtest"),
+    },
+    Group {
         file: "src/sv/cases/scan.vtest",
         text: include_str!("scan.vtest"),
     },

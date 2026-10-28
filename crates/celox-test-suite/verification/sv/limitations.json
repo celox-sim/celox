@@ -338,7 +338,8 @@
         "procedural::select_indices_call_functions",
         "synthesizable::function_output_and_inout_arguments_are_written_back",
         "system_functions::unpacked_dimensions_accepts_function_result_arguments",
-        "system_functions::unpacked_dimensions_validates_writable_function_arguments"
+        "system_functions::unpacked_dimensions_validates_writable_function_arguments",
+        "string_format::sformatf_with_reference_argument"
       ]
     }
   },
@@ -2879,6 +2880,93 @@
     "cases": {
       "verilator": [
         "string::characters_are_signed_bytes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_string_conditional",
+    "category": "simulator_internal_error",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 aborts with an assertion in eval_vec4.c (draw_eval_vec4) on a conditional operator whose operands are strings, also with two string variables. IEEE 1800-2023 11.4.11 permits operands of equivalent nonintegral types such as string. Verilator 5.052 and xezim pass the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::sformatf_in_conditional_expressions"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_sformat_property_output",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 compiles $sformat with a string class property as its output, but vvp stops with \"$sformat's first argument must be a register or SV string.\" IEEE 1800-2023 21.3.3 permits a string variable as the output, and a class property is one (8.5). Verilator 5.052 and xezim pass the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::sformat_property_output"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_integral_format_string",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 compiles $sformatf with a bit-vector variable as the format, but vvp stops with \"$sformatf's first argument must be a string or a register.\" IEEE 1800-2023 21.3.3 permits an expression of integral type whose content is the format. Verilator 5.052 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::sformatf_packed_runtime_format"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_string_associative_arrays_and_property_queue_methods",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects associative arrays with string and bit [63:0] indices (\"Type names are not valid expressions here\") and queue methods called on a class property (\"Can't find task push_back in class Log\"). IEEE 1800-2023 7.8 and 7.10 define both; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/sv_associative_index_cast.json"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::sformatf_in_container_operands",
+        "string_format::sformatf_with_associative_index"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_associative_index_cast",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 evaluates the index x + 32'd1 of an associative array with a bit [63:0] index at the expression's own 32 bits, so the element is stored under key 0. IEEE 1800-2023 7.8.4 evaluates an integral index as a cast to the index type, and 6.24.1 gives a size cast the value after an assignment to that width, so the key is 64'h100000000; xezim 0.11.3 also stores key 0.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_associative_index_cast.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "string_format::sformatf_with_associative_index"
       ]
     }
   }

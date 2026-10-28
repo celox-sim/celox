@@ -3723,11 +3723,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                         expr.clone()
                     };
                     let signed = self.expr_signed(&expr);
-                    arg_is_handle.push(reads_string_variable(
-                        &expr,
-                        self.m.variables,
-                        self.m.name_to_id,
-                    ));
+                    arg_is_handle.push(self.m.expr_is_string(&expr));
                     arg_float_precision.push(floating::precision(
                         &expr,
                         self.m.variables,
