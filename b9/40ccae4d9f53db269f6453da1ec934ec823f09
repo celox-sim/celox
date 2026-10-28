@@ -1,1 +1,6 @@
-Address Codex review on #2402: include omitted-argument defaults in host-request detection; keep runtime format bytes instead of lossy UTF-8 decoding.
+Revision history for #2403:
+
+rev 2 (content) 2026-10-28 08:40 UTC — Address Codex review on #2402: include omitted-argument defaults in host-request detection; keep runtime format bytes instead of lossy UTF-8 decoding.
+rev 1 (initial) 2026-10-28 08:40 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2403,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"3daf51501f64d26e617aec9d2d65686f609e29ec","timestamp_iso":"2026-10-28T08:40:34Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"3daf51501f64d26e617aec9d2d65686f609e29ec","new_sha":"b940ccae4d9f53db269f6453da1ec934ec823f09","timestamp_iso":"2026-10-28T08:40:34Z","reason":"Address Codex review on #2402: include omitted-argument defaults in host-request detection; keep runtime format bytes instead of lossy UTF-8 decoding.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/3daf51501f64d26e617aec9d2d65686f609e29ec...b940ccae4d9f53db269f6453da1ec934ec823f09"}]} -->
