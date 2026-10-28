@@ -61,6 +61,9 @@ pub(super) struct AnalysisState {
             std::rc::Rc<classes::specializations::Specialization>,
         )>,
     >,
+    /// The virtual interfaces of the design, if it has any (IEEE 1800-2023
+    /// 25.9).
+    virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
 }
 
 /// Syntax and specialization bindings for one scope within an analysis session.
@@ -98,6 +101,7 @@ impl<'a> AnalysisContext<'a> {
             state: std::rc::Rc::new(AnalysisState {
                 next_call_site: packages.call_sites.clone(),
                 foreign: packages.foreign.clone(),
+                virtual_interfaces: packages.virtual_interfaces.clone(),
                 ..AnalysisState::default()
             }),
             parameter_overrides: Cow::Owned(HashMap::default()),
@@ -158,7 +162,7 @@ mod functions;
 mod generate;
 pub(crate) mod imports;
 mod inlining;
-mod instances;
+pub(crate) mod instances;
 mod interface_ast;
 mod interface_binding;
 pub mod interfaces;
@@ -189,6 +193,7 @@ pub(crate) mod type_parameters;
 mod types;
 mod unpacked_structs;
 pub(crate) mod validation;
+pub mod virtual_interfaces;
 pub(crate) mod warnings;
 
 use array_compatibility::selected_unpacked_shape;
@@ -624,6 +629,8 @@ pub struct Module {
     imported_parameters: Vec<Parameter>,
     /// Elaborated interface scopes, including those without data members.
     interface_scope_names: Vec<String>,
+    /// The interface instances and ports a virtual interface may denote.
+    interface_handles: Vec<crate::ir::InterfaceHandle>,
     /// The symbols of a package, for the scopes that use it.
     symbols: Option<scope::ScopeSymbols>,
 }
@@ -1267,6 +1274,7 @@ impl Module {
                         pattern_type: function.return_type.clone(),
                         enum_domain: function.return_enum_domain.clone(),
                         class: function.return_class.clone(),
+                        virtual_interface: function.return_virtual_interface.clone(),
                     },
                 )
             }));
@@ -1288,6 +1296,7 @@ impl Module {
                         pattern_type: None,
                         enum_domain: None,
                         class: None,
+                        virtual_interface: None,
                     },
                 ))
             }));
@@ -1551,6 +1560,7 @@ impl Module {
             interface_members: imported.interface_members.clone(),
             local_aliases: imported.local_aliases.clone(),
             interface_types: imported.interface_types.clone(),
+            interface_modports: imported.interface_modports.clone(),
             interface_arrays: imported.interface_arrays.clone(),
             interface_scopes: imported.interface_scopes.clone(),
             interface_declarations: imported.interface_declarations.clone(),
@@ -1637,11 +1647,13 @@ impl Module {
             .collect::<Vec<_>>();
         interface_scope_names.sort_unstable();
         interface_scope_names.dedup();
+        let interface_handles = virtual_interfaces::handles(&syntax_tree.state, &imported, &ports);
 
         Ok(Self {
             name,
             program,
             interface_scope_names,
+            interface_handles,
             parameters,
             ports,
             signals,
@@ -1663,6 +1675,10 @@ impl Module {
 
     pub(crate) fn interface_scope_names(&self) -> &[String] {
         &self.interface_scope_names
+    }
+
+    pub(crate) fn interface_handles(&self) -> &[crate::ir::InterfaceHandle] {
+        &self.interface_handles
     }
 
     pub fn name(&self) -> &str {
@@ -2265,6 +2281,8 @@ pub struct Type {
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
     class: Option<Arc<str>>,
+    /// The interface of a virtual interface type (IEEE 1800-2023 25.9).
+    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
     /// The typedef that names an enumeration, struct or union type, and how
@@ -2295,6 +2313,7 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            virtual_interface: None,
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
@@ -2313,6 +2332,7 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            virtual_interface: None,
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
@@ -2344,6 +2364,11 @@ impl Type {
     /// The class of an object handle type.
     pub fn class(&self) -> Option<&str> {
         self.class.as_deref()
+    }
+
+    /// The interface of a virtual interface type.
+    pub fn virtual_interface(&self) -> Option<&virtual_interfaces::VirtualInterface> {
+        self.virtual_interface.as_deref()
     }
 
     pub fn kind(&self) -> TypeKind {
@@ -2884,6 +2909,8 @@ struct Function {
     return_enum_domain: Option<Arc<enums::EnumDomain>>,
     /// The class of a class handle result.
     return_class: Option<String>,
+    /// The function returns a virtual interface of this type.
+    return_virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
 }
 
 fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
@@ -3103,6 +3130,8 @@ struct VariableDimensions {
     string: bool,
     /// The class of an object handle variable.
     class: Option<String>,
+    /// The interface of a virtual interface variable.
+    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,
@@ -3144,6 +3173,8 @@ struct FunctionReturnMetadata {
     /// The class of a class handle result, whose members a call may select
     /// (IEEE 1800-2023 8.4).
     class: Option<String>,
+    /// The function returns a virtual interface of this type.
+    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -51,8 +51,25 @@ fn analyzed_info(design: &Design) -> Option<DesignInfo> {
         .map(|source| celox_sv_analyzer::ParsedSource::parse(&source.text, &source.path))
         .collect::<std::result::Result<Vec<_>, _>>()
         .ok()?;
+    let parsed = sources.iter().collect::<Vec<_>>();
+    // A design with virtual interface types is analyzed with the interfaces
+    // they name; the ports do not depend on the instances.
+    let texts = design
+        .sources
+        .iter()
+        .map(|source| (source.text.as_str(), source.path.as_path()))
+        .collect::<Vec<_>>();
+    let options = celox_sv_analyzer::AnalysisOptions {
+        virtual_interfaces: celox_sv_analyzer::VirtualInterfaces::declarations_of(
+            &texts,
+            &parsed,
+            &Default::default(),
+        )
+        .ok()?,
+        ..Default::default()
+    };
     let packages =
-        celox_sv_analyzer::ParsedSource::analyze_packages(&sources.iter().collect::<Vec<_>>())
+        celox_sv_analyzer::ParsedSource::analyze_packages_with_options(&parsed, None, options)
             .ok()?;
     let mut interfaces = celox_sv_analyzer::ModuleInterfaces::default();
     for source in &sources {

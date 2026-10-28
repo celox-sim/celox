@@ -189,13 +189,17 @@ fn property_shape(
 /// Whether variables of shapes `a` and `b` have equivalent types (IEEE
 /// 1800-2023 6.22.2). Integral types compare by total width, signedness and
 /// state count; an enumeration only by its members; an unpacked structure
-/// only with the same structure type.
+/// only with the same structure type; a virtual interface only with one of
+/// the same interface and modport (25.9), not with its number.
 fn equivalent(
     state: &AnalysisState,
     a: &VariableDimensions,
     b: &VariableDimensions,
     env: &HashMap<String, i128>,
 ) -> bool {
+    if a.virtual_interface != b.virtual_interface {
+        return false;
+    }
     let count = |width: &ConstExpr| eval_ast_const_expr(state, width, env);
     match (&a.container, &b.container) {
         (None, None) => {}

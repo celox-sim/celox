@@ -37,6 +37,10 @@ pub use ast::interfaces::{
     interface_prototypes_with_options,
 };
 pub use ast::packages::Packages;
+pub use ast::virtual_interfaces::{
+    VirtualInterface, VirtualInterfaceDeclaration, VirtualInterfaceMember, VirtualInterfaceSignal,
+    VirtualInterfaces,
+};
 pub use ast::{ModuleInterface, ModuleInterfaces};
 pub use ir::Ir;
 pub use parsed::ParsedSource;
@@ -46,7 +50,7 @@ pub use parsed::ParsedSource;
 pub const DIV_ZERO_UNKNOWN_LITERAL: &str = "$celox_div_zero_unknown";
 
 /// Language compatibility checks and implementation-defined timing defaults.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct AnalysisOptions {
     pub allow_mixed_timescales: bool,
     /// Compatibility mode: return zero for every empty array reduction,
@@ -54,6 +58,9 @@ pub struct AnalysisOptions {
     pub legacy_empty_reductions: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,
+    /// The virtual interfaces of the design (IEEE 1800-2023 25.9), which the
+    /// frontend provides when the design declares virtual interface types.
+    pub virtual_interfaces: Option<std::sync::Arc<ast::virtual_interfaces::VirtualInterfaces>>,
 }
 
 /// Errors reported by the SystemVerilog analyzer.
@@ -174,6 +181,19 @@ pub enum AnalyzerError {
         actual: String,
         target: String,
     },
+    /// A value assigned to or compared with a virtual interface that is not
+    /// `null`, a virtual interface or an interface instance of its type
+    /// (IEEE 1800-2023 25.9).
+    #[error("{context}: {actual} is not assignment compatible with `{target}`")]
+    IncompatibleVirtualInterface {
+        context: String,
+        actual: String,
+        target: String,
+    },
+    /// An assignment to a member that the modport of a virtual interface
+    /// lists as an input (IEEE 1800-2023 25.5, 23.3.3.4).
+    #[error("assignment to `{member}`, an input of `{target}`")]
+    InputModportAssignment { member: String, target: String },
     /// `posedge`, `negedge` or `edge` of a real expression, which has no
     /// least significant bit to judge the edge on (IEEE 1800-2023 6.12).
     #[error("`{edge}` of a real expression: edge event controls do not apply to reals")]

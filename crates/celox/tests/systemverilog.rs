@@ -259,6 +259,8 @@ mod tagged_unions;
 
 #[path = "frontends/systemverilog/references.rs"]
 mod references;
+#[path = "frontends/systemverilog/virtual_interfaces.rs"]
+mod virtual_interfaces;
 
 #[path = "frontends/systemverilog/container_formals.rs"]
 mod container_formals;

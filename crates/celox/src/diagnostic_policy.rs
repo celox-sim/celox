@@ -108,6 +108,7 @@ impl DiagnosticPolicy {
             allow_mixed_timescales: self.level("mixed_timescale") != DiagnosticLevel::Error,
             default_timescale: timescale.map(|scale| (scale.unit, scale.precision)),
             legacy_empty_reductions,
+            ..Default::default()
         }
     }
 

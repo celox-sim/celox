@@ -859,6 +859,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         module_names,
         root_id,
         packages,
+        instance_values,
     } = symbolic;
     let time_precision = modules
         .values()
@@ -2015,6 +2016,26 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(bound_initials)
         .map(|(_, init)| init)
         .collect();
+    for value in instance_values {
+        let instance_id = *expanded.get(&InstancePath(value.path)).ok_or_else(|| {
+            ParserError::illegal_context(
+                "instance value",
+                "a value of an instance that does not exist".to_string(),
+                None,
+            )
+        })?;
+        let width = modules[&instance_modules[&instance_id]].variables[&value.variable]
+            .metadata
+            .width;
+        initial_memory_values.push(InitialStateValue {
+            address: bindings.locate(instance_id, value.variable),
+            data: InitialStateData::Packed {
+                value: value.value,
+                mask: BigUint::default(),
+                written_mask: (BigUint::from(1u8) << width) - 1u8,
+            },
+        });
+    }
     if let Some(settle) = &settle_flags {
         // Every partition runs at the first settle.
         let partitions = settle_partitions.len();

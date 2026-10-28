@@ -990,6 +990,34 @@ pub(super) fn resolve_imports(
     packages: &packages::Packages,
     unit: Option<&packages::Unit>,
 ) -> Result<ResolvedImports, AnalyzerError> {
+    let mut resolved = resolve_scope_imports(tree, packages, unit)?;
+    // Every scope may reach the interface instances through virtual
+    // interfaces (IEEE 1800-2023 25.9), but those of an interface would be
+    // bound into each instance of it.
+    if let Some(declarations) = &packages.virtual_interfaces
+        && !tree
+            .root_unit()
+            .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Interface)
+    {
+        let symbols = &mut resolved.symbols;
+        for signal in virtual_interfaces::member_signals(declarations) {
+            if !symbols
+                .state_signals
+                .iter()
+                .any(|known| known.name == signal.name)
+            {
+                symbols.state_signals.push(signal);
+            }
+        }
+    }
+    Ok(resolved)
+}
+
+fn resolve_scope_imports(
+    tree: &SyntaxTree,
+    packages: &packages::Packages,
+    unit: Option<&packages::Unit>,
+) -> Result<ResolvedImports, AnalyzerError> {
     let imports = ScopeImports::from_scope(tree)?;
     // A module sees the compilation-unit items declared before it, which are
     // also those declared before any reference in it.

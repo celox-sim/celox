@@ -221,7 +221,7 @@ pub(crate) fn eval_const_expr_in_env(
                 crate::ast::const_functions::eval_call(name, args, constants)
             }
             Callee::System(function) => eval_system_function(*function, args, constants),
-            Callee::Checked { width, signed } => {
+            Callee::Checked { width, signed, .. } => {
                 let [guard, payload] = args.as_slice() else {
                     return None;
                 };

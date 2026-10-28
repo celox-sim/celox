@@ -524,6 +524,7 @@ fn pattern_items(
                 real: false,
                 string: false,
                 class: None,
+                virtual_interface: None,
                 packed: Vec::new(),
                 unpacked: Vec::new(),
                 members: Vec::new(),

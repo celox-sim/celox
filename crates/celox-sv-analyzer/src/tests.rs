@@ -6777,7 +6777,11 @@ fn tagged_constant_checks_preserve_guard_width_and_sign() {
         ("1'bz", "8'd4", 8, false, None),
     ] {
         let expr = ConstExpr::Function {
-            callee: Callee::Checked { width, signed },
+            callee: Callee::Checked {
+                width,
+                signed,
+                check: crate::system_functions::AccessCheck::TaggedMember,
+            },
             args: vec![
                 ConstExpr::Literal(guard.into()),
                 ConstExpr::Literal(payload.into()),

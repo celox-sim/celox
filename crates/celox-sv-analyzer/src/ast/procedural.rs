@@ -98,6 +98,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         string: matches!(r#type.kind(), TypeKind::String),
         class: r#type.class().map(str::to_owned),
+        virtual_interface: r#type.virtual_interface.clone(),
         packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
         unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
         signed: r#type.is_signed(),
@@ -309,6 +310,7 @@ pub(super) fn int_type() -> Type {
         members: Vec::new(),
         signed_element_depth: None,
         class: None,
+        virtual_interface: None,
         unpacked_struct: None,
         spelling: type_names::Spelling::keyword("int"),
     }
@@ -614,6 +616,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.tree,
             &self.dims,
         )?;
+        virtual_interfaces::check_target(&lowered)?;
         let mut renamed = lowered.clone();
         self.rename_lvalue(&mut renamed);
         Ok((lowered, renamed))
@@ -641,6 +644,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.reject_tagged_integral_target(id)?;
                 let mut target =
                     expression_binding::variable_lvalue(id, native, self.tree, &self.dims)?;
+                virtual_interfaces::check_target(&target)?;
                 self.rename_lvalue(&mut target);
                 parts.push(target);
             }
@@ -696,10 +700,43 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 &self.dims,
             )?;
         }
+        // A virtual interface is assigned or compared, not computed with
+        // (IEEE 1800-2023 25.9).
+        if op != "="
+            && let Some(ty) = virtual_interfaces::native_type(
+                self.tree,
+                left,
+                self.tree.declarations(),
+                &self.dims,
+            )
+        {
+            return Err(virtual_interfaces::arithmetic(op, &ty));
+        }
+        // An element of an array or a container of virtual interfaces is
+        // given no target type below, so it is checked here (25.9).
+        if op == "="
+            && let Some(ty) = virtual_interfaces::native_type(
+                self.tree,
+                left,
+                self.tree.declarations(),
+                &self.dims,
+            )
+        {
+            virtual_interfaces::check_assignment(
+                self.tree,
+                right,
+                self.tree.declarations(),
+                &self.dims,
+                &ty,
+            )?;
+        }
         if let Some(stmt) = self.string_character_assignment(op, nonblocking, left, right)? {
             return Ok(stmt);
         }
         if let Some(stmt) = self.property_assignment(op, nonblocking, left, right)? {
+            return Ok(stmt);
+        }
+        if let Some(stmt) = self.virtual_member_assignment(op, nonblocking, left, right)? {
             return Ok(stmt);
         }
         if let Some(stmt) = self.aggregate_assignment(op, nonblocking, left, right)? {
@@ -1075,6 +1112,86 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             value = expression_binding::string_operand(value, &self.dims);
         }
         self.property_store(&property, handle, op, value).map(Some)
+    }
+
+    /// An assignment to a member of the interface instance that a virtual
+    /// interface denotes, `h.m = v` or `h.m <= v` (IEEE 1800-2023 25.9).
+    fn virtual_member_assignment(
+        &self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Result<Option<Stmt>, AnalyzerError> {
+        let native = self.tree.declarations();
+        let (handle, ty, member, selected) =
+            match virtual_interfaces::native_member(self.tree, left, native, &self.dims) {
+                Some((handle, ty, member)) => (handle, ty, member, None),
+                None => match virtual_interfaces::native_selected_member(
+                    self.tree, left, native, &self.dims,
+                ) {
+                    // The select is bound against the member's template.
+                    Some((handle, ty, member)) => {
+                        let lowered = expression_binding::variable_lvalue(
+                            left, native, self.tree, &self.dims,
+                        )?;
+                        let mut renamed = lowered.clone();
+                        self.rename_lvalue(&mut renamed);
+                        (handle, ty, member, Some((lowered, renamed)))
+                    }
+                    None => return Ok(None),
+                },
+            };
+        let (found, _) = virtual_interfaces::member(&self.tree.state, &ty, &member)?;
+        virtual_interfaces::check_write(&self.tree.state, &ty, &member)?;
+        if found.is_net {
+            return Err(unsupported(format!(
+                "procedural assignment to net `{member}` through a virtual interface"
+            )));
+        }
+        let target = dimensions_from_type(&found.r#type);
+        let mut value = match (&selected, op) {
+            (Some((written, _)), "=") => {
+                expression_binding::expression(right, native, written, self.tree, &self.dims)?
+            }
+            (None, "=") => {
+                expression_binding::bind_value(right, native, self.tree, &self.dims, Some(&target))?
+            }
+            _ => expression_binding::value(right, native, self.tree, &self.dims)?,
+        };
+        let mut handle = expression_binding::value(handle, native, self.tree, &self.dims)?;
+        self.rename_expr(&mut handle);
+        self.rename_expr(&mut value);
+        let template = virtual_interfaces::template(&ty.interface, &member);
+        let stmt =
+            virtual_interfaces::dispatch(&self.tree.state, handle, &ty, &member, |signal| {
+                let lhs = match &selected {
+                    Some((_, lhs @ LValue::Select { name, .. })) if *name == template => {
+                        let mut lhs = lhs.clone();
+                        if let LValue::Select { name, .. } = &mut lhs {
+                            *name = signal;
+                        }
+                        lhs
+                    }
+                    Some(_) => {
+                        return Err(unsupported(format!(
+                            "assignment to a select of `{member}` through a virtual interface"
+                        )));
+                    }
+                    None => LValue::Ident(signal),
+                };
+                let rhs = if op == "=" {
+                    value.clone()
+                } else {
+                    assignment_op_expr(&self.tree.state, &lhs, op, value.clone(), &self.dims)?
+                };
+                Ok(vec![Stmt::Assign {
+                    lhs,
+                    rhs,
+                    nonblocking,
+                }])
+            })?;
+        Ok(Some(stmt))
     }
 
     /// `h.p op value`: a store of `value` into property `property` of the

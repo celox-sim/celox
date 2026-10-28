@@ -224,6 +224,18 @@ pub(super) fn analyze_module(
             imported
                 .interface_types
                 .insert(handle.clone(), port.interface.clone());
+            if let Some(modport) = &port.modport {
+                imported
+                    .interface_modports
+                    .insert(handle.clone(), modport.clone());
+            }
+            imported
+                .state_signals
+                .extend(virtual_interfaces::port_identity_signal(
+                    &tree.state,
+                    handle,
+                    &port.interface,
+                ));
             let symbol_prefix = if dimensions.is_empty() {
                 port.name.clone()
             } else {
@@ -508,6 +520,13 @@ pub(super) fn analyze_module(
                 imported
                     .interface_types
                     .insert(handle.clone(), interface_name.clone());
+                imported
+                    .state_signals
+                    .extend(virtual_interfaces::identity_signal(
+                        &tree.state,
+                        &handle,
+                        &interface_name,
+                    ));
                 let connections = instances::port_connections(
                     (id, index),
                     authored,
@@ -1159,6 +1178,11 @@ fn instance_symbols(
     names: &HashMap<String, String>,
 ) -> scope::ScopeSymbols {
     let mut bound = symbols.renamed(names);
+    // The signals for virtual interfaces belong to the scope that binds the
+    // instance, which declares its own.
+    bound
+        .state_signals
+        .retain(|signal| virtual_interfaces::VirtualInterfaceSignal::of(&signal.name).is_none());
     bound.interface_members.clear();
     bound.interface_types.clear();
     bound.interface_arrays.clear();

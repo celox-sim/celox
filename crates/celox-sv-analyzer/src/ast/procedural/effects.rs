@@ -318,13 +318,23 @@ impl BodyBuilder<'_, '_, '_> {
     ) -> Converted<()> {
         let native = self.tree.declarations();
         self.reject_tagged_integral_target(operand)?;
+        // A virtual interface is no number to step (IEEE 1800-2023 25.9).
+        if let Some(ty) = virtual_interfaces::native_type(self.tree, operand, native, &self.dims) {
+            return Err(virtual_interfaces::arithmetic(
+                if increment { "++" } else { "--" },
+                &ty,
+            ));
+        }
         if expression_binding::native_string(self.tree, operand, native, &self.dims) {
             return Err(unsupported("increment or decrement of a string"));
         }
         let current = expression_binding::value(operand, native, self.tree, &self.dims)?;
         // The operand is read and then written: a select of it must not
-        // change in between.
-        if inlining::effectful(&current) {
+        // change in between. A member read through a virtual interface checks
+        // for `null`, which changes nothing; its handle is pure.
+        if inlining::effectful(&current)
+            && virtual_interfaces::native_member(self.tree, operand, native, &self.dims).is_none()
+        {
             return Err(unsupported(
                 "increment or decrement of an operand selected with a side effect",
             ));
