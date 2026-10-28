@@ -1,0 +1,1 @@
+Rebased on #2322 and #2421: the built-in process::state type carries an enum_domain (FINISHED, RUNNING, WAITING, SUSPENDED, KILLED; 9.7) in place of enum_values; direct.rs keeps both the enum method and process call hooks; the moved DPI return metadata gets enum_domain: None.
