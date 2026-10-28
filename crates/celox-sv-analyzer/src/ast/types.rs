@@ -243,7 +243,8 @@ pub(super) fn enclose_aliased_packed_type(
     // array they form is unsigned, whatever its elements (IEEE 1800-2023
     // 7.4.1); a type name takes no signing of its own.
     if !direct_ranges.is_empty() {
-        r#type.enum_values = None;
+        r#type.packed_enum |= r#type.is_enum;
+        r#type.enum_domain = None;
         r#type.signed_element_depth = if r#type.is_signed {
             Some(direct_ranges.len())
         } else {

@@ -112,7 +112,7 @@ pub(super) fn expr_static_width(
             ..
         } => Some(op.result_type().0),
         Expr::Call {
-            callee: Callee::Checked { width, .. },
+            callee: Callee::Checked { width, .. } | Callee::Lookup { width, .. },
             ..
         } => Some(*width),
         Expr::Call {

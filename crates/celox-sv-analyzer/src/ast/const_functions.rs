@@ -637,7 +637,8 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
                 Callee::System(_)
                 | Callee::String(_)
                 | Callee::Object(_)
-                | Callee::Checked { .. } => {}
+                | Callee::Checked { .. }
+                | Callee::Lookup { .. } => {}
                 Callee::Subroutine(callee) => calls.push(callee.as_str()),
             }
         }

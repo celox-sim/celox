@@ -145,6 +145,7 @@ mod constants;
 mod declarations;
 mod dimensions;
 mod dpi;
+mod enums;
 mod expression_binding;
 mod expressions;
 mod ff_process;
@@ -1205,6 +1206,7 @@ impl Module {
                         is_2state: function.return_is_2state,
                         string: function.return_string,
                         pattern_type: function.return_type.clone(),
+                        enum_domain: function.return_enum_domain.clone(),
                     },
                 )
             }));
@@ -1224,6 +1226,7 @@ impl Module {
                         is_2state: !r#type.is_4state(),
                         string: false,
                         pattern_type: None,
+                        enum_domain: None,
                     },
                 ))
             }));
@@ -1667,6 +1670,8 @@ pub struct Parameter {
     is_local: bool,
     /// See [`Type::signed_element_depth`].
     signed_element_depth: Option<usize>,
+    /// The enumerated type the parameter is declared with.
+    enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
 impl Parameter {
@@ -1691,6 +1696,7 @@ impl Parameter {
             has_declared_type,
             is_local,
             signed_element_depth: None,
+            enum_domain: None,
         }
     }
 
@@ -2160,8 +2166,11 @@ pub enum PortDirection {
 pub struct Type {
     container: Option<Arc<ContainerType>>,
     is_enum: bool,
-    /// Resolved legal values for a scalar enum; None if its domain is unsupported.
-    enum_values: Option<Vec<i128>>,
+    /// Resolved members of a scalar enum; None if its domain is unsupported.
+    enum_domain: Option<Arc<enums::EnumDomain>>,
+    /// A packed array whose elements are of an enumerated type, whose
+    /// methods are not supported on its elements.
+    packed_enum: bool,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -2207,7 +2216,8 @@ impl Type {
     fn implicit() -> Self {
         Self {
             is_enum: false,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
@@ -2224,7 +2234,8 @@ impl Type {
         Self {
             kind,
             is_enum: false,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
@@ -2787,6 +2798,8 @@ struct Function {
     return_dimensions: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
+    /// The members of an enumerated return type, for its methods.
+    return_enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
 fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
@@ -2998,7 +3011,9 @@ struct UnpackedDimension {
 struct VariableDimensions {
     container: Option<Arc<ContainerType>>,
     randomizable: bool,
-    enum_values: Option<Vec<i128>>,
+    enum_domain: Option<Arc<enums::EnumDomain>>,
+    /// See [`Type::packed_enum`].
+    packed_enum: bool,
     real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     string: bool,
@@ -3035,6 +3050,8 @@ struct FunctionReturnMetadata {
     string: bool,
     /// Declared aggregate type, available before function bodies are inlined.
     pattern_type: Option<Type>,
+    /// The members of an enumerated return type, for its methods.
+    enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

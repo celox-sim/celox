@@ -43,7 +43,8 @@ impl Property {
             return None;
         }
         if self.r#type.is_enum {
-            self.r#type.enum_values.as_ref().and_then(|values| {
+            self.r#type.enum_domain.as_ref().and_then(|domain| {
+                let values = &domain.members;
                 (1..=256)
                     .contains(&values.len())
                     .then_some(values.len() as u16)
@@ -167,7 +168,7 @@ impl Class {
             }
             if (property.rand || property.randc)
                 && (property.field.handle.is_some()
-                    || (property.r#type.is_enum && property.r#type.enum_values.is_none()))
+                    || (property.r#type.is_enum && property.r#type.enum_domain.is_none()))
             {
                 return Err(unsupported(
                     "class randomize requires integral rand properties with a supported enum domain",

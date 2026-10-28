@@ -229,7 +229,7 @@ fn lower_methods(
                             if property.constant
                                 || property.field.handle.is_some()
                                 || (property.r#type.is_enum
-                                    && property.r#type.enum_values.is_none())
+                                    && property.r#type.enum_domain.is_none())
                             {
                                 continue;
                             }
@@ -383,7 +383,12 @@ fn random_property(
         classes::object_call(op, vec![Expr::Ident(this.into())])
     };
     let mut body = Vec::new();
-    let value = if let Some(values) = &property.r#type.enum_values {
+    let value = if let Some(values) = property
+        .r#type
+        .enum_domain
+        .as_ref()
+        .map(|domain| domain.values())
+    {
         let count = values.len() as u64;
         let threshold = count.wrapping_neg() % count;
         let draw = builder.declare("$enum_draw", classes::unsigned_type(64));

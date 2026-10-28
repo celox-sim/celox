@@ -239,6 +239,29 @@ pub(crate) fn eval_const_expr_in_env(
                     constants,
                 )
             }
+            Callee::Lookup { width, signed } => {
+                let (selector, rest) = args.split_first()?;
+                let (default, pairs) = rest.split_last()?;
+                let selector = eval_const_expr_in_env(selector, constants)?;
+                let (pairs, []) = pairs.as_chunks::<2>() else {
+                    return None;
+                };
+                let mut value = default;
+                for [key, candidate] in pairs {
+                    if eval_const_expr_in_env(key, constants)? == selector {
+                        value = candidate;
+                        break;
+                    }
+                }
+                eval_const_expr_in_env(
+                    &ConstExpr::Resize {
+                        expr: Box::new(value.clone()),
+                        width: *width,
+                        signed: *signed,
+                    },
+                    constants,
+                )
+            }
             Callee::String(_) | Callee::Object(_) => None,
         },
         ConstExpr::Unary { op, expr: operand } => {

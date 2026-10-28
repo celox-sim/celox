@@ -25,7 +25,7 @@ outline: [2, 3]
 
 | 領域 | サポート内容 |
 | --- | --- |
-| 型 | `logic`、`bit`、`reg`、packed ベクタ、任意の定数境界と昇順・降順の多次元 packed 配列、packed 構造体、hard / soft packed untagged union、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
+| 型 | `logic`、`bit`、`reg`、packed ベクタ、任意の定数境界と昇順・降順の多次元 packed 配列、packed 構造体、hard / soft packed untagged union、enum（暗黙値を含む）と enum 型の任意の式（enum の packed 配列の要素を除く、[#2417](https://github.com/celox-sim/celox/issues/2417)）に対するメソッド `first`・`last`・`next`・`prev`・`num`・`name`、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |

@@ -76,7 +76,8 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
         VariableDimensions {
             container: None,
             randomizable: true,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             real: false,
             string: false,
             class: None,
