@@ -54,6 +54,10 @@ fn analyzed_info(design: &Design) -> Option<DesignInfo> {
     let packages =
         celox_sv_analyzer::ParsedSource::analyze_packages(&sources.iter().collect::<Vec<_>>())
             .ok()?;
+    let mut interfaces = celox_sv_analyzer::ModuleInterfaces::default();
+    for source in &sources {
+        interfaces.extend(source.module_interfaces().clone());
+    }
     let mut modules: Vec<Module> = Vec::new();
     for source in &sources {
         for name in source.module_names() {
@@ -72,9 +76,14 @@ fn analyzed_info(design: &Design) -> Option<DesignInfo> {
                 Default::default()
             };
             let result = if design.timed {
-                source.analyze_module_declarations(name, &overrides, &packages)
+                source.analyze_module_declarations_with_interfaces(
+                    name,
+                    &overrides,
+                    &interfaces,
+                    &packages,
+                )
             } else {
-                source.analyze_module(name, &overrides, &[], &[], &Default::default(), &packages)
+                source.analyze_module(name, &overrides, &[], &[], &interfaces, &packages)
             };
             if let Ok(ir) = result {
                 modules.extend(ir.modules().iter().cloned());
@@ -204,4 +213,18 @@ pub fn suite() -> Suite {
 /// The command-line runner of `verify-sv-verilator` and `verify-sv-icarus`.
 pub fn run(tool: Tool) -> Result<()> {
     crate::verification::run(tool, &suite(), &SvFrontend)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn foreign_generic_multisource_case_has_declaration_metadata() {
+        let case = crate::sv::case("class::foreign_generic_multiple_user_classes").unwrap();
+        let info = super::design_info(&case.design())
+            .expect("cross-file instances retain their module contracts");
+        assert_eq!(
+            info.outputs,
+            ["first", "second", "first_count", "second_count"]
+        );
+    }
 }

@@ -74,6 +74,31 @@ pub(in crate::ast) fn native_class(
             return super_class(tree, dimensions);
         }
     }
+    // The receiver of `h.p` is resolved once for both kinds of property, so
+    // a chain `a.b.c` takes one walk.
+    if let ExprKind::Member {
+        expression: receiver,
+        separator,
+        name,
+    } = &expression.kind
+        && separator == "."
+    {
+        let owner = native_class(tree, *receiver, native, dimensions)?;
+        let member = instances::normalize_identifier(&name.spelling);
+        let receiver = (!is_super(*receiver, native)).then_some(*receiver);
+        if let Some((property, _)) =
+            property_in(tree, dimensions, &owner, &member, receiver).ok()?
+        {
+            return property.r#type.class().map(str::to_owned);
+        }
+        return class(tree, dimensions, &owner)
+            .ok()?
+            .static_property(&member)
+            .and_then(|property| property.r#type.class().map(str::to_owned));
+    }
+    if let Some(class) = static_property_class(tree, id, native, dimensions).ok()? {
+        return Some(class);
+    }
     let (property, _) = property(tree, id, native, dimensions).ok()??;
     property.r#type.class().map(str::to_owned)
 }
@@ -136,7 +161,7 @@ fn is_super(id: ExprId, native: &Declarations) -> bool {
 /// The class that native expression `id` names, as the scope of `C::name`:
 /// a class, or the specialization that a parameter value assignment or the
 /// defaults of a parameterized class make (IEEE 1800-2023 8.25.1).
-fn named_class(
+pub(in crate::ast) fn named_class(
     tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
@@ -152,11 +177,20 @@ fn named_class(
             let ExprKind::Name(package) = &native.expression(*expression).kind else {
                 return Ok(None);
             };
-            let class = scope::qualified_name(
-                &tree.state,
-                &instances::normalize_identifier(&package.spelling),
-                &instances::normalize_identifier(&name.spelling),
-            );
+            let scope_name = instances::normalize_identifier(&package.spelling);
+            let member_name = instances::normalize_identifier(&name.spelling);
+            if let Some(scope_class) = dimensions
+                .type_aliases
+                .get(&scope_name)
+                .and_then(|ty| ty.class().map(str::to_owned))
+                .or_else(|| classes::resolve(tree, &scope_name))
+                && let Some(ty) =
+                    classes::specializations::member_type(tree, &scope_class, &member_name)
+                && let Some(class) = ty.class()
+            {
+                return Ok(Some(class.to_owned()));
+            }
+            let class = scope::qualified_name(&tree.state, &scope_name, &member_name);
             // A typedef of the package may name a class or a specialization.
             if let Some(aliased) = dimensions
                 .type_aliases
@@ -173,17 +207,36 @@ fn named_class(
             return Ok(classes::resolve(tree, &class)
                 .filter(|class| classes::handle_type(tree, class).is_some()));
         }
-        ExprKind::Name(name) => (name, None),
+        ExprKind::Name(name) => (instances::normalize_identifier(&name.spelling), None),
         ExprKind::Parameterized {
             expression,
             arguments,
         } => match &native.expression(*expression).kind {
-            ExprKind::Name(name) => (name, Some(&arguments[..])),
+            ExprKind::Name(name) => (
+                instances::normalize_identifier(&name.spelling),
+                Some(&arguments[..]),
+            ),
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "::" => {
+                let ExprKind::Name(package) = &native.expression(*expression).kind else {
+                    return Ok(None);
+                };
+                (
+                    format!(
+                        "{}::{}",
+                        instances::normalize_identifier(&package.spelling),
+                        instances::normalize_identifier(&name.spelling)
+                    ),
+                    Some(&arguments[..]),
+                )
+            }
             _ => return Ok(None),
         },
         _ => return Ok(None),
     };
-    let name = instances::normalize_identifier(&name.spelling);
     if dimensions.get(&name).is_some() {
         return Ok(None);
     }
@@ -363,13 +416,30 @@ pub(in crate::ast) fn property(
         }
         _ => return Ok(None),
     };
+    property_in(
+        tree,
+        dimensions,
+        &class_name,
+        &instances::normalize_identifier(&name.spelling),
+        receiver,
+    )
+}
+
+/// The instance property `name` of class `class_name`, read through
+/// `receiver` as [`property`] returns it.
+fn property_in(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    class_name: &str,
+    name: &str,
+    receiver: Option<ExprId>,
+) -> Converted<Option<(classes::Property, Option<ExprId>)>> {
     if class_name == super::super::processes::CLASS {
         return Ok(None);
     }
-    let class = class(tree, dimensions, &class_name)?;
-    let name = instances::normalize_identifier(&name.spelling);
-    let Some(property) = class.property(&name) else {
-        if let Some(property) = class.static_property(&name) {
+    let class = class(tree, dimensions, class_name)?;
+    let Some(property) = class.property(name) else {
+        if let Some(property) = class.static_property(name) {
             check_access(
                 tree,
                 dimensions,

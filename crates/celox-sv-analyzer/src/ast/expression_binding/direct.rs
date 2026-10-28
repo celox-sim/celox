@@ -68,6 +68,11 @@ pub(super) fn bound_callable_name(
     if let Some(name) = callable_name(&tree.state, id, native) {
         return Ok(Some(name));
     }
+    if let Some((name, _, objects::Receiver::Static)) =
+        objects::method(tree, id, native, dimensions)?
+    {
+        return Ok(Some(name));
+    }
     let ExprKind::Member {
         expression,
         separator,

@@ -7733,3 +7733,113 @@ fn named_aggregate_type_arguments_keep_their_declarations() {
         );
     }
 }
+
+#[test]
+fn foreign_generic_specializations_bind_module_and_unit_requests() {
+    for user in [
+        "module Top; initial begin p::Db#(byte)::set(5); $display(\"%0d\", p::Db#(byte)::last); end endmodule",
+        "import p::*; class User; static function int go(); Db#(byte)::set(7); return Db#(byte)::last; endfunction endclass module Top; initial $display(\"%0d\", User::go()); endmodule",
+    ] {
+        let source = format!(
+            "package p; class Db #(type T=int); static T last; \
+             static function void set(T v); last=v; endfunction endclass endpackage {user}"
+        );
+        analyze_source(&source, Path::new("foreign_generic.sv"))
+            .unwrap_or_else(|error| panic!("{user}: {error}"));
+    }
+}
+
+#[test]
+fn foreign_generic_specialization_constructs_unit_type_argument() {
+    let code = r#"
+      package p;
+        class Registry #(type T);
+          static function T create(int n);
+            T object;
+            object=new(n);
+            return object;
+          endfunction
+        endclass
+      endpackage
+      import p::*;
+      class User;
+        typedef Registry#(User) type_id;
+        int value;
+        function new(int n); value=n; endfunction
+        static function User make(); return type_id::create(23); endfunction
+      endclass
+      module Top;
+        User object;
+        initial begin object=User::make(); $display("%0d", object.value); end
+      endmodule
+    "#;
+    analyze_source(code, Path::new("foreign_factory.sv")).unwrap();
+}
+
+#[test]
+fn foreign_generic_does_not_capture_compilation_unit_names() {
+    let source = r#"
+        class User; int value; endclass
+        package p;
+            class Factory #(type T);
+                static function User create(); User object; object=new(); return object; endfunction
+            endclass
+        endpackage
+        module Top; initial $display("%p", p::Factory#(int)::create()); endmodule
+    "#;
+    assert!(analyze_source(source, Path::new("foreign_scope_capture.sv")).is_err());
+}
+
+#[test]
+fn foreign_generic_rejects_module_class_without_instance_identity() {
+    for (name, canonical) in [("Item", "Item"), ("\\Item::Nested ", "\\Item::Nested")] {
+        let source = format!(
+            r#"
+            package p; class Box #(type T); static int count; endclass endpackage
+            module Top;
+                class {name}; int value; endclass
+                p::Box#({name}) object;
+            endmodule
+        "#
+        );
+        let error = analyze_source(&source, Path::new("foreign_module_class.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("module-local class `{canonical}`")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn foreign_generic_nested_actuals_are_bounded_on_default_stack() {
+    std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(|| {
+        let mut actual = "int".to_owned();
+        for _ in 0..70 { actual = format!("p::Box#({actual})"); }
+        let source = format!("package p; class Box #(type T); endclass endpackage module Top; {actual} object; endmodule");
+        let error = analyze_source(&source, Path::new("foreign_depth.sv")).unwrap_err();
+        assert!(error.to_string().contains("class specializations nested more than"), "{error}");
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+fn long_handle_chains_resolve_in_linear_time() {
+    // Each `.next` resolves its receiver once; resolving it again for the
+    // static and the instance lookup doubled the work per field.
+    let chain = ".next".repeat(30);
+    let source = format!(
+        "class Node; Node next; int value; endclass
+        module Top(output int y);
+            Node head;
+            initial y = head{chain}.value;
+        endmodule"
+    );
+    let started = std::time::Instant::now();
+    analyze_source(&source, Path::new("handle-chain.sv")).expect("the chain analyzes");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}

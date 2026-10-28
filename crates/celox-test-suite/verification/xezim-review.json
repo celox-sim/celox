@@ -738,6 +738,22 @@
     "sv_ref_subarray_element": {
       "title": "A ref formal bound to a subarray element neither reads nor writes that element",
       "standard": "IEEE 1800-2023 13.5.2, 7.4.6"
+    },
+    "sv_class_foreign_factory_constructor": {
+      "title": "A package factory reached through distinct caller-class type_id typedefs constructs the first caller type for both",
+      "standard": "IEEE 1800-2023 8.23, 8.25"
+    },
+    "sv_class_foreign_inherited_field_width": {
+      "title": "A derived class in another package sizes a field incorrectly when its bound uses an inherited local parameter",
+      "standard": "IEEE 1800-2023 8.13, 8.25"
+    },
+    "sv_class_foreign_constructor_default": {
+      "title": "A factory's call of a supplied class constructor loses the result of its call-valued default argument",
+      "standard": "IEEE 1800-2023 8.25, 13.5.3"
+    },
+    "sv_class_foreign_package_constructor": {
+      "title": "Constructing a package-class type argument through a generic in another package leaves initialized instance fields unknown",
+      "standard": "IEEE 1800-2023 8.7, 8.25"
     }
   },
   "cases": [
@@ -4459,6 +4475,54 @@
       "classification": "xezim_bug",
       "bug": "sv_ref_copy_semantics",
       "note": "The same concurrent task activations as references::ref_elements_of_concurrent_task_activations with the input argument first: ref formals bound to different array elements do not update them as references (q=18340 instead of 13570, which 13.5.2 gives with 11, 22, 33, 40). The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json shows the copy semantics in the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X2",
+      "note": "The explicit T argument is the importing module's 9-bit word_t; Wide::T must retain that width. The shared checksum is 109 instead of 127. The standalone reports 111 with the member-type width check still false. Verilator separately gives Wide/Same/default counts 1,1,1 instead of 2,2,1, despite matching N/T actuals. See verification/repros/sv_foreign_generic.json for sources, observations and exact installed-build provenance."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_nominal_and_nested_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X6",
+      "note": "The typedef Alias names the same enum type as A, so Counter#(Alias) and Counter#(A) must share their count. A standalone assigns consecutive tick results and prints 1,1,1 for A/Alias/B instead of 1,2,1. The shared case additionally distinguishes enum/struct declarations and queue element types. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_multiple_user_classes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_foreign_factory_constructor",
+      "note": "FirstUser and SecondUser have distinct names and layouts, so the source is valid with either compilation-unit model. Both factories construct a FirstUser-valued object: the second result is 42 instead of 73. A single-file standalone reproduces factories=42,42 instead of 42,73. This is independent of the separate-file compilation-unit policy. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_inherited_constants",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_foreign_inherited_field_width",
+      "note": "Base#(5) gives LOCAL=6 and item_t a width of 5. The derived field bound LOCAL must use the inherited value, despite q::LOCAL=23. The shared and standalone checksums are 23 instead of 31, specifically missing the bit for $bits(field)==6. Verilator reports 0 for the same checksum. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_constructor_lexical_scope",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_foreign_constructor_default",
+      "note": "User::new has n=initial_value() in compilation-unit scope; that function reads value=20 and returns 23. The package's same-named function returns 99. The constructor result is 20 instead of 23. IEEE 13.5.3 binds and evaluates the default in the subroutine declaration scope. Verilator raises an internal FuncRef-without-fvar error. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_package_type_static_storage",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_foreign_package_constructor",
+      "note": "q::Factory#(p::Item)::create() calls Item::new(), which must assign value=42. The result contains unknown bits; a standalone prints X,7,1 for result/tag/count instead of 42,7,1. The static tag and factory counter are explicitly initialized. See verification/repros/sv_foreign_generic.json."
     }
   ]
 }

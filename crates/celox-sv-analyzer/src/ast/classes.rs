@@ -13,6 +13,7 @@ use super::*;
 use crate::system_functions::{HandleProperty, ObjectField, ObjectOp};
 
 pub(super) mod constraints;
+pub(super) mod foreign;
 pub(super) mod specializations;
 
 /// Bit width of a handle, see `celox_design::HANDLE_WIDTH`.
@@ -371,7 +372,12 @@ pub(super) fn declared_name(
             instances::normalize_identifier(&unit.name.spelling)
         ),
         Some(_) => name,
-        None => format!("{}::{name}", packages::UNIT),
+        None => {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = fxhash::FxHasher::default();
+            tree.compilation_path().hash(&mut hasher);
+            format!("{}::{name}@{:016x}", packages::UNIT, hasher.finish())
+        }
     }
 }
 
@@ -435,9 +441,15 @@ pub(super) fn scope_class_types(tree: &AnalysisContext<'_>) -> Vec<(String, Type
 /// declares (IEEE 1800-2023 3.12.1). Classes of packages are seen through
 /// imports, as types.
 pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> {
+    if tree.state.foreign.contains(name) {
+        return Some(name.to_owned());
+    }
     let native = tree.declarations();
     let scope = tree.root_unit().ok().map(|unit| unit.tokens);
     let mut unit_class = None;
+    let package_scope = tree
+        .root_unit()
+        .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
     for class in &native.classes {
         if instances::normalize_identifier(&class.name.spelling) != name {
             continue;
@@ -446,25 +458,35 @@ pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> 
         if enclosing == scope {
             return Some(declared_name(tree, class));
         }
-        if enclosing.is_none() {
+        if enclosing.is_none() && !package_scope {
             unit_class = Some(declared_name(tree, class));
         }
     }
     // A class an import makes visible (IEEE 1800-2023 26.3).
     let imported = scope::imported(&tree.state);
-    if let Some(class) = imported.aliases.get(name)
-        && imported.classes.iter().any(|known| &known.name == class)
-    {
-        return Some(class.clone());
+    if let Some(alias) = imported.aliases.get(name) {
+        let class = imported
+            .type_aliases
+            .get(alias)
+            .and_then(Type::class)
+            .unwrap_or(alias);
+        if imported.classes.iter().any(|known| known.name == class)
+            || tree.state.foreign.contains(class)
+        {
+            return Some(class.to_owned());
+        }
     }
     unit_class
         .or_else(|| {
-            let class = format!("{}::{name}", packages::UNIT);
+            if package_scope {
+                return None;
+            }
+            let alias = format!("{}::{name}", packages::UNIT);
             imported
-                .classes
-                .iter()
-                .any(|known| known.name == class)
-                .then_some(class)
+                .type_aliases
+                .get(&alias)
+                .and_then(Type::class)
+                .map(str::to_owned)
         })
         .or_else(|| (name == "process").then(|| super::processes::CLASS.to_owned()))
 }
@@ -495,6 +517,7 @@ pub(super) fn is_interface(tree: &AnalysisContext<'_>, name: &str) -> bool {
 /// 1800-2023 8.25).
 pub(super) fn is_parameterized(tree: &AnalysisContext<'_>, name: &str) -> bool {
     declaration(tree, name).is_some_and(|class| class.parameter_ports.is_some())
+        || tree.state.foreign.contains(name)
 }
 
 /// The classes and interface classes that body item `item` declares: of a
@@ -912,7 +935,7 @@ pub(super) fn class(
     }
     let class = Rc::new(Class {
         name: name.to_owned(),
-        id: class_id(tree, name),
+        id: class_id(name),
         constraints,
         has_constraints: declaration.has_constraints
             || base.as_ref().is_some_and(|base| base.has_constraints),
@@ -1033,7 +1056,7 @@ fn interface_class(
     }
     let class = Rc::new(Class {
         name: name.to_owned(),
-        id: class_id(tree, name),
+        id: class_id(name),
         base: None,
         interfaces,
         is_abstract: true,
@@ -1176,30 +1199,11 @@ fn field(
 
 /// A run-time identifier of class `name`: an FNV-1a hash, never 0, which
 /// `null` reads as.
-fn class_id(tree: &AnalysisContext<'_>, name: &str) -> u32 {
-    // Classes of the compilation units of two sources may share a name; the
-    // path of the source tells them apart (IEEE 1800-2023 3.12.1).
-    let source = name
-        .starts_with(&format!("{}::", packages::UNIT))
-        .then(|| {
-            let native = tree.declarations();
-            native.tokens.first().map(|token| {
-                native
-                    .sources
-                    .file(token.origin.spelling.file)
-                    .path
-                    .display()
-                    .to_string()
-            })
-        })
-        .flatten()
-        .unwrap_or_default();
-    let hash = name
-        .bytes()
-        .chain(source.bytes())
-        .fold(0x811c_9dc5u32, |hash, byte| {
-            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
-        });
+fn class_id(name: &str) -> u32 {
+    // Compilation-unit declaration names already contain their source identity.
+    let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
     hash.max(1)
 }
 

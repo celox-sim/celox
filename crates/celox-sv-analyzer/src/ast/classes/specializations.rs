@@ -132,7 +132,12 @@ pub(in crate::ast) fn lookup(tree: &AnalysisContext<'_>, name: &str) -> Option<R
 /// The class declaration that class `name` specializes.
 pub(in crate::ast) fn generic(tree: &AnalysisContext<'_>, name: &str) -> String {
     lookup(tree, name).map_or_else(
-        || name.to_owned(),
+        || {
+            tree.state
+                .foreign
+                .generic(name)
+                .unwrap_or_else(|| name.to_owned())
+        },
         |specialization| specialization.generic.clone(),
     )
 }
@@ -173,6 +178,13 @@ pub(in crate::ast) fn shared_scope(
     let mut aliases = aliases.clone();
     let own = generic(tree, name);
     for specialization in lineage(tree, name) {
+        for base in &specialization.bases {
+            if lookup(tree, base).is_none()
+                && let Some(scope) = tree.state.foreign.declarations(base)
+            {
+                scope.apply(&mut env, &mut aliases);
+            }
+        }
         if !specialization.env.is_empty() || !specialization.hidden.is_empty() {
             env.extend(specialization.env.clone());
             for key in &specialization.hidden {
@@ -197,10 +209,13 @@ fn inherit(
     env: &mut HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) {
-    if lookup(tree, name).is_none()
-        && let Some(members) = scope::imported(&tree.state).class_member_types.get(name)
-    {
-        aliases.extend(members.clone());
+    if lookup(tree, name).is_none() {
+        if let Some(scope) = tree.state.foreign.declarations(name) {
+            scope.apply(env, aliases);
+        }
+        if let Some(members) = scope::imported(&tree.state).class_member_types.get(name) {
+            aliases.extend(members.clone());
+        }
     }
     for specialization in lineage(tree, name) {
         for (key, value) in &specialization.declared_env {
@@ -233,6 +248,14 @@ pub(in crate::ast) fn body_scope(
     let mut literals = literals.clone();
     let own = generic(tree, name);
     for specialization in lineage(tree, name) {
+        for base in &specialization.bases {
+            if lookup(tree, base).is_none()
+                && let Some(scope) = tree.state.foreign.declarations(base)
+            {
+                scope.apply(&mut dimensions.const_env, &mut dimensions.type_aliases);
+                literals.extend(scope.literals.clone());
+            }
+        }
         dimensions.const_env.extend(specialization.env.clone());
         for key in &specialization.hidden {
             dimensions.const_env.remove(key);
@@ -254,7 +277,55 @@ pub(in crate::ast) fn parameter(
     lineage(tree, name)
         .iter()
         .rev()
-        .find_map(|specialization| specialization.literals.get(parameter).cloned())
+        .find_map(|specialization| {
+            specialization.literals.get(parameter).cloned().or_else(|| {
+                specialization
+                    .bases
+                    .iter()
+                    .filter(|base| lookup(tree, base).is_none())
+                    .find_map(|base| tree.state.foreign.parameter(base, parameter))
+            })
+        })
+        .or_else(|| tree.state.foreign.parameter(name, parameter))
+}
+
+pub(in crate::ast) fn export_declarations(
+    tree: &AnalysisContext<'_>,
+    members: &HashMap<String, HashMap<String, Type>>,
+) -> HashMap<String, Rc<super::foreign::DeclarationScope>> {
+    // Only compilation-unit and package declarations have a design-wide name.
+    if tree
+        .root_unit()
+        .is_ok_and(|unit| unit.kind != celox_sv_syntax::UnitKind::Package)
+    {
+        return HashMap::default();
+    }
+    let own = super::scope_declarations(tree)
+        .map(|class| super::declared_name(tree, class))
+        .collect::<HashSet<_>>();
+    tree.state
+        .class_specializations
+        .borrow()
+        .iter()
+        .filter(|(_, specialization)| own.contains(&specialization.generic))
+        .map(|(name, _)| {
+            let mut scope = super::foreign::DeclarationScope::default();
+            for specialization in lineage(tree, name) {
+                for base in &specialization.bases {
+                    if lookup(tree, base).is_none()
+                        && let Some(parent) = tree.state.foreign.declarations(base)
+                    {
+                        scope.env.extend(parent.env.clone());
+                        scope.literals.extend(parent.literals.clone());
+                    }
+                }
+                scope.env.extend(specialization.declared_env.clone());
+                scope.literals.extend(specialization.literals.clone());
+            }
+            scope.types = members.get(name).cloned().unwrap_or_default();
+            (name.clone(), Rc::new(scope))
+        })
+        .collect()
 }
 
 /// The type parameter or typedef `member` of class `name`, declared in it
@@ -284,6 +355,7 @@ pub(in crate::ast) fn member_type(
                 .get(member)
                 .cloned()
         })
+        .or_else(|| tree.state.foreign.member_type(name, member))
 }
 
 /// Only types declared by a class and its bases cross the scope boundary.
@@ -375,6 +447,18 @@ fn bind_specialization(
     }
     depth.set(depth.get() + 1);
     let _nesting = Nesting(depth);
+    if super::foreign::is_foreign(tree, generic) {
+        return Ok(
+            match tree
+                .state
+                .foreign
+                .request(tree, generic, arguments, context)?
+            {
+                Some(name) => Binding::Ready(name),
+                None => Binding::Deferred(unsupported("class type parameter value")),
+            },
+        );
+    }
     // Parameter binding and body construction have large temporary values.
     // Keep those phases off the stack while resolving an inherited class.
     let pending = match prepare(tree, generic, arguments, context)? {
@@ -404,29 +488,37 @@ enum Preparation {
     Pending(Box<PendingSpecialization>),
 }
 
-// These boundaries keep the recursive inheritance frame small in debug and
-// optimized builds alike; the specialization limit must produce a diagnostic
-// before the host thread runs out of stack.
-#[inline(never)]
-fn prepare(
+#[derive(Clone, Debug, Default)]
+pub(in crate::ast) struct BoundArguments {
+    pub values: HashMap<String, ConstExpr>,
+    pub types: HashMap<String, Type>,
+}
+
+// Ordinary type equality ignores nominal declaration identity; specialization
+// matching must distinguish separately declared enum and aggregate types (8.25).
+impl PartialEq for BoundArguments {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+            && self.types.len() == other.types.len()
+            && self.types.iter().all(|(name, ty)| {
+                other
+                    .types
+                    .get(name)
+                    .is_some_and(|other| spelling(ty) == spelling(other))
+            })
+    }
+}
+
+impl Eq for BoundArguments {}
+
+pub(in crate::ast) fn bind_arguments(
     tree: &AnalysisContext<'_>,
     generic: &str,
+    declaration: &celox_sv_syntax::ClassDeclaration,
+    native: &celox_sv_syntax::Declarations,
     arguments: &[Argument],
     context: &PackedDimensions,
-) -> Converted<Preparation> {
-    let native = tree.declarations();
-    let declaration = super::declaration(tree, generic)
-        .ok_or_else(|| unsupported(format!("class `{generic}`")))?;
-    if tree
-        .state
-        .class_declarations_repeated
-        .borrow()
-        .contains(generic)
-    {
-        return Err(unsupported(format!(
-            "class `{generic}` declared in a loop generate block"
-        )));
-    }
+) -> Converted<Option<BoundArguments>> {
     // The parameters an assignment may set: those of the parameter port
     // list that are not local, in order.
     let ports = declaration
@@ -479,9 +571,7 @@ fn prepare(
                     types.insert(name, ty);
                 }
                 None => {
-                    return Ok(Preparation::Deferred(unsupported(
-                        "class type parameter value",
-                    )));
+                    return Ok(None);
                 }
             },
             ParameterKind::Value { .. } => {
@@ -489,6 +579,50 @@ fn prepare(
             }
         }
     }
+    Ok(Some(BoundArguments { values, types }))
+}
+
+// These boundaries keep the recursive inheritance frame small in debug and
+// optimized builds alike; the specialization limit must produce a diagnostic
+// before the host thread runs out of stack.
+#[inline(never)]
+fn prepare(
+    tree: &AnalysisContext<'_>,
+    generic: &str,
+    arguments: &[Argument],
+    context: &PackedDimensions,
+) -> Converted<Preparation> {
+    let native = tree.declarations();
+    let declaration = super::declaration(tree, generic)
+        .ok_or_else(|| unsupported(format!("class `{generic}`")))?;
+    if tree
+        .state
+        .class_declarations_repeated
+        .borrow()
+        .contains(generic)
+    {
+        return Err(unsupported(format!(
+            "class `{generic}` declared in a loop generate block"
+        )));
+    }
+    let Some(arguments) = bind_arguments(tree, generic, declaration, native, arguments, context)?
+    else {
+        return Ok(Preparation::Deferred(unsupported(
+            "class type parameter value",
+        )));
+    };
+    prepare_bound(tree, generic, arguments, context)
+}
+
+fn prepare_bound(
+    tree: &AnalysisContext<'_>,
+    generic: &str,
+    arguments: BoundArguments,
+    context: &PackedDimensions,
+) -> Converted<Preparation> {
+    let declaration = super::declaration(tree, generic)
+        .ok_or_else(|| unsupported(format!("class `{generic}`")))?;
+    let BoundArguments { values, types } = arguments;
     // The declarations of the class are bound in the scope that declares it,
     // the actuals in the scope that names the specialization.
     let (mut env, mut aliases) = declaration_scope(tree, generic).unwrap_or_else(|| {
@@ -873,21 +1007,10 @@ fn type_argument(
                 },
             }
         }
-        ExprKind::Parameterized {
-            expression,
-            arguments,
-        } => match &native.expression(*expression).kind {
-            ExprKind::Name(name) => {
-                match super::resolve(tree, &instances::normalize_identifier(&name.spelling)) {
-                    Some(name) => {
-                        let name = specialize(tree, &name, arguments, context)?;
-                        Some(super::handle(&name))
-                    }
-                    None => None,
-                }
-            }
-            _ => None,
-        },
+        ExprKind::Parameterized { .. } => {
+            expression_binding::named_class(tree, id, native, context)?
+                .map(|name| super::handle(&name))
+        }
         // A type of a class, `C::T` or `C#(...)::T`, or of a package
         // (IEEE 1800-2023 8.23, 26.3).
         ExprKind::Member {
@@ -926,21 +1049,9 @@ fn type_argument(
                         );
                     }
                 }
-                ExprKind::Parameterized {
-                    expression,
-                    arguments,
-                } => match &native.expression(*expression).kind {
-                    ExprKind::Name(scope) => {
-                        match super::resolve(
-                            tree,
-                            &instances::normalize_identifier(&scope.spelling),
-                        ) {
-                            Some(class) => Some(specialize(tree, &class, arguments, context)?),
-                            None => None,
-                        }
-                    }
-                    _ => None,
-                },
+                ExprKind::Parameterized { .. } => {
+                    expression_binding::named_class(tree, *expression, native, context)?
+                }
                 _ => None,
             };
             class.and_then(|class: String| member_type(tree, &class, &member))
@@ -1023,18 +1134,28 @@ fn value_argument(
 /// A spelling of type `ty` that tells it apart from other types, for the
 /// name of a specialization.
 fn spelling(ty: &Type) -> String {
-    let mut spelled = match (ty.class(), ty.kind()) {
-        (Some(class), _) => class.to_owned(),
-        (None, TypeKind::Real) => "real".to_owned(),
-        (None, TypeKind::Shortreal) => "shortreal".to_owned(),
-        (None, TypeKind::String) => "string".to_owned(),
-        (None, TypeKind::Object) => "object".to_owned(),
-        (None, TypeKind::Process) => "process".to_owned(),
-        (None, TypeKind::Bit) => "bit".to_owned(),
-        // `reg` is `logic` (6.11.2).
-        (None, TypeKind::Logic | TypeKind::Implicit | TypeKind::Reg) => "logic".to_owned(),
+    let mut spelled = if let Some(container) = &ty.container {
+        format!(
+            "container({:?},{},{})",
+            container.layout,
+            spelling(&container.element),
+            container.key.as_ref().map(spelling).unwrap_or_default()
+        )
+    } else {
+        match (ty.class(), ty.kind()) {
+            (Some(class), _) => class.to_owned(),
+            (None, TypeKind::Real) => "real".to_owned(),
+            (None, TypeKind::Shortreal) => "shortreal".to_owned(),
+            (None, TypeKind::String) => "string".to_owned(),
+            (None, TypeKind::Object) => "object".to_owned(),
+            (None, TypeKind::Process) => "process".to_owned(),
+            (None, TypeKind::Bit) => "bit".to_owned(),
+            // `reg` is `logic` (6.11.2).
+            (None, TypeKind::Logic | TypeKind::Implicit | TypeKind::Reg) => "logic".to_owned(),
+        }
     };
-    let integral = ty.class().is_none()
+    let integral = ty.container.is_none()
+        && ty.class().is_none()
         && !matches!(
             ty.kind(),
             TypeKind::Real
@@ -1089,6 +1210,42 @@ fn spelling(ty: &Type) -> String {
 /// new specialization appears.
 pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimensions) {
     tree.state.class_specializations_frozen.set(false);
+    for (generic, arguments) in tree.state.foreign_arguments.borrow().clone() {
+        let pending = match prepare_bound(tree, &generic, arguments.clone(), context) {
+            Ok(Preparation::Pending(pending)) => pending,
+            Ok(Preparation::Existing(name)) => {
+                tree.state
+                    .foreign_names
+                    .borrow_mut()
+                    .push((generic, arguments, name));
+                continue;
+            }
+            Ok(Preparation::Deferred(error)) | Err(error) => {
+                *tree.state.foreign_error.borrow_mut() = Some(error);
+                return;
+            }
+        };
+        tree.state
+            .class_specializations_building
+            .borrow_mut()
+            .push(pending.name.clone());
+        let _building = Building(&tree.state.class_specializations_building);
+        let result = (|| {
+            let bases = bind_bases(tree, &generic, &pending.env, &pending.aliases)?;
+            finish_specialization(tree, &generic, pending, bases)
+        })();
+        match result {
+            Ok(name) => tree
+                .state
+                .foreign_names
+                .borrow_mut()
+                .push((generic, arguments, name)),
+            Err(error) => {
+                *tree.state.foreign_error.borrow_mut() = Some(error);
+                return;
+            }
+        }
+    }
     let native = tree.declarations();
     let within = |outer: celox_sv_syntax::TokenRange, inner: celox_sv_syntax::TokenRange| {
         outer.start <= inner.start && inner.end <= outer.end
@@ -1105,11 +1262,8 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
         .iter()
         .filter(|class| super::enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == unit)
         .collect::<Vec<_>>();
-    if classes.is_empty() {
-        return;
-    }
     // The classes of the scope by the names its declarations use.
-    let names = classes
+    let mut names = classes
         .iter()
         .map(|class| {
             (
@@ -1118,6 +1272,14 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             )
         })
         .collect::<HashMap<_, _>>();
+    for name in tree.state.foreign.names() {
+        names.entry(name.clone()).or_insert(name);
+    }
+    for (alias, name) in &scope::imported(&tree.state).aliases {
+        if tree.state.foreign.contains(name) {
+            names.entry(alias.clone()).or_insert(name.clone());
+        }
+    }
     // The class scopes: each class declaration, and each out-of-block
     // method definition, which is in the scope of its class (8.24).
     let mut scopes = classes
@@ -1174,6 +1336,29 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             }
         }
     }
+    for ty in &native.types {
+        if !in_scope(ty.tokens) {
+            continue;
+        }
+        if let celox_sv_syntax::DataTypeKind::Named(path) = &ty.kind
+            && let [package, member] = path.as_slice()
+            && member.arguments.is_some()
+        {
+            let name = format!(
+                "{}::{}",
+                instances::normalize_identifier(&package.name.spelling),
+                instances::normalize_identifier(&member.name.spelling)
+            );
+            if tree.state.foreign.contains(&name) {
+                references.push((
+                    enclosing(ty.tokens),
+                    name,
+                    member.arguments.as_deref().unwrap(),
+                    ty.tokens,
+                ));
+            }
+        }
+    }
     for expression in &native.expressions {
         if !in_scope(expression.tokens) {
             continue;
@@ -1182,9 +1367,25 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             expression: scope,
             arguments,
         } = &expression.kind
-            && let ExprKind::Name(name) = &native.expression(*scope).kind
         {
-            let name = instances::normalize_identifier(&name.spelling);
+            let name = match &native.expression(*scope).kind {
+                ExprKind::Name(name) => instances::normalize_identifier(&name.spelling),
+                ExprKind::Member {
+                    expression,
+                    separator,
+                    name,
+                } if separator == "::" => {
+                    let ExprKind::Name(package) = &native.expression(*expression).kind else {
+                        continue;
+                    };
+                    format!(
+                        "{}::{}",
+                        instances::normalize_identifier(&package.spelling),
+                        instances::normalize_identifier(&name.spelling)
+                    )
+                }
+                _ => continue,
+            };
             if let Some(name) = names.get(&name).cloned() {
                 references.push((
                     enclosing(expression.tokens),

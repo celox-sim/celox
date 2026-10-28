@@ -733,19 +733,53 @@ fn classes_of_packages_in_other_sources_are_used_through_their_layouts() {
 }
 
 #[test]
-fn specializations_of_classes_of_other_scopes_are_rejected() {
-    let source = "package p; class Box #(int N = 2); endclass endpackage
-        module Top; import p::*; Box #(3) box; endmodule";
-    let Err(error) =
-        celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build()
-    else {
-        panic!("`{source}` is rejected");
-    };
-    let error = error.to_string();
-    assert!(
-        error.contains("outside the scope that declares it"),
-        "{error}"
-    );
+fn compilation_unit_types_of_separate_files_specialize_package_classes_separately() {
+    // Celox makes each source file a compilation unit of its own (IEEE
+    // 1800-2023 3.12.1 lets a tool choose this), so the same typedef in two
+    // files names two types and two specializations of `p::Counter`.
+    let package = "`timescale 1ns/1ns
+    package p;
+        class Counter #(type T = int);
+            static int count;
+            function new(); count++; endfunction
+        endclass
+    endpackage";
+    let a = "`timescale 1ns/1ns
+    typedef enum {A0, A1} E;
+    module A(output int n);
+        initial begin
+            automatic p::Counter#(E) c = new();
+            #1 n = p::Counter#(E)::count;
+        end
+    endmodule";
+    let b = "`timescale 1ns/1ns
+    typedef enum {B0, B1} E;
+    module B(output int n);
+        initial begin
+            automatic p::Counter#(E) c = new();
+            automatic p::Counter#(E) d = new();
+            #1 n = p::Counter#(E)::count;
+        end
+    endmodule";
+    let top = "`timescale 1ns/1ns
+    module Top(output int a, output int b);
+        A ua(.n(a));
+        B ub(.n(b));
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (package, Path::new("package.sv")),
+            (a, Path::new("a.sv")),
+            (b, Path::new("b.sv")),
+            (top, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("b")), 2u32.into());
 }
 
 #[test]
@@ -1166,4 +1200,145 @@ sv_backends! {
 
 sv_backends! {
     fn constraint_mode_base_dispatch(sim) { @case "class::constraint_mode_base_dispatch"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_static_state_across_modules(sim) { @case "class::foreign_generic_static_state_across_modules"; }
+    fn class_foreign_generic_unit_type_constructor(sim) { @case "class::foreign_generic_unit_type_constructor"; }
+    fn class_foreign_generic_static_handle_identity(sim) { @case "class::foreign_generic_static_handle_identity"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_declaration_scope_and_equivalent_defaults(sim) { @case "class::foreign_generic_declaration_scope_and_equivalent_defaults"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_multiple_user_classes(sim) { @case "class::foreign_generic_multiple_user_classes"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_nominal_and_nested_types(sim) { @case "class::foreign_generic_nominal_and_nested_types"; }
+}
+
+#[test]
+fn foreign_generic_native_images_and_checkpoints_preserve_shared_handles() {
+    let source = r#"`timescale 1ps/1ps
+        package p;
+            class Slot #(type T);
+                static T saved;
+                static function void put(T object); saved=object; endfunction
+            endclass
+        endpackage
+        class Item;
+            int value;
+            function new(); value=7; endfunction
+        endclass
+        module Writer;
+            Item object;
+            initial begin
+                object=new(); p::Slot#(Item)::put(object);
+                #10; object.value=21;
+                #10; object.value++;
+            end
+        endmodule
+        module Reader(output int value);
+            initial begin
+                #15; value=p::Slot#(Item)::saved.value;
+                #10; value=p::Slot#(Item)::saved.value;
+            end
+        endmodule
+        module Top(output int value);
+            Writer writer(); Reader reader(value);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let builder = || {
+            celox::Simulation::from_sv_sources(
+                vec![(source, Path::new("foreign_checkpoint.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+        };
+        let mut interpreted = builder().build_interpreter().unwrap();
+        interpreted.run_until(30).unwrap();
+        assert_eq!(
+            interpreted.get(interpreted.signal("value")),
+            BigUint::from(22u8)
+        );
+        let image = builder().compile_native().unwrap().into_program_image();
+        let image =
+            celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let mut sim = celox::Simulation::from_sv_sources(Vec::new(), "Top")
+            .build_native_from_image(image)
+            .unwrap();
+        sim.run_until(15).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(21u8));
+        let bytes = sim.checkpoint().unwrap().to_bytes().unwrap();
+        // SAFETY: bytes were created by this simulator.
+        let checkpoint = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
+        sim.run_until(30).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(22u8));
+        sim.restore(&checkpoint).unwrap();
+        sim.run_until(30).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(22u8));
+    }
+}
+
+// This API chooses one compilation unit per source file (3.12.1).
+sv_backends! {
+    fn foreign_generic_distinct_unit_classes(sim) {
+        @setup { let sources = vec![
+            (r#"
+package p;
+ class Registry #(type T);
+  static int count=0;
+  static function T create(); T object; object=new(); count++; return object; endfunction
+ endclass
+endpackage"#, Path::new("registry.sv")),
+            (r#"
+import p::*;
+class User;
+ int value;
+ function new(); value=42; endfunction
+ typedef Registry#(User) type_id;
+endclass
+module First(output int result, count);
+ User object;
+ initial begin object=User::type_id::create(); result=object.value; count=User::type_id::count; end
+endmodule"#, Path::new("first.sv")),
+            (r#"
+import p::*;
+class User;
+ int padding;
+ int value;
+ function new(); padding=99; value=73; endfunction
+ typedef Registry#(User) type_id;
+endclass
+module Second(output int result, count);
+ User object;
+ initial begin object=User::type_id::create(); result=object.value; count=User::type_id::count; end
+endmodule"#, Path::new("second.sv")),
+            (r#"
+module Top(output int first, second, first_count, second_count);
+ First a(first, first_count); Second b(second, second_count);
+endmodule"#, Path::new("top.sv")),
+        ]; }
+        @build celox::Simulation::from_sv_sources(sources, "Top");
+        sim.run_until(0).unwrap();
+        for (name, expected) in [("first", 42u32), ("second", 73), ("first_count", 1), ("second_count", 1)] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(expected), "{name}");
+        }
+    }
+}
+
+sv_backends! {
+    fn class_foreign_generic_inherited_constants(sim) { @case "class::foreign_generic_inherited_constants"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_constructor_lexical_scope(sim) { @case "class::foreign_generic_constructor_lexical_scope"; }
+    fn class_foreign_generic_package_type_static_storage(sim) { @case "class::foreign_generic_package_type_static_storage"; }
+    fn class_foreign_generic_template_of_the_named_package(sim) { @case "class::foreign_generic_template_of_the_named_package"; }
 }
