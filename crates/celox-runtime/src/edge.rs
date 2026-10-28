@@ -473,20 +473,33 @@ impl<E: EventHandle> CoincidentEdgeCache<E> {
 
     fn plan(
         &mut self,
-        key: Vec<(usize, bool)>,
+        changed: &[(E, bool)],
         make: impl FnOnce() -> DerivedTickPlan<E>,
     ) -> &DerivedTickPlan<E> {
-        let index = if let Some(index) = self.entries.iter().position(|(known, _)| *known == key) {
-            index
-        } else if self.entries.len() < 8 {
-            let index = self.entries.len();
-            self.entries.push((key, make()));
+        let index = if let Some(index) = self.entries.iter().position(|(known, _)| {
+            known.len() == changed.len()
+                && known
+                    .iter()
+                    .zip(changed)
+                    .all(|(&(id, fires), &(event, now))| id == event.id() && fires == now)
+        }) {
             index
         } else {
-            let index = self.replace;
-            self.replace = (index + 1) % self.entries.len();
-            self.entries[index] = (key, make());
-            index
+            let key = changed
+                .iter()
+                .map(|&(event, fires)| (event.id(), fires))
+                .collect();
+            let entry = (key, make());
+            if self.entries.len() < 8 {
+                let index = self.entries.len();
+                self.entries.push(entry);
+                index
+            } else {
+                let index = self.replace;
+                self.replace = (index + 1) % self.entries.len();
+                self.entries[index] = entry;
+                index
+            }
         };
         &self.entries[index].1
     }
@@ -521,9 +534,10 @@ where
             write,
         );
     }
-    let mut sources: Vec<EventDomain<E>> = Vec::with_capacity(moves.len());
+    let cached = cache.is_some();
+    let mut sources: Vec<EventDomain<E>> = Vec::with_capacity(if cached { 0 } else { moves.len() });
     let mut moved_plans = Vec::new();
-    let mut key = Vec::with_capacity(if cache.is_some() { moves.len() } else { 0 });
+    let mut changed = Vec::with_capacity(if cached { moves.len() } else { 0 });
     let mut transitions: Vec<(SignalRef, (u8, u8))> = Vec::new();
     let mut comb_read = false;
     let mut any_moved = false;
@@ -540,28 +554,48 @@ where
         transitions.push((info.signal, (old, new)));
         comb_read |= info.comb_read;
         let fires = info.fires(known(old), edge);
-        if cache.is_some() {
-            key.push((id, fires));
-        }
-        if fires {
-            let address = executor.backend().id_to_addr_slice()[id];
-            sources.push(EventDomain {
-                eval_apply: event,
-                eval_only: executor.backend().resolve_eval_only_event(&address),
-                apply: executor.backend().resolve_apply_event(&address),
-            });
-        }
-        if let Some(Some(plan)) = plans.get(id) {
-            moved_plans.push(plan);
+        if cached {
+            changed.push((event, fires));
+        } else {
+            if fires {
+                let address = executor.backend().id_to_addr_slice()[id];
+                sources.push(EventDomain {
+                    eval_apply: event,
+                    eval_only: executor.backend().resolve_eval_only_event(&address),
+                    apply: executor.backend().resolve_apply_event(&address),
+                });
+            }
+            if let Some(Some(plan)) = plans.get(id) {
+                moved_plans.push(plan);
+            }
         }
     }
     if !any_moved {
         return Ok(EdgeOutcome::Unchanged);
     }
     let uncached;
-    let make = || DerivedTickPlan::merge(sources, moved_plans);
+    let make = || {
+        // Resolving phase handles and collecting constituent plans belongs to
+        // a cache miss. Hits still inspect and drive the actual signal levels
+        // above, and evaluate gate predicates when the retained plan runs.
+        for &(event, fires) in &changed {
+            let id = event.id();
+            if fires {
+                let address = executor.backend().id_to_addr_slice()[id];
+                sources.push(EventDomain {
+                    eval_apply: event,
+                    eval_only: executor.backend().resolve_eval_only_event(&address),
+                    apply: executor.backend().resolve_apply_event(&address),
+                });
+            }
+            if let Some(Some(plan)) = plans.get(id) {
+                moved_plans.push(plan);
+            }
+        }
+        DerivedTickPlan::merge(sources, moved_plans)
+    };
     let plan = if let Some(cache) = cache {
-        cache.plan(key, make)
+        cache.plan(&changed, make)
     } else {
         uncached = make();
         &uncached
