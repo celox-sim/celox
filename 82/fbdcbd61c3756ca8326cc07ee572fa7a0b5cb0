@@ -1,6 +1,1 @@
-Revision history for #2467:
-
-rev 2 (rebase) 2026-10-28 17:13 UTC — Correct the validation summary: all script tests passed.
-rev 1 (initial) 2026-10-28 17:13 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2467,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5bdb5102261260fa19faf7ac5836319a78c8a376","timestamp_iso":"2026-10-28T17:13:23Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"5bdb5102261260fa19faf7ac5836319a78c8a376","new_sha":"6194e6cfb8ced8448b9773ac5c583600ff30fc6e","timestamp_iso":"2026-10-28T17:13:23Z","reason":"Correct the validation summary: all script tests passed.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5bdb5102261260fa19faf7ac5836319a78c8a376...6194e6cfb8ced8448b9773ac5c583600ff30fc6e"}]} -->
+Build documentation tests with the vtest profile too: with tests no longer at opt-level 0 they otherwise recompiled the workspace (seen in this PR's own run).
