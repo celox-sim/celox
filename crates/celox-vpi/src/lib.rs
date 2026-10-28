@@ -810,32 +810,34 @@ fn with_runtime<R>(operation: impl FnOnce(&dyn VpiState) -> R) -> Option<R> {
     })
 }
 
-fn with_runtime_mut<R>(operation: impl FnOnce(&mut dyn VpiState) -> R) -> Option<R> {
-    with_host(|host| {
-        borrow_cell_mut(&host.runtime, |runtime| {
-            let result = runtime
-                .as_mut()
-                .map(|runtime| operation(runtime.state_mut()));
-            if result.is_some() {
-                host.values_dirty.set(true);
-            }
-            result
-        })
+fn with_runtime_mut<R>(
+    host: &VpiHost,
+    operation: impl FnOnce(&mut dyn VpiState) -> R,
+) -> Option<R> {
+    borrow_cell_mut(&host.runtime, |runtime| {
+        let result = runtime
+            .as_mut()
+            .map(|runtime| operation(runtime.state_mut()));
+        if result.is_some() {
+            host.values_dirty.set(true);
+        }
+        result
     })
 }
 
 /// The untimed program instance of the session, whose regions the VPI host
 /// schedules itself; `None` for a timed simulation.
-fn with_instance_mut<R>(operation: impl FnOnce(&mut NativeProgramInstance) -> R) -> Option<R> {
-    with_host(|host| {
-        borrow_cell_mut(&host.runtime, |runtime| match runtime {
-            Some(Runtime::Untimed(instance)) => {
-                let result = operation(instance);
-                host.values_dirty.set(true);
-                Some(result)
-            }
-            _ => None,
-        })
+fn with_instance_mut<R>(
+    host: &VpiHost,
+    operation: impl FnOnce(&mut NativeProgramInstance) -> R,
+) -> Option<R> {
+    borrow_cell_mut(&host.runtime, |runtime| match runtime {
+        Some(Runtime::Untimed(instance)) => {
+            let result = operation(instance);
+            host.values_dirty.set(true);
+            Some(result)
+        }
+        _ => None,
     })
 }
 
@@ -1653,11 +1655,9 @@ pub unsafe extern "C" fn vpi_put_value(
         return ptr::null_mut();
     };
     if flags == VPI_RELEASE_FLAG {
-        let released = with_host(|host| {
-            borrow_cell_mut(&host.forced_values, |forced| forced.remove(&identity))
-        });
+        let released = borrow_cell_mut(&host.forced_values, |forced| forced.remove(&identity));
         let succeeded = released.is_none_or(|released| {
-            with_runtime_mut(|runtime| {
+            with_runtime_mut(&host, |runtime| {
                 let Some(signal) = id.resolve(runtime) else {
                     return false;
                 };
@@ -1677,19 +1677,17 @@ pub unsafe extern "C" fn vpi_put_value(
                     let (old_value, old_mask) = runtime.get_four_state(signal.signal);
                     let old_level = logic_level(&old_value, &old_mask);
                     let new_level = logic_level(&released_value, &released_mask);
-                    with_host(|host| {
-                        borrow_cell_mut(&host.pending_writes, |pending| {
-                            record_pending_write(
-                                pending,
-                                id,
-                                identity,
-                                released_value.clone(),
-                                released_mask.clone(),
-                                signal.domain_kind,
-                                old_level,
-                                new_level,
-                            );
-                        })
+                    borrow_cell_mut(&host.pending_writes, |pending| {
+                        record_pending_write(
+                            pending,
+                            id,
+                            identity,
+                            released_value.clone(),
+                            released_mask.clone(),
+                            signal.domain_kind,
+                            old_level,
+                            new_level,
+                        );
                     });
                 }
                 runtime.set_four_state(signal.signal, released_value, released_mask);
@@ -1697,7 +1695,9 @@ pub unsafe extern "C" fn vpi_put_value(
             })
             .unwrap_or(false)
         });
-        return if succeeded && (callbacks::is_running() || flush_pending_writes()) {
+        return if succeeded
+            && (callbacks::is_running_for_host(&host) || flush_pending_writes_for_host(&host))
+        {
             reference
         } else {
             ptr::null_mut()
@@ -1732,7 +1732,7 @@ pub unsafe extern "C" fn vpi_put_value(
         );
         return reference;
     }
-    if apply_signal_value(id, identity, bits, mask, flags) {
+    if apply_signal_value(&host, id, identity, bits, mask, flags) {
         reference
     } else {
         ptr::null_mut()
@@ -1740,6 +1740,7 @@ pub unsafe extern "C" fn vpi_put_value(
 }
 
 fn apply_signal_value(
+    host: &VpiHost,
     id: SignalSelection,
     identity: VpiSignalIdentity,
     bits: BigUint,
@@ -1747,37 +1748,36 @@ fn apply_signal_value(
     flags: i32,
 ) -> bool {
     let force_deposited = if flags == VPI_FORCE_FLAG {
-        let deposited = with_host(|host| {
-            borrow_cell(&host.forced_values, |forced| {
-                forced.get(&identity).map(|forced| {
-                    (
-                        forced.deposited_value.clone(),
-                        forced.deposited_mask.clone(),
-                    )
-                })
+        let deposited = borrow_cell(&host.forced_values, |forced| {
+            forced.get(&identity).map(|forced| {
+                (
+                    forced.deposited_value.clone(),
+                    forced.deposited_mask.clone(),
+                )
             })
         })
         .or_else(|| {
-            with_runtime(|runtime| Some(runtime.get_four_state(id.signal(runtime)?))).flatten()
+            borrow_cell(&host.runtime, |runtime| {
+                let runtime = runtime.as_ref()?.state();
+                Some(runtime.get_four_state(id.signal(runtime)?))
+            })
         });
         let Some((deposited_value, deposited_mask)) = deposited else {
             return false;
         };
         Some((deposited_value, deposited_mask))
-    } else if with_host(|host| {
-        borrow_cell_mut(&host.forced_values, |forced| {
-            forced.get_mut(&identity).is_some_and(|forced| {
-                forced.deposited_value = bits.clone();
-                forced.deposited_mask = mask.clone();
-                true
-            })
+    } else if borrow_cell_mut(&host.forced_values, |forced| {
+        forced.get_mut(&identity).is_some_and(|forced| {
+            forced.deposited_value = bits.clone();
+            forced.deposited_mask = mask.clone();
+            true
         })
     }) {
         return true;
     } else {
         None
     };
-    let succeeded = with_runtime_mut(|runtime| {
+    let succeeded = with_runtime_mut(host, |runtime| {
         let Some(domain_kind) = id.domain_kind(runtime) else {
             return false;
         };
@@ -1795,19 +1795,17 @@ fn apply_signal_value(
         }
         // A timed simulation schedules the edges of its host writes itself.
         if runtime.schedules_writes() {
-            with_host(|host| {
-                borrow_cell_mut(&host.pending_writes, |pending| {
-                    record_pending_write(
-                        pending,
-                        id,
-                        identity,
-                        bits.clone(),
-                        mask.clone(),
-                        domain_kind,
-                        old_level,
-                        new_level,
-                    );
-                })
+            borrow_cell_mut(&host.pending_writes, |pending| {
+                record_pending_write(
+                    pending,
+                    id,
+                    identity,
+                    bits.clone(),
+                    mask.clone(),
+                    domain_kind,
+                    old_level,
+                    new_level,
+                );
             });
         }
         true
@@ -1815,22 +1813,20 @@ fn apply_signal_value(
     .unwrap_or(false);
     if succeeded {
         if let Some((deposited_value, deposited_mask)) = force_deposited {
-            with_host(|host| {
-                borrow_cell_mut(&host.forced_values, |forced| {
-                    forced.insert(
-                        identity,
-                        ForcedValue {
-                            value: bits,
-                            mask,
-                            deposited_value,
-                            deposited_mask,
-                        },
-                    );
-                })
+            borrow_cell_mut(&host.forced_values, |forced| {
+                forced.insert(
+                    identity,
+                    ForcedValue {
+                        value: bits,
+                        mask,
+                        deposited_value,
+                        deposited_mask,
+                    },
+                );
             });
         }
     }
-    succeeded && (callbacks::is_running() || flush_pending_writes())
+    succeeded && (callbacks::is_running_for_host(host) || flush_pending_writes_for_host(host))
 }
 
 fn has_inertial_writes() -> bool {
@@ -1841,28 +1837,33 @@ fn has_inertial_writes() -> bool {
 /// A callback on an edge generated here can enqueue the next round, but its
 /// deposits must not change the values sampled by that edge's FF kernel.
 fn flush_inertial_writes() -> bool {
-    let writes = with_host(|host| std::mem::take(&mut *host.inertial_writes.borrow_mut()));
+    with_host(flush_inertial_writes_for_host)
+}
+
+fn flush_inertial_writes_for_host(host: &VpiHost) -> bool {
+    let writes = std::mem::take(&mut *host.inertial_writes.borrow_mut());
     if writes.is_empty() {
         return false;
     }
     for (identity, deposit) in writes {
         if !apply_signal_value(
+            host,
             deposit.id,
             identity,
             deposit.value,
             deposit.mask,
             VPI_NO_DELAY,
         ) {
-            callbacks::fail("failed to apply an inertial VPI write".into());
+            callbacks::fail_for_host(host, "failed to apply an inertial VPI write".into());
             return true;
         }
     }
-    flush_pending_writes();
+    flush_pending_writes_for_host(host);
     true
 }
 
-fn flush_pending_writes() -> bool {
-    let pending = with_host(|host| borrow_cell_mut(&host.pending_writes, std::mem::take));
+fn flush_pending_writes_for_host(host: &VpiHost) -> bool {
+    let pending = borrow_cell_mut(&host.pending_writes, std::mem::take);
     if !pending.settle {
         return true;
     }
@@ -1873,9 +1874,9 @@ fn flush_pending_writes() -> bool {
             batch.deposits.insert(*id, value.clone());
         }
         let overridden = replay_overrides.keys().copied().collect::<HashSet<_>>();
-        let running = callbacks::is_running();
+        let running = callbacks::is_running_for_host(host);
         let result: Result<Vec<celox_design::StateAddr>, celox::RuntimeErrorCode> =
-            with_instance_mut(|runtime| {
+            with_instance_mut(host, |runtime| {
                 let active_edges = batch
                     .active_signals
                     .into_iter()
@@ -1897,7 +1898,7 @@ fn flush_pending_writes() -> bool {
                     .collect::<Vec<_>>();
                 apply_pending_deposits(runtime, &batch.deposits);
                 let context = RuntimeFormatContext {
-                    tb_time: Some(celox_vpi_current_time()),
+                    tb_time: Some(callbacks::current_time_for_host(host)),
                     scope: None,
                 };
                 if running {
@@ -1912,27 +1913,26 @@ fn flush_pending_writes() -> bool {
         let active_edges = match result {
             Ok(active_edges) => active_edges,
             Err(error) => {
-                callbacks::fail(error.to_string());
+                callbacks::fail_for_host(host, error.to_string());
                 return false;
             }
         };
-        process_runtime_events();
-        if callbacks::has_error() {
+        process_runtime_events_for_host(host);
+        if callbacks::has_error_for_host(host) {
             return false;
         }
         if running {
             // Input-edge callbacks observe the state before any FF runs. Keep
             // the compiled evaluate/apply kernel fused: the observation point
             // is at its entry, not between sampling and committing every FF.
-            callbacks::dispatch_value_changes();
-            if callbacks::finish_requested() {
+            callbacks::dispatch_value_changes_for_host(host);
+            if callbacks::finish_requested_for_host(host) {
                 return true;
             }
-            let wrote_inputs =
-                with_host(|host| borrow_cell(&host.pending_writes, |pending| pending.settle));
-            let result = with_instance_mut(|runtime| {
+            let wrote_inputs = borrow_cell(&host.pending_writes, |pending| pending.settle);
+            let result = with_instance_mut(host, |runtime| {
                 let context = RuntimeFormatContext {
-                    tb_time: Some(celox_vpi_current_time()),
+                    tb_time: Some(callbacks::current_time_for_host(host)),
                     scope: None,
                 };
                 if wrote_inputs {
@@ -1942,77 +1942,77 @@ fn flush_pending_writes() -> bool {
             })
             .unwrap_or(Ok(()));
             if let Err(error) = result {
-                callbacks::fail(error.to_string());
+                callbacks::fail_for_host(host, error.to_string());
                 return false;
             }
-            process_runtime_events();
-            if callbacks::has_error() || callbacks::finish_requested() {
-                return !callbacks::has_error();
+            process_runtime_events_for_host(host);
+            if callbacks::has_error_for_host(host) || callbacks::finish_requested_for_host(host) {
+                return !callbacks::has_error_for_host(host);
             }
-            callbacks::dispatch_value_changes();
-            if callbacks::finish_requested() {
+            callbacks::dispatch_value_changes_for_host(host);
+            if callbacks::finish_requested_for_host(host) {
                 return true;
             }
             let mut callback_iterations = 0usize;
             loop {
-                let callback_pending =
-                    with_host(|host| borrow_cell_mut(&host.pending_writes, std::mem::take));
+                let callback_pending = borrow_cell_mut(&host.pending_writes, std::mem::take);
                 if !callback_pending.settle {
                     break;
                 }
                 callback_iterations += 1;
                 if callback_iterations > 1_000_000 {
-                    callbacks::fail(
+                    callbacks::fail_for_host(
+                        host,
                         "VPI callback writes exceeded 1000000 intermediate settlements".to_string(),
                     );
                     return false;
                 }
                 let overrides = callback_pending.deposits.clone();
-                with_host(|host| {
-                    borrow_cell_mut(&host.pending_writes, |pending| *pending = callback_pending)
-                });
-                if !flush_pending_writes() {
+                borrow_cell_mut(&host.pending_writes, |pending| *pending = callback_pending);
+                if !flush_pending_writes_for_host(host) {
                     return false;
                 }
-                if callbacks::finish_requested() {
+                if callbacks::finish_requested_for_host(host) {
                     return true;
                 }
                 replay_overrides.extend(overrides.clone());
                 final_deposits.extend(overrides);
-                callbacks::dispatch_value_changes();
-                if callbacks::finish_requested() {
+                callbacks::dispatch_value_changes_for_host(host);
+                if callbacks::finish_requested_for_host(host) {
                     return true;
                 }
             }
         }
     }
-    let result: Result<(), celox::RuntimeErrorCode> = with_instance_mut(|runtime| {
+    let result: Result<(), celox::RuntimeErrorCode> = with_instance_mut(host, |runtime| {
         apply_pending_deposits(runtime, &final_deposits);
         runtime.settle_active_edges_with_context(
             &[],
             RuntimeFormatContext {
-                tb_time: Some(celox_vpi_current_time()),
+                tb_time: Some(callbacks::current_time_for_host(host)),
                 scope: None,
             },
         )
     })
     .unwrap_or(Ok(()));
     if let Err(error) = result {
-        callbacks::fail(error.to_string());
+        callbacks::fail_for_host(host, error.to_string());
         return false;
     }
-    process_runtime_events();
-    !callbacks::has_error()
+    process_runtime_events_for_host(host);
+    !callbacks::has_error_for_host(host)
 }
 
 fn process_runtime_events() {
-    let time = celox_vpi_current_time();
-    let events = with_host(|host| {
-        borrow_cell_mut(&host.runtime, |runtime| {
-            runtime
-                .as_mut()
-                .map(|runtime| runtime.drain_runtime_events(time))
-        })
+    with_host(process_runtime_events_for_host)
+}
+
+fn process_runtime_events_for_host(host: &VpiHost) {
+    let time = callbacks::current_time_for_host(host);
+    let events = borrow_cell_mut(&host.runtime, |runtime| {
+        runtime
+            .as_mut()
+            .map(|runtime| runtime.drain_runtime_events(time))
     })
     .unwrap_or_default();
     for event in events {
@@ -2030,20 +2030,23 @@ fn process_runtime_events() {
                 let _ = output.write_all(&report.render());
                 let _ = output.write_all(b"\n");
                 if report.severity == Severity::Fatal {
-                    callbacks::fail(celox_message_diagnostic(&report.message));
+                    callbacks::fail_for_host(host, celox_message_diagnostic(&report.message));
                 }
             }
             // Like `vpiStop` in `vpi_control`, `$stop` ends a run that has
             // no interactive mode.
-            RuntimeEvent::Finish | RuntimeEvent::Stop => callbacks::request_finish(),
+            RuntimeEvent::Finish | RuntimeEvent::Stop => callbacks::request_finish_for_host(host),
             RuntimeEvent::Missed { count } => {
                 let _ = writeln!(
                     std::io::stderr().lock(),
                     "celox-vpi: missed {count} runtime events"
                 );
-                callbacks::fail(format!(
-                    "missed {count} runtime events; a fatal assertion may have been overwritten"
-                ));
+                callbacks::fail_for_host(
+                    host,
+                    format!(
+                        "missed {count} runtime events; a fatal assertion may have been overwritten"
+                    ),
+                );
             }
         }
     }
