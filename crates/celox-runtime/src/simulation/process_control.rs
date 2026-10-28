@@ -152,6 +152,15 @@ impl<B: SimBackend> SimulationState<B> {
         ) {
             return self.event_request(executor, now, current, op, request);
         }
+        if matches!(
+            op,
+            ProcessOp::SemaphoreNew
+                | ProcessOp::SemaphorePut
+                | ProcessOp::SemaphoreGet
+                | ProcessOp::SemaphoreTryGet
+        ) {
+            return self.semaphore_request(executor, current, op, request);
+        }
         let count = match op {
             ProcessOp::SelfHandle | ProcessOp::Observe => 0,
             ProcessOp::Srandom | ProcessOp::SetRandstate => 2,
@@ -317,7 +326,11 @@ impl<B: SimBackend> SimulationState<B> {
                             && self.process_state.activations[target]
                                 .control
                                 .events
-                                .is_empty())
+                                .is_empty()
+                            && self.process_state.activations[target]
+                                .control
+                                .semaphore
+                                .is_none())
                     {
                         self.wake_controlled(target);
                     }
@@ -377,7 +390,11 @@ impl<B: SimBackend> SimulationState<B> {
             | ProcessOp::TriggerNonblocking
             | ProcessOp::WaitEvent
             | ProcessOp::Triggered
-            | ProcessOp::WaitTriggered => unreachable!(),
+            | ProcessOp::WaitTriggered
+            | ProcessOp::SemaphoreNew
+            | ProcessOp::SemaphorePut
+            | ProcessOp::SemaphoreGet
+            | ProcessOp::SemaphoreTryGet => unreachable!(),
         }
         if let Some(result) = request.results.first() {
             executor.backend_mut().set(result.id, value);
@@ -557,4 +574,161 @@ impl<B: SimBackend> SimulationState<B> {
             event.waiters.extend(suspended);
         }
     }
+
+    /// Operations on semaphores (IEEE 1800-2023 15.3).
+    fn semaphore_request<E: SimulationExecutor<Backend = B>>(
+        &mut self,
+        executor: &mut E,
+        current: usize,
+        op: ProcessOp,
+        request: &HostRequestSite<SignalRef>,
+    ) -> Result<bool, Halt> {
+        let count = if op == ProcessOp::SemaphoreNew { 1 } else { 2 };
+        if request.args.len() != count || request.results.len() != 1 {
+            return Err(SimulatorErrorCode::InternalError.into());
+        }
+        let args: Vec<u32> = request
+            .args
+            .iter()
+            .map(|arg| executor.backend().get_as(arg.id))
+            .collect();
+        let arg = |index: usize| args[index];
+        let mut value = 0u32;
+        let mut blocked = false;
+        if op == ProcessOp::SemaphoreNew {
+            let heap = executor.backend_mut().heap_mut();
+            self.forget_collected_semaphores(heap);
+            value = heap.new_object(SCHEDULER_CLASS, 0);
+            let keys = i64::from(arg(0) as i32);
+            self.process_state.semaphores.insert(
+                value,
+                crate::timing::Semaphore {
+                    keys,
+                    queue: Default::default(),
+                },
+            );
+        } else {
+            let handle = arg(0);
+            let keys = arg(1) as i32;
+            if keys < 0 {
+                return Err(error(format!(
+                    "semaphore {} with a negative key count",
+                    match op {
+                        ProcessOp::SemaphorePut => "put",
+                        ProcessOp::SemaphoreGet => "get",
+                        _ => "try_get",
+                    }
+                )));
+            }
+            let keys = keys as u32;
+            if !self.process_state.semaphores.contains_key(&handle) {
+                return Err(error(if handle == 0 {
+                    "method called on a null semaphore handle"
+                } else {
+                    "invalid semaphore handle"
+                }));
+            }
+            match op {
+                ProcessOp::SemaphorePut => {
+                    self.process_state.semaphores.get_mut(&handle).unwrap().keys += i64::from(keys);
+                    self.serve_semaphore(handle);
+                }
+                ProcessOp::SemaphoreTryGet => {
+                    let semaphore = self.process_state.semaphores.get_mut(&handle).unwrap();
+                    if semaphore.keys >= i64::from(keys) {
+                        semaphore.keys -= i64::from(keys);
+                        value = 1;
+                    }
+                }
+                ProcessOp::SemaphoreGet => {
+                    // Available keys are taken at once; otherwise the process
+                    // waits in arrival order (15.3.3).
+                    let semaphore = self.process_state.semaphores.get_mut(&handle).unwrap();
+                    if semaphore.keys >= i64::from(keys) {
+                        semaphore.keys -= i64::from(keys);
+                    } else {
+                        // An entry of an earlier process with this ID is stale.
+                        semaphore.queue.retain(|&(process, _)| process != current);
+                        semaphore.queue.push_back((current, keys));
+                        self.process_state.activations[current].control.semaphore = Some(handle);
+                        blocked = true;
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        if let Some(result) = request.results.first() {
+            executor.backend_mut().set(result.id, value);
+        }
+        Ok(!blocked
+            && self.process_state.activations[current].live
+            && self.process_state.activations[current]
+                .control
+                .suspended
+                .is_none())
+    }
+
+    /// Forget the semaphores the heap collected that no process waits for,
+    /// once there are twice as many as the last time this looked.
+    fn forget_collected_semaphores(&mut self, heap: &celox_heap::Heap) {
+        let state = &mut self.process_state;
+        if state.semaphores.len() < state.semaphore_limit {
+            return;
+        }
+        state.semaphores.retain(|&handle, semaphore| {
+            heap.contains_object(handle) || !semaphore.queue.is_empty()
+        });
+        state.semaphore_limit = (2 * state.semaphores.len()).max(64);
+    }
+
+    /// Stop process `process`, which ended without its keys, from waiting
+    /// for a semaphore: the processes behind it may get keys now.
+    pub(super) fn cancel_semaphore_wait(&mut self, process: usize) {
+        let Some(handle) = self.process_state.activations[process]
+            .control
+            .semaphore
+            .take()
+        else {
+            return;
+        };
+        if let Some(semaphore) = self.process_state.semaphores.get_mut(&handle) {
+            semaphore.queue.retain(|&(waiter, _)| waiter != process);
+            self.serve_semaphore(handle);
+        }
+    }
+
+    /// Give the keys of semaphore `handle` to its waiting processes in
+    /// arrival order, while the first one's request can be met (15.3.2,
+    /// 15.3.3).
+    fn serve_semaphore(&mut self, handle: u32) {
+        loop {
+            let Some(&(process, keys)) = self.process_state.semaphores[&handle].queue.front()
+            else {
+                return;
+            };
+            let waiting = self
+                .process_state
+                .activations
+                .get(process)
+                .is_some_and(|activation| {
+                    activation.live && activation.control.semaphore == Some(handle)
+                });
+            let semaphore = self.process_state.semaphores.get_mut(&handle).unwrap();
+            if waiting {
+                if semaphore.keys < i64::from(keys) {
+                    return;
+                }
+                semaphore.keys -= i64::from(keys);
+            }
+            semaphore.queue.pop_front();
+            if waiting {
+                self.process_state.activations[process].control.semaphore = None;
+                self.wake_controlled(process);
+            }
+        }
+    }
 }
+
+/// The class of the heap objects the scheduler owns, such as semaphores: no
+/// class identifier, which hashes names to nonzero values, is all ones.
+const SCHEDULER_CLASS: u32 = u32::MAX;

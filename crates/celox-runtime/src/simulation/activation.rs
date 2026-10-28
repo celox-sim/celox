@@ -24,6 +24,9 @@ pub struct ProcessControl {
     /// wait read: a trigger of one checks the predicate again.
     #[serde(default)]
     pub observed_events: Vec<u32>,
+    /// The semaphore whose keys the process is blocked on.
+    #[serde(default)]
+    pub semaphore: Option<u32>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SuspendedProcess {
@@ -331,6 +334,14 @@ impl<B: SimBackend> SimulationState<B> {
     }
 
     pub(super) fn retire_activation(&mut self, process: usize) {
+        if self
+            .process_state
+            .activations
+            .get(process)
+            .is_some_and(|activation| !activation.live)
+        {
+            self.cancel_semaphore_wait(process);
+        }
         let mut next = Some(process);
         while let Some(id) = next {
             let has_children = self

@@ -474,6 +474,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Unsupported: tristate in top-level IO",
                         ),
+                        (
+                            "icarus",
+                            "semaphores::get_waits_until_enough_keys_are_put"
+                            | "semaphores::try_get_takes_only_available_keys",
+                        ) => ("compile_error", "compile", "Invalid module instantiation"),
+                        ("icarus", "semaphores::one_key_admits_one_process_at_a_time") => {
+                            ("compile_error", "compile", "semaphore doesn't name a type")
+                        }
                         ("icarus", "events::events_of_class_objects") => {
                             ("compile_error", "compile", "Invalid class item")
                         }

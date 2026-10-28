@@ -22,7 +22,8 @@ pub(super) fn ordinary_variable(
     !variable.value.is_some_and(|id|matches!(&native.expression(id).kind,celox_sv_syntax::ExprKind::Name(name) if name.spelling=="new")) || names_class(data_type, native)
 }
 
-/// Whether `data_type` names a class declared in the source.
+/// Whether `data_type` names a class declared in the source or a built-in
+/// class constructed with `new` (IEEE 1800-2023 15.3).
 pub(super) fn names_class(
     data_type: celox_sv_syntax::TypeId,
     native: &celox_sv_syntax::Declarations,
@@ -30,10 +31,18 @@ pub(super) fn names_class(
     let celox_sv_syntax::DataTypeKind::Named(segments) = &native.data_type(data_type).kind else {
         return false;
     };
-    let [segment] = segments.as_slice() else {
-        return false;
+    let segment = match segments.as_slice() {
+        [segment] => segment,
+        [std, segment] if std.name.spelling == "std" => segment,
+        _ => return false,
     };
     let name = normalize_identifier(&segment.name.spelling);
+    if name == "semaphore" {
+        return true;
+    }
+    if segments.len() > 1 {
+        return false;
+    }
     native
         .classes
         .iter()

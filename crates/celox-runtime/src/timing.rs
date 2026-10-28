@@ -466,6 +466,25 @@ pub struct ProcessState {
     /// The time [`Self::events`] was last cleared of expired events.
     #[serde(default)]
     pub event_time: u64,
+    /// The semaphores, by handle (IEEE 1800-2023 15.3).
+    #[serde(default)]
+    pub semaphores: std::collections::BTreeMap<u32, Semaphore>,
+    /// The number of semaphores at which the next new one first forgets
+    /// those the heap collected.
+    #[serde(default)]
+    pub semaphore_limit: usize,
+}
+
+/// A semaphore: its keys and the processes waiting for them (IEEE 1800-2023
+/// 15.3).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Semaphore {
+    /// The available keys; the initial count may be negative (15.3.1).
+    pub keys: i64,
+    /// The blocked `get` calls as (process, keys), in arrival order (15.3.3).
+    /// An entry is stale once the process no longer waits for this semaphore
+    /// in [`crate::simulation::ProcessControl::semaphore`].
+    pub queue: std::collections::VecDeque<(usize, u32)>,
 }
 
 /// The synchronization object of a named event (IEEE 1800-2023 15.5).

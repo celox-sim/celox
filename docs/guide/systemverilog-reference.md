@@ -1003,6 +1003,21 @@ the processes that use them; other processes are compiled as before. Named event
 state files: saving is refused while a process waits for an event or a trigger
 of the current time step is still visible to `triggered`.
 
+### Semaphores {#semaphores}
+
+`semaphore` and `std::semaphore` are the built-in class of IEEE 1800-2023
+15.3: `new(keyCount = 0)` creates one with that many keys, which may be
+negative. `put(n = 1)` returns keys, `get(n = 1)` takes them, blocking until
+enough are available, and `try_get(n = 1)` takes them only if enough are
+available, returning 1, and returns 0 otherwise. A `get` takes available keys
+at once; the processes that wait obtain keys in arrival order, so a later
+small request waits behind an earlier large one (15.3.3). A negative key
+count is a run-time error. `get` is a task: functions cannot call it. A
+process killed or disabled while it waits stops waiting, and the processes
+behind it may get keys. A semaphore is a heap object, so collection reclaims
+it once no handle reaches it; like other objects, it keeps a portable state
+file from being saved while a variable holds it.
+
 ### Variable lifetimes
 
 Variable lifetimes follow IEEE 1800-2023 6.21. Outside classes, a variable

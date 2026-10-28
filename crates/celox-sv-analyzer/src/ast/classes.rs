@@ -502,7 +502,11 @@ pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> 
                 .and_then(Type::class)
                 .map(str::to_owned)
         })
-        .or_else(|| (name == "process").then(|| super::processes::CLASS.to_owned()))
+        .or_else(|| match name {
+            "process" => Some(super::processes::CLASS.to_owned()),
+            "semaphore" => Some(super::semaphores::CLASS.to_owned()),
+            _ => None,
+        })
 }
 
 /// Whether class `name` is declared in the source of the current scope.
@@ -640,9 +644,13 @@ pub(super) fn base_arguments<'a>(
 }
 
 /// Whether class `name` is a built-in class whose objects the scheduler owns:
-/// `process` (IEEE 1800-2023 9.7) or the type of named events (15.5).
+/// `process` (IEEE 1800-2023 9.7), `semaphore` (15.3) or the type of named
+/// events (15.5).
 pub(super) fn builtin(name: &str) -> bool {
-    name == super::processes::CLASS || name == super::events::CLASS
+    matches!(
+        name,
+        super::processes::CLASS | super::events::CLASS | super::semaphores::CLASS
+    )
 }
 
 /// The handle type of class `name`, if it is a class.
@@ -677,13 +685,16 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>) -> Vec<String> {
 
 /// The handle type of class `name`.
 pub(super) fn handle(name: &str) -> Type {
-    let mut ty = Type::new(if name == super::processes::CLASS {
-        TypeKind::Process
-    } else if name == super::events::CLASS {
-        TypeKind::Event
-    } else {
-        TypeKind::Object
-    });
+    let mut ty = Type::new(
+        // A semaphore is a heap object, which collection reclaims.
+        if name == super::processes::CLASS {
+            TypeKind::Process
+        } else if name == super::events::CLASS {
+            TypeKind::Event
+        } else {
+            TypeKind::Object
+        },
+    );
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal((HANDLE_WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),

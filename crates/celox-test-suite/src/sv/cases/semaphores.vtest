@@ -1,0 +1,65 @@
+(group semaphores (category sequential))
+
+; IEEE 1800-2023 15.3: a semaphore of one key admits one process at a time,
+; here through a class property as uvm_sequence_base and uvm_reg use it.
+(case one_key_admits_one_process_at_a_time
+ (source "mutex.sv" #"module Top(output int order, output int most);
+ class Sequence;
+  semaphore lock;
+  int active;
+  function new(); lock = new(1); endfunction
+  task run(int id);
+   lock.get(1);
+   active++;
+   if (active > most) most = active;
+   #2;
+   order = order * 10 + id;
+   active--;
+   lock.put(1);
+  endtask
+ endclass
+ Sequence s;
+ initial begin
+  s = new;
+  fork s.run(1); s.run(2); s.run(3); join
+ end
+endmodule"#)
+ (top Top) (run_until 1) (assert_eq order 0)
+ (run_until 6) (assert_eq order 123) (assert_eq most 1))
+
+; 15.3.1, 15.3.2, 15.3.4: keys start at keyCount, try_get takes them only when
+; enough are available, and put returns them.
+(case try_get_takes_only_available_keys
+ (source "try_get.sv" #"module Top(output bit [5:0] q);
+ semaphore s;
+ initial begin
+  s = new;
+  q[0] = s.try_get() == 0;
+  s.put(3);
+  q[1] = s.try_get(2) != 0;
+  q[2] = s.try_get(2) == 0;
+  q[3] = s.try_get() != 0;
+  s = new(2);
+  q[4] = s.try_get(2) != 0;
+  q[5] = s.try_get(1) == 0;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 63))
+
+; 15.3.2, 15.3.3: get takes available keys at once and otherwise blocks until
+; enough keys are put.
+(case get_waits_until_enough_keys_are_put
+ (source "get.sv" #"module Top(output int order, output int at);
+ semaphore s;
+ initial begin
+  s = new(1);
+  fork
+   begin s.get(3); order = order * 10 + 1; at = $time; end
+   begin #1 s.get(1); order = order * 10 + 2; end
+   begin #2 s.put(1); #1 s.put(2); end
+  join
+ end
+endmodule"#)
+ (top Top) (run_until 1) (assert_eq order 2)
+ (run_until 2) (assert_eq order 2)
+ (run_until 3) (assert_eq order 21) (assert_eq at 3))

@@ -977,6 +977,9 @@ pub(in crate::ast) fn constructor(
         }
         _ => return Ok(None),
     };
+    if class_name == super::super::semaphores::CLASS {
+        return super::super::semaphores::new(tree, arguments, native, dimensions).map(Some);
+    }
     if classes::builtin(&class_name) {
         return Err(unsupported("constructing a process or event with new"));
     }

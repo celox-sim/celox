@@ -70,6 +70,11 @@ pub(super) fn qualified_type(path: &[celox_sv_syntax::TypeSegment]) -> Option<Ty
         [std, process] if std.name.spelling == "std" && process.name.spelling == "process" => {
             Some(classes::handle(CLASS))
         }
+        [std, semaphore]
+            if std.name.spelling == "std" && semaphore.name.spelling == "semaphore" =>
+        {
+            Some(classes::handle(super::semaphores::CLASS))
+        }
         [std, process, state]
             if std.name.spelling == "std"
                 && process.name.spelling == "process"

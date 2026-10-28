@@ -146,6 +146,7 @@ mod classes;
 mod comb_process;
 mod events;
 mod processes;
+mod semaphores;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
 pub(crate) mod const_functions;
