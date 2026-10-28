@@ -1,0 +1,1 @@
+Synchronize the stack after #2333 merged; current master adds gated wait metadata (native image version 50). Revalidate the rebased native image and VPI consumers before publishing the rebased branches.
