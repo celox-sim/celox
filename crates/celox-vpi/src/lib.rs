@@ -354,8 +354,9 @@ enum HandleKind {
 /// Opaque allocation referenced by the C `vpiHandle` pointer type.
 pub struct VpiHandleObject {
     kind: HandleKind,
-    name: CString,
-    full_name: CString,
+    // Unnamed temporary handles share the empty C string without allocating it.
+    name: Option<CString>,
+    full_name: Option<CString>,
     value_string: Vec<u8>,
     value_vector: Vec<VpiVecVal>,
 }
@@ -868,8 +869,8 @@ fn new_object_handle(object: ObjectRef) -> VpiHandle {
     .unwrap_or_default();
     Box::into_raw(Box::new(VpiHandleObject {
         kind: HandleKind::Object(object),
-        name: c_string(&name),
-        full_name: c_string(&full_name),
+        name: Some(c_string(&name)),
+        full_name: Some(c_string(&full_name)),
         value_string: Vec::new(),
         value_vector: Vec::new(),
     }))
@@ -881,8 +882,8 @@ fn new_iterator_handle(objects: Vec<ObjectRef>) -> VpiHandle {
     }
     Box::into_raw(Box::new(VpiHandleObject {
         kind: HandleKind::Iterator { objects, next: 0 },
-        name: c_string(""),
-        full_name: c_string(""),
+        name: None,
+        full_name: None,
         value_string: Vec::new(),
         value_vector: Vec::new(),
     }))
@@ -891,8 +892,8 @@ fn new_iterator_handle(objects: Vec<ObjectRef>) -> VpiHandle {
 fn new_constant_handle(value: i32) -> VpiHandle {
     Box::into_raw(Box::new(VpiHandleObject {
         kind: HandleKind::Constant(value),
-        name: c_string(""),
-        full_name: c_string(""),
+        name: None,
+        full_name: None,
         value_string: Vec::new(),
         value_vector: Vec::new(),
     }))
@@ -901,8 +902,8 @@ fn new_constant_handle(value: i32) -> VpiHandle {
 fn new_callback_handle(id: u64) -> VpiHandle {
     Box::into_raw(Box::new(VpiHandleObject {
         kind: HandleKind::Callback(id),
-        name: c_string(""),
-        full_name: c_string(""),
+        name: None,
+        full_name: None,
         value_string: Vec::new(),
         value_vector: Vec::new(),
     }))
@@ -1272,8 +1273,13 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
         return ptr::null_mut();
     };
     match property {
-        VPI_NAME => handle.name.as_ptr().cast_mut(),
-        VPI_FULL_NAME => handle.full_name.as_ptr().cast_mut(),
+        VPI_NAME => handle.name.as_deref().unwrap_or(c"").as_ptr().cast_mut(),
+        VPI_FULL_NAME => handle
+            .full_name
+            .as_deref()
+            .unwrap_or(c"")
+            .as_ptr()
+            .cast_mut(),
         VPI_DEF_NAME => {
             let HandleKind::Object(ObjectRef::Scope(id)) = handle.kind else {
                 return ptr::null_mut();
