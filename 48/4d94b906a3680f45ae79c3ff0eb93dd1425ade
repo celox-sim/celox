@@ -1,0 +1,1 @@
+Sync with master (#2411 ref arguments, #2446): ref formals are captured before inputs and skipped by the host-request scan. Address Codex 4401461491/4401473527: retained string_format reports keep only reviewed non-passing results; %p prints conditionals and functions returning class handles as handles.
