@@ -1309,7 +1309,10 @@ pub unsafe extern "C" fn vpi_get_str(property: i32, reference: VpiHandle) -> *mu
     }
 }
 
-fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
+fn value_snapshot_at(
+    host: &VpiHost,
+    id: SignalSelection,
+) -> Option<(callbacks::ValueSnapshot, usize)> {
     borrow_cell(&host.runtime, |runtime| {
         let runtime = runtime.as_ref()?.state();
         let signal = runtime.reflection().signal(id.root)?;
@@ -1326,16 +1329,30 @@ fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUin
             if !forced_values.is_empty()
                 && let Some(forced) = forced_values.get(&id.identity(runtime)?)
             {
-                return Some((forced.value.clone(), forced.mask.clone(), width));
+                return Some((
+                    callbacks::ValueSnapshot::Wide(forced.value.clone(), forced.mask.clone()),
+                    width,
+                ));
             }
+        }
+        if id.depth == 0
+            && let Some((value, mask)) = runtime.get_word(signal.signal)
+        {
+            return Some((callbacks::ValueSnapshot::Word(value, mask), width));
         }
         let (value, mask) = if id.depth == 0 {
             runtime.get_four_state(signal.signal)
         } else {
             id.read(runtime)?
         };
-        Some((value, mask, width))
+        Some((callbacks::ValueSnapshot::Wide(value, mask), width))
     })
+}
+
+fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
+    let (snapshot, width) = value_snapshot_at(host, id)?;
+    let (value, mask) = snapshot.into_big();
+    Some((value, mask, width))
 }
 
 fn format_binary(buffer: &mut Vec<u8>, value: &BigUint, mask: &BigUint, width: usize) {
@@ -1430,8 +1447,7 @@ unsafe fn write_snapshot_value(
     host: &VpiHost,
     reference: VpiHandle,
     value: *mut VpiValue,
-    bits: &BigUint,
-    mask: &BigUint,
+    snapshot: &callbacks::ValueSnapshot,
 ) {
     if value.is_null() || reference.is_null() {
         return;
@@ -1453,7 +1469,44 @@ unsafe fn write_snapshot_value(
         return;
     };
     // Safety: checked non-null above; the caller owns writable value storage.
-    encode_signal_value(handle, unsafe { &mut *value }, bits, mask, width, signed);
+    let value = unsafe { &mut *value };
+    if let callbacks::ValueSnapshot::Word(bits, mask) = snapshot {
+        match value.format {
+            VPI_SUPPRESS_VAL => return,
+            VPI_INT_VAL => {
+                let mut integer = *bits as u32;
+                if signed && width > 0 && width < 32 && (bits >> (width - 1)) & 1 != 0 {
+                    integer |= u32::MAX << width;
+                }
+                value.value.integer = integer as i32;
+                return;
+            }
+            VPI_SCALAR_VAL => {
+                value.value.scalar = if mask & 1 != 0 {
+                    if bits & 1 != 0 { VPI_X } else { VPI_Z }
+                } else if bits & 1 != 0 {
+                    VPI_1
+                } else {
+                    VPI_0
+                };
+                return;
+            }
+            _ => {}
+        }
+    }
+    match snapshot {
+        callbacks::ValueSnapshot::Wide(bits, mask) => {
+            encode_signal_value(handle, value, bits, mask, width, signed)
+        }
+        callbacks::ValueSnapshot::Word(bits, mask) => encode_signal_value(
+            handle,
+            value,
+            &BigUint::from(*bits),
+            &BigUint::from(*mask),
+            width,
+            signed,
+        ),
+    }
 }
 
 #[unsafe(no_mangle)]
