@@ -425,7 +425,9 @@ impl Plan {
         for (index, slots) in schema.processes.iter().enumerate() {
             let process = &model.processes[index];
             let unit = &sir.processes[index];
-            let reason = if slots.kind == celox_design::ProcessKind::Initializer {
+            let reason = if slots.kind == celox_design::ProcessKind::Callable {
+                Some("an explicitly invoked kernel")
+            } else if slots.kind == celox_design::ProcessKind::Initializer {
                 Some("a declaration initializer")
             } else if slots.kind == celox_design::ProcessKind::Final {
                 Some("a final procedure")

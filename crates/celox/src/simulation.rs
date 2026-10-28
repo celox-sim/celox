@@ -202,7 +202,7 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         timestamp: u64,
     ) -> Result<(), Halt> {
         match request.kind {
-            celox_design::HostRequestKind::Process => {
+            celox_design::HostRequestKind::Process | celox_design::HostRequestKind::Testbench => {
                 Err(celox_runtime::SimulatorErrorCode::InternalError.into())
             }
             celox_design::HostRequestKind::Plusargs => {

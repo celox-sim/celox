@@ -542,6 +542,9 @@ pub enum HostRequestKind {
     Scan,
     Distribution,
     Process,
+    // Append new variants: native images persist Serde variant indices.
+    /// Services owned by an explicitly invoked testbench kernel.
+    Testbench,
 }
 
 impl HostRequestKind {
@@ -554,6 +557,7 @@ impl HostRequestKind {
             Self::Scan => 4,
             Self::Distribution => 5,
             Self::Process => 6,
+            Self::Testbench => 7,
         };
         (family << 32) | site as u64
     }
@@ -567,6 +571,7 @@ impl HostRequestKind {
             4 => Self::Scan,
             5 => Self::Distribution,
             6 => Self::Process,
+            7 => Self::Testbench,
             _ => return None,
         };
         Some((family, request as u32))
@@ -707,6 +712,8 @@ pub enum ProcessKind {
     Regular,
     /// A final procedure runs only when simulation ends (IEEE 1800-2023 9.2.3).
     Final,
+    /// Invoked explicitly by its caller; never enqueued as an initial procedure.
+    Callable,
 }
 
 /// A pure expression evaluated with the storage of one waiting activation.
@@ -2263,6 +2270,7 @@ mod tests {
             HostRequestKind::Scan,
             HostRequestKind::Distribution,
             HostRequestKind::Process,
+            HostRequestKind::Testbench,
         ] {
             for site in [0, 1, u32::MAX] {
                 assert_eq!(
@@ -2271,7 +2279,7 @@ mod tests {
                 );
             }
         }
-        for invalid in [0, u32::MAX as u64, 7u64 << 32, 1u64 << 63] {
+        for invalid in [0, u32::MAX as u64, 8u64 << 32, 1u64 << 63] {
             assert_eq!(HostRequestKind::decode(invalid), None);
         }
         assert_eq!(

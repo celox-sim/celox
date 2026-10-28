@@ -378,6 +378,33 @@ mod tests {
             .clone()
     }
     #[test]
+    fn host_request_variants_preserve_existing_image_encoding() {
+        use celox_design::HostRequestKind;
+
+        // These bytes are the enum indices stored in pre-Callable images.
+        // Round trips alone would miss a simultaneous encoder/decoder change.
+        for (index, kind) in [
+            HostRequestKind::Plusargs,
+            HostRequestKind::FileIo,
+            HostRequestKind::Vcd,
+            HostRequestKind::Scan,
+            HostRequestKind::Distribution,
+            HostRequestKind::Process,
+            HostRequestKind::Testbench,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let bytes = [index as u8];
+            assert_eq!(
+                postcard::from_bytes::<HostRequestKind>(&bytes).unwrap(),
+                kind
+            );
+            assert_eq!(postcard::to_allocvec(&kind).unwrap(), bytes);
+        }
+    }
+
+    #[test]
     fn reader_ignores_runtime_prefix_and_preserves_image_and_offset() {
         let image = image();
         let suffix = image.to_container_bytes().unwrap();

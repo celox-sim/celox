@@ -564,7 +564,10 @@ impl NativeProgramImage {
     /// Whether the design has process kernels, which only a timed
     /// [`crate::Simulation`] runs.
     pub fn has_processes(&self) -> bool {
-        !self.runtime_schema.processes.is_empty()
+        self.runtime_schema
+            .processes
+            .iter()
+            .any(|process| process.kind != celox_design::ProcessKind::Callable)
     }
 
     /// The compiler-inserted override slots of a reflected signal, as
