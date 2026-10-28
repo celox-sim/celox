@@ -3935,6 +3935,14 @@
     },
     {
       "suite": "sv",
+      "name": "class::package_constant_type_arguments",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X2",
+      "note": "Package p declares W=6, word_t = bit signed [W-1:0] and the typedefs Utils#(word_t) word_utils and Utils#(bit [W:0]) wide_utils. Utils::width() returns $bits(T) and negative() whether T'('1) is negative, so read() returns 100*6 + 10*7 + 2*1 + 0 = 672 (8.25, 26.3); a caller module localparam W=29 cannot rebind W. The pinned xezim returns 923: it prints word=6,1 wide=32,1 as both Top and Wrapped without the adapter, so the inline packed type argument of wide_utils becomes the 32-bit signed default int, sv_class-X2. See verification/repros/sv_class_type_arguments_xezim.{sv,json}; Verilator passes the shared case."
+    },
+    {
+      "suite": "sv",
       "name": "class::parameter_defaults_bind_where_the_class_is_declared",
       "status": "mismatch",
       "classification": "xezim_bug",
