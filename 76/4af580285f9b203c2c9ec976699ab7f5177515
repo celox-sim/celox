@@ -1,0 +1,1 @@
+Rebased onto master after #2390, #2407, #2429 and #2444. Review fix: members of structure formals and results share the subroutine's lifetime (static tasks). The obsolete rejection of a static nested string initializer became a positive test, since #2407 allows run-time static initializers.
