@@ -288,6 +288,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::imported_member_type_dimensions",
                 "class::imported_member_type_inheritance",
                 "class::package_constant_class_defaults",
+                "class::package_constant_type_arguments",
                 "class::type_alias_lexical_scopes",
                 "class::type_alias_members",
                 "class::type_parameter_imports",
