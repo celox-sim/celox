@@ -1,0 +1,1 @@
+Rebased onto master: merged #2429's property_in into the chain-based property lookup; native_class falls through for members of structure properties. Docs: selects/packed members of properties and properties as output/inout actuals are unsupported for every property.
