@@ -2,6 +2,7 @@
   "case_files": [
     "verilator/always_comb.json",
     "verilator/class.json",
+    "verilator/concurrent_assertions.json",
     "verilator/fork.json",
     "verilator/fork_deferred.json",
     "verilator/generate.json",

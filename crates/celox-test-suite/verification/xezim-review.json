@@ -686,6 +686,10 @@
     "sv_iff_automatic_clock": {
       "title": "A wait on an automatic clock keeps an enabled iff gate after the gate was cleared",
       "standard": "IEEE 1800-2023 9.4.2.3"
+    },
+    "sv_concurrent_observed_reactive": {
+      "title": "A concurrent assertion action executes before another assertion finishes its Observed decision",
+      "standard": "IEEE 1800-2023 16.5, 16.14.1"
     }
   },
   "cases": [
@@ -4215,6 +4219,14 @@
       "classification": "xezim_bug",
       "bug": "sv_iff_automatic_clock",
       "note": "The module gate enable is cleared between the rising and falling writes to the shared automatic clock. Standalone Top/Wrapped print accepted=1 rejected=1; 9.4.2.3 requires accepted=1 rejected=0. See verification/repros/sv_iff_hierarchy_automatic.json for exact installed-build provenance and source; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "concurrent_assertions::predicates_before_all_actions",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_concurrent_observed_reactive",
+      "note": "The first assertion action sets reset=1 in Reactive. The second assertion must already have decided with reset=0 in Observed, so both counters must be 1. Installed xezim produces first=1 second=0; Verilator gives 1/1. Reproduced without the suite harness in Top and Wrapped. Exact source, commands and installed-build limitation are in verification/repros/sv_concurrent_regions.json."
     }
   ]
 }

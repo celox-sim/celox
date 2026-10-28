@@ -596,7 +596,7 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.check_vcd_rewind(record.time)?;
         self.simulator
             .validate_activation_queue_values(&record.processes)?;
-        let mut parts = self.simulator.resolve_schedule(record, &file.strings)?;
+        let mut parts = self.simulator.resolve_schedule(record, file)?;
         let host_writes = self
             .simulator
             .resolve_host_writes(&record.processes.host_writes)?;

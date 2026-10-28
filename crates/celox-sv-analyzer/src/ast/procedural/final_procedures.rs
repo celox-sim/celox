@@ -101,6 +101,7 @@ pub(super) fn effects<'a>(
                     | Stmt::WaitEvent(_)
                     | Stmt::WaitImplicit(_)
                     | Stmt::Wait(_)
+                    | Stmt::AssertionRegion { .. }
                     | Stmt::WaitFork
                     | Stmt::Fork {
                         join: celox_design::ForkJoin::All | celox_design::ForkJoin::Any,
