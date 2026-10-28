@@ -47,6 +47,14 @@ pub trait SimBackend {
     // ── evaluation ──────────────────────────────────────────────
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode>;
 
+    /// Publish all combinational effects of a single clock-level change when
+    /// its cone is proven to contain only wiring. Called only from a settled
+    /// state, immediately after the host writes the clock. `false` must leave
+    /// state unchanged and requests the normal full settle.
+    fn eval_clock_aliases(&mut self, _event: Self::Event) -> Result<bool, SimulatorErrorCode> {
+        Ok(false)
+    }
+
     /// Evaluate and apply a flip-flop domain for the given event.
     fn eval_apply_ff_at(&mut self, event: Self::Event) -> Result<(), SimulatorErrorCode>;
 
