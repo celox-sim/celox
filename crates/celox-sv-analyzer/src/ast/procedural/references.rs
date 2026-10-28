@@ -1,5 +1,6 @@
 //! Uses of reference formals and calls passing by reference that IEEE
-//! 1800-2023 forbids, checked once the bodies are bound.
+//! 1800-2023 forbids, and calls that omit an actual without a default,
+//! checked once the bodies are bound.
 use super::*;
 use crate::procedural::ParamDirection;
 use lifetimes::{expr_reads, stmt_exprs, visit_calls};
@@ -32,8 +33,36 @@ pub(in crate::ast) fn validate<'a>(
             .and_then(|directions| directions.get(position))
             .copied()
     };
-    // A net is never passed by reference (13.5.2).
+    let subroutines = subroutines.collect::<Vec<_>>();
+    let params = subroutines
+        .iter()
+        .map(|subroutine| (subroutine.name.as_str(), subroutine.params.as_slice()))
+        .collect::<HashMap<_, _>>();
     let check_call = |name: &str, args: &[Option<Expr>]| -> Result<(), AnalyzerError> {
+        let unbindable = |detail: String| AnalyzerError::InvalidCallArguments {
+            subroutine: name.strip_suffix("$virtual").unwrap_or(name).to_owned(),
+            detail,
+        };
+        if let Some(params) = params.get(name) {
+            if args.len() > params.len() {
+                return Err(unbindable(format!(
+                    "{} actuals for {} formals (IEEE 1800-2023 13.5.4)",
+                    args.len(),
+                    params.len()
+                )));
+            }
+            // An omitted actual takes the default of its formal, which
+            // shall have one (IEEE 1800-2023 13.5.3).
+            if let Some((_, missing)) = params.iter().enumerate().find(|(position, param)| {
+                param.default.is_none() && args.get(*position).is_none_or(Option::is_none)
+            }) {
+                return Err(unbindable(format!(
+                    "formal `{}` has no default and is not given an actual (IEEE 1800-2023 13.5.3)",
+                    missing.source_name
+                )));
+            }
+        }
+        // A net is never passed by reference (13.5.2).
         for (position, arg) in args.iter().enumerate() {
             if let Some(actual) = arg.as_ref().and_then(root_variable)
                 && direction(name, position).is_some_and(ParamDirection::is_reference)

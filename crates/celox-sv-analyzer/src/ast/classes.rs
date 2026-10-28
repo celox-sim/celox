@@ -273,51 +273,14 @@ impl Class {
         &self,
         arguments: &[celox_sv_syntax::Argument],
     ) -> Converted<(Vec<Option<celox_sv_syntax::ExprId>>, Vec<usize>)> {
-        let names = self
+        let formals = self
             .method("new")
             .map_or_else(Vec::new, |method| method.formals.clone());
-        let mut actuals = vec![None; names.len()];
-        let mut order = Vec::new();
-        let mut named = false;
-        for (index, argument) in arguments.iter().enumerate() {
-            let index = match &argument.name {
-                Some(name) => {
-                    named = true;
-                    let name = instances::normalize_identifier(&name.spelling);
-                    names
-                        .iter()
-                        .position(|formal| formal.as_ref() == Some(&name))
-                        .ok_or_else(|| {
-                            unsupported(format!(
-                                "constructor of class `{}` without an argument `{name}`",
-                                self.name
-                            ))
-                        })?
-                }
-                None if named => {
-                    return Err(unsupported("positional argument after named argument"));
-                }
-                None => index,
-            };
-            let Some(actual) = actuals.get_mut(index) else {
-                return Err(unsupported(format!(
-                    "constructor of class `{}` with {} arguments",
-                    self.name,
-                    arguments.len()
-                )));
-            };
-            // An omitted actual `.x()` binds its formal too.
-            if order.contains(&index) {
-                return Err(unsupported("constructor argument passed twice"));
-            }
-            order.push(index);
-            *actual = argument.value;
-        }
-        let unbound = (0..names.len())
-            .filter(|index| !order.contains(index))
-            .collect::<Vec<_>>();
-        order.extend(unbound);
-        Ok((actuals, order))
+        expression_binding::formal_arguments(
+            &Self::subroutine_name(&self.name, "new"),
+            arguments,
+            &formals,
+        )
     }
 
     /// The subroutine name of `method` of `owner`, and the variable name of
