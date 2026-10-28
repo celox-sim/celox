@@ -7244,6 +7244,11 @@ impl Ff<'_, '_> {
         }) {
             return Err(unsupported("wait condition reading a static task argument"));
         }
+        // A write of a class property does not wake a waiting process yet, so
+        // a condition that reads one would never be checked again.
+        if let Some(op) = heap_read(self.m, condition) {
+            return Err(unsupported(format!("{op} in a wait condition")));
+        }
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
@@ -7467,6 +7472,66 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
                     pending.push(name.clone());
                 }
             });
+        }
+    }
+}
+
+/// The name of an operation in `expr` that reads the class object heap,
+/// directly or through the functions it calls: a class property, or the
+/// random mode of one. Container contents are values of their handles. The
+/// default of an argument counts only where a call omits the argument.
+fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    let mut pending = vec![expr.clone()];
+    let mut calls = Vec::new();
+    let mut visited = HashSet::default();
+    let mut defaults = HashSet::default();
+    loop {
+        while let Some(expr) = pending.pop() {
+            let found = std::cell::RefCell::new(None);
+            expr_calls(&expr, &|callee| {
+                if let sv::ir::Callee::Object(op) = callee
+                    && matches!(
+                        **op,
+                        sv::ir::ObjectOp::Load(_)
+                            | sv::ir::ObjectOp::ModeGet(..)
+                            | sv::ir::ObjectOp::ConstraintModeGet(_)
+                    )
+                {
+                    found.borrow_mut().get_or_insert(op.to_string());
+                }
+                false
+            });
+            if let Some(op) = found.into_inner() {
+                return Some(op);
+            }
+            collect_calls(&expr, &mut calls);
+        }
+        let (callee, args) = calls.pop()?;
+        let sv::ir::Callee::Subroutine(name) = callee else {
+            continue;
+        };
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        for (position, param) in subroutine.params.iter().enumerate() {
+            if matches!(args.get(position), None | Some(None))
+                && let Some(default) = &param.default
+                && defaults.insert((name.clone(), position))
+            {
+                pending.push(default.clone());
+            }
+        }
+        if !visited.insert(name) {
+            continue;
+        }
+        for stmt in &subroutine.body {
+            let mut stmt = stmt.clone();
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+            stmt.visit_mut(
+                &mut |expr| pending.push(expr.clone()),
+                &mut |_| {},
+                &mut |_| {},
+            );
         }
     }
 }

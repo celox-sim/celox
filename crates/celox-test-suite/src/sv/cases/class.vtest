@@ -2806,3 +2806,28 @@ module Top(output int a, output int b);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq a 8) (assert_eq b 8))
+
+(case waits_on_static_properties
+  ; A static property is a variable of the declaring scope, so a wait in a
+  ; method wakes when another process writes it (IEEE 1800-2023 8.9, 9.4.3).
+  (source "class.sv" #"
+class C;
+    static int s_state;
+    task wait_for(int s);
+        wait (s_state >= s);
+        $display("reached %0d at %0d", s, $time);
+    endtask
+endclass
+module Top;
+    C c;
+    initial begin
+        c = new;
+        fork
+            c.wait_for(2);
+            begin #1 c.s_state = 1; #1 c.s_state = 2; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 5)
+  (expect_output "reached 2 at 2\n"))
