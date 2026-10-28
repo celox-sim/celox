@@ -4,3 +4,5 @@ rev 2 (content) 2026-10-28 16:12 UTC
 rev 1 (initial) 2026-10-28 16:12 UTC
 
 <!-- mergify-revision-data: {"schema_version":1,"pull_number":2444,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"54d947dc905358ab48b994b9d5a3c90f374b775b","timestamp_iso":"2026-10-28T16:12:19Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"54d947dc905358ab48b994b9d5a3c90f374b775b","new_sha":"7a7a02922643804cc0862450af63c929c375fd46","timestamp_iso":"2026-10-28T16:12:19Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/54d947dc905358ab48b994b9d5a3c90f374b775b...7a7a02922643804cc0862450af63c929c375fd46"}]} -->
+
+Mark the public enum/API compatibility changes explicitly in the Conventional Commit title and description; source and validation are unchanged.
