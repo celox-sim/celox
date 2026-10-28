@@ -1,0 +1,1 @@
+Enum methods apply to process::state values: status() of a process handle and the process::/std::process:: state constants (Codex r4400550547).
