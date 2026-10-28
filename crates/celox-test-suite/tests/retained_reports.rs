@@ -548,6 +548,10 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "icarus",
                             "class::foreign_generic_declaration_scope_and_equivalent_defaults",
                         ) => ("compile_error", "compile", "source_0.sv:5: syntax error"),
+                        (
+                            "icarus",
+                            "class::foreign_generic_in_a_module_with_interface_instances",
+                        ) => ("compile_error", "compile", "source_0.sv:3: syntax error"),
                         ("icarus", "class::foreign_generic_inherited_constants") => {
                             ("compile_error", "compile", "source_0.sv:3: syntax error")
                         }

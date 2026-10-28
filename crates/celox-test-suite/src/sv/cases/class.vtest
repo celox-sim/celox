@@ -3156,3 +3156,28 @@ module Top(output int w);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq w 108))
+(case foreign_generic_in_a_module_with_interface_instances
+  (source "package.sv" #"
+package p;
+    class C #(type T = int);
+        static T v;
+        static function void set(T value);
+            v = value;
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+interface bus_if;
+    logic x;
+endinterface
+module Top(output int got);
+    import p::*;
+    bus_if b();
+    initial begin
+        C#(byte)::set(2);
+        got = C#(byte)::v;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq got 2))

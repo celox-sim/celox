@@ -139,16 +139,27 @@ impl Registry {
             // An owner may import a caller's static field while binding T's
             // methods. Returning those symbols to the caller must not redeclare
             // storage that the caller's own class declarations already supply.
+            // Storage the symbols already hold, as a signal or as state, is
+            // not declared again under the other kind: a scope analyzed inside
+            // another, such as a module bound to an interface instance, starts
+            // from symbols this registry already extended.
+            let present = symbols
+                .signals
+                .iter()
+                .chain(&symbols.state_signals)
+                .map(|signal| signal.name())
+                .collect::<HashSet<_>>();
             let local_storage = extra
                 .signals
                 .iter()
                 .chain(&extra.state_signals)
                 .filter(|signal| {
-                    local_classes.iter().any(|class| {
-                        signal.name().strip_prefix(class).is_some_and(|suffix| {
-                            suffix.starts_with("::") || suffix.starts_with("#(")
+                    present.contains(signal.name())
+                        || local_classes.iter().any(|class| {
+                            signal.name().strip_prefix(class).is_some_and(|suffix| {
+                                suffix.starts_with("::") || suffix.starts_with("#(")
+                            })
                         })
-                    })
                 })
                 .map(|signal| signal.name().to_owned())
                 .collect::<HashSet<_>>();
