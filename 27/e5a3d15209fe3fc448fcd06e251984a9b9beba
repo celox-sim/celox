@@ -1,0 +1,1 @@
+Address Codex review 5679124714: check omitted-argument defaults (and nested defaults) when deciding whether a call can make a host request, evaluate subroutine inputs before a later host request, and render run-time formats byte for byte.
