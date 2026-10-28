@@ -2474,10 +2474,14 @@ unsafe extern "C" fn drive_two_edges_with_distinct_data(data: *mut VpiCbData) ->
     let d = EDGE_DATA_HANDLE.load(Ordering::SeqCst) as VpiHandle;
     unsafe {
         put_int(clk, 1);
+        put_int(d, 7);
         put_int(d, 1);
         put_int(clk, 0);
+        put_int(d, 9);
         put_int(d, 2);
         put_int(clk, 1);
+        put_int(d, 8);
+        put_int(d, 2);
     }
     0
 }
