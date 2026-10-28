@@ -275,10 +275,20 @@ compiler. Tiered execution promotes the DUT and testbench kernels together.
 
 The compiled process stores its continuation before requesting a clock/reset
 wait or a host service such as display, assertions, random generation or component
-calls. The Veryl event scheduler resumes these kernels and retains clock order,
-private process state, tick limits and heap roots. This does not change
-`clock_gen` or `clock.next` timing. Compiler-only builds retain the same lowering
-and serialized kernel metadata without requiring a host JIT.
+calls. A generated SIR scheduler resumes the TB kernels in declaration order,
+tracks their clock waits, and advances all clock generators together. It composes
+the same compiled clock-domain scheduler used by timed simulation. TB arithmetic,
+settlement requests and ordinary clock progress stay inside generated code;
+host services and bounded safe points return to the runtime so tiered compilation
+can be adopted. Observed slots still use the runtime event queue when tracing,
+components or other observers require it.
+
+Scheduler continuations, saved process-local values, event baselines and clock
+state have layout-owned homes. Wait releases precede runnable TB processes, which
+run before the timestamp's clock edges. Simultaneous edges sample before commits;
+tick limits drain pending falling edges and reset releases. The reference
+scheduler remains available for differential checks. Compiler-only builds retain
+the same lowering and serialized kernel metadata without requiring a host JIT.
 
 ## Public API boundary
 

@@ -29,6 +29,8 @@ use rand_pcg::Pcg64;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 
+mod clock_batch;
+mod compiled;
 mod native;
 
 // ── Public types ───────────────────────────────────────────────────────
@@ -1091,6 +1093,9 @@ fn exec_testbench<B: SimBackend>(
 ) -> ExecResult {
     let blocks: Vec<_> = testbench.processes().collect();
     let clocks = initialize_process_clocks(sim, testbench);
+    if let Some(result) = compiled::run(sim, testbench, ctx) {
+        return result;
+    }
     // One process on one clock spends time only in that clock's periods, so
     // stepping them in place is the whole schedule.
     if blocks.is_empty() {
@@ -1169,6 +1174,7 @@ fn exec_processes<B: SimBackend>(
         state.synchronize_event_values(&sim.backend);
         sim.component_simulation = Some(state);
     }
+    let clock_batch = clock_batch::ClockBatch::new(sim);
     let mut now = 0;
     // Reuse per-slot batches instead of allocating on each rising and falling
     // edge; their capacities can grow when a wait introduces another clock.
@@ -1295,6 +1301,7 @@ fn exec_processes<B: SimBackend>(
                 !fired.is_empty(),
                 ctx,
                 &mut moves,
+                clock_batch.as_ref(),
             );
             if !matches!(result, ExecResult::Continue) {
                 return result;
@@ -1354,6 +1361,7 @@ fn exec_processes<B: SimBackend>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step_process_events<B: SimBackend>(
     sim: &mut Simulator<B>,
     events: &[(B::Event, u8)],
@@ -1362,6 +1370,7 @@ fn step_process_events<B: SimBackend>(
     rising: bool,
     ctx: &mut DetailedExecContext,
     moves: &mut Vec<(B::Event, celox_runtime::Edge)>,
+    clock_batch: Option<&clock_batch::ClockBatch>,
 ) -> ExecResult {
     let mut state = sim
         .component_simulation
@@ -1423,10 +1432,10 @@ fn step_process_events<B: SimBackend>(
                 },
             )
         }));
-        let result = sim
-            .edges(moves)
-            .map(|()| None)
-            .map_err(|error| error.to_string());
+        let result = clock_batch
+            .and_then(|batch| batch.run(sim, events, time))
+            .unwrap_or_else(|| sim.edges(moves).map_err(|error| error.to_string()))
+            .map(|()| None);
         // A later reset can return to the queue. Its pre-write baseline must
         // include every clock and derived-domain update performed here.
         state.synchronize_event_values(&sim.backend);
@@ -2057,6 +2066,169 @@ mod tests {
         );
     }
 
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn native_clock_batches_preserve_odd_periods_and_tb_before_edge_order() {
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset_async_low, q: output logic<8>) {
+                always_ff (clk, rst) { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst fast: $tb::clock_gen #(period: 3);
+                inst slow: $tb::clock_gen #(period: 4);
+                var rst_n: reset_async_low;
+                var enable: logic;
+                var gated: reset_async_low;
+                assign gated = rst_n && enable;
+                var a: logic<8>;
+                var b: logic<8>;
+                inst ca: Counter(clk: fast, rst: gated, q: a);
+                inst cb: Counter(clk: slow, rst: gated, q: b);
+                initial {
+                    rst_n = 1;
+                    enable = 0;
+                    fast.next(4);
+                    $assert(a == 0 && b == 0);
+                    enable = 1;
+                    fast.next(4);
+                    // At time 24 both clocks are due, but the TB runs first.
+                    $assert(a == 4 && b == 3);
+                    fast.next(4);
+                    $assert(a == 8 && b == 6);
+                    $finish();
+                }
+                initial { slow.next(100); }
+            }
+        "#;
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let batch = clock_batch::ClockBatch::new(&sim);
+            assert_eq!(batch.is_some(), mode != crate::SchedulerMode::Reference);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            if let Some(batch) = batch {
+                assert_eq!(sim.backend.get_as::<u64>(batch.count_slot()), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn native_tb_scheduler_runs_processes_and_multiple_clocks_without_host_roundtrips() {
+        let source = r#"
+            module Counter(clk: input clock, q: output bit<32>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst fast: $tb::clock_gen #(period: 3);
+                inst slow: $tb::clock_gen #(period: 4);
+                var a: u32; var b: u32; var observed: u32;
+                inst ca: Counter(clk: fast, q: a);
+                inst cb: Counter(clk: slow, q: b);
+                initial { for i in 0..128 { fast.next(); observed = a; } $finish(); }
+                initial { for i in 0..128 { slow.next(); } }
+            }
+        "#;
+        // No clock-wait batching in the source: both TB processes resume each cycle.
+        let mut results = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters();
+            results.push((
+                sim.get_as::<u32>(sim.signal("a")),
+                sim.get_as::<u32>(sim.signal("b")),
+                sim.get_as::<u32>(sim.signal("observed")),
+            ));
+            if mode == crate::SchedulerMode::Compiled {
+                assert!(counters.0 < 10, "native entries: {counters:?}");
+                assert!(counters.1 < 3, "host edge batches: {counters:?}");
+            }
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[1], (128, 96, 128));
+    }
+
+    #[test]
+    fn compiled_tb_settle_continuations_are_not_limited_to_one_byte() {
+        let mut source =
+            String::from("#[test(Top)] module Top { var a: bit<8>; let q: bit<8> = a + 1; ");
+        for _ in 0..260 {
+            source.push_str("initial { $assert(q == 1); } ");
+        }
+        source.push_str("initial { $finish(); } }");
+        let mut sim = Simulator::builder(&source, "Top")
+            .four_state(false)
+            .build_interpreter()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+
+    #[test]
+    fn native_tb_dynamic_clock_count_preserves_dut_writes() {
+        let source = r#"
+            module Register(clk: input clock, d: input bit<32>, q: output bit<32>) {
+                let next_value: bit<32> = d + 1;
+                always_ff { q = next_value; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var d: u32; var q: u32;
+                inst dut: Register(clk, d, q);
+                function change_input() -> u32 { d = 7; return 1; }
+                initial {
+                    d=1; clk.next(); $assert(q==2);
+                    clk.next(change_input()); $assert(q==8); $finish();
+                }
+            }
+        "#;
+        fn run<B: SimBackend>(mut sim: Simulator<B>) {
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+        }
+        run(Simulator::builder(source, "Top")
+            .four_state(false)
+            .build_native()
+            .unwrap());
+        run(Simulator::builder(source, "Top")
+            .four_state(false)
+            .build_interpreter()
+            .unwrap());
+        #[cfg(feature = "cranelift")]
+        run(Simulator::builder(source, "Top")
+            .four_state(false)
+            .build()
+            .unwrap());
+    }
+
     #[test]
     fn concurrent_tb_preserves_direct_async_reset_writes() {
         let source = r#"
@@ -2204,7 +2376,10 @@ mod tests {
         ));
         assert_eq!(
             run_compiled_testbench_to_finish(&mut sim, &tb),
-            TestResult::Pass
+            TestResult::Pass,
+            "q={}, counters={:?}",
+            sim.get_as::<u32>(sim.signal("q")),
+            compiled::take_counters()
         );
     }
 

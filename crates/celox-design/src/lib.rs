@@ -1354,7 +1354,8 @@ pub struct SchedulerSlots<A> {
     /// Where a shared combinational settle continues.
     pub cont: A,
     /// Set when state combinational logic reads may have changed since its
-    /// last settle.
+    /// last settle. The caller initializes this before every scheduler run;
+    /// timed runs set it even after a checkpoint restore or partial-slot exit.
     pub dirty: A,
     /// The number of time slots the run ran.
     pub count: A,

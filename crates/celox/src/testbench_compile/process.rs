@@ -563,5 +563,110 @@ pub(crate) fn lower(
         });
     }
     program.set_kernels(kernels);
+    allocate_scheduler(runtime, program);
     Ok(())
+}
+
+fn allocate_scheduler(runtime: &mut RuntimeProgram, program: &mut TestbenchProgram<Addr>) {
+    fn collect(body: &[SemanticStatement<Addr>], clocks: &mut Vec<(Addr, u64)>) {
+        for statement in body {
+            match statement {
+                SemanticStatement::ClockNext {
+                    clock_event,
+                    period,
+                    ..
+                }
+                | SemanticStatement::ResetAssert {
+                    clock_event,
+                    period,
+                    ..
+                } => {
+                    if !clocks.iter().any(|(a, _)| a == clock_event) {
+                        clocks.push((*clock_event, (*period).max(2)));
+                    }
+                }
+                SemanticStatement::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    collect(then_block, clocks);
+                    collect(else_block, clocks);
+                }
+                SemanticStatement::For { body, .. } => collect(body, clocks),
+                _ => {}
+            }
+        }
+    }
+    let mut clocks: Vec<_> = program
+        .clocks()
+        .iter()
+        .map(|c| (c.event, c.period.max(2)))
+        .collect();
+    let declared = clocks.len();
+    collect(program.statements(), &mut clocks);
+    let mut slot = || {
+        let a = runtime.design.allocate_testbench_slot(64, false);
+        runtime.runtime_schema.testbench_read_roots.insert(a);
+        a
+    };
+    let control = std::array::from_fn(|_| slot());
+    let processes = program
+        .kernels()
+        .iter()
+        .map(|_| std::array::from_fn(|_| slot()))
+        .collect();
+    let clock_slots = clocks
+        .iter()
+        .map(|_| std::array::from_fn(|_| slot()))
+        .collect();
+    let locals = program
+        .kernels()
+        .iter()
+        .map(|_| {
+            program
+                .private_variables()
+                .iter()
+                .map(|&a| {
+                    let copy = runtime.design.allocate_testbench_copy(a);
+                    runtime.runtime_schema.testbench_read_roots.insert(copy);
+                    (a, copy)
+                })
+                .collect()
+        })
+        .collect();
+    let event_sources: Vec<_> = runtime
+        .design
+        .state_objects
+        .iter()
+        .filter(|(_, m)| {
+            matches!(
+                m.kind,
+                celox_design::DomainKind::ClockPosedge
+                    | celox_design::DomainKind::ClockNegedge
+                    | celox_design::DomainKind::ResetAsyncLow
+                    | celox_design::DomainKind::ResetAsyncHigh
+            )
+        })
+        .map(|(&a, _)| a)
+        .collect();
+    let baselines = event_sources
+        .into_iter()
+        .map(|a| {
+            let copy = runtime.design.allocate_testbench_copy(a);
+            runtime.runtime_schema.testbench_read_roots.insert(copy);
+            (a, copy)
+        })
+        .collect();
+    program.set_scheduler(TestbenchScheduler {
+        entry: None,
+        control,
+        processes,
+        clocks: clock_slots,
+        events: clocks.iter().map(|c| c.0).collect(),
+        periods: clocks.iter().map(|c| c.1).collect(),
+        declared,
+        locals,
+        baselines,
+    });
 }

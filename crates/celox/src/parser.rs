@@ -398,6 +398,24 @@ pub(crate) fn project_scheduled_rtl(
             })
             .map_err(|error| ParserError::illegal_context("testbench SIR lowering", error, None))?;
     }
+    // TB expressions and processes are appended after symbolic scheduling.
+    // Keep its per-process control arrays aligned with the final kernel list.
+    if let Some(scheduler) = &mut runtime.runtime_schema.scheduler {
+        while scheduler.slots.wake.len() < runtime.runtime_schema.processes.len() {
+            scheduler
+                .slots
+                .wake
+                .push(runtime.design.allocate_testbench_slot(64, false));
+            scheduler
+                .slots
+                .waiting
+                .push(runtime.design.allocate_testbench_slot(8, false));
+            scheduler
+                .slots
+                .baseline
+                .push(runtime.design.allocate_testbench_slot(8, false));
+        }
+    }
     runtime.testbench = testbench;
     dump_addr_map_if_requested(&runtime, diagnostics);
     Ok((sir, runtime))

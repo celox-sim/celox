@@ -4,6 +4,9 @@
 //! execution. No Veryl AST, parser ID, simulator backend, or runtime handle is
 //! part of the bytecode representation.
 
+mod scheduler;
+pub use scheduler::*;
+
 use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -305,6 +308,7 @@ pub struct TestbenchKernel<A> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchProgram<A> {
     kernels: Vec<TestbenchKernel<A>>,
+    scheduler: Option<TestbenchScheduler<A>>,
     statements: Vec<SemanticStatement<A>>,
     process_lengths: Vec<usize>,
     clocks: Vec<TestbenchClock<A>>,
@@ -320,6 +324,7 @@ impl<A> Default for TestbenchProgram<A> {
     fn default() -> Self {
         Self {
             kernels: Vec::new(),
+            scheduler: None,
             statements: Vec::new(),
             process_lengths: Vec::new(),
             clocks: Vec::new(),
@@ -334,6 +339,12 @@ impl<A> Default for TestbenchProgram<A> {
 }
 
 impl<A> TestbenchProgram<A> {
+    pub fn scheduler(&self) -> Option<&TestbenchScheduler<A>> {
+        self.scheduler.as_ref()
+    }
+    pub fn set_scheduler(&mut self, scheduler: TestbenchScheduler<A>) {
+        self.scheduler = Some(scheduler);
+    }
     pub fn kernels(&self) -> &[TestbenchKernel<A>] {
         &self.kernels
     }
@@ -344,6 +355,7 @@ impl<A> TestbenchProgram<A> {
     pub fn new(statements: Vec<SemanticStatement<A>>) -> Self {
         Self {
             kernels: Vec::new(),
+            scheduler: None,
             process_lengths: vec![statements.len()],
             clocks: Vec::new(),
             private_variables: Vec::new(),
@@ -708,6 +720,7 @@ pub type ExecutableComponentBinding<Event, Signal> = ComponentBinding<Event, Sig
 
 pub struct ExecutableTestbench<Event, Signal> {
     kernels: Vec<TestbenchKernel<Signal>>,
+    scheduler: Option<TestbenchScheduler<Signal>>,
     statements: Vec<ExecutableStatement<Event, Signal>>,
     process_lengths: Vec<usize>,
     clocks: Vec<TestbenchClock<Event>>,
@@ -720,6 +733,13 @@ pub struct ExecutableTestbench<Event, Signal> {
 }
 
 impl<Event, Signal> ExecutableTestbench<Event, Signal> {
+    pub fn scheduler(&self) -> Option<&TestbenchScheduler<Signal>> {
+        self.scheduler.as_ref()
+    }
+    pub fn with_scheduler(mut self, scheduler: Option<TestbenchScheduler<Signal>>) -> Self {
+        self.scheduler = scheduler;
+        self
+    }
     pub fn kernels(&self) -> &[TestbenchKernel<Signal>] {
         &self.kernels
     }
@@ -738,6 +758,7 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
     ) -> Self {
         Self {
             kernels: Vec::new(),
+            scheduler: None,
             process_lengths: vec![statements.len()],
             clocks: Vec::new(),
             private_signals: Vec::new(),

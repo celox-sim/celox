@@ -476,6 +476,10 @@ pub fn bind_testbench_program<B: SimBackend>(
         .into_iter()
         .map(|component| bind_component(backend, component, rtl_writes))
         .collect::<Option<Vec<_>>>()?;
+    let scheduler = program
+        .scheduler()
+        .cloned()
+        .map(|s| s.map(|a| backend.resolve_signal(&a)));
     let statements = program
         .into_statements()
         .into_iter()
@@ -489,6 +493,7 @@ pub fn bind_testbench_program<B: SimBackend>(
     Some(
         ExecutableTestbench::from_processes(processes, random_seed)
             .with_kernels(kernels)
+            .with_scheduler(scheduler)
             .with_clocks(clocks)
             .with_private_signals(private_signals)
             .with_component_runtime(

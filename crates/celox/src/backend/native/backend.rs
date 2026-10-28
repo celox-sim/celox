@@ -313,7 +313,7 @@ impl SharedNativeCode {
         // full settle. Export names are part of the native runtime contract.
         let mut clock_alias_funcs = vec![None; id_to_event.len()];
         for entry in &program_image.code_entries {
-            if let Some(id) = entry.name.strip_prefix(super::clock_aliases::EXPORT_PREFIX) {
+            if let Some(id) = entry.name.strip_prefix(crate::clock_aliases::EXPORT_PREFIX) {
                 let id = id
                     .strip_suffix(']')
                     .and_then(|id| id.parse::<usize>().ok())
@@ -787,7 +787,25 @@ impl NativeProgramImage {
                     usize::MAX
                 }
             });
-        // The derived-edge units follow the kernels and the scheduler.
+        let testbench_units = self
+            .testbench
+            .as_ref()
+            .and_then(|tb| tb.scheduler())
+            .and_then(|scheduler| scheduler.entry)
+            .map_or(0, |unit| {
+                if unit
+                    == self
+                        .runtime_schema
+                        .processes
+                        .len()
+                        .saturating_add(scheduler_units)
+                {
+                    1
+                } else {
+                    usize::MAX
+                }
+            });
+        // Derived-edge units follow process and scheduler entries.
         let derived_units = 2 * self.runtime_schema.derived_edges.len();
         let derived_in_range = self.runtime_schema.derived_edges.iter().all(|units| {
             units.rising < self.process_offsets.len() && units.falling < self.process_offsets.len()
@@ -799,9 +817,55 @@ impl NativeProgramImage {
                     .processes
                     .len()
                     .saturating_add(scheduler_units)
+                    .saturating_add(testbench_units)
                     .saturating_add(derived_units)
         {
             return Err("process kernels and their control slots disagree".into());
+        }
+        if let Some(tb) = &self.testbench
+            && let Some(scheduler) = tb.scheduler()
+        {
+            let valid_slot = |a: &AbsoluteAddr| {
+                self.design
+                    .state_objects
+                    .get(a)
+                    .is_some_and(|info| info.width == 64 && !info.is_4state)
+            };
+            if scheduler.processes.len() != tb.kernels().len()
+                || scheduler.locals.len() != tb.kernels().len()
+                || scheduler.clocks.len() != scheduler.events.len()
+                || scheduler.clocks.len() != scheduler.periods.len()
+                || scheduler.declared > scheduler.clocks.len()
+                || scheduler.periods.iter().any(|&period| period < 2)
+                || !scheduler
+                    .control
+                    .iter()
+                    .chain(scheduler.processes.iter().flatten())
+                    .chain(scheduler.clocks.iter().flatten())
+                    .all(valid_slot)
+                || scheduler
+                    .events
+                    .iter()
+                    .any(|a| !self.design.state_objects.contains_key(a))
+                || scheduler
+                    .locals
+                    .iter()
+                    .flatten()
+                    .chain(&scheduler.baselines)
+                    .any(|(a, b)| {
+                        let Some(a) = self.design.state_objects.get(a) else {
+                            return true;
+                        };
+                        let Some(b) = self.design.state_objects.get(b) else {
+                            return true;
+                        };
+                        a.width != b.width
+                            || a.array_dims != b.array_dims
+                            || a.is_4state != b.is_4state
+                    })
+            {
+                return Err("invalid testbench scheduler storage".into());
+            }
         }
         if self.runtime_schema.process_frames.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their activation frames disagree".into());
@@ -2742,8 +2806,8 @@ fn compile_program_with_outlining_threshold(
     if !options.four_state && !options.native_force_support && force_bindings.is_empty() {
         let (_, clocks) = crate::backend::event_ids(sir);
         for (id, clock) in clocks.into_iter().enumerate() {
-            if let Some(units) = super::clock_aliases::extract(sir, clock) {
-                let name = format!("{}{}]", super::clock_aliases::EXPORT_PREFIX, id);
+            if let Some(units) = crate::clock_aliases::extract(sir, clock) {
+                let name = format!("{}{}]", crate::clock_aliases::EXPORT_PREFIX, id);
                 let compiled = compile_units(
                     &units,
                     layout,
@@ -4257,11 +4321,9 @@ mod tests {
             .unwrap()
             .into_program_image();
         let previous = image.code_entries.len();
-        image.code_entries.retain(|entry| {
-            !entry
-                .name
-                .starts_with(super::super::clock_aliases::EXPORT_PREFIX)
-        });
+        image
+            .code_entries
+            .retain(|entry| !entry.name.starts_with(crate::clock_aliases::EXPORT_PREFIX));
         assert_eq!(previous, image.code_entries.len() + 1);
         let image =
             NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap()).unwrap();

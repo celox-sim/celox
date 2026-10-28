@@ -174,6 +174,13 @@ impl RuntimeDesign {
         address
     }
 
+    pub(crate) fn allocate_testbench_copy(&mut self, source: AbsoluteAddr) -> AbsoluteAddr {
+        let info = self.semantic.state_objects[&source].clone();
+        let address = self.allocate_testbench_slot(info.width, false);
+        self.semantic.state_objects.insert(address, info);
+        address
+    }
+
     fn from_projection(
         semantic: celox_design::ElaboratedDesign<AbsoluteAddr>,
         frontend: FrontendLookup,

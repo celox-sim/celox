@@ -9,9 +9,9 @@ use crate::ir::{
 };
 use celox_sir::BasicBlock;
 
-pub(super) const EXPORT_PREFIX: &str = "clock_alias_update[";
+pub(crate) const EXPORT_PREFIX: &str = "clock_alias_update[";
 
-pub(super) fn extract(
+pub(crate) fn extract(
     program: &LaidOutProgram,
     clock: AbsoluteAddr,
 ) -> Option<Vec<ExecutionUnit<RegionedAbsoluteAddr>>> {

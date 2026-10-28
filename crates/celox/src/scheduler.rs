@@ -30,6 +30,8 @@
 //! and every design or kernel this module does not qualify, runs in the
 //! reference loop.
 
+mod testbench;
+
 use celox_design::{
     CounterKind, DomainKind, ProcessStatus, RuntimeEventKind, SCHEDULER_CLOCKS,
     SCHEDULER_FLAG_WIDTH, SCHEDULER_TIME_WIDTH, STABLE_REGION, SchedulerExit, SchedulerSlots,
@@ -76,52 +78,53 @@ const WAIT_STATUSES: [ProcessStatus; 4] = [
 
 /// Generate the compiled scheduler of `program`, if it qualifies, and record
 /// for every process kernel whether the scheduler runs it.
-pub(crate) fn attach(program: &mut LaidOutProgram) {
+pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
         return;
     };
     let kernels = program.runtime.runtime_schema.processes.len();
-    let (fallback, unit, events, clocks, kernel_events) = match Plan::new(program, &schema.slots) {
-        Err(reason) => (
-            vec![Some(reason); kernels],
-            None,
-            Vec::new(),
-            Vec::new(),
-            vec![Vec::new(); kernels],
-        ),
-        Ok(plan) => {
-            let fallback = plan.fallback.clone();
-            // Without kernels, slots of host clocks alone.
-            let unit = (plan.kernels.iter().any(Option::is_some) || !plan.clocks.is_empty())
-                .then(|| plan.generate(program, &schema.slots));
-            let tracked = plan.tracked();
-            let kernel_events = plan
-                .kernels
-                .iter()
-                .map(|kernel| {
-                    kernel
-                        .iter()
-                        .flat_map(|kernel| &kernel.writes)
-                        .map(|event| {
-                            tracked
-                                .binary_search(event)
-                                .expect("the scheduler's kernels write tracked events")
-                        })
-                        .collect()
-                })
-                .collect();
-            let events = tracked
-                .into_iter()
-                .map(|event| plan.events[event].signal)
-                .collect();
-            let clocks = plan
-                .clocks
-                .iter()
-                .map(|&event| plan.events[event].signal)
-                .collect();
-            (fallback, unit, events, clocks, kernel_events)
-        }
-    };
+    let (fallback, unit, events, clocks, kernel_events) =
+        match Plan::new(program, &schema.slots, wiring_clocks) {
+            Err(reason) => (
+                vec![Some(reason); kernels],
+                None,
+                Vec::new(),
+                Vec::new(),
+                vec![Vec::new(); kernels],
+            ),
+            Ok(plan) => {
+                let fallback = plan.fallback.clone();
+                // Without kernels, slots of host clocks alone.
+                let unit = (plan.kernels.iter().any(Option::is_some) || !plan.clocks.is_empty())
+                    .then(|| plan.generate(program, &schema.slots));
+                let tracked = plan.tracked();
+                let kernel_events = plan
+                    .kernels
+                    .iter()
+                    .map(|kernel| {
+                        kernel
+                            .iter()
+                            .flat_map(|kernel| &kernel.writes)
+                            .map(|event| {
+                                tracked
+                                    .binary_search(event)
+                                    .expect("the scheduler's kernels write tracked events")
+                            })
+                            .collect()
+                    })
+                    .collect();
+                let events = tracked
+                    .into_iter()
+                    .map(|event| plan.events[event].signal)
+                    .collect();
+                let clocks = plan
+                    .clocks
+                    .iter()
+                    .map(|&event| plan.events[event].signal)
+                    .collect();
+                (fallback, unit, events, clocks, kernel_events)
+            }
+        };
     let scheduler = program
         .runtime
         .runtime_schema
@@ -136,6 +139,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram) {
         scheduler.unit = Some(program.sir.processes.len());
         program.sir.processes.push(unit);
     }
+    testbench::attach(program);
 }
 
 /// An event the scheduler records edges of.
@@ -148,6 +152,8 @@ struct Event {
     /// A clock edge rather than an asynchronous reset.
     clock: bool,
     eval_apply: Vec<Unit>,
+    /// Wiring-only clock changes do not invalidate the datapath.
+    aliases: Option<Vec<Unit>>,
     /// The units of the path of several triggered domains, which a design
     /// without kernels lacks; required when more than one event can have an
     /// edge in a slot.
@@ -249,7 +255,11 @@ enum DomainSettle {
 }
 
 impl Plan {
-    fn new(program: &LaidOutProgram, slots: &SchedulerSlots<AbsoluteAddr>) -> Result<Self, String> {
+    fn new(
+        program: &LaidOutProgram,
+        slots: &SchedulerSlots<AbsoluteAddr>,
+        wiring_clocks: bool,
+    ) -> Result<Self, String> {
         let schema = &program.runtime.runtime_schema;
         let model = ScheduleModel::derive(&program.design, schema);
         if program.layout().four_state {
@@ -319,6 +329,9 @@ impl Plan {
                 clock,
                 eval_apply: units(&sir.eval_apply_ffs)?
                     .ok_or("an event domain has no separate units")?,
+                aliases: wiring_clocks
+                    .then(|| crate::clock_aliases::extract(program, signal))
+                    .flatten(),
                 eval_only: units(&sir.eval_only_ffs)?,
                 apply: units(&sir.apply_ffs)?,
             };
@@ -403,7 +416,13 @@ impl Plan {
         // asynchronous resets by writes.
         let undriven = |signal: AbsoluteAddr| {
             !rtl_stores.contains(&signal)
-                && !kernel_stores.iter().any(|stores| stores.contains(&signal))
+                && !kernel_stores
+                    .iter()
+                    .zip(&schema.processes)
+                    .any(|(stores, process)| {
+                        process.kind != celox_design::ProcessKind::Callable
+                            && stores.contains(&signal)
+                    })
                 && !nba_targets.contains_key(&signal)
         };
         let clocks: Vec<usize> = events
@@ -599,7 +618,15 @@ impl Plan {
             .collect();
         // A settle is the same function of the state it reads every time,
         // unless combinational logic has effects of its own: records,
-        // captures, external calls or trigger marks.
+        // captures or external calls. Clock/reset trigger bits are internal
+        // notifications: this scheduler compares event levels itself, and
+        // its caller clears the bits before returning to the reference loop.
+        // Keep unknown notifications conservative.
+        let internal_trigger = |trigger: &celox_design::TriggerIdWithKind| {
+            addresses
+                .get(trigger.id)
+                .is_some_and(|signal| model.kinds.get(signal) == Some(&trigger.kind))
+        };
         let effects = sir.eval_comb.iter().any(|unit| {
             instructions(unit).any(|inst| match inst {
                 SIRInstruction::RuntimeEvent { .. }
@@ -607,9 +634,11 @@ impl Plan {
                 | SIRInstruction::CombCaptureEnableIfChanged { .. }
                 | SIRInstruction::ExternCall { .. } => true,
                 SIRInstruction::Store(_, _, _, _, triggers, sites) => {
-                    !triggers.is_empty() || !sites.is_empty()
+                    triggers.iter().any(|trigger| !internal_trigger(trigger)) || !sites.is_empty()
                 }
-                SIRInstruction::Commit(_, _, _, _, triggers) => !triggers.is_empty(),
+                SIRInstruction::Commit(_, _, _, _, triggers) => {
+                    triggers.iter().any(|trigger| !internal_trigger(trigger))
+                }
                 _ => false,
             })
         });
@@ -770,7 +799,54 @@ impl Plan {
                 }
             }
         }
-        if !rtl_written.is_subset(&derived) {
+        // A combinational reset (or clock) driven only by host-owned inputs
+        // is stable throughout a compiled run. Host writes are settled and
+        // their edges handled before entering the scheduler. Callable kernels,
+        // like host writes, can only run outside this unit.
+        let scheduled_stores: HashSet<AbsoluteAddr> = sir
+            .eval_apply_ffs
+            .values()
+            .flatten()
+            .chain(sir.eval_only_ffs.values().flatten())
+            .chain(sir.apply_ffs.values().flatten())
+            .flat_map(stores)
+            .chain(
+                kernel_stores
+                    .iter()
+                    .zip(&schema.processes)
+                    .filter(|(_, process)| process.kind != celox_design::ProcessKind::Callable)
+                    .flat_map(|(stores, _)| stores.iter().copied()),
+            )
+            .chain(nba_targets.keys().copied())
+            .collect();
+        let clocked_storage: HashSet<_> = edged
+            .iter()
+            .map(|&event| storage(plan.events[event].signal))
+            .collect();
+        let stable_input = |address| {
+            let address = storage(address);
+            undriven(address) && !clocked_storage.contains(&address)
+        };
+        let stable_host_events: BTreeSet<usize> = topology
+            .combinational_derived
+            .iter()
+            .filter(|(source, _)| stable_input(**source))
+            .flat_map(|(_, clocks)| clocks)
+            .filter(|clock| !scheduled_stores.contains(&storage(clock.clock)))
+            .filter(|clock| {
+                clock.gate.as_ref().is_some_and(|gate| {
+                    gate.iter().all(|op| match op {
+                        celox_design::GateOp::Load { address, .. } => stable_input(*address),
+                        _ => true,
+                    })
+                })
+            })
+            .filter_map(|clock| index_of.get(&topology.canonical(clock.clock)).copied())
+            .collect();
+        if rtl_written
+            .difference(&derived)
+            .any(|event| !stable_host_events.contains(event))
+        {
             return Err("RTL logic drives an event signal".into());
         }
         let gating: Vec<(usize, Vec<usize>)> = edged
@@ -916,12 +992,9 @@ impl Plan {
         // The bit of each kernel in the ready mask: its place among the
         // kernels the scheduler runs, in kernel order.
         let ordinals = ordinals(&self.kernels);
-        // Every run starts dirty, and this mark is required, not a margin:
-        // it is the only cover for a unit that exited to the `$finish` exit
-        // partway through, whose mark after the unit never ran, and for
-        // state a checkpoint or a state file restored between runs, which
-        // no mark sees.
-        g.mark_dirty();
+        // The caller supplies the dirty flag. Timed runs must start dirty:
+        // checkpoint restores and partial-slot exits need a fresh settle.
+        // A host clock batch may instead enter with already settled inputs.
         let header = g.b.new_block();
         g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
 
@@ -1110,10 +1183,18 @@ impl Plan {
                 let is = g.b.alloc_bit(1, false);
                 g.b.emit(SIRInstruction::Mux(is, due, value, was));
                 g.store(event.signal, 1, is);
-                if g.settle_reads(event.signal) {
-                    g.mark_dirty();
-                }
                 let changed = g.binary(1, was, BinaryOp::Ne, is);
+                if let Some(aliases) = &event.aliases {
+                    for unit in aliases {
+                        g.inline(unit, finish_exit);
+                    }
+                } else if g.settle_reads(event.signal) {
+                    // Other clocks in this batch may not be due. Writing
+                    // their old level does not invalidate settled inputs.
+                    let dirty = g.load(slots.dirty, SCHEDULER_FLAG_WIDTH);
+                    let dirty = g.binary(SCHEDULER_FLAG_WIDTH, dirty, BinaryOp::Or, changed);
+                    g.store(slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
+                }
                 let active = g.equals(is, u64::from(event.active));
                 let edge = g.binary(1, changed, BinaryOp::And, active);
                 let edge = g.bit(edge, index);
@@ -1428,7 +1509,26 @@ impl Plan {
                     g.b.switch_to_block(unit);
                     let units = match self.lazy.as_ref().map(|lazy| &lazy.domains[index]) {
                         None | Some(DomainSettle::Pending) => &event.eval_apply,
-                        Some(DomainSettle::Fused(units)) => units,
+                        Some(DomainSettle::Fused(units)) => {
+                            // Fusion is needed only when combinational inputs
+                            // changed since the last settle. Otherwise the
+                            // ordinary FF unit already has its inputs.
+                            let dirty = g.load(slots.dirty, SCHEDULER_FLAG_WIDTH);
+                            let fused = g.b.new_block();
+                            let clean = g.b.new_block();
+                            g.b.seal_block(SIRTerminator::Branch {
+                                cond: dirty,
+                                true_block: (fused, Vec::new()),
+                                false_block: (clean, Vec::new()),
+                            });
+                            g.b.switch_to_block(clean);
+                            for unit in &event.eval_apply {
+                                g.inline_writer(unit, finish_exit);
+                            }
+                            g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
+                            g.b.switch_to_block(fused);
+                            units
+                        }
                         Some(DomainSettle::Settled) => {
                             let evaluate = g.b.new_block();
                             g.settle_then(evaluate);
@@ -2322,16 +2422,13 @@ fn retains_state(
                 | SIRInstruction::Commit(source, _, offset, width, _) => {
                     let home = storage(source.absolute_addr());
                     if stores.contains(&home) {
-                        let read = match offset {
-                            SIROffset::Static(start) => {
-                                covered.get(&(source.region, home)).is_some_and(|ranges| {
-                                    ranges
-                                        .iter()
-                                        .any(|&(s, e)| s <= *start && start + width <= e)
-                                })
-                            }
-                            _ => false,
-                        };
+                        let read = offset.constant_bit_offset().is_some_and(|start| {
+                            covered.get(&(source.region, home)).is_some_and(|ranges| {
+                                ranges
+                                    .iter()
+                                    .any(|&(s, e)| s <= start && start + width <= e)
+                            })
+                        });
                         if !read {
                             return false;
                         }
@@ -2340,13 +2437,17 @@ fn retains_state(
                 _ => {}
             }
             match inst {
-                SIRInstruction::Store(target, SIROffset::Static(start), width, ..)
-                | SIRInstruction::Commit(_, target, SIROffset::Static(start), width, _) => add(
-                    covered,
-                    (target.region, storage(target.absolute_addr())),
-                    *start,
-                    start + width,
-                ),
+                SIRInstruction::Store(target, offset, width, ..)
+                | SIRInstruction::Commit(_, target, offset, width, _) => {
+                    if let Some(start) = offset.constant_bit_offset() {
+                        add(
+                            covered,
+                            (target.region, storage(target.absolute_addr())),
+                            start,
+                            start + width,
+                        );
+                    }
+                }
                 _ => {}
             }
         }
@@ -2487,4 +2588,120 @@ fn statuses_only(unit: &Unit, status: AbsoluteAddr, allowed: &[ProcessStatus]) -
         SIRInstruction::Commit(_, target, ..) => *target != status,
         _ => true,
     })
+}
+
+/// Instrument the generated settle after eligibility/retention analysis, so
+/// measuring it does not turn a pure combinational cone into a stateful one.
+#[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub(crate) fn count_test_settles(
+    program: &mut LaidOutProgram,
+    counter: AbsoluteAddr,
+    fused_counter: AbsoluteAddr,
+) -> usize {
+    fn counted(units: &[Unit], counter: AbsoluteAddr) -> Vec<Unit> {
+        let mut b = Builder::new();
+        let count = b.alloc_bit(64, false);
+        let one = b.alloc_bit(64, false);
+        let next = b.alloc_bit(64, false);
+        let address = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, counter);
+        b.emit(SIRInstruction::Load(
+            count,
+            address,
+            SIROffset::Static(0),
+            64,
+        ));
+        b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        b.emit(SIRInstruction::Binary(next, count, BinaryOp::Add, one));
+        b.emit(SIRInstruction::Store(
+            address,
+            SIROffset::Static(0),
+            64,
+            next,
+            vec![],
+            vec![],
+        ));
+        for unit in units {
+            b.inline_execution_unit(unit);
+        }
+        b.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = b.drain();
+        vec![Unit {
+            entry_block_id: celox_sir::BlockId(0),
+            blocks,
+            register_map,
+        }]
+    }
+    let schema = program.runtime.runtime_schema.scheduler.clone().unwrap();
+    let mut plan = Plan::new(program, &schema.slots, true).unwrap();
+    let mut fused = 0;
+    if let Some(lazy) = &mut plan.lazy {
+        for domain in &mut lazy.domains {
+            if let DomainSettle::Fused(units) = domain {
+                *units = counted(units, fused_counter);
+                fused += 1;
+            }
+        }
+    }
+    let instrumented = counted(&program.sir.eval_comb, counter);
+    let original = std::mem::replace(&mut program.sir.eval_comb, instrumented);
+    let generated = plan.generate(program, &schema.slots);
+    program.sir.eval_comb = original;
+    program.sir.processes[schema.unit.unwrap()] = generated;
+    fused
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retention_uses_logical_ranges_for_packed_elements() {
+        let address = AbsoluteAddr {
+            instance_id: celox_design::InstanceId(0),
+            var_id: celox_design::StateObjectId(0),
+        };
+        let offsets = [
+            SIROffset::Static(0),
+            SIROffset::PackedElements {
+                bit_offset: 0,
+                element_width: 4,
+            },
+        ];
+        for store in &offsets {
+            for load in &offsets {
+                for width in [8, 32] {
+                    let mut b = Builder::new();
+                    let value = b.alloc_bit(32, false);
+                    let read = b.alloc_bit(32, false);
+                    b.emit(SIRInstruction::Imm(value, SIRValue::new(0u32)));
+                    b.emit(SIRInstruction::Store(
+                        stable(address),
+                        store.clone(),
+                        width,
+                        value,
+                        vec![],
+                        vec![],
+                    ));
+                    b.emit(SIRInstruction::Load(
+                        read,
+                        stable(address),
+                        load.clone(),
+                        32,
+                    ));
+                    b.seal_block(SIRTerminator::Return);
+                    let (blocks, register_map, _) = b.drain();
+                    let unit = Unit {
+                        entry_block_id: celox_sir::BlockId(0),
+                        blocks,
+                        register_map,
+                    };
+                    assert_eq!(
+                        retains_state(&[unit], &|a| a, &HashSet::from_iter([address])),
+                        width < 32,
+                        "store={store:?} load={load:?} width={width}"
+                    );
+                }
+            }
+        }
+    }
 }

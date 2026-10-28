@@ -36,6 +36,8 @@ mod parser;
 pub(crate) mod portable;
 // Builds without the host runtime run every slot in the reference loop.
 #[cfg(feature = "host-runtime")]
+mod clock_aliases;
+#[cfg(feature = "host-runtime")]
 mod scheduler;
 mod settle;
 #[cfg(feature = "host-runtime")]
