@@ -4574,7 +4574,7 @@ fn value_buffers_preserve_formats_and_independent_pointer_lifetimes() {
 #[test]
 fn deposits_preserve_formats_at_word_boundaries() {
     let _serial = lock_vpi();
-    let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 129];
+    let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129];
     let ports = widths
         .iter()
         .flat_map(|width| {
