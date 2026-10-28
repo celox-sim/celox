@@ -32,7 +32,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Dynamic containers | one-dimensional dynamic arrays, queues (including bounded queues), and associative arrays with integral or string keys; element access, value assignment, equality, `foreach` and built-in container methods. See [dynamic containers](#dynamic-containers) |
-| Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values. See [strings](#strings) |
+| Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values; text formatted by `$sformatf` / `$sformat`. See [strings](#strings) |
 | Classes | classes declared in a module, a package or the compilation unit: properties of 2-state and 4-state integral types up to 64 bits (4-state properties start as X and keep X/Z bits), `string` and class handle types, plus dynamic arrays, queues and associative arrays, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named constructor arguments; shallow copies (`new h`). See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
@@ -318,7 +318,7 @@ waits zero.
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | Sampled values | `$sampled` in processes, combinational logic and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes whose clock they infer and the subroutines those call; see [Sampled values](#sampled-values) |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
-| Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
+| Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, `$sformatf` / `$sformat` (see [Formatted output to strings](#formatted-output-to-strings)), and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -436,7 +436,7 @@ string, and an integral value assigned or cast to a string contributes its
 bytes from the most significant one. A character read as `s[i]` or `s.getc(i)` is a `byte`,
 which is signed (6.16, 6.11): a code above 127 reads as a negative value.
 
-Not yet supported: `$sformat` / `$sformatf`, `atoreal` / `realtoa`, string
+Not yet supported: `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
 VCD output and the TypeScript API.
 
@@ -1142,6 +1142,23 @@ Integral conversions require integral destinations; real conversions require rea
 destinations. `%s` string outputs and `%t` time scaling are unsupported.
 Both functions require timed `Simulation` execution. Pure `$sscanf` state can
 be checkpointed; `$fscanf` uses external file state and prevents checkpoints.
+
+### Formatted output to strings {#formatted-output-to-strings}
+
+`$sformatf(format, args...)` returns, as a `string`, the text `$write` prints
+for the same format and arguments, and `$sformat(output, format, args...)`
+assigns it to `output` (IEEE 1800-2023 21.3.3). Every conversion of `$display`
+is available, with the same field widths, X/Z digits and `%t` scaling.
+`$sformatf` can appear in any expression of a procedural statement, including
+function results, arguments, concatenations and conditional operands. The format
+can be a string literal or, evaluated when the call runs, a `string` or integral
+value. The output of `$sformat` must be a `string` variable or class property;
+integral outputs, `%p` and the `$swrite` family are unsupported.
+
+Each call with conversions is a host request of a timed `Simulation`, like the
+file output tasks below; a format without conversions and arguments is a
+constant. Calls from combinational processes and continuous assignments are
+unsupported.
 
 ### Runtime file output
 

@@ -21,6 +21,7 @@
     "icarus/review_regressions.json",
     "icarus/scan.json",
     "icarus/string.json",
+    "icarus/string_format.json",
     "icarus/synthesizable.json",
     "icarus/system_functions.json",
     "icarus/tagged_unions.json",

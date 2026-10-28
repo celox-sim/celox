@@ -665,6 +665,38 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         .map(Some)
     }
 
+    /// `output = value` for the string `value` of `$sformat`, which assigns
+    /// its output as a string literal is assigned (IEEE 1800-2023 21.3.3,
+    /// 5.9).
+    fn format_assignment(
+        &self,
+        output: celox_sv_syntax::ExprId,
+        value: Expr,
+    ) -> Result<Stmt, AnalyzerError> {
+        let native = self.tree.declarations();
+        if let Some((property, receiver)) =
+            expression_binding::object_property(self.tree, output, native, &self.dims)?
+        {
+            if property.field.handle != Some(system_functions::HandleProperty::String) {
+                return Err(unsupported("`$sformat` output that is not a string"));
+            }
+            let handle =
+                expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
+            return self.property_store(&property, handle, "=", value);
+        }
+        if !expression_binding::native_string(self.tree, output, native, &self.dims) {
+            return Err(unsupported("`$sformat` output that is not a string"));
+        }
+        let (_, lhs) = self.native_lvalue(output)?;
+        let mut rhs = value;
+        self.rename_expr(&mut rhs);
+        Ok(Stmt::Assign {
+            lhs,
+            rhs,
+            nonblocking: false,
+        })
+    }
+
     /// An assignment to a property of a class object: `h.p = v`, or `p = v`
     /// inside a method of its class (IEEE 1800-2023 8.5).
     fn property_assignment(
@@ -1390,6 +1422,42 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 then_body: Vec::new(),
                 else_body: vec![error],
             }]);
+        }
+        // `$sformat(output, format, args...)` assigns what `$sformatf(format,
+        // args...)` returns (IEEE 1800-2023 21.3.3).
+        if name == "$sformat" {
+            if arguments.iter().any(|arg| arg.name.is_some()) {
+                return Err(unsupported("named arguments of `$sformat`"));
+            }
+            let output = arguments.first().and_then(|arg| arg.value).ok_or_else(|| {
+                AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "expected an output argument".into(),
+                }
+            })?;
+            let mut values = Vec::new();
+            for id in expression_binding::format_arguments(name, &arguments[1..])? {
+                values.push(expression_binding::bind_value(
+                    id,
+                    declarations,
+                    self.tree,
+                    &self.dims,
+                    None,
+                )?);
+            }
+            let value = expression_binding::string_call(
+                StringOp::Format {
+                    ticks_per_unit: timescales::time_divisor(root, self.tree)?,
+                },
+                values,
+            );
+            return Ok(vec![self.format_assignment(output, value)?]);
+        }
+        if name == "$sformatf" {
+            let mut value =
+                expression_binding::bind_value(root, declarations, self.tree, &self.dims, None)?;
+            self.rename_expr(&mut value);
+            return Ok(vec![Stmt::Eval(value)]);
         }
         let task = match system_functions::check_call(
             name,

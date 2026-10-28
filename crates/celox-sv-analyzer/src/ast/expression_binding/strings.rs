@@ -113,7 +113,8 @@ pub(in crate::ast) fn operands(
     dimensions: &PackedDimensions,
 ) -> Vec<Expr> {
     let strings = match op {
-        StringOp::FromBits | StringOp::Itoa(_) => 0,
+        // A format keeps its type: the frontend reads a literal one as text.
+        StringOp::FromBits | StringOp::Itoa(_) | StringOp::Format { .. } => 0,
         StringOp::Concat => usize::MAX,
         StringOp::Compare | StringOp::ICompare => 2,
         _ => 1,
@@ -170,7 +171,10 @@ pub(in crate::ast) fn native_string(
                 .is_some_and(|ty| ty.string)
         }
         ExprKind::Call { expression, .. } => {
-            method(tree, *expression, native, dimensions).is_some_and(|(op, _)| op.returns_string())
+            matches!(&native.expression(ungroup(*expression, native)).kind,
+                ExprKind::Name(name) if name.spelling == "$sformatf")
+                || method(tree, *expression, native, dimensions)
+                    .is_some_and(|(op, _)| op.returns_string())
                 || enum_name(tree, *expression, native, dimensions)
         }
         // `e.name` without parentheses (6.19.5.6, 6.19.5.7).

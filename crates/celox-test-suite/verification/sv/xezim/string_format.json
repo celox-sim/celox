@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "string_format::sformatf_packed_runtime_format at 170:3: expect_output: expected [52, 50, 10, 60, 99, 10], got [32, 32, 32, 50, 52, 51, 55, 50, 50, 48, 32, 32, 32, 32, 32, 32, 32, 32, 32, 52, 50, 10, 32, 32, 32, 51, 57, 52, 49, 55, 51, 54, 49, 50, 10]",
+      "expectation": "Simulation",
+      "name": "string_format::sformatf_packed_runtime_format",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "string_format::sformatf_with_associative_index at 322:3: expect_output: expected [49, 32, 48, 10], got [48, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "string_format::sformatf_with_associative_index",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

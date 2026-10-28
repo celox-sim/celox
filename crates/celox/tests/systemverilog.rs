@@ -145,6 +145,8 @@ mod review_regressions;
 mod scan;
 #[path = "frontends/systemverilog/string.rs"]
 mod string;
+#[path = "frontends/systemverilog/string_format.rs"]
+mod string_format;
 #[path = "frontends/systemverilog/suite.rs"]
 mod suite;
 #[path = "frontends/systemverilog/synthesizable.rs"]

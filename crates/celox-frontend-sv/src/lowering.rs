@@ -96,17 +96,6 @@ struct SvVariable {
     history_of: Option<SourceVarId>,
 }
 
-/// Whether `expr` reads a string variable: after its calls are hoisted, a
-/// string-valued argument is the identifier of a variable or temporary.
-fn reads_string_variable(
-    expr: &sv::ir::Expr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    names: &HashMap<String, SourceVarId>,
-) -> bool {
-    matches!(expr, sv::ir::Expr::Ident(name)
-        if names.get(name).and_then(|id| variables.get(id)).is_some_and(|v| v.value_kind == celox_design::ValueKind::StrRef))
-}
-
 impl SvVariable {
     fn to_symbolic_variable(&self) -> SymbolicVariable {
         SymbolicVariable {
@@ -3555,6 +3544,7 @@ fn needs_host_request(
     while let Some((callee, args)) = calls.pop() {
         match callee {
             sv::ir::Callee::System(function) if function.is_host_request() => return true,
+            sv::ir::Callee::String(sv::ir::StringOp::Format { .. }) => return true,
             sv::ir::Callee::Subroutine(name) => {
                 let Some(subroutine) = module.subroutines().iter().find(|sub| sub.name == name)
                 else {
