@@ -207,6 +207,14 @@ pub enum AnalyzerError {
     /// (IEEE 1800-2023 8.25).
     #[error("class `{class}` has no parameter `{name}` that a specialization may assign")]
     UnknownClassParameter { class: String, name: String },
+    /// A `ref` or `const ref` formal bound to an actual, or used in a way,
+    /// that IEEE 1800-2023 13.5.2 forbids.
+    #[error("ref argument `{argument}` of `{subroutine}`: {detail}")]
+    InvalidRefArgument {
+        subroutine: String,
+        argument: String,
+        detail: String,
+    },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

@@ -14,6 +14,7 @@ mod file_io;
 mod fread;
 mod objects;
 mod process;
+mod references;
 mod scan;
 mod strings;
 
@@ -90,6 +91,9 @@ pub(super) struct Ff<'p, 'a> {
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
     forked: bool,
+    /// Whether [`Self::freeze_lvalue`] keeps its copies in the activation
+    /// frame of a forked process.
+    frame_positions: bool,
     process_control: bool,
     process_predicate: bool,
     frame_locals: Vec<SourceVarId>,
@@ -191,6 +195,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             forked: false,
+            frame_positions: false,
             process_control: false,
             process_predicate: false,
             frame_locals: Vec::new(),
@@ -1411,6 +1416,23 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(lvalue)
     }
 
+    /// A copy of a position for [`Self::freeze_const`].
+    fn position_temp(
+        &mut self,
+        width: usize,
+        signed: bool,
+        is_4state: bool,
+    ) -> Result<(SourceVarId, String), sv::AnalyzerError> {
+        let (temp, name) = self.m.temp("position", width, signed, is_4state);
+        if self.frame_positions && self.forked {
+            let slot = self.frame_locals.len();
+            self.frame_locals.push(temp);
+            self.with_kernel(|kernel| kernel.local(slot))
+                .map_err(kernel_error)?;
+        }
+        Ok((temp, name))
+    }
+
     /// `lvalue` with the variables its select positions read replaced by
     /// copies of their current values, so a later write to one does not move
     /// the target.
@@ -1449,7 +1471,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let variable = self.m.var(id);
                 let (width, signed, is_4state) =
                     (variable.width, variable.signed, variable.is_4state);
-                let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
+                let (temp, temp_name) = self.position_temp(width, signed, is_4state)?;
                 let value = self.eval(&sv::ir::Expr::Ident(name.clone()), Some((width, signed)))?;
                 self.store(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
@@ -1474,7 +1496,13 @@ impl<'p, 'a> Ff<'p, 'a> {
                 };
                 let value = self.eval(&read, None)?;
                 let width = self.b.register(&value).width();
-                let (temp, temp_name) = self.m.temp("position", width, *signed, is_4state);
+                let (temp, temp_name) = self.position_temp(width, *signed, is_4state)?;
+                // A frame slot starts a new block: read the bits there.
+                let value = if self.frame_positions && self.forked {
+                    self.eval(&read, None)?
+                } else {
+                    value
+                };
                 self.store(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
             }
@@ -1491,8 +1519,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     lsb: bit,
                     signed: false,
                 };
+                let (temp, temp_name) = self.position_temp(1, false, is_4state)?;
                 let value = self.eval(&read, Some((1, false)))?;
-                let (temp, temp_name) = self.m.temp("position", 1, false, is_4state);
                 self.store(temp, SIROffset::Static(0), 1, value);
                 ConstExpr::Ident(temp_name)
             }
@@ -4536,6 +4564,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut activation = Vec::new();
         if self.kernel.is_some() && (subroutine.is_task || self.forked) {
             for name in &subroutine.automatic_locals {
+                // A reference formal has no storage of its own.
+                if subroutine
+                    .params
+                    .iter()
+                    .any(|param| &param.name == name && param.direction.is_reference())
+                {
+                    continue;
+                }
                 let original = self
                     .m
                     .id(name)
@@ -4572,16 +4608,50 @@ impl<'p, 'a> Ff<'p, 'a> {
         // read a formal of an enclosing call of another subroutine.
         let mut outputs = Vec::new();
         let mut inputs = Vec::new();
+        let mut references = Vec::new();
+        let mut aliases = Vec::new();
+        let mut property_outputs = Vec::new();
         let positions: Vec<_> = if arg_order.is_empty() {
             (0..subroutine.params.len()).collect()
         } else {
             arg_order.to_vec()
         };
+        // The objects and positions that references capture come first (the
+        // order of evaluation of arguments is undefined, IEEE 1800-2023
+        // 13.5): keeping one in a forked activation's frame starts a new
+        // resume point, which no evaluated input may span.
+        for &position in &positions {
+            let Some(param) = subroutine
+                .params
+                .get(position)
+                .filter(|param| param.direction.is_reference())
+            else {
+                continue;
+            };
+            let id = self
+                .m
+                .id(&param.name)
+                .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+            let actual = args
+                .get(position)
+                .cloned()
+                .flatten()
+                .or_else(|| param.default.clone());
+            match self.reference(name, param, actual)? {
+                Reference::Variable(target) => {
+                    references.push((param.name.clone(), id, target));
+                }
+                Reference::Alias(alias) => aliases.push(*alias),
+            }
+        }
         for position in positions {
             let param = subroutine
                 .params
                 .get(position)
                 .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
+            if param.direction.is_reference() {
+                continue;
+            }
             let id = self
                 .m
                 .id(&param.name)
@@ -4595,15 +4665,21 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let reference = actual
                     .as_ref()
                     .ok_or_else(|| unsupported("missing output argument"))?;
-                let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
-                    unsupported(format!(
-                        "output argument `{}` of `{name}`",
-                        param.source_name
-                    ))
-                })?;
-                let guards = tagged_actual_guards(reference);
-                self.check_tagged_guards(&guards)?;
-                outputs.push((param.name.clone(), id, lvalues, guards));
+                // A reference formal bound to a class property, forwarded:
+                // its object was evaluated when the reference was made.
+                if let Some(store) = forwarded_property(reference, &param.name) {
+                    property_outputs.push(store);
+                } else {
+                    let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
+                        unsupported(format!(
+                            "output argument `{}` of `{name}`",
+                            param.source_name
+                        ))
+                    })?;
+                    let guards = tagged_actual_guards(reference);
+                    self.check_tagged_guards(&guards)?;
+                    outputs.push((param.name.clone(), id, lvalues, guards));
+                }
             }
             if param.direction.is_read() {
                 let actual = actual.ok_or_else(|| {
@@ -4668,6 +4744,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             let offset = sv_memory_offset(self.m.var(id), 0, width);
             self.store(id, offset, width, value);
         }
+        // The body names each reference formal's actual itself, so its reads
+        // and writes are those of the actual, also across suspensions of a
+        // task and through any other name of it (IEEE 1800-2023 13.5.2).
+        for (formal, _, target) in &references {
+            self.m.name_to_id.insert(formal.clone(), *target);
+        }
         if let Some(return_var) = &subroutine.return_var {
             let id = self
                 .m
@@ -4683,10 +4765,21 @@ impl<'p, 'a> Ff<'p, 'a> {
             return_var: subroutine.return_var.clone(),
             loop_depth: self.loops.len(),
         });
+        let mut body = subroutine.body;
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let constant = |position: &sv::ir::ConstExpr| {
+            sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
+        };
+        for alias in &aliases {
+            body = alias.rewrite(body, &constant)?;
+        }
         self.active_calls.push(name.to_string());
-        let falls = self.exec_block(&subroutine.body);
+        let falls = self.exec_block(&body);
         self.active_calls.pop();
         self.functions.pop();
+        for (formal, original, _) in references {
+            self.m.name_to_id.insert(formal, original);
+        }
         if falls? {
             self.jump(return_block);
         }
@@ -4702,6 +4795,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             self.observe_assignment(&lvalues)?;
         }
+        for store in property_outputs {
+            self.exec_block(&[store])?;
+        }
         let result = subroutine.return_var.as_ref().map(|name| {
             if activation.iter().any(|(local, _)| local == name) {
                 self.m.var(self.m.id(name).unwrap()).path[0].clone()
@@ -4713,6 +4809,98 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.m.name_to_id.insert(name, original);
         }
         Ok(result)
+    }
+
+    /// What reference formal `param` of `name` refers to for a call with
+    /// `actual`. The object of a property is evaluated here, at the call.
+    fn reference(
+        &mut self,
+        name: &str,
+        param: &sv::ir::SubroutineParam,
+        actual: Option<sv::ir::Expr>,
+    ) -> Result<Reference, sv::AnalyzerError> {
+        match actual {
+            Some(sv::ir::Expr::Ident(actual)) => self
+                .m
+                .id(&actual)
+                .map(Reference::Variable)
+                .ok_or_else(|| unsupported(format!("reference to `{actual}`"))),
+            Some(sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                args,
+                ..
+            }) if matches!(*op, sv::ir::ObjectOp::Load(_)) => {
+                let sv::ir::ObjectOp::Load(field) = *op else {
+                    unreachable!()
+                };
+                let [Some(object)] = args.as_slice() else {
+                    return Err(unsupported("class property receiver"));
+                };
+                let (handle, handle_name) = self.m.temp(references::OBJECT_TEMP, 32, false, false);
+                self.m.variables.get_mut(&handle).unwrap().value_kind =
+                    celox_design::ValueKind::ObjRef;
+                // A forked activation keeps its own object.
+                if self.forked {
+                    let slot = self.frame_locals.len();
+                    self.frame_locals.push(handle);
+                    self.with_kernel(|kernel| kernel.local(slot))
+                        .map_err(kernel_error)?;
+                }
+                let object = self.handle(object)?;
+                self.store(handle, SIROffset::Static(0), 32, object);
+                Ok(Reference::Alias(Box::new(references::Alias {
+                    formal: param.name.clone(),
+                    source_name: param.source_name.clone(),
+                    target: references::Target::Property {
+                        handle: handle_name,
+                        field,
+                    },
+                })))
+            }
+            // An element of a fixed-size unpacked array, which the analyzer
+            // has checked: its index is evaluated at the call.
+            Some(actual @ sv::ir::Expr::Select { .. }) => {
+                let signed = self.expr_signed(&actual);
+                let element = match lvalue_from_expr(&actual).as_deref() {
+                    Some([element @ sv::ir::LValue::Select { .. }]) => element.clone(),
+                    _ => {
+                        return Err(unsupported(format!(
+                            "ref argument `{}` of `{name}`",
+                            param.source_name
+                        )));
+                    }
+                };
+                let element = self.hoist_lvalue(&element)?;
+                // A forked activation keeps its own copies of the positions.
+                self.frame_positions = true;
+                let element = self.freeze_lvalue(element);
+                self.frame_positions = false;
+                let element = element?;
+                let width = self.m.var(self.m.id(&param.name).expect("a formal")).width;
+                let total = self
+                    .m
+                    .var(self.m.id(element.name()).expect("an array"))
+                    .width;
+                Ok(Reference::Alias(Box::new(references::Alias {
+                    formal: param.name.clone(),
+                    source_name: param.source_name.clone(),
+                    target: references::Target::Element {
+                        element: Box::new(element),
+                        signed,
+                        width,
+                        total,
+                    },
+                })))
+            }
+            Some(_) => Err(unsupported(format!(
+                "ref argument `{}` of `{name}` bound to a structure member",
+                param.source_name
+            ))),
+            None => Err(unsupported(format!(
+                "missing argument `{}` of `{name}`",
+                param.source_name
+            ))),
+        }
     }
 
     // -------------------------------------------------------------- process
@@ -8027,4 +8215,39 @@ fn past_depth_and_gate(
         }
     };
     Ok((depth, args.get(2).cloned().flatten()))
+}
+
+/// What a reference formal names during an inlined call.
+enum Reference {
+    Variable(SourceVarId),
+    Alias(Box<references::Alias>),
+}
+
+/// The store that copies formal `formal` back into the class property that
+/// `actual` reads through the object of a reference formal (see
+/// [`references::Alias`]), when it is such a read.
+fn forwarded_property(actual: &sv::ir::Expr, formal: &str) -> Option<sv::ir::Stmt> {
+    let sv::ir::Expr::Call {
+        callee: sv::ir::Callee::Object(op),
+        args,
+        ..
+    } = actual
+    else {
+        return None;
+    };
+    let (sv::ir::ObjectOp::Load(field), [Some(sv::ir::Expr::Ident(handle))]) =
+        (&**op, args.as_slice())
+    else {
+        return None;
+    };
+    handle.starts_with(references::OBJECT_TEMP).then(|| {
+        sv::ir::Stmt::Eval(sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(Box::new(sv::ir::ObjectOp::Store(*field))),
+            args: vec![
+                Some(sv::ir::Expr::Ident(handle.clone())),
+                Some(sv::ir::Expr::Ident(formal.to_owned())),
+            ],
+            arg_order: Vec::new(),
+        })
+    })
 }

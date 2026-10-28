@@ -620,6 +620,12 @@ impl Radix {
 }
 
 impl SystemTask {
+    /// Whether the task writes argument `position`, as `$readmemh` loads
+    /// its memory argument (IEEE 1800-2023 21.4).
+    pub fn writes_argument(self, position: usize) -> bool {
+        matches!(self, Self::Readmem(_)) && position == 1
+    }
+
     /// Tasks executed synchronously by the timed simulation host.
     pub fn is_host_request(self) -> bool {
         matches!(

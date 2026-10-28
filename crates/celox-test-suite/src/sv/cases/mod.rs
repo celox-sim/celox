@@ -32,6 +32,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("tagged_unions.vtest"),
     },
     Group {
+        file: "src/sv/cases/references.vtest",
+        text: include_str!("references.vtest"),
+    },
+    Group {
         file: "src/sv/cases/unions.vtest",
         text: include_str!("unions.vtest"),
     },

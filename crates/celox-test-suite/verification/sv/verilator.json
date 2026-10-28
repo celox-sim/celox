@@ -18,6 +18,7 @@
     "verilator/procedural.json",
     "verilator/program.json",
     "verilator/random_plusargs.json",
+    "verilator/references.json",
     "verilator/review_regressions.json",
     "verilator/scan.json",
     "verilator/string.json",

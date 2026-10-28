@@ -17,6 +17,7 @@
     "icarus/procedural.json",
     "icarus/program.json",
     "icarus/random_plusargs.json",
+    "icarus/references.json",
     "icarus/review_regressions.json",
     "icarus/scan.json",
     "icarus/string.json",
