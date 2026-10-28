@@ -2984,6 +2984,10 @@
     "cases": {
       "icarus": [
         "unpacked_structs::assignment_patterns",
+        "unpacked_structs::class_properties",
+        "unpacked_structs::class_properties_inheritance_and_collections",
+        "unpacked_structs::class_property_assignment_order",
+        "unpacked_structs::class_property_four_state_members",
         "unpacked_structs::four_state_members",
         "unpacked_structs::handle_members_survive_heap_collections",
         "unpacked_structs::initializers_results_and_defaults",

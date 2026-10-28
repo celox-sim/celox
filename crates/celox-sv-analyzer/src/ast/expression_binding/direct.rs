@@ -485,6 +485,16 @@ pub(in crate::ast) fn bind_value(
                             values.push(value);
                             continue;
                         }
+                        if let Some((aggregate, class, _)) =
+                            objects::aggregate_property(tree, id, native, dimensions)?
+                        {
+                            values.push(objects::aggregate_load(
+                                &aggregate,
+                                &class,
+                                &objects::this(),
+                            )?);
+                            continue;
+                        }
                         if let Some(value) = objects::unqualified_property(tree, dimensions, &name)?
                         {
                             values.push(value);
@@ -933,6 +943,16 @@ pub(in crate::ast) fn bind_value(
                             objects::class_parameter(tree, id, native, dimensions)?
                                 .expect("checked by the guard"),
                         );
+                        continue;
+                    }
+                    ExprKind::Member { .. }
+                        if objects::aggregate_property(tree, id, native, dimensions)?.is_some() =>
+                    {
+                        let (aggregate, class, receiver) =
+                            objects::aggregate_property(tree, id, native, dimensions)?
+                                .expect("checked by the guard");
+                        let handle = objects::receiver(tree, receiver, native, dimensions)?;
+                        values.push(objects::aggregate_load(&aggregate, &class, &handle)?);
                         continue;
                     }
                     ExprKind::Member { .. }
