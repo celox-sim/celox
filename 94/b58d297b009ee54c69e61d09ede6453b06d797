@@ -1,0 +1,1 @@
+Address Codex review on #2402/#2403/#2423: container operands across host requests, default conversions and %p rewrites before renaming, native ids kept through format merging, value-based %p string detection.
