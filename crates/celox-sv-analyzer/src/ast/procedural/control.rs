@@ -708,6 +708,7 @@ mod tests {
             subroutine_directions: &directions,
             automatic: false,
             statics: Vec::new(),
+            explicit_statics: HashSet::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
         };
