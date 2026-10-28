@@ -209,6 +209,102 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                 }
                 "compile_error" | "mismatch" | "runtime_error" => {
                     let (expected_status, phase, diagnostic) = match (tool, name) {
+                        (
+                            "verilator",
+                            "fork_control::process_program_exit_wakes_sibling_observers",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "the simulation ended before the script did",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_ancestor_kill_preserves_caller_rng",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x1f, got 0xb",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_finished_parent_kills_descendants",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0xf, got 0x0",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_self_kill_finishes_program"
+                            | "fork_control::process_external_kill_finishes_program",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq ticks: expected 0x1, got 0x5",
+                        ),
+                        (
+                            "verilator" | "icarus",
+                            "timing::final_procedure_output_survives_program_completion",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "the design did not finish after run_to_finish",
+                        ),
+                        ("icarus", "fork_control::process_self_kill_finishes_program") => {
+                            ("compile_error", "compile", "source_0.sv:10: syntax error")
+                        }
+                        (
+                            "icarus",
+                            "fork_control::process_external_kill_finishes_program"
+                            | "fork_control::process_final_kill_preserves_cleanup"
+                            | "fork_control::process_program_exit_wakes_sibling_observers",
+                        ) => ("compile_error", "compile", "source_0.sv:2: syntax error"),
+                        (
+                            "verilator",
+                            "fork_control::process_mutual_status_waits_advance_to_cancellation",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x2, got 0x0",
+                        ),
+                        ("verilator", "fork_control::process_status_wait_and_disable") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x3, got 0x0",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_self_suspend_and_await"
+                            | "fork_control::process_suspend_and_resume_waits"
+                            | "fork_control::process_nested_calls_preserve_level_wait_resume"
+                            | "fork_control::process_resume_after_program_exit_is_noop",
+                        ) => (
+                            "runtime_error",
+                            "execute",
+                            "native testbench failed: exit status: 1",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_resume_resamples_automatic_event_expression",
+                        ) => ("compile_error", "compile", "%Error-LIFETIME:"),
+                        (
+                            "icarus",
+                            "fork_control::process_nested_calls_preserve_level_wait_resume",
+                        ) => ("compile_error", "compile", "source_0.sv:4: syntax error"),
+                        (
+                            "icarus",
+                            "fork_control::process_ancestor_kill_preserves_caller_rng"
+                            | "fork_control::process_final_procedures_share_identity_and_rng"
+                            | "fork_control::process_finished_parent_kills_descendants"
+                            | "fork_control::process_identity_and_status"
+                            | "fork_control::process_mutual_status_waits_advance_to_cancellation"
+                            | "fork_control::process_random_state_and_handles"
+                            | "fork_control::process_resume_after_program_exit_is_noop"
+                            | "fork_control::process_resume_resamples_automatic_event_expression"
+                            | "fork_control::process_self_suspend_and_await"
+                            | "fork_control::process_status_wait_and_disable"
+                            | "fork_control::process_suspend_and_resume_waits",
+                        ) => ("compile_error", "compile", "source_0.sv:3: syntax error"),
                         ("verilator", "fork::compound_event_activations_outlive_parent") => (
                             "runtime_error",
                             "execute",

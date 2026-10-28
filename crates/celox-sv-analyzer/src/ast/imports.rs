@@ -122,7 +122,12 @@ impl ScopeImports {
                 let package = normalize_identifier(&package.spelling);
                 // std::randomize is a built-in scope function, not a
                 // user-declared package dependency (IEEE 1800-2023 18.12).
-                if package == "std" && normalize_identifier(&name.spelling) == "randomize" {
+                if package == "std"
+                    && matches!(
+                        normalize_identifier(&name.spelling).as_str(),
+                        "randomize" | "process"
+                    )
+                {
                     continue;
                 }
                 // Inline constraint local:: lookup bypasses the receiver class,
@@ -158,6 +163,7 @@ impl ScopeImports {
                 && let celox_sv_syntax::DataTypeKind::Named(path) = &ty.kind
                 && let [package, name] = path.as_slice()
                 // `C::T` names a type of class `C` (IEEE 1800-2023 8.23).
+                && !(package.name.spelling == "std" && name.name.spelling == "process")
                 && !visible_class(tree, &normalize_identifier(&package.name.spelling))
                 && !aliases.iter().any(|(start, end, name)| {
                     (*start..*end).contains(&ty.tokens.start)
@@ -1048,6 +1054,17 @@ pub(super) fn resolve_imports(
             }
             continue;
         }
+        // Defer the implicit std fallback until all user packages are known,
+        // including packages declared in another source file (26.7).
+        if package_name == "process"
+            && packages.get(package_name).is_none()
+            && matches!(
+                name.as_str(),
+                "self" | "state" | "FINISHED" | "RUNNING" | "WAITING" | "SUSPENDED" | "KILLED"
+            )
+        {
+            continue;
+        }
         if package_name == packages::UNIT {
             // `$unit` does not reach items declared later (IEEE 1800-2023
             // 3.12.1).
@@ -1092,7 +1109,14 @@ pub(super) fn resolve_imports(
             }
         }
     }
-    let mut symbols = ScopeSymbols::default();
+    let mut symbols = ScopeSymbols {
+        package_scopes: packages
+            .names()
+            .map(str::to_owned)
+            .chain(own.iter().cloned())
+            .collect(),
+        ..ScopeSymbols::default()
+    };
     let mut used = Vec::new();
     for package in imports.packages.iter().chain(
         unit.iter()

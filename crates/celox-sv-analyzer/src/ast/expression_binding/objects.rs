@@ -29,6 +29,19 @@ pub(in crate::ast) fn native_class(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<String> {
+    let id = ungroup(id, native);
+    if let ExprKind::Call { expression, .. } = &native.expression(id).kind
+        && let ExprKind::Member {
+            expression: base,
+            separator,
+            name,
+        } = &native.expression(*expression).kind
+        && separator == "::"
+        && name.spelling == "self"
+        && super::super::processes::scope(tree, *base, native, dimensions)
+    {
+        return Some(super::super::processes::CLASS.to_owned());
+    }
     let expression = native.expression(ungroup(id, native));
     if let ExprKind::Select {
         expression,
@@ -266,6 +279,9 @@ pub(in crate::ast) fn static_property(
     let Some(class_name) = class_name else {
         return Ok(None);
     };
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
     let class = class(tree, dimensions, &class_name)?;
     let Some(property) = class.static_property(&instances::normalize_identifier(&name.spelling))
     else {
@@ -347,6 +363,9 @@ pub(in crate::ast) fn property(
         }
         _ => return Ok(None),
     };
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
     let class = class(tree, dimensions, &class_name)?;
     let name = instances::normalize_identifier(&name.spelling);
     let Some(property) = class.property(&name) else {
@@ -410,6 +429,9 @@ pub(in crate::ast) fn unqualified_property(
     let Some(class_name) = scope_class(dimensions) else {
         return Ok(None);
     };
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
     let class = class(tree, dimensions, &class_name)?;
     let Some(property) = class.property(name) else {
         if let Some(property) = class.static_property(name) {
@@ -497,6 +519,9 @@ pub(in crate::ast) fn method(
         }
         _ => return Ok(None),
     };
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
     let class = class(tree, dimensions, &class_name)?;
     let method_name = instances::normalize_identifier(&method_name.spelling);
     if method_name == "new" {
@@ -602,6 +627,12 @@ fn derives_from(
     class_name: &str,
     ancestor: &str,
 ) -> Converted<bool> {
+    if class_name == ancestor {
+        return Ok(true);
+    }
+    if class_name == super::super::processes::CLASS || ancestor == super::super::processes::CLASS {
+        return Ok(false);
+    }
     Ok(class(tree, dimensions, class_name)?.derives_from(
         tree,
         ancestor,
@@ -689,6 +720,10 @@ pub(in crate::ast) fn constructor(
     // of its class; handles are copied, not the objects they refer to (IEEE
     // 1800-2023 8.12).
     if let ExprKind::Copy(source) = &native.expression(ungroup(id, native)).kind {
+        if class_name == super::super::processes::CLASS {
+            return Err(unsupported("constructing a process with new"));
+        }
+
         let source_class = match native_class(tree, *source, native, dimensions) {
             Some(class) => Some(class),
             None => static_property_class(tree, *source, native, dimensions)?,
@@ -739,6 +774,9 @@ pub(in crate::ast) fn constructor(
         }
         _ => return Ok(None),
     };
+    if class_name == super::super::processes::CLASS {
+        return Err(unsupported("constructing a process with new"));
+    }
     let class = class(tree, dimensions, &class_name)?;
     if let Some(method) = class.method("new") {
         check_access(

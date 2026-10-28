@@ -5394,8 +5394,12 @@ fn lower_initial_processes(
                 }
                 None => process.body(),
             };
-            let kernel =
-                ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(body, slots, index)?;
+            let kernel = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
+                body,
+                slots,
+                index,
+                process.is_final(),
+            )?;
             wait_sites.extend(kernel.wait_sites);
             nba_sites.extend(kernel.nba_sites);
             nba_switches.extend(kernel.nba_switches);
@@ -7433,7 +7437,10 @@ fn signal_type_from_sv(
     let is_4state = float.is_none()
         && !matches!(
             typ.kind(),
-            sv::ir::TypeKind::Bit | sv::ir::TypeKind::String | sv::ir::TypeKind::Object
+            sv::ir::TypeKind::Bit
+                | sv::ir::TypeKind::String
+                | sv::ir::TypeKind::Object
+                | sv::ir::TypeKind::Process
         );
     let packed_ranges = typ
         .packed_ranges()
@@ -7459,7 +7466,9 @@ fn signal_type_from_sv(
         sv::ir::TypeKind::Logic | sv::ir::TypeKind::Reg | sv::ir::TypeKind::Implicit => {
             PortTypeKind::Logic
         }
-        sv::ir::TypeKind::String | sv::ir::TypeKind::Object => PortTypeKind::Other,
+        sv::ir::TypeKind::String | sv::ir::TypeKind::Object | sv::ir::TypeKind::Process => {
+            PortTypeKind::Other
+        }
     };
     let value_kind = match typ.kind() {
         sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,
@@ -7760,6 +7769,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     use sv::ir::SystemFunction;
     let (width, signed) = function.result_type()?;
     let result = match function {
+        SystemFunction::Process(_) => return None,
         SystemFunction::Countbits => {
             let controls = operands[1..]
                 .iter()

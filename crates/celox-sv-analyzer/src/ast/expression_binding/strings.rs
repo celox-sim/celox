@@ -11,6 +11,13 @@ use super::*;
 /// Whether `expr` has type `string`.
 pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {
     match expr {
+        Expr::Call {
+            callee:
+                Callee::System(crate::system_functions::SystemFunction::Process(
+                    celox_design::ProcessOp::GetRandstate,
+                )),
+            ..
+        } => true,
         Expr::Ident(name) => dimensions.get(name).is_some_and(|ty| ty.string),
         Expr::Call {
             callee: Callee::String(op),
@@ -134,6 +141,9 @@ pub(in crate::ast) fn native_string(
     dimensions: &PackedDimensions,
 ) -> bool {
     match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, separator } if separator == "." && name.spelling == "get_randstate" && objects::native_class(tree, *base, native, dimensions).as_deref() == Some(super::super::processes::CLASS)) => {
+            true
+        }
         ExprKind::Select { expression, .. }
             if containers::native_type(*expression, native, tree, dimensions)
                 .ok()

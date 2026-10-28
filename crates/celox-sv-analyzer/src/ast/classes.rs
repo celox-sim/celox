@@ -457,14 +457,16 @@ pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> 
     {
         return Some(class.clone());
     }
-    unit_class.or_else(|| {
-        let class = format!("{}::{name}", packages::UNIT);
-        imported
-            .classes
-            .iter()
-            .any(|known| known.name == class)
-            .then_some(class)
-    })
+    unit_class
+        .or_else(|| {
+            let class = format!("{}::{name}", packages::UNIT);
+            imported
+                .classes
+                .iter()
+                .any(|known| known.name == class)
+                .then_some(class)
+        })
+        .or_else(|| (name == "process").then(|| super::processes::CLASS.to_owned()))
 }
 
 /// Whether class `name` is declared in the source of the current scope.
@@ -602,7 +604,10 @@ pub(super) fn base_arguments<'a>(
 
 /// The handle type of class `name`, if it is a class.
 pub(super) fn handle_type(tree: &AnalysisContext<'_>, name: &str) -> Option<Type> {
-    (declaration(tree, name).is_some() || imported(tree, name).is_some()).then(|| handle(name))
+    (name == super::processes::CLASS
+        || declaration(tree, name).is_some()
+        || imported(tree, name).is_some())
+    .then(|| handle(name))
 }
 
 /// Class `name` as the scope that declares it laid it out, when the current
@@ -631,7 +636,11 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>) -> Vec<String> {
 
 /// The handle type of class `name`.
 pub(super) fn handle(name: &str) -> Type {
-    let mut ty = Type::new(TypeKind::Object);
+    let mut ty = Type::new(if name == super::processes::CLASS {
+        TypeKind::Process
+    } else {
+        TypeKind::Object
+    });
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal((HANDLE_WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
@@ -1138,6 +1147,7 @@ fn field(
         _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
+        TypeKind::Process => (HANDLE_WIDTH, false, None),
         TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
             let shape = casts::expr_type_from_type(state, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;
@@ -1156,7 +1166,11 @@ fn field(
         signed,
         handle,
         // A 4-state property keeps its X and Z bits (IEEE 1800-2023 6.3.1).
-        four_state: handle.is_none() && ty.kind() != TypeKind::Bit,
+        four_state: handle.is_none()
+            && matches!(
+                ty.kind(),
+                TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+            ),
     })
 }
 

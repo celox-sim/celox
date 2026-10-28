@@ -93,7 +93,7 @@ pub(super) fn with_dimensions(
         kind,
         width: shape.width as u32,
         signed: shape.signed,
-        two_state: base.kind() == TypeKind::Bit || handle.is_some(),
+        two_state: matches!(base.kind(), TypeKind::Bit | TypeKind::Process) || handle.is_some(),
         handle,
     };
     let mut ty = Type::new(TypeKind::Object);

@@ -202,6 +202,9 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         timestamp: u64,
     ) -> Result<(), Halt> {
         match request.kind {
+            celox_design::HostRequestKind::Process => {
+                Err(celox_runtime::SimulatorErrorCode::InternalError.into())
+            }
             celox_design::HostRequestKind::Plusargs => {
                 self.run_plusargs_request(request, timestamp)
             }
@@ -2037,6 +2040,8 @@ endmodule
     }
 }
 
+#[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+mod process_control_tests;
 #[cfg(all(test, feature = "host-runtime"))]
 mod runtime_core_tests;
 

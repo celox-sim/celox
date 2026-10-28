@@ -134,6 +134,7 @@ mod case;
 mod casts;
 mod classes;
 mod comb_process;
+mod processes;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
 pub(crate) mod const_functions;
@@ -1417,6 +1418,7 @@ impl Module {
             .collect();
         // A package keeps its symbols for the scopes that use it.
         let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
+            package_scopes: imported.package_scopes.clone(),
             classes: classes::scope_classes(syntax_tree, &const_env),
             class_member_types: classes::specializations::export_member_types(syntax_tree),
             inline_randomizations,
@@ -2293,6 +2295,8 @@ pub enum TypeKind {
     /// IEEE 1800-2023 8.4: a handle of a class object, `null` or an object
     /// in the heap.
     Object,
+    /// A scheduler-owned process reference (9.7), independent of the heap.
+    Process,
     Bit,
     Logic,
     Reg,
