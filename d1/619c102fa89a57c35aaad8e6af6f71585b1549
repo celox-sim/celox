@@ -1,0 +1,1 @@
+Gate native TB dependency metadata and its collection out of WASM builds; fixes NAPI WASM dead-code failure
