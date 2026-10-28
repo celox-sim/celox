@@ -4449,3 +4449,121 @@ fn value_change_callbacks_compare_full_values_and_unknown_masks() {
         }
     }
 }
+
+/// String and vector results have independent handle-owned scratch storage.
+/// Exercise repeated formats, word boundaries and partial unknown hex nibbles.
+#[cfg(feature = "systemverilog")]
+#[test]
+fn value_buffers_preserve_formats_and_independent_pointer_lifetimes() {
+    let _serial = lock_vpi();
+    let source = "module Top(input logic [2:0] p, input logic [64:0] w,
+        input logic [128:0] v, output logic [2:0] po,
+        output logic [64:0] wo, output logic [128:0] vo);
+        assign po=p; assign wo=w; assign vo=v; endmodule";
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("value_buffers.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .opt_level(celox::OptLevel::O1)
+    .build()
+    .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    let partial = [
+        ("000", "0"),
+        ("101", "5"),
+        ("zzz", "z"),
+        ("xxx", "x"),
+        ("00z", "x"),
+        ("x01", "x"),
+    ]
+    .into_iter()
+    .map(|(b, h)| (b.to_string(), h.to_string()))
+    .collect::<Vec<_>>();
+    let mut cases = vec![(c"Top.p", 3usize, partial)];
+    for (name, width) in [(c"Top.w", 65usize), (c"Top.v", 129usize)] {
+        let digits = width.div_ceil(4);
+        cases.push((
+            name,
+            width,
+            vec![
+                ("0".repeat(width), "0".repeat(digits)),
+                (
+                    format!("1{}", "0".repeat(width - 1)),
+                    format!("1{}", "0".repeat(digits - 1)),
+                ),
+                (
+                    format!("1{}1", "0".repeat(width - 2)),
+                    format!("1{}1", "0".repeat(digits - 2)),
+                ),
+                (
+                    format!("z{}", "0".repeat(width - 1)),
+                    format!("z{}", "0".repeat(digits - 1)),
+                ),
+                ("x".repeat(width), "x".repeat(digits)),
+                ("z".repeat(width), "z".repeat(digits)),
+                ("0".repeat(width), "0".repeat(digits)),
+            ],
+        ));
+    }
+    // Safety: each handle is live, write strings remain live through deposit,
+    // and pointers are checked only before their own scratch storage is replaced.
+    unsafe {
+        for (name, width, patterns) in cases {
+            let handle = vpi_handle_by_name(name.as_ptr(), ptr::null_mut());
+            assert!(!handle.is_null());
+            for (binary, hex) in patterns {
+                let input = std::ffi::CString::new(binary.clone()).unwrap();
+                let deposit = VpiValue {
+                    format: VPI_BIN_STR_VAL,
+                    value: VpiValueData {
+                        str_: input.as_ptr().cast_mut(),
+                    },
+                };
+                assert_eq!(
+                    vpi_put_value(handle, &deposit, ptr::null(), VPI_NO_DELAY),
+                    handle
+                );
+                let mut read = VpiValue {
+                    format: VPI_BIN_STR_VAL,
+                    value: VpiValueData { integer: 0 },
+                };
+                vpi_get_value(handle, &mut read);
+                let binary_pointer = read.value.str_;
+                assert!(!binary_pointer.is_null());
+                assert_eq!(CStr::from_ptr(binary_pointer).to_bytes(), binary.as_bytes());
+                read.format = VPI_INT_VAL;
+                vpi_get_value(handle, &mut read);
+                let mut vector = VpiValue {
+                    format: VPI_VECTOR_VAL,
+                    value: VpiValueData {
+                        vector: ptr::null_mut(),
+                    },
+                };
+                vpi_get_value(handle, &mut vector);
+                let vector_pointer = vector.value.vector;
+                assert!(!vector_pointer.is_null());
+                let words = width.div_ceil(32);
+                let saved_vector = std::slice::from_raw_parts(vector_pointer, words).to_vec();
+                assert_eq!(CStr::from_ptr(binary_pointer).to_bytes(), binary.as_bytes());
+                read.format = VPI_HEX_STR_VAL;
+                vpi_get_value(handle, &mut read);
+                assert_eq!(CStr::from_ptr(read.value.str_).to_bytes(), hex.as_bytes());
+                assert_eq!(
+                    std::slice::from_raw_parts(vector_pointer, words),
+                    saved_vector
+                );
+                read.format = VPI_BIN_STR_VAL;
+                vpi_get_value(handle, &mut read);
+                assert_eq!(
+                    CStr::from_ptr(read.value.str_).to_bytes(),
+                    binary.as_bytes()
+                );
+            }
+            vpi_free_object(handle);
+        }
+    }
+}
