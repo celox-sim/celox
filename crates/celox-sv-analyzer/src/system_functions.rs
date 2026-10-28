@@ -1557,13 +1557,13 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$fmonitorb", Task),
     unsupported("$fmonitoro", Task),
     unsupported("$fmonitorh", Task),
+    // The binders convert `$swrite`, `$sformat` and `$sformatf` into string
+    // operations (`StringOp::Format`) before consulting the catalog, which
+    // rejects them anywhere else, such as in a constant expression.
     unsupported("$swrite", Task),
     unsupported("$swriteb", Task),
     unsupported("$swriteo", Task),
     unsupported("$swriteh", Task),
-    // The binders convert `$sformat` and `$sformatf` into string operations
-    // (`StringOp::Format`) before consulting the catalog, which rejects them
-    // anywhere else, such as in a constant expression.
     unsupported("$sformat", Task),
     unsupported("$sformatf", Function),
     function(SystemFunction::Fgetc, 1, Some(1)),
