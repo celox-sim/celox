@@ -992,3 +992,22 @@ sources and a regenerated dependency lock, without simulator source changes.
 Its exact mismatch remains an executed failure in
 [the xezim class report](verification/sv/xezim/class.json).
 No assertions or exclusions are weakened.
+
+### Package constants in class type arguments
+
+`class::package_constant_type_arguments` specializes a class in package
+typedefs with `word_t = bit signed [W-1:0]` and with the inline type
+`bit [W:0]`, both bounded by the package's `W=6`, despite a caller module with
+its own `W=29` (IEEE 1800-2023 8.25 and 26.3). The widths and signedness of
+the two specializations give a sum of 672. Verilator 5.052 passes. Icarus 13.0
+rejects the generic class declaration; its exact compile diagnostic remains an
+executed failure in [the Icarus class report](verification/sv/icarus/class.json).
+
+The pinned xezim 0.11.3 returns 923: the inline packed type argument becomes
+the 32-bit signed default `int`, the existing `sv_class-X2` discrepancy in
+[the review](verification/xezim-review.json). The
+[adapter-free source](verification/repros/sv_class_type_arguments_xezim.sv)
+and [observations](verification/repros/sv_class_type_arguments_xezim.json)
+reproduce it as both Top and Wrapped. Its exact mismatch remains an executed
+failure in [the xezim class report](verification/sv/xezim/class.json).
+No assertions or exclusions are weakened.

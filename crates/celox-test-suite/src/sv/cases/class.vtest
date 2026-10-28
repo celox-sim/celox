@@ -2663,3 +2663,33 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 230))
+(case package_constant_type_arguments
+  (source "package.sv" #"
+package p;
+    parameter int W = 6;
+    typedef bit signed [W-1:0] word_t;
+    class Utils #(type T = int);
+        static function int width();
+            T v;
+            return $bits(v);
+        endfunction
+        static function int negative();
+            T v = '1;
+            return v < 0;
+        endfunction
+    endclass
+    typedef Utils#(word_t) word_utils;
+    typedef Utils#(bit [W:0]) wide_utils;
+    function automatic int read();
+        return 100 * word_utils::width() + 10 * wide_utils::width()
+            + 2 * word_utils::negative() + wide_utils::negative();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    localparam int W = 29;
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 672))
