@@ -1492,6 +1492,20 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     encode_signal_value(handle, unsafe { &mut *value }, &bits, &mask, width, signed);
 }
 
+fn decode_digit(digit: u8, radix_bits: u32) -> Option<(u8, u8)> {
+    match digit {
+        b'0'..=b'9' if digit - b'0' < (1 << radix_bits) => Some((digit - b'0', 0)),
+        b'a'..=b'f' if radix_bits == 4 => Some((digit - b'a' + 10, 0)),
+        b'A'..=b'F' if radix_bits == 4 => Some((digit - b'A' + 10, 0)),
+        b'x' | b'X' => {
+            let unknown = (1u8 << radix_bits) - 1;
+            Some((unknown, unknown))
+        }
+        b'z' | b'Z' => Some((0, (1u8 << radix_bits) - 1)),
+        _ => None,
+    }
+}
+
 unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint, BigUint)> {
     if value.is_null() {
         return None;
@@ -1504,7 +1518,11 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
             let integer = unsafe { value.value.integer };
             let mut bits = BigUint::from(integer as u32);
             if integer < 0 && width > 32 {
-                bits |= ((BigUint::from(1u8) << (width - 32)) - BigUint::from(1u8)) << 32;
+                if width <= 64 {
+                    bits = BigUint::from(integer as i64 as u64);
+                } else {
+                    bits |= ((BigUint::from(1u8) << (width - 32)) - BigUint::from(1u8)) << 32;
+                }
             }
             Some((bits, 0u8.into()))
         }
@@ -1527,6 +1545,15 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
             let words = width.div_ceil(32);
             // Safety: the VPI caller supplies at least ceil(width / 32) words.
             let vector = unsafe { std::slice::from_raw_parts(vector, words) };
+            if width <= 64 {
+                let mut bits = 0u64;
+                let mut mask = 0u64;
+                for word in vector.iter().rev() {
+                    bits = (bits << 32) | u64::from(word.aval as u32);
+                    mask = (mask << 32) | u64::from(word.bval as u32);
+                }
+                return Some((BigUint::from(bits), BigUint::from(mask)));
+            }
             let mut bits = BigUint::from(0u8);
             let mut mask = BigUint::from(0u8);
             for (index, word) in vector.iter().enumerate().rev() {
@@ -1551,41 +1578,37 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
             } else {
                 4
             };
+            if width <= 64 {
+                let mut bits = 0u64;
+                let mut mask = 0u64;
+                for digit in string.bytes() {
+                    if digit == b'_' {
+                        continue;
+                    }
+                    // Truncation to the destination width is performed by
+                    // the caller. Still validate every digit, including an
+                    // overlong string's discarded prefix.
+                    bits <<= radix_bits;
+                    mask <<= radix_bits;
+                    let (value_digit, mask_digit) = decode_digit(digit, radix_bits)?;
+                    bits |= u64::from(value_digit);
+                    mask |= u64::from(mask_digit);
+                }
+                return Some((BigUint::from(bits), BigUint::from(mask)));
+            }
             let mut bits = BigUint::from(0u8);
             let mut mask = BigUint::from(0u8);
             for digit in string.bytes() {
                 if digit == b'_' {
                     continue;
                 }
+                let (value_digit, mask_digit) = decode_digit(digit, radix_bits)?;
                 bits <<= radix_bits;
                 mask <<= radix_bits;
-                match digit {
-                    b'0'..=b'9' if digit - b'0' < (1 << radix_bits) => {
-                        bits |= BigUint::from(digit - b'0');
-                    }
-                    b'a'..=b'f' if radix_bits == 4 => {
-                        bits |= BigUint::from(digit - b'a' + 10);
-                    }
-                    b'A'..=b'F' if radix_bits == 4 => {
-                        bits |= BigUint::from(digit - b'A' + 10);
-                    }
-                    b'x' | b'X' => {
-                        let unknown = (1u8 << radix_bits) - 1;
-                        bits |= BigUint::from(unknown);
-                        mask |= BigUint::from(unknown);
-                    }
-                    b'z' | b'Z' => {
-                        let unknown = (1u8 << radix_bits) - 1;
-                        mask |= BigUint::from(unknown);
-                    }
-                    _ => return None,
-                }
+                bits |= BigUint::from(value_digit);
+                mask |= BigUint::from(mask_digit);
             }
-            if width == 0 {
-                return Some((0u8.into(), 0u8.into()));
-            }
-            let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
-            Some((bits & &width_mask, mask & width_mask))
+            Some((bits, mask))
         }
         _ => None,
     }
@@ -1712,12 +1735,14 @@ pub unsafe extern "C" fn vpi_put_value(
         bits = 0u8.into();
         mask = 0u8.into();
     } else {
-        let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
-        bits &= &width_mask;
-        mask &= &width_mask;
-        if !is_4state {
-            let known_bits = &width_mask ^ &mask;
-            bits &= known_bits;
+        if bits.bits() > width as u64 || mask.bits() > width as u64 {
+            let width_mask = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+            bits &= &width_mask;
+            mask &= &width_mask;
+        }
+        if !is_4state && mask.bits() != 0 {
+            let unknown_bits = &bits & &mask;
+            bits ^= unknown_bits;
             mask = 0u8.into();
         }
     }
