@@ -786,6 +786,14 @@
     "sv_rest-X88": {
       "title": "An automatic output argument of unpacked structure type that is not written is copied out as X for a 2-state member",
       "standard": "IEEE 1800-2023 13.5.2, 6.8"
+    },
+    "sv_rest-X84": {
+      "title": "A string member of a class property of unpacked structure type prints with %s as a space-padded packed value, and a property of the object in a handle member reads empty",
+      "standard": "IEEE 1800-2023 7.2, 8.4, 21.2.1.7"
+    },
+    "sv_rest-X89": {
+      "title": "A whole class property of unpacked structure type is assigned member by member: a pattern reading the property sees members already written, and a receiver with a side-effecting index is evaluated per member",
+      "standard": "IEEE 1800-2023 7.2, 10.9.2, 11.4.1"
     }
   },
   "cases": [
@@ -4619,6 +4627,30 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X88",
       "note": "outz(r) does not write its output formal, so r.a must become the int default 0; xezim prints \"outz x\". Reproduced by verification/repros/sv_xezim_struct_output_default.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::class_properties",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X84",
+      "note": "o.orig.m_type_name and o.ovrd.m_type_name print as space-padded wide values and o.orig.m_type.n prints empty; the time member also starts at X in xezim's 4-state run of this 2-state case. Reproduced by verification/repros/sv_xezim_unpacked_struct_properties.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::class_properties_inheritance_and_collections",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X84",
+      "note": "d.orig.m_type_name and d.ovrd.m_type_name print as space-padded wide values (\"o x\" and \"[2999!]\" expected). Reproduced by verification/repros/sv_xezim_unpacked_struct_properties.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::class_property_assignment_order",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X89",
+      "note": "h.p = '{h.p.b, h.p.a} prints \"2 2\" instead of \"2 1\", and items[next_index()].p = '{7, 8} calls next_index() once per member, writing items[1].p.a and items[2].p.b, with i = 3 instead of 1."
     }
   ]
 }

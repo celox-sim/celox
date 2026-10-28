@@ -239,13 +239,19 @@ pub(in crate::ast) fn native_struct(
 ) -> Converted<Option<Arc<UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
     Ok(match &native.expression(id).kind {
-        ExprKind::Name(_) | ExprKind::Member { .. } => member_path(id, native)
+        ExprKind::Name(_) | ExprKind::Member { .. } => match member_path(id, native)
             .map(|mut parts| {
                 collapse(&mut parts, dims);
                 parts
             })
             .filter(|parts| parts.len() == 1)
-            .and_then(|parts| dims.get(&parts[0])?.unpacked_struct.clone()),
+            .and_then(|parts| dims.get(&parts[0])?.unpacked_struct.clone())
+        {
+            Some(aggregate) => Some(aggregate),
+            // A class property of unpacked structure type.
+            None => expression_binding::object_aggregate_property(tree, id, native, dims)?
+                .and_then(|(aggregate, _, _)| aggregate.r#type.unpacked_struct().cloned()),
+        },
         ExprKind::Conditional {
             then_expression,
             else_expression,
@@ -265,11 +271,16 @@ pub(in crate::ast) fn native_struct(
         } if std::ptr::eq(native, tree.declarations()) => {
             patterns::typed_shape(id, tree, dims)?.and_then(|shape| shape.unpacked_struct)
         }
+        // A method of the scope class hides a module function of its name,
+        // as call binding resolves it.
         ExprKind::Call { expression, .. } => {
-            expression_binding::callable_name(&tree.state, *expression, native)
-                .and_then(|name| dims.functions.get(&name))
-                .and_then(|function| function.return_type.as_ref())
-                .and_then(|ty| ty.unpacked_struct().cloned())
+            match expression_binding::object_method_result(tree, *expression, native, dims)? {
+                Some(ty) => ty.unpacked_struct().cloned(),
+                None => expression_binding::callable_name(&tree.state, *expression, native)
+                    .and_then(|name| dims.functions.get(&name))
+                    .and_then(|function| function.return_type.as_ref())
+                    .and_then(|ty| ty.unpacked_struct().cloned()),
+            }
         }
         _ => None,
     })

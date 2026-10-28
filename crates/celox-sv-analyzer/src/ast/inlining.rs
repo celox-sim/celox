@@ -145,6 +145,94 @@ pub(super) fn expr_signedness_with_return_types(
     }
 }
 
+/// Whether a call of `callee` only reads: a container element, size or
+/// membership, an object property, a string operation or an enumeration
+/// lookup.
+fn reads_only(callee: &Callee) -> bool {
+    match callee {
+        Callee::String(_) | Callee::Lookup { .. } => true,
+        Callee::Object(op) => matches!(
+            **op,
+            ObjectOp::Load(_)
+                | ObjectOp::Container {
+                    op: ContainerOp::Get | ContainerOp::Size | ContainerOp::Exists,
+                    ..
+                }
+        ),
+        _ => false,
+    }
+}
+
+/// Whether evaluating `expr` calls anything that does not only read (see
+/// [`reads_only`]), also in the positions of a select.
+pub(super) fn effectful(expr: &Expr) -> bool {
+    fn constant(expr: &ConstExpr) -> bool {
+        match expr {
+            ConstExpr::Function { callee, args, .. } => {
+                !reads_only(callee) || args.iter().any(constant)
+            }
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                constant(expr) || constant(msb) || constant(lsb)
+            }
+            ConstExpr::Select { expr, bit } => constant(expr) || constant(bit),
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => constant(expr),
+            ConstExpr::Binary { left, right, .. } => constant(left) || constant(right),
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => constant(condition) || constant(then_expr) || constant(else_expr),
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => false,
+        }
+    }
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                if !reads_only(callee) {
+                    return true;
+                }
+                pending.extend(args.iter().flatten());
+            }
+            Expr::Select { expr, msb, lsb, .. } => {
+                if constant(msb) || constant(lsb) {
+                    return true;
+                }
+                pending.push(expr)
+            }
+            Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => pending.push(expr),
+            Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => pending.extend(parts),
+            Expr::Binary { left, right, .. } => {
+                pending.push(left);
+                pending.push(right);
+            }
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                pending.push(condition);
+                pending.push(then_expr);
+                pending.push(else_expr);
+            }
+            Expr::Inside { expr, items } => {
+                pending.push(expr);
+                for item in items {
+                    match item {
+                        InsideItem::Value(value) => pending.push(value),
+                        InsideItem::Range { low, high } => {
+                            pending.push(low);
+                            pending.push(high);
+                        }
+                    }
+                }
+            }
+            Expr::Ident(_) | Expr::Literal(_) => {}
+        }
+    }
+    false
+}
+
 /// Whether `expr` calls a subroutine, which may have side effects.
 pub(super) fn calls_subroutine(expr: &Expr) -> bool {
     fn constant(expr: &ConstExpr) -> bool {

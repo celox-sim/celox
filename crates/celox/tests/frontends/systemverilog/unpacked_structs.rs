@@ -19,6 +19,64 @@ sv_backends! {
         @case "unpacked_structs::results_and_outputs";
     }
 
+    fn structure_properties_hide_module_variables(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { int a; int b; } pair_t;
+                int p;
+                class C;
+                    pair_t p;
+                    function int first();
+                        p.a = 7;
+                        return p.a;
+                    endfunction
+                endclass
+                initial begin
+                    C c;
+                    c = new;
+                    p = 3;
+                    value = c.first() * 10 + p;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(73u8));
+    }
+
+    fn structure_properties_in_for_headers_and_method_precedence(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { int a; int b; } pair_t;
+                function int get();
+                    return 5;
+                endfunction
+                class H;
+                    pair_t p;
+                    function pair_t get();
+                        return '{4, 2};
+                    endfunction
+                    function int run();
+                        int n;
+                        for (p = '{0, 0}; p.a < 3; p = '{p.a + 1, p.b + 2}) n++;
+                        p = get();
+                        return n * 100 + p.a * 10 + p.b;
+                    endfunction
+                endclass
+                initial begin
+                    H h;
+                    h = new;
+                    value = h.run();
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(342u16));
+    }
+
     fn constructors_in_structure_patterns(sim) {
         @setup {
             let source = r#"module Top(output bit ok);
@@ -96,6 +154,36 @@ sv_backends! {
         let out = sim.signal("out");
         assert_eq!(sim.get(out), BigUint::from(71u8));
     }
+    fn redeclared_structure_properties_hide_their_members(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { int a; int b; } pair_t;
+                typedef struct { int a; } one_t;
+                class Base;
+                    pair_t p;
+                endclass
+                class Derived extends Base;
+                    one_t p;
+                    function int sum();
+                        return p.a * 100 + super.p.a * 10 + super.p.b;
+                    endfunction
+                endclass
+                initial begin
+                    Derived d;
+                    Base b;
+                    d = new;
+                    b = d;
+                    d.p.a = 1;
+                    b.p = '{2, 3};
+                    value = d.sum() * 10 + d.p.a;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(1231u16));
+    }
     fn unpacked_struct_module_variables(sim) {
         @case "unpacked_structs::module_variables";
     }
@@ -104,6 +192,18 @@ sv_backends! {
     }
     fn unpacked_struct_four_state_members(sim) {
         @case "unpacked_structs::four_state_members";
+    }
+    fn unpacked_struct_class_properties(sim) {
+        @case "unpacked_structs::class_properties";
+    }
+    fn unpacked_struct_class_property_assignment_order(sim) {
+        @case "unpacked_structs::class_property_assignment_order";
+    }
+    fn unpacked_struct_class_property_four_state_members(sim) {
+        @case "unpacked_structs::class_property_four_state_members";
+    }
+    fn unpacked_struct_class_properties_inheritance_and_collections(sim) {
+        @case "unpacked_structs::class_properties_inheritance_and_collections";
     }
 }
 
@@ -166,12 +266,40 @@ fn unsupported_and_illegal_uses_are_rejected() {
         ),
         ("i_t q[$];", "dynamic container of unpacked structures"),
         (
-            "class C; i_t v; endclass",
-            "class property of unpacked structure type",
+            "class C; static i_t v; endclass",
+            "static class property of unpacked structure type",
+        ),
+        (
+            "class C; rand i_t v; endclass",
+            "random class property of unpacked structure type",
+        ),
+        (
+            "class C; i_t v; endclass C c; initial begin c = new; c.v += c.v; end",
+            "operator `+=` on an unpacked structure",
+        ),
+        (
+            "class C; i_t v; endclass C c; i_t w; initial begin c = new; c.v <= w; end",
+            "nonblocking assignment to a class property",
+        ),
+        (
+            "class C; i_t v; endclass C cs[2]; int k; i_t w; function int f(); k = k + 1; return k; endfunction initial w = cs[f()].v;",
+            "whole unpacked structure property read through a receiver with a side effect",
+        ),
+        (
+            "class C; i_t v; endclass C cs[$]; int k[$]; i_t w; initial w = cs[k.pop_front()].v;",
+            "whole unpacked structure property read through a receiver with a side effect",
         ),
         (
             "function automatic void f(ref i_t r); r.a++; endfunction i_t v; initial f(v);",
             "ref argument of `f` of unpacked structure type",
+        ),
+        (
+            "class B; i_t p; endclass class D extends B; int p; endclass D d; int x; initial begin d = new; x = d.p.a; end",
+            "structure member `d.p.a`",
+        ),
+        (
+            "class B; i_t p; endclass typedef struct { int a; } one_t; class D extends B; one_t p; endclass D d; bit x; initial begin d = new; x = d.p.b; end",
+            "structure member `d.p.b`",
         ),
         ("i_t v[2];", "array of unpacked structures"),
         (
