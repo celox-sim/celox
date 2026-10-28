@@ -1184,3 +1184,31 @@ reproduce it as both Top and Wrapped. The two exact failures remain executed
 evidence in the [Icarus](verification/sv/icarus/class.json) and
 [xezim](verification/sv/xezim/class.json) class reports.
 No assertions or exclusions are weakened.
+### Reference arguments
+
+The 18 `references::*` cases check that `ref` and `const ref` formals are the
+actual itself (IEEE 1800-2023 13.5.2): variables, queues, strings, class handles,
+class and static properties (also passed on to `output` and `inout` arguments) and
+fixed-size array elements, with selects past the element writing nothing, across
+task suspensions and concurrent activations. Celox passes all of them on every backend.
+
+Verilator 5.052 passes 15. It rejects an `int` formal bound to a `bit signed [31:0]`
+actual with "Ref argument requires matching types", although 6.22.2 makes the
+types equivalent, and rejects two functions that also write a module variable with
+`%Error-IMPURE` "External variable referenced by non-inlined function/task".
+Icarus 13.0 compiles none: it reports "Reference ports not supported yet", a syntax
+error for `const ref` or a `C::p` task argument, or "Overriding the default variable lifetime is not yet
+supported" for the `automatic` locals. These are executed compile failures.
+
+The installed xezim 0.11.3 build gives copy-in/copy-out results in nine cases: a
+write through the formal is not seen through another name of the actual before the
+return, two formals of one actual do not alias, suspended tasks miss concurrent
+writes, and an element's index is evaluated again. A formal bound to a subarray
+element neither reads nor writes it in a tenth. They are recorded as
+`sv_ref_copy_semantics` and `sv_ref_subarray_element` in
+[the review](verification/xezim-review.json) and remain
+executed mismatches in [the report](verification/sv/xezim/references.json). The
+[adapter-free Top/Wrapped probe](verification/repros/ref_arguments.sv) and
+[its observations](verification/repros/ref_arguments.json) reproduce the same
+values without the suite adapters; the observations are from the installed build,
+not a current-pin validation.

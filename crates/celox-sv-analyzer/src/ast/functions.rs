@@ -41,18 +41,8 @@ pub(super) fn native_functions(
                 .chain(native.port_declarations.iter().flat_map(|decl| &decl.ports))
             {
                 if let Some(direction) = port.direction {
-                    previous = match direction {
-                        celox_sv_syntax::Direction::Input => {
-                            crate::procedural::ParamDirection::Input
-                        }
-                        celox_sv_syntax::Direction::Output => {
-                            crate::procedural::ParamDirection::Output
-                        }
-                        celox_sv_syntax::Direction::Inout => {
-                            crate::procedural::ParamDirection::Inout
-                        }
-                        _ => continue,
-                    };
+                    previous =
+                        crate::procedural::ParamDirection::declared(direction, port.constant);
                 }
                 if let Some(name) = &port.name {
                     arguments.push(instances::normalize_identifier(&name.spelling));
@@ -195,12 +185,7 @@ fn native_signature(
             .flat_map(|group| &group.ports),
     ) {
         if let Some(value) = port.direction {
-            direction = match value {
-                celox_sv_syntax::Direction::Input => ParamDirection::Input,
-                celox_sv_syntax::Direction::Output => ParamDirection::Output,
-                celox_sv_syntax::Direction::Inout => ParamDirection::Inout,
-                _ => direction,
-            };
+            direction = ParamDirection::declared(value, port.constant);
         }
         let Some(name) = &port.name else { continue };
         let data = tree.declarations().data_type(port.data_type);

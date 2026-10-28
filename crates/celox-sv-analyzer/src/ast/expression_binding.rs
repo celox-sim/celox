@@ -5,6 +5,7 @@ mod calls;
 mod direct;
 mod lvalues;
 mod objects;
+mod references;
 #[cfg(test)]
 mod selected;
 mod strings;

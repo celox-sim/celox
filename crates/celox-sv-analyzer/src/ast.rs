@@ -120,6 +120,7 @@ impl Deref for AnalysisContext<'_> {
     }
 }
 
+use crate::procedural::ParamDirection;
 pub use crate::system_functions::{
     ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, ObjectOp, StringOp,
     SystemFunction, SystemTask,
@@ -1406,6 +1407,21 @@ impl Module {
                 }
             }
         }
+        let nets = signals
+            .iter()
+            .filter(|signal| signal.is_net())
+            .map(Signal::name)
+            .chain(ports.iter().filter(|port| port.is_net).map(Port::name))
+            .collect();
+        procedural::references::validate(
+            subroutines.iter().chain(imported.subroutines.iter()),
+            &comb_processes,
+            &ff_processes,
+            &initial_processes,
+            &subroutine_directions,
+            &subroutine_params,
+            &nets,
+        )?;
         procedural::timed_tasks::classify(
             subroutines.iter().chain(imported.subroutines.iter()),
             &mut comb_processes,
@@ -2794,21 +2810,6 @@ fn dpi_argument_metadata(import: &crate::ir::DpiImport) -> Arc<[FunctionArgument
             has_default: false,
         })
         .collect()
-}
-
-/// How a function argument is passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParamDirection {
-    Input,
-    Output,
-    Inout,
-}
-
-impl ParamDirection {
-    /// Whether the call writes the actual argument back.
-    fn is_written(self) -> bool {
-        !matches!(self, ParamDirection::Input)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

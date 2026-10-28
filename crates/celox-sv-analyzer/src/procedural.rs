@@ -221,17 +221,40 @@ pub enum ParamDirection {
     Input,
     Output,
     Inout,
+    /// `ref`: the formal names the actual itself (IEEE 1800-2023 13.5.2).
+    Ref,
+    /// `const ref`: a reference the subroutine only reads.
+    ConstRef,
 }
 
 impl ParamDirection {
-    /// Whether the call copies the argument's value in.
+    /// The direction a formal declares with `direction`, `const` (only
+    /// meaningful with `ref`) and `static` (`ref static`).
+    pub fn declared(direction: celox_sv_syntax::Direction, constant: bool) -> Self {
+        match direction {
+            celox_sv_syntax::Direction::Input => ParamDirection::Input,
+            celox_sv_syntax::Direction::Output => ParamDirection::Output,
+            celox_sv_syntax::Direction::Inout => ParamDirection::Inout,
+            celox_sv_syntax::Direction::Ref if constant => ParamDirection::ConstRef,
+            celox_sv_syntax::Direction::Ref => ParamDirection::Ref,
+        }
+    }
+
+    /// Whether the callee may read the actual: the call copies it in, or
+    /// the formal refers to it.
     pub fn is_read(self) -> bool {
         !matches!(self, ParamDirection::Output)
     }
 
-    /// Whether the call writes the actual argument back.
+    /// Whether the callee may change the actual: the call copies the formal
+    /// back, or the formal refers to it.
     pub fn is_written(self) -> bool {
-        !matches!(self, ParamDirection::Input)
+        !matches!(self, ParamDirection::Input | ParamDirection::ConstRef)
+    }
+
+    /// Whether the formal refers to the actual instead of holding a copy.
+    pub fn is_reference(self) -> bool {
+        matches!(self, ParamDirection::Ref | ParamDirection::ConstRef)
     }
 }
 

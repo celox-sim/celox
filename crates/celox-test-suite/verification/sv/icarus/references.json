@@ -1,0 +1,202 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:5: syntax error\n<case>/testbench.sv:17: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:17: error: ';' is an invalid port declaration separator.\n<case>/testbench.sv:24: syntax error\n<case>/source_0.sv:5: error: Syntax error defining function.\n",
+      "expectation": "Simulation",
+      "name": "references::const_ref_in_a_continuous_assignment",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/testbench.sv:17: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:17: error: ';' is an invalid port declaration separator.\n<case>/testbench.sv:24: syntax error\n<case>/source_0.sv:4: error: Syntax error defining function.\n",
+      "expectation": "Simulation",
+      "name": "references::const_ref_reads_the_current_value",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: Reference ports not supported yet.\n<case>/source_0.sv:3: error: Function celox_suite_tb.dut.set port x is not an input port.\n<case>/source_0.sv:3:      : Function arguments must be input ports.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_actual_of_an_equivalent_type",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 11; see <case>/build.log\n<case>/source_0.sv:5: sorry: Reference ports not supported yet.\n<case>/source_0.sv:5: error: Function celox_suite_tb.dut.bump port x is not an input port.\n<case>/source_0.sv:5:      : Function arguments must be input ports.\n<case>/source_0.sv:10: sorry: Reference ports not supported yet.\n<case>/source_0.sv:10: error: Function celox_suite_tb.dut.row port r is not an input port.\n<case>/source_0.sv:10:      : Function arguments must be input ports.\n<case>/source_0.sv:10: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:13: sorry: Reference ports not supported yet.\n<case>/source_0.sv:13: sorry: Reference ports not supported yet.\n<case>/source_0.sv:13: error: Function celox_suite_tb.dut.swap port a is not an input port.\n<case>/source_0.sv:13:      : Function arguments must be input ports.\n<case>/source_0.sv:13: error: Function celox_suite_tb.dut.swap port b is not an input port.\n<case>/source_0.sv:13:      : Function arguments must be input ports.\n<case>/source_0.sv:24: error: Array m['sd1] needs 2 indices, but got only 1.\n<case>/source_0.sv:24: sorry: Assignment to an  array slice is not yet supported.\n<case>/source_0.sv:24: error: I give up on task port 1 expression: m['sd1]\n11 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_array_element_index_is_fixed_at_the_call",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:16: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:17: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_class_property_names_the_object_of_the_call",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:4: sorry: Reference ports not supported yet.\n<case>/source_0.sv:4: sorry: Default arguments for subroutine output or inout ports are not yet supported.\n<case>/source_0.sv:4: error: Function celox_suite_tb.dut.inc port x is not an input port.\n<case>/source_0.sv:4:      : Function arguments must be input ports.\n<case>/source_0.sv:7: sorry: Reference ports not supported yet.\n<case>/source_0.sv:7: sorry: Reference ports not supported yet.\n<case>/source_0.sv:7: error: Function celox_suite_tb.dut.move port a is not an input port.\n<case>/source_0.sv:7:      : Function arguments must be input ports.\n<case>/source_0.sv:7: error: Function celox_suite_tb.dut.move port b is not an input port.\n<case>/source_0.sv:7:      : Function arguments must be input ports.\n<case>/source_0.sv:12: error: Missing argument 1 of call to task.\n8 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_default_and_named_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:9: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_element_after_an_input_in_forked_activations",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:3: sorry: Reference ports not supported yet.\n<case>/source_0.sv:3: error: Function celox_suite_tb.dut.touch port r is not an input port.\n<case>/source_0.sv:3:      : Function arguments must be input ports.\n<case>/source_0.sv:3: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:4: warning: ignoring out of bounds l-value array access r[3].\n<case>/source_0.sv:6: warning: returning 'bx for out of bounds array access r[3].\n<case>/source_0.sv:9: error: Array m['sd0] needs 2 indices, but got only 1.\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_element_select_past_the_element",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:9: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_elements_of_concurrent_task_activations",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:12: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:13: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_fills_caller_queues",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:3: sorry: Reference ports not supported yet.\n<case>/source_0.sv:3: sorry: Reference ports not supported yet.\n<case>/source_0.sv:3: error: Function celox_suite_tb.dut.f port a is not an input port.\n<case>/source_0.sv:3:      : Function arguments must be input ports.\n<case>/source_0.sv:3: error: Function celox_suite_tb.dut.f port b is not an input port.\n<case>/source_0.sv:3:      : Function arguments must be input ports.\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_formals_of_one_actual_alias_each_other",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:14: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_property_forwarded_to_output_and_inout",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:13: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_property_of_this",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:10: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:11: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_replaces_a_class_handle",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Syntax error in task arguments.\n<case>/source_0.sv:15: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Syntax error in task arguments.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "references::ref_static_class_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:7: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_task_keeps_a_property_while_suspended",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:9: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_task_keeps_the_reference_while_suspended",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: Reference ports not supported yet.\n<case>/source_0.sv:3: error: Function celox_suite_tb.dut.bump port x is not an input port.\n<case>/source_0.sv:3:      : Function arguments must be input ports.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "references::ref_writes_are_seen_before_the_return",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
