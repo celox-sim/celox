@@ -839,6 +839,27 @@ pub struct ObjectField {
     pub handle: Option<HandleProperty>,
     /// A 4-state value: its unknown-bit mask follows the value bytes.
     pub four_state: bool,
+    /// A member of a [`Record`]: `null` reads as the member's default.
+    pub nullable: bool,
+}
+
+/// The layout of an immutable heap record that holds the value of an
+/// unpacked structure (IEEE 1800-2023 7.2) as a container element: one
+/// field per leaf member, first declared first.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Record {
+    pub size: u32,
+    pub fields: Vec<ObjectField>,
+}
+
+impl Record {
+    /// The run-time class of a record, which no class shares.
+    pub const CLASS: u32 = u32::MAX;
+
+    /// Bits of the flat structure value.
+    pub fn width(&self) -> usize {
+        self.fields.iter().map(|field| field.width as usize).sum()
+    }
 }
 
 /// What a handle property refers to.
@@ -1011,6 +1032,11 @@ pub enum ObjectOp {
     /// A new object of the class of the object in the argument, with a copy
     /// of its properties (IEEE 1800-2023 8.12).
     Copy,
+    /// A new record holding the flat structure value in the argument.
+    Box(Record),
+    /// The flat structure value of the record in the argument; `null` is
+    /// the default value.
+    Unbox(Record),
 }
 
 impl ObjectOp {
@@ -1042,7 +1068,10 @@ impl ObjectOp {
             | Self::ModeSelected(_) => (32, false),
             Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
-            Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy => (32, false),
+            Self::Unbox(record) => (record.width(), false),
+            Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy | Self::Box(_) => {
+                (32, false)
+            }
         }
     }
 }
@@ -1069,6 +1098,8 @@ impl fmt::Display for ObjectOp {
             Self::ModeSelect(..) => "select random property",
             Self::ModeSelected(_) => "selected random property query",
             Self::Copy => "shallow copy",
+            Self::Box(_) => "structure record",
+            Self::Unbox(_) => "structure record read",
         })
     }
 }

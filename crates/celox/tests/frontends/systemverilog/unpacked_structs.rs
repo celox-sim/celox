@@ -77,6 +77,42 @@ sv_backends! {
         assert_eq!(sim.get(value), BigUint::from(342u16));
     }
 
+    fn container_elements_with_packed_and_process_members(sim) {
+        @setup {
+            let source = r#"module Top(output bit [3:0] code, output bit [7:0] header,
+                    output bit null_process, output int changes);
+                timeunit 1ps / 1ps;
+                typedef struct packed { bit [3:0] code; bit [3:0] kind; } header_t;
+                typedef struct { header_t header; string s; } element_t;
+                typedef struct { process p; logic flag; } waiter_t;
+                typedef struct { string name; bit flag; } entry_t;
+                entry_t q[$];
+                initial begin
+                    element_t r[$];
+                    waiter_t w[];
+                    r.push_back('{8'hA5, "a"});
+                    code = r[0].header.code;
+                    header = r[0].header;
+                    w = new[1];
+                    null_process = w[0].p == null;
+                    q.push_back('{"x", 0});
+                    #1 q[0] = '{"x", 1};
+                end
+                initial begin
+                    @(q[0].flag);
+                    changes = 1;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top")
+            .four_state(true);
+        sim.run_until(5).unwrap();
+        for (name, value) in [("code", 0xau8), ("header", 0xa5), ("null_process", 1), ("changes", 1)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+
     fn constructors_in_structure_patterns(sim) {
         @setup {
             let source = r#"module Top(output bit ok);
@@ -117,6 +153,65 @@ sv_backends! {
         assert_eq!(sim.get(first), BigUint::from(22u8));
         assert_eq!(sim.get(second), BigUint::from(22u8));
     }
+    fn unknown_record_members_and_properties_are_not_folded(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { string name; logic flag; } row_t;
+                class H;
+                    logic f;
+                endclass
+                initial begin
+                    row_t q[$];
+                    row_t d[];
+                    H h;
+                    h = new;
+                    q.push_back('{name: "a", flag: 'x});
+                    value = 0;
+                    if (q[0].flag || !q[0].flag) value += 1;
+                    else value += 10;
+                    if (h.f || !h.f) value += 100;
+                    else value += 1000;
+                    d = new[2];
+                    if ((d[0] == d[1]) || (d[0] != d[1])) value += 10000;
+                    else value += 100000;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top")
+            .four_state(true);
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(101010u32));
+    }
+    fn equal_record_updates_preserve_event_waits(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output bit done, output int changes);
+                typedef struct { string name; int value; } row_t;
+                row_t q[$], d[];
+                int count, before_count;
+                initial begin
+                    q.push_back('{"a", 1});
+                    d = new[1];
+                    #1 before_count = count;
+                    d[0] = d[0];
+                    d[0] = '{default: 0, name: ""};
+                    q[0] = q[0];
+                    q[0] = '{{"a"}, 1};
+                    #1 q = '{'{"a", 1}};
+                    #1 done = count == before_count;
+                    q[0] = '{"b", 1};
+                    #1 changes = count - before_count;
+                end
+                always @(q or d) count = count + 1;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(4).unwrap();
+        let (done, changes) = (sim.signal("done"), sim.signal("changes"));
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+        assert_eq!(sim.get(changes), BigUint::from(1u8));
+    }
     fn static_nested_string_initializers(sim) {
         @setup {
             let source = r#"module Top(output int n);
@@ -153,6 +248,28 @@ sv_backends! {
         sim.run_until(4).unwrap();
         let out = sim.signal("out");
         assert_eq!(sim.get(out), BigUint::from(71u8));
+    }
+    fn enumeration_methods_of_container_element_members(sim) {
+        @setup {
+            let source = r#"module Top(output bit done);
+                typedef enum { STARTED, FINISHED } state_e;
+                typedef struct { state_e state; string tag; } rec_t;
+                typedef struct { state_e state; int n; } flat_t;
+                initial begin
+                    rec_t m[int];
+                    flat_t q[$];
+                    string s;
+                    m[2] = '{STARTED, "x"};
+                    q.push_back('{FINISHED, 3});
+                    s = {m[2].state.name(), " ", q[0].state.name, " ", m[2].state.next().name()};
+                    done = s == "STARTED FINISHED FINISHED" && q[0].state.prev() == STARTED;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
     }
     fn redeclared_structure_properties_hide_their_members(sim) {
         @setup {
@@ -204,6 +321,18 @@ sv_backends! {
     }
     fn unpacked_struct_class_properties_inheritance_and_collections(sim) {
         @case "unpacked_structs::class_properties_inheritance_and_collections";
+    }
+    fn unpacked_struct_container_elements(sim) {
+        @case "unpacked_structs::container_elements";
+    }
+    fn unpacked_struct_container_element_member_selects(sim) {
+        @case "unpacked_structs::container_element_member_selects";
+    }
+    fn unpacked_struct_container_element_four_state_defaults(sim) {
+        @case "unpacked_structs::container_element_four_state_defaults";
+    }
+    fn unpacked_struct_container_records_survive_heap_collections(sim) {
+        @case "unpacked_structs::container_records_survive_heap_collections";
     }
 }
 
@@ -264,7 +393,34 @@ fn unsupported_and_illegal_uses_are_rejected() {
             "parameter i_t P = '{1, 0};",
             "parameter of unpacked structure type",
         ),
-        ("i_t q[$];", "dynamic container of unpacked structures"),
+        (
+            "s_t q[$], r[$]; bit x; initial x = q == r;",
+            "comparison of dynamic containers of unpacked structures",
+        ),
+        (
+            "i_t q[$]; initial q.sort();",
+            "sorting unpacked structures requires a with expression",
+        ),
+        (
+            "s_t q[$]; initial begin q.push_back('{1, \"x\"}); q[0].a = 5; end",
+            "assignment to a member of a dynamic container element",
+        ),
+        (
+            "s_t q[$]; initial begin q.push_back('{1, \"x\"}); q[0].a++; end",
+            "assignment to a member of a dynamic container element",
+        ),
+        (
+            "typedef struct { bit [15:8] hi; string s; } h_t; h_t q[$]; bit x; initial x = q[0].hi[8];",
+            "select of a container element member that is not declared [N-1:0]",
+        ),
+        (
+            "typedef struct { s_t inner; } n_t; n_t q[$]; s_t i; initial i = q.pop_front().inner;",
+            "structure member with several members of an element read with a side effect",
+        ),
+        (
+            "typedef struct { s_t inner; } n_t; n_t q[$]; s_t i; initial i = q[$urandom_range(0, 1)].inner;",
+            "structure member with several members of an element read with a side effect",
+        ),
         (
             "class C; static i_t v; endclass",
             "static class property of unpacked structure type",

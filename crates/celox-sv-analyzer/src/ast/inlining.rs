@@ -154,6 +154,7 @@ fn reads_only(callee: &Callee) -> bool {
         Callee::Object(op) => matches!(
             **op,
             ObjectOp::Load(_)
+                | ObjectOp::Unbox(_)
                 | ObjectOp::Container {
                     op: ContainerOp::Get | ContainerOp::Size | ContainerOp::Exists,
                     ..
