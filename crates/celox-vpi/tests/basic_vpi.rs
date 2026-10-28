@@ -4339,7 +4339,7 @@ unsafe extern "C" fn record_callback_vector_values(data: *mut VpiCbData) -> i32 
 fn value_change_callbacks_compare_full_values_and_unknown_masks() {
     let _serial = lock_vpi();
     for four_state in [false, true] {
-        for width in [63usize, 64, 65] {
+        for width in [63usize, 64, 65, 129] {
             let source = format!(
                 "module Top(input logic [{0}:0] x, output logic [{0}:0] y); assign y=x; endmodule",
                 width - 1

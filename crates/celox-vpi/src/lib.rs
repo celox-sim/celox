@@ -1349,16 +1349,13 @@ fn value_snapshot_at(
     })
 }
 
-fn value_bits_at(host: &VpiHost, id: SignalSelection) -> Option<(BigUint, BigUint, usize)> {
-    let (snapshot, width) = value_snapshot_at(host, id)?;
-    let (value, mask) = snapshot.into_big();
-    Some((value, mask, width))
-}
-
-fn format_binary(buffer: &mut Vec<u8>, value: &BigUint, mask: &BigUint, width: usize) {
+fn format_binary(
+    buffer: &mut Vec<u8>,
+    mut values: impl Iterator<Item = u64>,
+    mut masks: impl Iterator<Item = u64>,
+    width: usize,
+) {
     buffer.resize(width, 0);
-    let mut values = value.iter_u64_digits();
-    let mut masks = mask.iter_u64_digits();
     for chunk in buffer.rchunks_mut(64) {
         let value = values.next().unwrap_or(0);
         let mask = masks.next().unwrap_or(0);
@@ -1370,10 +1367,13 @@ fn format_binary(buffer: &mut Vec<u8>, value: &BigUint, mask: &BigUint, width: u
     buffer.push(0);
 }
 
-fn format_hex(buffer: &mut Vec<u8>, value: &BigUint, mask: &BigUint, width: usize) {
+fn format_hex(
+    buffer: &mut Vec<u8>,
+    mut values: impl Iterator<Item = u64>,
+    mut masks: impl Iterator<Item = u64>,
+    width: usize,
+) {
     buffer.resize(width.div_ceil(4), 0);
-    let mut values = value.iter_u64_digits();
-    let mut masks = mask.iter_u64_digits();
     for (word, chunk) in buffer.rchunks_mut(16).enumerate() {
         let value = values.next().unwrap_or(0);
         let mask = masks.next().unwrap_or(0);
@@ -1392,6 +1392,19 @@ fn format_hex(buffer: &mut Vec<u8>, value: &BigUint, mask: &BigUint, width: usiz
         }
     }
     buffer.push(0);
+}
+
+fn format_vector(
+    buffer: &mut Vec<VpiVecVal>,
+    mut values: impl Iterator<Item = u32>,
+    mut masks: impl Iterator<Item = u32>,
+    width: usize,
+) {
+    buffer.clear();
+    buffer.extend((0..width.div_ceil(32)).map(|_| VpiVecVal {
+        aval: values.next().unwrap_or(0) as i32,
+        bval: masks.next().unwrap_or(0) as i32,
+    }));
 }
 
 fn encode_signal_value(
@@ -1420,22 +1433,94 @@ fn encode_signal_value(
             };
         }
         VPI_BIN_STR_VAL => {
-            format_binary(&mut handle.value_string, bits, mask, width);
+            format_binary(
+                &mut handle.value_string,
+                bits.iter_u64_digits(),
+                mask.iter_u64_digits(),
+                width,
+            );
             value.value.str_ = handle.value_string.as_mut_ptr().cast();
         }
         VPI_HEX_STR_VAL => {
-            format_hex(&mut handle.value_string, bits, mask, width);
+            format_hex(
+                &mut handle.value_string,
+                bits.iter_u64_digits(),
+                mask.iter_u64_digits(),
+                width,
+            );
             value.value.str_ = handle.value_string.as_mut_ptr().cast();
         }
         VPI_VECTOR_VAL => {
-            let words = width.div_ceil(32);
-            let mut value_words = bits.iter_u32_digits();
-            let mut mask_words = mask.iter_u32_digits();
-            handle.value_vector.clear();
-            handle.value_vector.extend((0..words).map(|_| VpiVecVal {
-                aval: value_words.next().unwrap_or(0) as i32,
-                bval: mask_words.next().unwrap_or(0) as i32,
-            }));
+            format_vector(
+                &mut handle.value_vector,
+                bits.iter_u32_digits(),
+                mask.iter_u32_digits(),
+                width,
+            );
+            value.value.vector = handle.value_vector.as_mut_ptr();
+        }
+        VPI_SUPPRESS_VAL => {}
+        _ => {}
+    }
+}
+
+// A numerically narrow snapshot can belong to a wider logical object. The
+// shared digit formatters zero-extend it to that object's full declared width.
+fn encode_snapshot_value(
+    handle: &mut VpiHandleObject,
+    value: &mut VpiValue,
+    snapshot: &callbacks::ValueSnapshot,
+    width: usize,
+    signed: bool,
+) {
+    let (bits, mask) = match snapshot {
+        callbacks::ValueSnapshot::Word(bits, mask) => (*bits, *mask),
+        callbacks::ValueSnapshot::Wide(bits, mask) => {
+            return encode_signal_value(handle, value, bits, mask, width, signed);
+        }
+    };
+    match value.format {
+        VPI_INT_VAL => {
+            let mut integer = bits as u32;
+            if signed && width > 0 && width < 32 && (bits >> (width - 1)) & 1 != 0 {
+                integer |= u32::MAX << width;
+            }
+            value.value.integer = integer as i32;
+        }
+        VPI_SCALAR_VAL => {
+            value.value.scalar = if mask & 1 != 0 {
+                if bits & 1 != 0 { VPI_X } else { VPI_Z }
+            } else if bits & 1 != 0 {
+                VPI_1
+            } else {
+                VPI_0
+            };
+        }
+        VPI_BIN_STR_VAL => {
+            format_binary(
+                &mut handle.value_string,
+                std::iter::once(bits),
+                std::iter::once(mask),
+                width,
+            );
+            value.value.str_ = handle.value_string.as_mut_ptr().cast();
+        }
+        VPI_HEX_STR_VAL => {
+            format_hex(
+                &mut handle.value_string,
+                std::iter::once(bits),
+                std::iter::once(mask),
+                width,
+            );
+            value.value.str_ = handle.value_string.as_mut_ptr().cast();
+        }
+        VPI_VECTOR_VAL => {
+            format_vector(
+                &mut handle.value_vector,
+                [bits as u32, (bits >> 32) as u32].into_iter(),
+                [mask as u32, (mask >> 32) as u32].into_iter(),
+                width,
+            );
             value.value.vector = handle.value_vector.as_mut_ptr();
         }
         VPI_SUPPRESS_VAL => {}
@@ -1470,43 +1555,7 @@ unsafe fn write_snapshot_value(
     };
     // Safety: checked non-null above; the caller owns writable value storage.
     let value = unsafe { &mut *value };
-    if let callbacks::ValueSnapshot::Word(bits, mask) = snapshot {
-        match value.format {
-            VPI_SUPPRESS_VAL => return,
-            VPI_INT_VAL => {
-                let mut integer = *bits as u32;
-                if signed && width > 0 && width < 32 && (bits >> (width - 1)) & 1 != 0 {
-                    integer |= u32::MAX << width;
-                }
-                value.value.integer = integer as i32;
-                return;
-            }
-            VPI_SCALAR_VAL => {
-                value.value.scalar = if mask & 1 != 0 {
-                    if bits & 1 != 0 { VPI_X } else { VPI_Z }
-                } else if bits & 1 != 0 {
-                    VPI_1
-                } else {
-                    VPI_0
-                };
-                return;
-            }
-            _ => {}
-        }
-    }
-    match snapshot {
-        callbacks::ValueSnapshot::Wide(bits, mask) => {
-            encode_signal_value(handle, value, bits, mask, width, signed)
-        }
-        callbacks::ValueSnapshot::Word(bits, mask) => encode_signal_value(
-            handle,
-            value,
-            &BigUint::from(*bits),
-            &BigUint::from(*mask),
-            width,
-            signed,
-        ),
-    }
+    encode_snapshot_value(handle, value, snapshot, width, signed);
 }
 
 #[unsafe(no_mangle)]
@@ -1539,7 +1588,7 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
     let HandleKind::Object(ObjectRef::Signal(id)) = handle.kind else {
         return;
     };
-    let Some((bits, mask, width)) = value_bits_at(&host, id) else {
+    let Some((snapshot, width)) = value_snapshot_at(&host, id) else {
         return;
     };
     let signed = borrow_cell(&host.runtime, |runtime| {
@@ -1549,7 +1598,7 @@ pub unsafe extern "C" fn vpi_get_value(reference: VpiHandle, value: *mut VpiValu
             .is_some_and(|signal| signal.signed)
     });
     // Safety: checked non-null above; caller owns the `VpiValue` allocation.
-    encode_signal_value(handle, unsafe { &mut *value }, &bits, &mask, width, signed);
+    encode_snapshot_value(handle, unsafe { &mut *value }, &snapshot, width, signed);
 }
 
 fn decode_digit(digit: u8, radix_bits: u32) -> Option<(u8, u8)> {
