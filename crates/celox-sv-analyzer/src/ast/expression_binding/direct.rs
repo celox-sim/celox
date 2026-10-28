@@ -579,7 +579,10 @@ pub(in crate::ast) fn bind_value(
                         if let objects::Receiver::Handle(handle) = receiver {
                             children.push((handle, None));
                         }
+                        // The shapes of the formals, after `this` of a method
+                        // that is not static, receive assignment patterns.
                         let first = usize::from(receiver != objects::Receiver::Static);
+                        let shapes = dimensions.subroutine_param_shapes.get(&name);
                         for (position, arg) in
                             args.iter().filter(|_| selection.is_none()).enumerate()
                         {
@@ -596,7 +599,12 @@ pub(in crate::ast) fn bind_value(
                                 tree,
                                 dimensions,
                             )?;
-                            children.push((value, None));
+                            let shape = shapes
+                                .and_then(|shapes| shapes.get(first + position))
+                                .filter(|shape| shape.unpacked_struct.is_some())
+                                .cloned()
+                                .map(Rc::new);
+                            children.push((value, shape));
                         }
                         (
                             Finish::MethodCall {
@@ -943,6 +951,14 @@ pub(in crate::ast) fn bind_value(
                             objects::class_parameter(tree, id, native, dimensions)?
                                 .expect("checked by the guard"),
                         );
+                        continue;
+                    }
+                    ExprKind::Member { .. }
+                        if containers::element_member(id, native, tree, dimensions)?.is_some() =>
+                    {
+                        let (_, value) = containers::element_member(id, native, tree, dimensions)?
+                            .expect("checked by the guard");
+                        values.push(value);
                         continue;
                     }
                     ExprKind::Member { .. }
@@ -1680,9 +1696,40 @@ fn selected_value(
     {
         return Err(unsupported("bit-select or part-select of a real variable"));
     }
-    if let ExprKind::Concatenation(_) | ExprKind::Replication { .. } = native.expression(base).kind
+    // A select of a member of a container element reads the member first.
+    let element_member = if suffix.is_empty() {
+        None
+    } else {
+        containers::element_member(base, native, tree, dimensions)?
+    };
+    if element_member.is_some()
+        || matches!(
+            native.expression(base).kind,
+            ExprKind::Concatenation(_) | ExprKind::Replication { .. }
+        )
     {
-        let expr = bind_value(base, native, tree, dimensions, None)?;
+        let expr = match element_member {
+            Some((ty, value)) => {
+                // The select indices are offsets from bit 0, which only a
+                // `[N-1:0]` range declares.
+                let zero_based = match ty.packed_ranges() {
+                    [range] => {
+                        eval_ast_const_expr(&tree.state, range.right(), &dimensions.const_env)
+                            == Some(0)
+                            && eval_ast_const_expr(&tree.state, range.left(), &dimensions.const_env)
+                                .is_some_and(|left| left >= 0)
+                    }
+                    _ => false,
+                };
+                if !zero_based || ty.unpacked_struct().is_some() || !ty.members.is_empty() {
+                    return Err(unsupported(
+                        "select of a container element member that is not declared [N-1:0]",
+                    ));
+                }
+                value
+            }
+            None => bind_value(base, native, tree, dimensions, None)?,
+        };
         if suffix.len() != 1 {
             return Err(unsupported("concatenation select"));
         }

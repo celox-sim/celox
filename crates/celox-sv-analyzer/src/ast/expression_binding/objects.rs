@@ -46,6 +46,10 @@ pub(in crate::ast) fn native_class(
     if let Some(name) = unpacked_structs::native_member(ungroup(id, native), native, dimensions) {
         return dimensions.get(&name)?.class.clone();
     }
+    // A class handle member of a container element of unpacked structure type.
+    if let Ok(Some((ty, _))) = containers::element_member(id, native, tree, dimensions) {
+        return ty.class().map(str::to_owned);
+    }
     let expression = native.expression(ungroup(id, native));
     if let ExprKind::Select {
         expression,

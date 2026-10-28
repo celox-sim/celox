@@ -248,6 +248,9 @@ pub(in crate::ast) fn native_struct(
             .and_then(|parts| dims.get(&parts[0])?.unpacked_struct.clone())
         {
             Some(aggregate) => Some(aggregate),
+            None if let Some((ty, _)) = containers::element_member(id, native, tree, dims)? => {
+                ty.unpacked_struct().cloned()
+            }
             // A class property of unpacked structure type.
             None => expression_binding::object_aggregate_property(tree, id, native, dims)?
                 .and_then(|(aggregate, _, _)| aggregate.r#type.unpacked_struct().cloned()),
@@ -270,6 +273,9 @@ pub(in crate::ast) fn native_struct(
             target: Some(_), ..
         } if std::ptr::eq(native, tree.declarations()) => {
             patterns::typed_shape(id, tree, dims)?.and_then(|shape| shape.unpacked_struct)
+        }
+        _ if containers::native_struct_element(id, native, tree, dims)?.is_some() => {
+            containers::native_struct_element(id, native, tree, dims)?
         }
         // A method of the scope class hides a module function of its name,
         // as call binding resolves it.
@@ -447,4 +453,65 @@ pub(in crate::ast) fn leaf_parts(aggregate: &UnpackedStruct, value: &Expr) -> Op
     }
     // A whole variable is one part per leaf.
     (parts.len() == aggregate.leaves().len()).then(|| parts.clone())
+}
+
+/// The record that holds a container element of type `aggregate`, or `None`
+/// when the element is kept as its flat value: at most 64 bits, with no
+/// handle member and members that are all 2-state or all 4-state, so the
+/// container's default element is the structure's default.
+pub(in crate::ast) fn record(
+    state: &AnalysisState,
+    aggregate: &UnpackedStruct,
+    env: &HashMap<String, i128>,
+) -> Converted<Option<crate::system_functions::Record>> {
+    let leaves = aggregate.leaves();
+    let two_state = |leaf: &Leaf| {
+        matches!(
+            leaf.r#type.kind,
+            TypeKind::Bit | TypeKind::String | TypeKind::Object | TypeKind::Process
+        )
+    };
+    let handles = leaves
+        .iter()
+        .any(|leaf| matches!(leaf.r#type.kind, TypeKind::String | TypeKind::Object));
+    let uniform = leaves.iter().all(two_state) || !leaves.iter().any(two_state);
+    if aggregate.width() <= 64 && !handles && uniform {
+        return Ok(None);
+    }
+    let mut size = 0;
+    let mut fields = Vec::new();
+    for leaf in &leaves {
+        let mut field = classes::field(state, &leaf.r#type, env, size)?;
+        field.nullable = true;
+        size = field.offset + field.storage();
+        fields.push(field);
+    }
+    Ok(Some(crate::system_functions::Record {
+        size: size.max(1),
+        fields,
+    }))
+}
+
+/// The member at `path` of `aggregate`, with its type and the leaves it
+/// covers.
+pub(in crate::ast) fn member_leaves(
+    aggregate: &UnpackedStruct,
+    path: &[String],
+) -> Option<(Type, Vec<Leaf>)> {
+    let mut ty = None::<&Type>;
+    let mut current = aggregate;
+    for (index, name) in path.iter().enumerate() {
+        let member = current.member(name)?;
+        ty = Some(&member.r#type);
+        if index + 1 < path.len() {
+            current = member.r#type.unpacked_struct()?;
+        }
+    }
+    let ty = ty?.clone();
+    let leaves = aggregate
+        .leaves()
+        .into_iter()
+        .filter(|leaf| leaf.path.starts_with(path))
+        .collect();
+    Some((ty, leaves))
 }

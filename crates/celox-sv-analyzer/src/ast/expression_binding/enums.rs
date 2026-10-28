@@ -119,6 +119,17 @@ pub(super) fn domain(
                 }
                 None => match objects::property(tree, id, native, dimensions)? {
                     Some((property, _)) => scalar(&property.r#type),
+                    // A member of a container element of unpacked structure
+                    // type.
+                    None if let Some((ty, _)) = containers::element_member(
+                        ungroup(id, native),
+                        native,
+                        tree,
+                        dimensions,
+                    )? =>
+                    {
+                        scalar(&ty)
+                    }
                     // A member of a packed struct.
                     None => dimensions::operand_shape(id, tree, dimensions)
                         .ok()

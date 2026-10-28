@@ -330,7 +330,8 @@ SystemVerilog emitted by Veryl.
 Unpacked structures (IEEE 1800-2023 7.2) may have integral, enumeration,
 `string`, class handle, packed structure and nested unpacked structure
 members, each keeping its own 2-state or 4-state type. Variables of such a
-type may be module variables, procedural locals, class properties, and
+type may be module variables, procedural locals, class properties, queue,
+dynamic and associative array elements (`q[i].m` reads a member), and
 subroutine arguments of any direction and results. Members are read and written like variables of
 their type; a whole structure is assigned and compared with `==`, `!=`,
 `===` and `!==` against a value of the same type, chosen with `?:`, or built
@@ -362,7 +363,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   `real`, and unpacked structs as ports, nets, parameters, static, `rand` or
-  `const` class properties, array or container elements, or with members that
+  `const` class properties, fixed-size array elements, or with members that
   are arrays, `real`, or have default values.
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
@@ -484,8 +485,13 @@ including changes caused by ordering methods (9.4.2).
 Associative arrays cannot use ordering methods. Fixed-array ordering, `shuffle`,
 `with` expressions and iterator arguments remain unsupported.
 
-Elements may be packed integral values up to 64 bits, strings or class
-handles. Positional assignment patterns and element concatenations construct
+Elements may be packed integral values up to 64 bits, strings, class
+handles or [unpacked structures](#unpacked-structures); a missing
+associative entry or a new dynamic array element of structure type has the
+structure's default members. Containers of unpacked structures with a string
+or handle member, or wider than 64 bits, are not compared with `==` or sorted
+without `with`; a member of such an element is read, not written (assign
+the whole element). Positional assignment patterns and element concatenations construct
 sequences; assignments between dynamic arrays and queues copy values and
 respect the destination queue's bound. Associative assignment requires the
 same key type. Equality (`==`, `!=`, `===`, `!==`) between equivalent container types compares contents,
