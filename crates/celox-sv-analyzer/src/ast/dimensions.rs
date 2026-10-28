@@ -134,9 +134,10 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             VariableDimensions {
                 container: port.r#type().container.clone(),
                 randomizable: port.r#type().container.is_none()
-                    && (!port.r#type().is_enum || port.r#type().enum_values.is_some())
+                    && (!port.r#type().is_enum || port.r#type().enum_domain.is_some())
                     && port.randomizable,
-                enum_values: port.r#type().enum_values.clone(),
+                enum_domain: port.r#type().enum_domain.clone(),
+                packed_enum: port.r#type().packed_enum,
                 real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                 string: matches!(port.r#type().kind(), TypeKind::String),
                 class: port.r#type().class().map(str::to_owned),
@@ -163,10 +164,11 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             VariableDimensions {
                 container: signal.r#type().container.clone(),
                 randomizable: signal.r#type().container.is_none()
-                    && (!signal.r#type().is_enum || signal.r#type().enum_values.is_some())
+                    && (!signal.r#type().is_enum || signal.r#type().enum_domain.is_some())
                     && !signal.is_net()
                     && !signal.is_const,
-                enum_values: signal.r#type().enum_values.clone(),
+                enum_domain: signal.r#type().enum_domain.clone(),
+                packed_enum: signal.r#type().packed_enum,
                 real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                 string: matches!(signal.r#type().kind(), TypeKind::String),
                 class: signal.r#type().class().map(str::to_owned),
@@ -362,7 +364,8 @@ fn extend_variable_dimensions_from_const_env(
         let ty = Type {
             container: None,
             is_enum: false,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             kind: TypeKind::Logic,
             is_signed: variable_type_is_signed(const_env, name),
             packed_ranges,
@@ -379,7 +382,8 @@ fn extend_variable_dimensions_from_const_env(
         if let Some(existing) = context.get(name) {
             shape.container = existing.container.clone();
             shape.randomizable = existing.randomizable;
-            shape.enum_values = existing.enum_values.clone();
+            shape.enum_domain = existing.enum_domain.clone();
+            shape.packed_enum = existing.packed_enum;
             shape.members = existing.members.clone();
             shape.is_2state = existing.is_2state;
             shape.signed_element_depth = existing.signed_element_depth;
@@ -543,14 +547,15 @@ mod tests;
 pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariablePackedDimensions {
     parameters
         .iter()
-        .filter(|parameter| !parameter.packed_ranges.is_empty())
+        .filter(|parameter| !parameter.packed_ranges.is_empty() || parameter.enum_domain.is_some())
         .map(|parameter| {
             (
                 parameter.name.clone(),
                 VariableDimensions {
                     container: None,
                     randomizable: true,
-                    enum_values: None,
+                    enum_domain: parameter.enum_domain.clone(),
+                    packed_enum: false,
                     real: false,
                     string: false,
                     class: None,

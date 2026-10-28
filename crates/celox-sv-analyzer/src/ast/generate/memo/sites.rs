@@ -150,7 +150,8 @@ impl CallSites for Type {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
         let Type {
             is_enum: _,
-            enum_values: _,
+            enum_domain: _,
+            packed_enum: _,
             kind: _,
             is_signed: _,
             packed_ranges,
@@ -189,7 +190,8 @@ impl CallSites for VariableDimensions {
         let VariableDimensions {
             container: _,
             randomizable: _,
-            enum_values: _,
+            enum_domain: _,
+            packed_enum: _,
             real: _,
             string: _,
             class: _,

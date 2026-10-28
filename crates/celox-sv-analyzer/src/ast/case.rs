@@ -69,6 +69,21 @@ pub(super) fn expr_is_two_state(
             callee: Callee::Checked { .. },
             ..
         } => false,
+        // The selector is compared with case equality; the result is a value
+        // or the default.
+        Expr::Call {
+            callee: Callee::Lookup { .. },
+            args,
+            ..
+        } => {
+            let key = |index: usize| index % 2 == 1 && index + 1 != args.len();
+            args.iter().enumerate().skip(1).all(|(index, arg)| {
+                key(index)
+                    || arg
+                        .as_ref()
+                        .is_some_and(|arg| expr_is_two_state(state, arg, packed_dimensions))
+            })
+        }
         Expr::Call {
             callee: Callee::Object(op),
             ..

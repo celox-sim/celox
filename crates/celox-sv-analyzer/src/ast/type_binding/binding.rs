@@ -229,7 +229,8 @@ fn bind_in_mode(
                             if matches!(mode, BindingMode::Use) {
                                 validate_enum_initializers(id, native, tree, context, &ty)?;
                             }
-                            ty.enum_values = enum_values(id, native, tree, context, &ty);
+                            ty.enum_domain = enum_values(id, native, tree, context, &ty);
+                            ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
                             ty.packed_ranges = ranges.into_iter().chain(ty.packed_ranges).collect();
                             values.push(ty);
                         }
@@ -330,7 +331,8 @@ fn bind_in_mode(
                 outer.extend(ty.packed_ranges);
                 ty.packed_ranges = outer;
                 ty.is_enum = true;
-                ty.enum_values = enum_values(id, native, tree, context, &ty);
+                ty.enum_domain = enum_values(id, native, tree, context, &ty);
+                ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
                 values.push(ty);
             }
             Job::Aggregate {
@@ -661,7 +663,7 @@ fn enum_values(
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
     ty: &Type,
-) -> Option<Vec<i128>> {
+) -> Option<Arc<enums::EnumDomain>> {
     let data = native.data_type(id);
     if !data.packed_dimensions.is_empty() {
         return None;
@@ -676,6 +678,7 @@ fn enum_values(
     let mut env = context.const_env.clone();
     let mut next = 0i128;
     let mut values = Vec::new();
+    let mut members = Vec::new();
     for item in items {
         if !item.dimensions.is_empty() {
             return None;
@@ -710,9 +713,20 @@ fn enum_values(
         }
         values.push(value);
         let name = normalize_identifier(&item.name.spelling);
+        members.push(enums::EnumMember {
+            name: name.clone(),
+            value,
+        });
         env.insert(name.clone(), value);
         dimensions::insert_parameter_type_markers(&mut env, &name, shape);
         next = value.checked_add(1)?;
     }
-    (!values.is_empty()).then_some(values)
+    (!members.is_empty()).then(|| {
+        Arc::new(enums::EnumDomain {
+            members,
+            width: shape.width,
+            signed: shape.signed,
+            four_state: !matches!(ty.kind(), TypeKind::Bit),
+        })
+    })
 }
