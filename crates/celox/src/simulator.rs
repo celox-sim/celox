@@ -2394,7 +2394,7 @@ mod host {
                 celox_runtime::set_level,
             );
             if let Some(old) = moved {
-                if info.comb_read {
+                if self.clock_move_needs_settle(event, info.comb_read)? {
                     self.dirty = true;
                 }
                 if info.fires(old, active) {
@@ -2402,7 +2402,7 @@ mod host {
                 }
             }
             self.backend.set(info.signal, inactive.level());
-            if info.comb_read || observers {
+            if self.clock_move_needs_settle(event, info.comb_read)? || observers {
                 self.dirty = true;
             }
             Ok(())
@@ -2421,10 +2421,22 @@ mod host {
             }
             self.backend
                 .set(info.signal, info.active_edge().opposite().level());
-            if info.comb_read || !self.program.runtime_schema.comb_observers.is_empty() {
+            if self.clock_move_needs_settle(event, info.comb_read)?
+                || !self.program.runtime_schema.comb_observers.is_empty()
+            {
                 self.dirty = true;
             }
             Ok(())
+        }
+
+        /// Publish wiring immediately when the previous state was settled;
+        /// otherwise leave the entire pending evaluation to the normal path.
+        fn clock_move_needs_settle(
+            &mut self,
+            event: B::Event,
+            comb_read: bool,
+        ) -> Result<bool, RuntimeErrorCode> {
+            Ok(comb_read && (self.dirty || !self.backend.eval_clock_aliases(event)?))
         }
 
         /// Run the event's domain as its active edge does, with the signal
@@ -2522,7 +2534,9 @@ mod host {
                     // wait behind the kernel's stores (4 KiB aliasing),
                     // which made a period cost almost two domain runs.
                     self.backend.set(info.signal, edge.level());
-                    if info.comb_read || !self.program.runtime_schema.comb_observers.is_empty() {
+                    if self.clock_move_needs_settle(event, info.comb_read)?
+                        || !self.program.runtime_schema.comb_observers.is_empty()
+                    {
                         self.dirty = true;
                     }
                     return Ok(());
@@ -2539,7 +2553,7 @@ mod host {
                 else {
                     return Ok(());
                 };
-                if info.comb_read {
+                if self.clock_move_needs_settle(event, info.comb_read)? {
                     self.dirty = true;
                 }
                 if info.fires(old, edge) {
@@ -2559,7 +2573,7 @@ mod host {
                 && !self.finish_sites
                 && self.backend.runs_derived_edge_units()
             {
-                return self.edge_unit(info, edge, unit);
+                return self.edge_unit(event, info, edge, unit);
             }
             let plans = std::sync::Arc::clone(&self.derived_ticks);
             let plan = plans.get(event.id()).and_then(Option::as_ref);
@@ -2581,6 +2595,7 @@ mod host {
         #[inline(never)]
         fn edge_unit(
             &mut self,
+            event: B::Event,
             info: celox_runtime::EventEdge,
             edge: celox_runtime::Edge,
             unit: DerivedEdgeUnit,
@@ -2597,9 +2612,9 @@ mod host {
                 return Ok(());
             };
             let fires = info.fires(old, edge);
+            let comb_read = self.clock_move_needs_settle(event, info.comb_read)?;
             if let Some(flag) = self.derived_settle {
-                self.backend
-                    .set(flag, u8::from(self.dirty || info.comb_read));
+                self.backend.set(flag, u8::from(self.dirty || comb_read));
             }
             let index = match edge {
                 celox_runtime::Edge::Rising => unit.rising,
@@ -2613,7 +2628,7 @@ mod host {
             // in the plan walk.
             let outcome = if unit.gated || fires {
                 celox_runtime::EdgeOutcome::Settled
-            } else if info.comb_read {
+            } else if comb_read {
                 celox_runtime::EdgeOutcome::Moved
             } else {
                 celox_runtime::EdgeOutcome::Stored
@@ -3930,7 +3945,11 @@ mod host {
                         assign seen = {seen};
                     }}"
                 );
-                let mut sim = Simulator::builder(&source, "Top").build().unwrap();
+                // The interpreter requests the generic full-settle fallback.
+                // Native wiring-only cones are checked in native_clock_aliases.
+                let mut sim = Simulator::builder(&source, "Top")
+                    .build_interpreter()
+                    .unwrap();
                 let clk = sim.event("clk");
                 sim.posedge(clk).unwrap();
                 assert!(!sim.dirty);
