@@ -3927,6 +3927,14 @@
     },
     {
       "suite": "sv",
+      "name": "class::package_constant_class_defaults",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X5",
+      "note": "Package p declares WIDTH=5 and Box defaults N=WIDTH, M=N+2. Both Box and Box#() therefore use N=5,M=7; Box#(9) uses N=9,M=11. get() also reads the declaring package WIDTH, so read() returns 62+62+106=230. A caller module localparam WIDTH=29 cannot rebind those names (8.25,23.9). The pinned xezim prints 830 as both Top and Wrapped without the adapter, consistent with resolving WIDTH at the call site. See verification/repros/sv_class_constant_defaults_xezim.{sv,json}; Verilator passes the shared case."
+    },
+    {
+      "suite": "sv",
       "name": "class::parameter_defaults_bind_where_the_class_is_declared",
       "status": "mismatch",
       "classification": "xezim_bug",
