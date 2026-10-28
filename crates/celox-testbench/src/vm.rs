@@ -9,6 +9,7 @@ use crate::{ExprBytecode, ExprOpcode as TbOpcode, TestbenchOperator as Op};
 #[derive(Clone, Debug)]
 pub struct CompiledExpr {
     bytecode: ExprBytecode,
+    observes_hardware: bool,
 }
 
 /// Stack value: integer bits or a dynamically sized byte string.
@@ -17,6 +18,50 @@ pub enum TestbenchValue {
     U64(u64),
     Wide(BigUint),
     String(Vec<u8>),
+}
+
+// Most expressions need only two or three operands. Keep their stack local;
+// deeply nested expressions can still spill without imposing a depth limit.
+struct ValueStack {
+    inline: [Option<TestbenchValue>; 8],
+    len: usize,
+    spill: Vec<TestbenchValue>,
+}
+
+impl ValueStack {
+    fn new() -> Self {
+        Self {
+            inline: [const { None }; 8],
+            len: 0,
+            spill: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, value: TestbenchValue) {
+        if self.len < self.inline.len() {
+            self.inline[self.len] = Some(value);
+        } else {
+            self.spill.push(value);
+        }
+        self.len += 1;
+    }
+
+    fn pop(&mut self) -> Option<TestbenchValue> {
+        self.len = self.len.checked_sub(1)?;
+        if self.len < self.inline.len() {
+            self.inline[self.len].take()
+        } else {
+            self.spill.pop()
+        }
+    }
+
+    fn last_mut(&mut self) -> Option<&mut TestbenchValue> {
+        if self.len <= self.inline.len() {
+            self.inline.get_mut(self.len.checked_sub(1)?)?.as_mut()
+        } else {
+            self.spill.last_mut()
+        }
+    }
 }
 
 impl TestbenchValue {
@@ -58,7 +103,33 @@ impl TestbenchValue {
 
 impl CompiledExpr {
     pub fn new(bytecode: ExprBytecode) -> Self {
-        Self { bytecode }
+        Self {
+            bytecode,
+            observes_hardware: true,
+        }
+    }
+
+    /// Classify reads after binding against the hardware's state objects.
+    /// Include stores conservatively: a function expression can overwrite
+    /// an RTL result as well as read it.
+    pub fn classify_hardware_access(mut self, mut hardware: impl FnMut(usize) -> bool) -> Self {
+        self.observes_hardware = self.bytecode.ops().iter().any(|op| match op {
+            TbOpcode::LoadU64 { location, .. }
+            | TbOpcode::LoadWide { location, .. }
+            | TbOpcode::LoadIndexed { location, .. }
+            | TbOpcode::LoadBitSelect { location, .. }
+            | TbOpcode::LoadString { location, .. }
+            | TbOpcode::StoreString { location, .. }
+            | TbOpcode::StoreU64 { location, .. } => hardware(*location),
+            _ => false,
+        });
+        self
+    }
+
+    /// Whether evaluating this expression can observe an RTL-written object.
+    /// Unclassified expressions conservatively return true.
+    pub fn observes_hardware(&self) -> bool {
+        self.observes_hardware
     }
 
     /// Evaluate against raw simulator memory, returning the result as u64.
@@ -113,6 +184,25 @@ impl CompiledExpr {
         self.eval_with_heap(memory, None, on_write)
     }
 
+    fn eval_leaf(&self, memory: *mut u8) -> Option<TestbenchValue> {
+        match self.bytecode.ops() {
+            [TbOpcode::ConstU64(value)] => Some(TestbenchValue::U64(*value)),
+            [
+                TbOpcode::LoadU64 {
+                    location,
+                    byte_size,
+                    mask,
+                },
+            ] => {
+                // SAFETY: bound bytecode addresses valid simulator memory.
+                Some(TestbenchValue::U64(
+                    unsafe { read_le_u64(memory.add(*location), *byte_size) } & mask,
+                ))
+            }
+            _ => None,
+        }
+    }
+
     /// Evaluate with the simulator's heap, which string variables refer to.
     /// Without a heap, string variables read as `""` and string stores are
     /// dropped instead of writing a handle no heap knows.
@@ -122,7 +212,10 @@ impl CompiledExpr {
         mut heap: Option<&mut celox_heap::Heap>,
         mut on_write: impl FnMut(usize, usize),
     ) -> TestbenchValue {
-        let mut stack: Vec<TestbenchValue> = Vec::with_capacity(16);
+        if let Some(value) = self.eval_leaf(memory) {
+            return value;
+        }
+        let mut stack = ValueStack::new();
         let mut pc: usize = 0;
         let ops = self.bytecode.ops();
 
@@ -142,7 +235,7 @@ impl CompiledExpr {
         &self,
         ops: &[TbOpcode],
         pc: &mut usize,
-        stack: &mut Vec<TestbenchValue>,
+        stack: &mut ValueStack,
         memory: *mut u8,
         heap: &mut Option<&mut celox_heap::Heap>,
         on_write: &mut impl FnMut(usize, usize),
@@ -1032,6 +1125,36 @@ unsafe fn read_handle(memory: *const u8, offset: usize) -> celox_heap::Handle {
 mod float_tests {
     use super::*;
     use celox_design::{FloatBinaryOp, FloatPrecision, FloatUnaryOp};
+
+    #[test]
+    fn expression_stack_spills_and_returns_to_inline_operands() {
+        for depth in [1, 8, 9, 32, 128] {
+            let mut ops: Vec<_> = (1..=depth).map(TbOpcode::ConstU64).collect();
+            ops.extend((1..depth).map(|_| TbOpcode::BinOp(Op::Add)));
+            let expression = CompiledExpr::new(ExprBytecode::new(ops));
+            assert_eq!(
+                expression.eval_u64(std::ptr::null_mut()),
+                depth * (depth + 1) / 2
+            );
+        }
+        let mut stack = ValueStack::new();
+        for i in 0..20 {
+            stack.push(TestbenchValue::String(vec![i]));
+        }
+        for i in (0..20).rev() {
+            let Some(TestbenchValue::String(bytes)) = stack.last_mut() else {
+                panic!()
+            };
+            bytes.push(i);
+            let Some(TestbenchValue::String(bytes)) = stack.pop() else {
+                panic!()
+            };
+            assert_eq!(bytes, [i, i]);
+        }
+        assert!(stack.pop().is_none());
+        assert!(stack.last_mut().is_none());
+        assert!(stack.inline.iter().all(Option::is_none));
+    }
 
     #[test]
     fn floating_bytecode_keeps_precision_and_numeric_conversions() {
