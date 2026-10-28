@@ -1,6 +1,1 @@
-Revision history for #2402:
-
-rev 2 (content) 2026-10-28 08:40 UTC — Address Codex review 5679124714: check omitted-argument defaults (and nested defaults) when deciding whether a call can make a host request, evaluate subroutine inputs before a later host request, and render run-time formats byte for byte.
-rev 1 (initial) 2026-10-28 08:40 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2402,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"290e01820f7ab0472d2fe6f2e48f99b4b2f5871c","timestamp_iso":"2026-10-28T08:40:34Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"290e01820f7ab0472d2fe6f2e48f99b4b2f5871c","new_sha":"27e5a3d15209fe3fc448fcd06e251984a9b9beba","timestamp_iso":"2026-10-28T08:40:34Z","reason":"Address Codex review 5679124714: check omitted-argument defaults (and nested defaults) when deciding whether a call can make a host request, evaluate subroutine inputs before a later host request, and render run-time formats byte for byte.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/290e01820f7ab0472d2fe6f2e48f99b4b2f5871c...27e5a3d15209fe3fc448fcd06e251984a9b9beba"}]} -->
+Address Codex review 4398512249: keep call inputs after their conversion to the formal across a later host request, so the formal's width context is preserved.
