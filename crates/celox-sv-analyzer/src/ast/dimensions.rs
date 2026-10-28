@@ -132,6 +132,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             port.name().to_string(),
             VariableDimensions {
+                declared: type_names::Declared::new(port.r#type()),
                 container: port.r#type().container.clone(),
                 randomizable: port.r#type().container.is_none()
                     && (!port.r#type().is_enum || port.r#type().enum_domain.is_some())
@@ -163,6 +164,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             signal.name().to_string(),
             VariableDimensions {
+                declared: type_names::Declared::new(signal.r#type()),
                 container: signal.r#type().container.clone(),
                 randomizable: signal.r#type().container.is_none()
                     && (!signal.r#type().is_enum || signal.r#type().enum_domain.is_some())
@@ -378,11 +380,14 @@ fn extend_variable_dimensions_from_const_env(
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
-            nominal: Nominal::default(),
             unpacked_struct: None,
+            spelling: type_names::Spelling::default(),
         };
         let mut shape = procedural::dimensions_from_type(&ty);
+        // The markers keep the shape, not the declared type.
+        shape.declared = type_names::Declared::default();
         if let Some(existing) = context.get(name) {
+            shape.declared = existing.declared.clone();
             shape.container = existing.container.clone();
             shape.randomizable = existing.randomizable;
             shape.enum_domain = existing.enum_domain.clone();
@@ -570,6 +575,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
             (
                 parameter.name.clone(),
                 VariableDimensions {
+                    declared: type_names::Declared::default(),
                     container: None,
                     randomizable: true,
                     enum_domain: parameter.enum_domain.clone(),

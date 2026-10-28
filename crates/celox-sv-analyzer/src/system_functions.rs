@@ -74,6 +74,8 @@ pub enum SystemFunction {
     Fell,
     Stable,
     Changed,
+    /// `$typename` (20.6.1).
+    Typename,
     /// `$bits` (20.6.2).
     Bits,
     /// `$isunbounded` (20.6.3).
@@ -286,6 +288,7 @@ impl SystemFunction {
             Self::Fell => "$fell",
             Self::Stable => "$stable",
             Self::Changed => "$changed",
+            Self::Typename => "$typename",
             Self::Bits => "$bits",
             Self::Isunbounded => "$isunbounded",
             Self::Dimensions => "$dimensions",
@@ -349,6 +352,12 @@ impl SystemFunction {
                 | Self::UnpackedDimensions
                 | Self::ArrayQuery(_)
         )
+    }
+
+    /// The functions whose first argument is a data object or type that is
+    /// not evaluated: the data queries and `$typename` (20.6.1).
+    pub fn has_unevaluated_operand(self) -> bool {
+        self.is_data_query() || self == Self::Typename
     }
 
     /// Whether each call has an effect, so that copies of one call made by
@@ -506,6 +515,7 @@ impl SystemFunction {
             | Self::Unsigned
             | Self::Sampled
             | Self::Past
+            | Self::Typename
             | Self::Bits
             | Self::Dimensions
             | Self::UnpackedDimensions
@@ -1426,7 +1436,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     // 6.24.2 Dynamic casting
     unsupported("$cast", TaskOrFunction),
     // 20.6 Data query functions
-    unsupported("$typename", Function),
+    function(SystemFunction::Typename, 1, Some(1)),
     function(SystemFunction::Bits, 1, Some(1)),
     function(SystemFunction::Isunbounded, 1, Some(1)),
     // 20.7 Array query functions

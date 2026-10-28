@@ -189,7 +189,7 @@ pub(in crate::ast) fn validate(
                         if let Some(value) = argument.value {
                             jobs.push((
                                 value,
-                                if function.is_data_query() {
+                                if function.has_unevaluated_operand() {
                                     position == 0
                                 } else {
                                     query
@@ -475,6 +475,7 @@ fn pattern_items(
             left.min(right),
             left.max(right),
             VariableDimensions {
+                declared: type_names::Declared::default(),
                 container: None,
                 real: false,
                 string: false,
@@ -499,6 +500,7 @@ fn pattern_items(
             left.min(right),
             left.max(right),
             VariableDimensions {
+                declared: type_names::Declared::default(),
                 container: None,
                 real: false,
                 string: false,
@@ -514,6 +516,7 @@ fn pattern_items(
             0,
             count as i128 - 1,
             VariableDimensions {
+                declared: type_names::Declared::default(),
                 container: None,
                 randomizable: true,
                 enum_domain: None,
@@ -639,7 +642,7 @@ pub(in crate::ast) fn literal_widths(
             } => {
                 let query = expression_binding::native_name(&tree.state, *expression, native)
                     .and_then(|name| SystemFunction::from_name(&name))
-                    .is_some_and(SystemFunction::is_data_query);
+                    .is_some_and(SystemFunction::has_unevaluated_operand);
                 for (index, arg) in arguments.iter().enumerate() {
                     if let Some(value) = arg.value {
                         if query && index == 0 {
@@ -1071,7 +1074,7 @@ pub(in crate::ast) fn needs_selected(
         if let ExprKind::Call { expression, .. } = native.expression(id).kind
             && expression_binding::native_name(state, expression, native)
                 .and_then(|name| SystemFunction::from_name(&name))
-                .is_some_and(SystemFunction::is_data_query)
+                .is_some_and(SystemFunction::has_unevaluated_operand)
         {
             continue;
         }
@@ -1108,7 +1111,7 @@ fn validate_operators(
         if let ExprKind::Call { expression, .. } = native.expression(id).kind
             && expression_binding::native_name(state, expression, native)
                 .and_then(|name| SystemFunction::from_name(&name))
-                .is_some_and(SystemFunction::is_data_query)
+                .is_some_and(SystemFunction::has_unevaluated_operand)
         {
             continue;
         }

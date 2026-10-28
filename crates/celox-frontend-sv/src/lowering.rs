@@ -8023,6 +8023,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Fell
         | SystemFunction::Stable
         | SystemFunction::Changed
+        | SystemFunction::Typename
         | SystemFunction::Bits
         | SystemFunction::Size
         | SystemFunction::Dimensions

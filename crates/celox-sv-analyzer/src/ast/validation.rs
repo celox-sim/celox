@@ -1040,7 +1040,8 @@ fn reject_constant_calls(
             .any(|index| {
                 expression_binding::native_name(&tree.state, facts.first_arguments[index].0, native)
                     .is_some_and(|name| {
-                        SystemFunction::from_name(&name).is_some_and(SystemFunction::is_data_query)
+                        SystemFunction::from_name(&name)
+                            .is_some_and(SystemFunction::has_unevaluated_operand)
                     })
             })
     };

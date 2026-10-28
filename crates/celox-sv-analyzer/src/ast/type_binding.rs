@@ -274,6 +274,18 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
     };
     let mut ty = Type::new(kind);
     ty.is_signed = signing.unwrap_or(signed);
+    let keyword = match name {
+        "byte" => Some("byte"),
+        "shortint" => Some("shortint"),
+        "int" => Some("int"),
+        "longint" => Some("longint"),
+        "integer" => Some("integer"),
+        "time" => Some("time"),
+        _ => None,
+    };
+    if let Some(keyword) = keyword {
+        ty.spelling = type_names::Spelling::keyword(keyword);
+    }
     if let Some(width) = width {
         ty.packed_ranges.push(PackedRange::new(
             ConstExpr::Literal((width - 1).to_string()),

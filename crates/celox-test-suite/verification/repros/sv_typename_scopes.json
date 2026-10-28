@@ -1,0 +1,30 @@
+{
+  "case": "system_functions::typename_scopes_and_string_operands",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 20.6.1 accepts a data_type argument, which may be a type of a package or class (`p::word_t`, `Holder::T`; 8.23, 26.3) and resolves to its type (a); the result is a string, so a relational operator compares its characters (11.4.4, 6.16: \"integer\" < \"logic\") and a string method applies to it (6.16.1, A.8.2 method_call_root).",
+  "method": "The reduced source runs without the suite adapters: verilator --binary -Wno-fatal --top Top and the built model, iverilog -g2012 -s Top and vvp -n, xezim -s Top, and the Celox sv_tests driver in simulation mode. The output of each tool is compared with the 20.6.1 spelling, which Celox prints.",
+  "reduced_source": "package p;\n    typedef bit [3:0] word_t;\nendpackage\nclass Holder;\n    typedef byte T;\nendclass\nmodule Top;\n    localparam string HELD = $typename(Holder::T);\n    initial begin\n        $display(\"%s|%s\", $typename(p::word_t), HELD);\n        $display(\"%0d %0d\", $typename(integer) < $typename(logic), $typename(int).len());\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "status": "compile_error",
+      "stderr": "%Error: scopes.sv:11:78: Syntax error: Not expecting BASICDTYPE under a ATTROF in dotted expression\n%Error: Exiting due to 1 error(s)\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "scopes.sv:8: syntax error\nscopes.sv:8: error: Invalid module item.\nscopes.sv:11: syntax error\nscopes.sv:11: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "bit[3:0]|\n0 3\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "bit[3:0]|byte\n1 3\n"
+    }
+  ]
+}

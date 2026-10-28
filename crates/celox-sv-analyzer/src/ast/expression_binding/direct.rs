@@ -885,6 +885,17 @@ pub(in crate::ast) fn bind_value(
                                 (!args.iter().any(|arg| arg.name.is_some()))
                                     .then_some(presence.as_slice()),
                             )?;
+                            if function == SystemFunction::Typename {
+                                let argument = args[0]
+                                    .value
+                                    .ok_or_else(|| unsupported(format!("operand of `{name}`")))?;
+                                values.push(type_names::query_value(
+                                    argument,
+                                    tree,
+                                    scope.as_deref().unwrap_or(dimensions),
+                                )?);
+                                continue;
+                            }
                             if function == SystemFunction::Bits
                                 && let Some(argument) = args.first().and_then(|a| a.value)
                             {

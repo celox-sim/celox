@@ -184,6 +184,7 @@ mod shared_map;
 mod statements;
 mod subroutine_owners;
 pub(crate) mod timescales;
+mod type_names;
 pub(crate) mod type_parameters;
 mod types;
 mod unpacked_structs;
@@ -2262,29 +2263,11 @@ pub struct Type {
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
     class: Option<Arc<str>>,
-    /// The typedef that names an enumeration, struct or union type.
-    nominal: Nominal,
     /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
-}
-
-/// The declaration that names an enumeration, struct or union type, which
-/// tells it apart from another type of the same structure (IEEE 1800-2023
-/// 6.19, 6.22.1) where a class specialization is keyed by its type
-/// arguments (8.25). Type equality does not compare it.
-#[derive(Debug, Clone, Default)]
-struct Nominal(Option<Arc<str>>);
-
-impl PartialEq for Nominal {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl Eq for Nominal {}
-
-impl std::hash::Hash for Nominal {
-    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+    /// The typedef that names an enumeration, struct or union type, and how
+    /// `$typename` spells the type where its structure does not tell.
+    spelling: type_names::Spelling,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2311,8 +2294,8 @@ impl Type {
             signed_element_depth: None,
             class: None,
             container: None,
-            nominal: Nominal::default(),
             unpacked_struct: None,
+            spelling: type_names::Spelling::default(),
         }
     }
 
@@ -2330,24 +2313,25 @@ impl Type {
             class: None,
             container: None,
             unpacked_struct: None,
-            nominal: Nominal::default(),
+            spelling: type_names::Spelling::default(),
         }
     }
 
     /// Name an enumeration, struct or union type after typedef `name`,
     /// unless an earlier typedef already named it (`typedef A B` names the
-    /// type of `A`).
-    fn name_declaration(&mut self, name: impl FnOnce() -> String) {
+    /// type of `A`). `typename` is how `$typename` writes the name.
+    fn name_declaration(&mut self, name: impl FnOnce() -> (String, type_names::TypedefName)) {
         if (self.is_enum || !self.members.is_empty() || self.unpacked_struct.is_some())
-            && self.nominal.0.is_none()
+            && self.spelling.declaration().is_none()
         {
-            self.nominal = Nominal(Some(name().into()));
+            let (name, typename) = name();
+            self.spelling.name(name.into(), typename);
         }
     }
 
     /// The typedef that names this enumeration, struct or union type.
     fn declaration_name(&self) -> Option<&str> {
-        self.nominal.0.as_deref()
+        self.spelling.declaration()
     }
 
     /// The members of an unpacked structure type.
@@ -3125,6 +3109,8 @@ struct VariableDimensions {
     /// A variable of unpacked structure type: the names of its members
     /// are variables (see [`unpacked_structs`]).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
+    /// The declared type, for `$typename`.
+    declared: type_names::Declared,
 }
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;

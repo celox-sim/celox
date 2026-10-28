@@ -130,6 +130,42 @@ fn bind_in_context(
                     {
                         return Ok(None);
                     }
+                    // A string operand orders the operands as strings
+                    // (11.4.4), not as the integral values of their bytes.
+                    if matches!(operator.as_str(), "<" | "<=" | ">" | ">=")
+                        && (typename_operand(*left, native).is_some()
+                            || typename_operand(*right, native).is_some())
+                    {
+                        let text = |id| -> Converted<Option<Vec<u8>>> {
+                            let id = expression_binding::ungroup(id, native);
+                            if let Some(argument) = typename_operand(id, native) {
+                                return Ok(Some(
+                                    type_names::query_string(argument, tree, query_dimensions)?
+                                        .into_bytes(),
+                                ));
+                            }
+                            Ok(match &native.expression(id).kind {
+                                ExprKind::Literal(text) => {
+                                    expression_binding::string_literal_bytes(text)
+                                }
+                                _ => None,
+                            })
+                        };
+                        let (Some(left), Some(right)) = (text(*left)?, text(*right)?) else {
+                            return Ok(None);
+                        };
+                        let ordering = left.cmp(&right);
+                        let holds = match operator.as_str() {
+                            "<" => ordering.is_lt(),
+                            "<=" => ordering.is_le(),
+                            ">" => ordering.is_gt(),
+                            _ => ordering.is_ge(),
+                        };
+                        values.push(ConstExpr::Literal(
+                            if holds { "1'b1" } else { "1'b0" }.into(),
+                        ));
+                        continue;
+                    }
                     jobs.push(Job::Binary(operator.clone()));
                     jobs.push(Job::Enter(*right));
                     jobs.push(Job::Enter(*left));
@@ -307,7 +343,7 @@ fn bind_in_context(
                     }
                 }
                 ExprKind::Call { .. } | ExprKind::Member { .. } => {
-                    let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||f==SystemFunction::Isunbounded)));
+                    let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||matches!(f,SystemFunction::Isunbounded|SystemFunction::Typename))));
                     let mut context = if is_query {
                         query_dimensions.clone()
                     } else {
@@ -321,6 +357,18 @@ fn bind_in_context(
                             Err(AnalyzerError::Unsupported(_)) => return Ok(None),
                             Err(error) => return Err(error),
                         };
+                    // A `$typename` string is the constant of its bytes, as a
+                    // string literal is (5.9).
+                    let value = match value {
+                        Expr::Call {
+                            callee: Callee::String(StringOp::FromBits),
+                            mut args,
+                            ..
+                        } if is_query && matches!(args.as_slice(), [Some(Expr::Literal(_))]) => {
+                            args.pop().flatten().unwrap()
+                        }
+                        value => value,
+                    };
                     let countbits = matches!(
                         &value,
                         Expr::Call {
@@ -500,6 +548,30 @@ pub(super) fn bind_unpacked_dimension(
         }
     };
     range.ok_or_else(|| unsupported("unresolved unpacked array dimension"))
+}
+
+/// The operand of native expression `id` if it is a `$typename` call.
+fn typename_operand(id: ExprId, native: &Declarations) -> Option<ExprId> {
+    let ExprKind::Call {
+        expression,
+        arguments,
+    } = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return None;
+    };
+    let ExprKind::Name(name) = &native.expression(*expression).kind else {
+        return None;
+    };
+    match arguments.as_slice() {
+        [argument]
+            if SystemFunction::from_name(&name.spelling) == Some(SystemFunction::Typename) =>
+        {
+            argument.value
+        }
+        _ => None,
+    }
 }
 
 #[cfg(test)]

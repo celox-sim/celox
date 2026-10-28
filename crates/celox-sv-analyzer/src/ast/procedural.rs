@@ -101,6 +101,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         members: r#type.members.clone(),
         signed_element_depth: r#type.signed_element_depth,
         unpacked_struct: r#type.unpacked_struct.clone(),
+        declared: type_names::Declared::new(r#type),
     }
 }
 
@@ -297,8 +298,8 @@ pub(super) fn int_type() -> Type {
         members: Vec::new(),
         signed_element_depth: None,
         class: None,
-        nominal: Nominal::default(),
         unpacked_struct: None,
+        spelling: type_names::Spelling::keyword("int"),
     }
 }
 
