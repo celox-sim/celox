@@ -1,1 +1,6 @@
-Address review: module declaration initializers, results assigned through the function name, return values before inout copy-back, struct defaults of formals, one-time static initializers
+Revision history for #2415:
+
+rev 2 (content) 2026-10-28 09:24 UTC — Address review: module declaration initializers, results assigned through the function name, return values before inout copy-back, struct defaults of formals, one-time static initializers
+rev 1 (initial) 2026-10-28 09:24 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2415,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4167642da2d38a4b1712cb2f8ca70de0dc6cfa54","timestamp_iso":"2026-10-28T09:24:02Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"4167642da2d38a4b1712cb2f8ca70de0dc6cfa54","new_sha":"a9fdc69a44d6ab1fafd9331cf739c05cb7e29ecb","timestamp_iso":"2026-10-28T09:24:02Z","reason":"Address review: module declaration initializers, results assigned through the function name, return values before inout copy-back, struct defaults of formals, one-time static initializers","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4167642da2d38a4b1712cb2f8ca70de0dc6cfa54...a9fdc69a44d6ab1fafd9331cf739c05cb7e29ecb"}]} -->
