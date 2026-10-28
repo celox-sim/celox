@@ -433,7 +433,8 @@ fn return_metadata(
             .or(width),
         dimensions: ty.map(|ty| {
             ty.unpacked_ranges().len()
-                + if matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
+                // A chandle has no packed dimensions (IEEE 1800-2023 6.14).
+                + if ty.chandle || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
                     0
                 } else {
                     ty.packed_ranges().len()
@@ -449,6 +450,7 @@ fn return_metadata(
             .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
             .and_then(|ty| ty.class().map(str::to_owned)),
         virtual_interface: ty.and_then(|ty| ty.virtual_interface.clone()),
+        chandle: ty.is_some_and(|ty| ty.chandle && ty.unpacked_ranges.is_empty()),
         pattern_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()
@@ -961,10 +963,13 @@ fn subroutine_signatures(
                         arguments: Some(dpi_argument_metadata(&import)),
                         width: Some(ty.width()),
                         first_packed_dimension_width: (ty.width() > 1).then_some(ty.width()),
-                        dimensions: Some(usize::from(ty.width() > 1)),
+                        dimensions: Some(usize::from(
+                            ty.width() > 1 && ty != crate::ir::DpiType::Chandle,
+                        )),
                         signed: ty.is_signed(),
                         is_2state: !ty.is_4state(),
                         string: false,
+                        chandle: ty == crate::ir::DpiType::Chandle,
                         pattern_type: None,
                         enum_domain: None,
                         class: None,

@@ -4,6 +4,17 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "types::chandles_hold_null_and_copies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "types::constant_functions_in_unpacked_dimensions",
       "phase": "execute",
       "status": "passed",

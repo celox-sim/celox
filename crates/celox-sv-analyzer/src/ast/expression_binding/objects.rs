@@ -1062,17 +1062,22 @@ pub(in crate::ast) fn constructor(
     }
     let mut args = vec![Some(class.allocation())];
     let (actuals, order) = class.constructor_arguments(arguments)?;
-    // A virtual interface formal receives only a virtual interface of its
-    // type (IEEE 1800-2023 25.9); the object is the first formal.
+    // The object is the first formal.
     let name = Class::subroutine_name(&class_name, "new");
-    let shapes = dimensions.subroutine_param_shapes.get(&name);
     for (position, actual) in actuals.into_iter().enumerate() {
-        let target = shapes
-            .and_then(|shapes| shapes.get(position + 1))
-            .filter(|shape| {
-                shape.virtual_interface.is_some()
-                    && super::direct::copied_in(dimensions, &name, position + 1)
-            });
+        if let Some(value) = actual {
+            direct::check_argument(
+                &name,
+                position + 1,
+                position + 1,
+                value,
+                native,
+                tree,
+                dimensions,
+                session,
+            )?;
+        }
+        let target = super::direct::copied_in_target(dimensions, &name, position + 1);
         args.push(
             actual
                 .map(|value| bind_value(value, native, tree, session, dimensions, target))
@@ -1080,7 +1085,7 @@ pub(in crate::ast) fn constructor(
         );
     }
     Ok(Some(Expr::Call {
-        callee: Callee::Subroutine(Class::subroutine_name(&class_name, "new")),
+        callee: Callee::Subroutine(name),
         args,
         // The allocation is passed first; the actuals are evaluated in the
         // order they are written (13.5.4).
@@ -1135,6 +1140,7 @@ pub(super) fn random_selection(
                     return Err(unsupported("randomization of a 4-state class property"));
                 }
                 if property.field.handle.is_some()
+                    || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
                     || (property.randc && property.cyclic_domain_size().is_none())
                 {
@@ -1480,6 +1486,11 @@ pub(super) fn randomize_with(
         let variable = dimensions
             .get(&name)
             .ok_or_else(|| unsupported(format!("inline local variable `{name}`")))?;
+        if variable.chandle {
+            return Err(AnalyzerError::IllegalChandleUse {
+                detail: "a chandle in a constraint".into(),
+            });
+        }
         if variable.real
             || variable.string
             || variable.class.is_some()

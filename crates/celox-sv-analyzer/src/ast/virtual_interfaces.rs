@@ -183,13 +183,16 @@ fn resolved_type(r#type: &crate::ir::Type, constants: &HashMap<String, i128>) ->
     if !r#type.unpacked_ranges().is_empty() {
         return None;
     }
-    Some(Type::resolved(
-        kind,
-        r#type.is_signed(),
-        r#type.signed_element_depth(),
-        &packed,
-        &[],
-    ))
+    Some(
+        Type::resolved(
+            kind,
+            r#type.is_signed(),
+            r#type.signed_element_depth(),
+            &packed,
+            &[],
+        )
+        .with_chandle(r#type.is_chandle()),
+    )
 }
 
 /// A signal of a module that the frontend binds for virtual interfaces.

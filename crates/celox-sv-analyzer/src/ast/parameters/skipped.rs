@@ -484,6 +484,7 @@ fn pattern_items(
             VariableDimensions {
                 declared: type_names::Declared::default(),
                 container: None,
+                chandle: false,
                 real: false,
                 string: false,
                 class: None,
@@ -525,6 +526,7 @@ fn pattern_items(
             VariableDimensions {
                 declared: type_names::Declared::default(),
                 container: None,
+                chandle: false,
                 randomizable: true,
                 enum_domain: None,
                 packed_enum: false,

@@ -371,6 +371,8 @@ fn check_written_container(
     Ok(())
 }
 
+/// Bind value native expression `root`, which is no chandle unless `target`
+/// is a chandle (see [`chandles::Permits`]).
 pub(in crate::ast) fn bind_value(
     root: ExprId,
     native: &Declarations,
@@ -379,12 +381,42 @@ pub(in crate::ast) fn bind_value(
     dimensions: &PackedDimensions,
     target: Option<&VariableDimensions>,
 ) -> Converted<Expr> {
+    bind_value_in(root, native, tree, dimensions, target, false, session)
+}
+
+/// Bind value native expression `root`, which may be a chandle: a condition
+/// tested as a Boolean, or a value a chandle receives (IEEE 1800-2023 6.14).
+pub(in crate::ast) fn bind_chandle_value(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+    target: Option<&VariableDimensions>,
+) -> Converted<Expr> {
+    bind_value_in(root, native, tree, dimensions, target, true, session)
+}
+
+fn bind_value_in(
+    root: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    target: Option<&VariableDimensions>,
+    chandle: bool,
+    session: &mut Session,
+) -> Converted<Expr> {
+    let mut permits = chandles::Permits::new(root, chandle);
     let mut jobs = vec![Job::Enter(root, target.cloned().map(Rc::new), None)];
     let mut values = Vec::new();
     while let Some(job) = jobs.pop() {
         match job {
             Job::Enter(id, target, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
+                // The one check of every value the binder reads: a chandle
+                // is only where 6.14 allows one.
+                let permitted =
+                    permits.check(session, id, target.as_deref(), tree, native, dimensions)?;
                 if let Some(value) = dimensions.effect_values.get(&id) {
                     values.push(value.clone());
                     continue;
@@ -610,6 +642,7 @@ pub(in crate::ast) fn bind_value(
                 }
                 let (finish, children) = match &native.expression(id).kind {
                     ExprKind::Group(inner) => {
+                        permits.grant_if(permitted, *inner);
                         jobs.push(Job::Enter(*inner, target, scope.clone()));
                         continue;
                     }
@@ -677,6 +710,8 @@ pub(in crate::ast) fn bind_value(
                         expression,
                         postfix: false,
                     } if !matches!(operator.as_str(), "++" | "--") => {
+                        // A Boolean test (6.14).
+                        permits.grant_if(operator == "!", *expression);
                         (Finish::Unary(operator.clone()), vec![(*expression, None)])
                     }
                     ExprKind::Binary {
@@ -689,6 +724,8 @@ pub(in crate::ast) fn bind_value(
                                 tree, session, *left, *right, native, dimensions,
                             )?;
                         }
+                        permits
+                            .binary(session, operator, *left, *right, tree, native, dimensions)?;
                         (
                             Finish::Binary(operator.clone()),
                             vec![(*left, None), (*right, None)],
@@ -699,7 +736,20 @@ pub(in crate::ast) fn bind_value(
                         then_expression,
                         else_expression,
                     } => (
-                        Finish::Mux,
+                        {
+                            // The condition is a Boolean test; the branches
+                            // are values where the conditional is one.
+                            permits.grant(*condition);
+                            permits.conditional(
+                                session,
+                                permitted,
+                                [*then_expression, *else_expression],
+                                tree,
+                                native,
+                                dimensions,
+                            )?;
+                            Finish::Mux
+                        },
                         vec![
                             (*condition, None),
                             (*then_expression, target.clone()),
@@ -841,6 +891,16 @@ pub(in crate::ast) fn bind_value(
                                 session,
                                 dimensions,
                             )?;
+                            check_argument(
+                                &name,
+                                first + position,
+                                position + 1,
+                                value,
+                                native,
+                                tree,
+                                dimensions,
+                                session,
+                            )?;
                             check_written_container(
                                 &name,
                                 first + position,
@@ -863,6 +923,7 @@ pub(in crate::ast) fn bind_value(
                             let shape = shape
                                 .filter(|shape| {
                                     shape.unpacked_struct.is_some()
+                                        || chandles::receives_chandle(shape)
                                         || (shape.container.is_some()
                                             || shape.virtual_interface.is_some())
                                             && copied_in
@@ -1132,6 +1193,8 @@ pub(in crate::ast) fn bind_value(
                                 if function.writes_argument(position)
                                     && let Some(id) = id
                                 {
+                                    // Such as `$fread` into a memory.
+                                    chandles::check_memory(*id, tree, dimensions, session)?;
                                     check_tagged_copyout(*id, None, tree, session, dimensions)?;
                                 }
                             }
@@ -1150,6 +1213,16 @@ pub(in crate::ast) fn bind_value(
                                 if let Some(id) = id {
                                     references::check_actual(
                                         &name, position, *id, native, tree, session, dimensions,
+                                    )?;
+                                    check_argument(
+                                        &name,
+                                        position,
+                                        position + 1,
+                                        *id,
+                                        native,
+                                        tree,
+                                        dimensions,
+                                        session,
                                     )?;
                                     check_written_container(
                                         &name, position, *id, tree, session, dimensions,
@@ -1185,14 +1258,6 @@ pub(in crate::ast) fn bind_value(
                                             )?;
                                         }
                                     }
-                                    array_compatibility::check_native_unpacked_assignment(
-                                        tree,
-                                        session,
-                                        *id,
-                                        shape,
-                                        || format!("argument {} of `{name}`", position + 1),
-                                        dimensions,
-                                    )?;
                                 }
                             }
                             let children = actuals
@@ -2228,6 +2293,20 @@ fn selected_value(
             ));
         }
     }
+    if let ExprKind::Name(name) = &native.expression(base).kind
+        && dimensions
+            .get(&instances::normalize_identifier(&name.spelling))
+            .is_some_and(|ty| ty.chandle && suffix.len() > ty.unpacked.len())
+    {
+        return Err(chandles::packed_select());
+    }
+    // Nor does a chandle member, property or call result.
+    if !suffix.is_empty()
+        && !matches!(native.expression(base).kind, ExprKind::Name(_))
+        && chandles::native_chandle(tree, base, native, dimensions, session)
+    {
+        return Err(chandles::packed_select());
+    }
     // A select of a member of a container element reads the member first.
     let element_member = if suffix.is_empty() {
         None
@@ -2390,6 +2469,12 @@ pub(in crate::ast) fn selected_lvalue(
                 && suffix.len() >= ty.unpacked.len() + ty.packed.len()
         }) {
             return Err(unsupported("bit-select or part-select of a tagged union"));
+        }
+        if context
+            .get(&name)
+            .is_some_and(|ty| ty.chandle && suffix.len() > ty.unpacked.len())
+        {
+            return Err(chandles::packed_select());
         }
         if context
             .get(&name)
@@ -2840,6 +2925,106 @@ fn zero_based_vector(
         _ => false,
     };
     zero_based && r#type.members.is_empty()
+}
+
+/// An actual of formal `position` of subroutine `name` is assigned to the
+/// formal, and is therefore a chandle exactly when the formal is one (IEEE
+/// 1800-2023 6.14).
+fn check_chandle_argument(
+    name: &str,
+    position: usize,
+    actual: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    session: &mut Session,
+) -> Converted<()> {
+    let Some(formal) = dimensions
+        .subroutine_param_shapes
+        .get(name)
+        .and_then(|shapes| shapes.get(position))
+    else {
+        return Ok(());
+    };
+    chandles::check_assignment(
+        formal.chandle && formal.unpacked.is_empty(),
+        actual,
+        tree,
+        native,
+        dimensions,
+        session,
+    )
+}
+
+/// Check actual `actual` of formal `position` of subroutine `name`, which
+/// the call assigns to the formal (IEEE 1800-2023 13.5): a chandle formal
+/// takes only a chandle or `null`, and an unpacked array formal an array of
+/// its type. Every call binds its actuals after this check; `ordinal`
+/// numbers the argument in diagnostics.
+pub(in crate::ast) fn check_argument(
+    name: &str,
+    position: usize,
+    ordinal: usize,
+    actual: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    session: &mut Session,
+) -> Converted<()> {
+    check_chandle_argument(name, position, actual, native, tree, dimensions, session)?;
+    if let Some(shape) = dimensions
+        .subroutine_param_shapes
+        .get(name)
+        .and_then(|shapes| shapes.get(position))
+    {
+        array_compatibility::check_native_unpacked_assignment(
+            tree,
+            session,
+            actual,
+            shape,
+            || format!("argument {ordinal} of `{name}`"),
+            dimensions,
+        )?;
+    }
+    Ok(())
+}
+
+/// Bind actual `actual` of formal `position` of subroutine `name`, which
+/// may be a chandle exactly when the formal is one.
+pub(in crate::ast) fn bind_argument(
+    name: &str,
+    position: usize,
+    actual: ExprId,
+    native: &Declarations,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    session: &mut Session,
+) -> Converted<Expr> {
+    check_argument(
+        name, position, position, actual, native, tree, dimensions, session,
+    )?;
+    let target = copied_in_target(dimensions, name, position);
+    bind_value_in(actual, native, tree, dimensions, target, false, session)
+}
+
+/// The shape that actual `position` of subroutine `name` is bound for: a
+/// chandle formal receives a chandle (6.14), a virtual interface input
+/// only a virtual interface of its type (25.9) and a container input a
+/// container of an equivalent element type (7.6).
+pub(in crate::ast) fn copied_in_target<'a>(
+    dimensions: &'a PackedDimensions,
+    name: &str,
+    position: usize,
+) -> Option<&'a VariableDimensions> {
+    dimensions
+        .subroutine_param_shapes
+        .get(name)
+        .and_then(|shapes| shapes.get(position))
+        .filter(|shape| {
+            chandles::receives_chandle(shape)
+                || (shape.virtual_interface.is_some() || shape.container.is_some())
+                    && copied_in(dimensions, name, position)
+        })
 }
 
 #[cfg(test)]

@@ -83,7 +83,10 @@ impl BodyBuilder<'_, '_, '_> {
                             result.push(EventItemBase {
                                 edge,
                                 expr: self.native_value(item.expression)?,
-                                iff: item.iff.map(|iff| self.native_value(iff)).transpose()?,
+                                iff: item
+                                    .iff
+                                    .map(|iff| self.native_chandle_value(iff))
+                                    .transpose()?,
                             });
                         }
                         Ok(Stmt::WaitEvent(result))
@@ -157,7 +160,18 @@ impl BodyBuilder<'_, '_, '_> {
                 TimingEdge::Neg => EventEdge::Neg,
                 TimingEdge::Both => EventEdge::Both,
             };
-            let iff = item.iff.map(|iff| self.native_value(iff)).transpose()?;
+            // The member is read below without the binder.
+            expression_binding::check_chandle_read(
+                item.expression,
+                self.tree,
+                native,
+                &self.dims,
+                self.session,
+            )?;
+            let iff = item
+                .iff
+                .map(|iff| self.native_chandle_value(iff))
+                .transpose()?;
             let expr = match virtual_interfaces::native_member(
                 self.tree,
                 self.session,
@@ -265,8 +279,11 @@ impl BodyBuilder<'_, '_, '_> {
             if let ExprKind::MinTypMax { typical, .. } = native.expression(value).kind {
                 value = typical;
             }
+        }
+        if parenthesized {
             return self.native_value(value);
         }
+        expression_binding::check_chandle_read(value, self.tree, native, &self.dims, self.session)?;
         match &native.expression(value).kind {
             ExprKind::Literal(text) if text.chars().all(|c| c.is_ascii_digit() || c == '_') => {
                 Ok(Expr::Literal(text.replace('_', "")))

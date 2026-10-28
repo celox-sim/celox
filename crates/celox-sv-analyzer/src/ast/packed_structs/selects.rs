@@ -4,7 +4,7 @@ use super::*;
 
 /// Collapse an interface handle/member prefix using its bound symbols. Any
 /// remaining path selects a packed-structure member of the interface signal.
-pub(super) fn bind_interface_path(
+pub(in crate::ast) fn bind_interface_path(
     tree: &AnalysisContext<'_>,
     path: &mut Vec<String>,
     dimensions: &PackedDimensions,
@@ -76,6 +76,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
         VariableDimensions {
             declared: type_names::Declared::default(),
             container: None,
+            chandle: false,
             randomizable: true,
             enum_domain: None,
             packed_enum: false,

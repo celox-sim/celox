@@ -259,6 +259,13 @@ fn parse(
     }))
 }
 
+/// Chandles have no relational operators to order them (6.14, 7.12.1).
+fn min_max_chandles() -> AnalyzerError {
+    AnalyzerError::IllegalChandleUse {
+        detail: "the minimum or maximum of chandles".into(),
+    }
+}
+
 /// The array that `base` names, if it is an unpacked array whose elements a
 /// locator method can return.
 fn array(
@@ -326,6 +333,7 @@ fn array(
         ty.enum_domain = shape.enum_domain.clone();
         ty.packed_enum = shape.packed_enum;
         ty.signed_element_depth = shape.signed_element_depth;
+        ty.chandle = shape.chandle;
         ty
     };
     let width = casts::expr_type_from_type(&tree.functions, &element, &dims.const_env)
@@ -465,7 +473,16 @@ pub(super) fn bind(
             scope
                 .expression_signedness
                 .insert(index.clone(), index_type.is_signed());
-            let mut value = expression_binding::value(predicate, native, tree, session, &scope)?;
+            // A find tests its expression as a Boolean, and `unique`
+            // compares the values for equality, either of which takes a
+            // chandle (6.14); the order `min` and `max` take does not.
+            let mut value = if matches!(call.method, LocatorMethod::Min | LocatorMethod::Max) {
+                expression_binding::value(predicate, native, tree, session, &scope)?
+            } else {
+                expression_binding::bind_chandle_value(
+                    predicate, native, tree, session, &scope, None,
+                )?
+            };
             let key = if call.method.finds() {
                 None
             } else if expression_binding::string_value(&value, &scope) {
@@ -500,6 +517,11 @@ pub(super) fn bind(
         None => {
             let key = match &call.array {
                 _ if element.kind() == TypeKind::String => LocatorKey::String,
+                _ if element.chandle
+                    && matches!(call.method, LocatorMethod::Min | LocatorMethod::Max) =>
+                {
+                    return Err(min_max_chandles());
+                }
                 _ if element.class().is_some()
                     || element.unpacked_struct().is_some()
                     || element.container.is_some() =>

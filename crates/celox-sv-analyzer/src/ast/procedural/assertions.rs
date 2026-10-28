@@ -14,7 +14,7 @@ impl BodyBuilder<'_, '_, '_> {
         if !matches!(keyword, "assert" | "assume" | "cover") {
             return Err(unsupported("immediate assertion keyword"));
         }
-        self.native_value(*condition)
+        self.native_chandle_value(*condition)
             .map(procedural_truth_condition)
     }
 }

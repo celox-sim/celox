@@ -79,7 +79,8 @@ pub(in crate::ast) fn statement(
             arg_order: Vec::new(),
         }));
     }
-    super::bind_value(root, native, tree, session, &context, None).map(Some)
+    // The result, which may be a chandle, is discarded (13.4.1).
+    super::bind_chandle_value(root, native, tree, session, &context, None).map(Some)
 }
 
 #[cfg(test)]

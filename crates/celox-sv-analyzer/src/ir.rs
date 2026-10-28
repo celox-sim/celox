@@ -773,6 +773,8 @@ pub struct Type {
     resolved_width: Option<usize>,
     signed_element_depth: Option<usize>,
     class: Option<String>,
+    /// A `chandle`, held as 64 bits (IEEE 1800-2023 6.14).
+    chandle: bool,
 }
 
 /// Shared metadata, allocated only for unpacked structure types. Ordinary
@@ -796,6 +798,12 @@ impl Type {
         self.structure
             .as_ref()
             .map_or(&[], |structure| structure.leaves.as_slice())
+    }
+
+    /// Whether the type is a `chandle`, which other analyses of names of
+    /// this signal must keep (see [`crate::ast::Type::with_chandle`]).
+    pub fn is_chandle(&self) -> bool {
+        self.chandle
     }
 
     /// How many leading packed dimensions select an element of a signed
@@ -908,6 +916,7 @@ impl Type {
         let is_signed = r#type.is_signed();
         let class = r#type.class().map(str::to_owned);
         let signed_element_depth = r#type.signed_element_depth();
+        let chandle = r#type.is_chandle();
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
             structure,
@@ -919,6 +928,7 @@ impl Type {
             resolved_width,
             signed_element_depth,
             class,
+            chandle,
         }
     }
 }
@@ -1992,6 +2002,8 @@ pub enum DpiType {
     /// `byte`, `shortint`, `int` or `longint`, passed as the C integer of
     /// that width.
     Integer { width: usize, signed: bool },
+    /// `chandle`, passed as a C pointer (IEEE 1800-2023 6.14).
+    Chandle,
 }
 
 impl DpiType {
@@ -1999,6 +2011,7 @@ impl DpiType {
         match self {
             DpiType::Bit | DpiType::Logic => 1,
             DpiType::Integer { width, .. } => *width,
+            DpiType::Chandle => 64,
         }
     }
 

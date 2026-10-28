@@ -32,6 +32,7 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed and unpacked structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Dynamic containers | dynamic arrays, queues (including bounded queues), and associative arrays with integral, string or class handle keys, also nested (`int m[string][$]`, `T m[C][C][E]`); element access, value assignment, equality, `foreach` and built-in container methods. See [dynamic containers](#dynamic-containers) |
+| Chandles | `chandle` variables, class properties, elements of dynamic arrays, queues and associative arrays, subroutine arguments and results, and DPI-C arguments and results (passed as C pointers): they start as `null`, compare with `==`, `!=`, `===` and `!==` against another chandle or `null`, test as Booleans, and are assigned from another chandle or `null`. Other operators, assignments from or to other types, casts, ports, event expressions, continuous assignments and packed types of chandles are rejected (IEEE 1800-2023 6.14). Fixed-size unpacked arrays of chandles (`chandle a[4]`, also through a typedef) are not supported |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values; text formatted by `$sformatf` / `$sformat` / `$swrite`. See [strings](#strings) |
 | Classes | classes declared in a module, a package or the compilation unit: properties of 2-state and 4-state integral types of any width (4-state properties start as X and keep X/Z bits), `string` and class handle types, unpacked structures of those types (see [unpacked structures](#unpacked-structures)), plus dynamic arrays, queues and associative arrays, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named and defaulted method and constructor arguments; shallow copies (`new h`); bit and part selects of properties, read and written like selects of a variable (11.5.1). See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
@@ -1648,11 +1649,12 @@ first release supports this subset:
   argument types, with up to 16 `input` arguments. Imports linked to one C
   name must declare the same prototype.
 - Argument and result types `bit`, `logic` (passed as `svBit` / `svLogic`),
-  `byte`, `shortint`, `int` and `longint`, signed or `unsigned`.
+  `byte`, `shortint`, `int` and `longint`, signed or `unsigned`, and
+  `chandle` (passed as a C pointer).
 
 Imports at compilation-unit scope, `output` and `inout` arguments, `context`
 imports, task imports, packed vector arguments (`svBitVecVal` /
-`svLogicVecVal`), `integer`, `real`, `chandle` and `string` are rejected.
+`svLogicVecVal`), `integer`, `real` and `string` are rejected.
 
 `export "DPI-C"` declarations of functions and tasks defined in the same
 module or package are accepted and checked: the subroutine is exported once,

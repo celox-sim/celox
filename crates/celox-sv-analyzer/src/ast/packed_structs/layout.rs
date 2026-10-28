@@ -53,7 +53,8 @@ pub(in crate::ast) fn native_type(
     let members = fields
         .into_iter()
         .map(|(name, ty, is_void)| {
-            if !names.insert(name.clone()) {
+            // A chandle is no packed type (IEEE 1800-2023 6.14).
+            if !names.insert(name.clone()) || ty.chandle {
                 return None;
             }
             Some(PackedMember {

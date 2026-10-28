@@ -12,7 +12,7 @@ pub(in crate::ast) use tagged::{
 mod tests;
 
 pub(super) use layout::{AggregateKind, capture_member_type, native_type};
-pub(super) use selects::{select_member, whole_member};
+pub(super) use selects::{bind_interface_path, select_member, whole_member};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct PackedMember {

@@ -1288,6 +1288,11 @@ impl<'a> ProcModule<'a> {
             sv::ir::DpiType::Bit => ExternType::Bit,
             sv::ir::DpiType::Logic => ExternType::Logic,
             sv::ir::DpiType::Integer { width, signed } => ExternType::Integer { width, signed },
+            // A pointer, 64 bits on the supported hosts.
+            sv::ir::DpiType::Chandle => ExternType::Integer {
+                width: 64,
+                signed: false,
+            },
         };
         let function = ExternFunction {
             name: import.c_name().to_string(),

@@ -90,10 +90,10 @@ pub(super) fn with_dimensions(
         _ => None,
     };
     let Some(kind) = kind else {
-        return Ok(types::type_with_unpacked_ranges(
+        return types::type_with_unpacked_ranges(
             base,
             constant_binding::bind_unpacked_ranges(dims, tree, session, context)?,
-        ));
+        );
     };
     // `T a[x][y]`: each element of `a` is a container `T [y]` (IEEE
     // 1800-2023 7.4.5, 7.8), held by its handle like any container value.
@@ -464,6 +464,14 @@ fn element_value(
     if let Some(aggregate) = target.element.unpacked_struct() {
         unpacked_structs::check_value(aggregate, id, native, tree, session, dims)?;
     }
+    expression_binding::check_chandle_assignment(
+        target.element.chandle && target.element.unpacked_ranges.is_empty(),
+        id,
+        tree,
+        native,
+        dims,
+        session,
+    )?;
     let shape = procedural::dimensions_from_type(&target.element);
     let value = expression_binding::bind_value(id, native, tree, session, dims, Some(&shape))?;
     if let Some(record) = &target.record {
@@ -521,6 +529,9 @@ fn index_value(
             || "associative array index".into(),
         )?;
     }
+    // Only an associative array indexed by chandles takes a chandle index.
+    let chandle = target.key.as_ref().is_some_and(|key| key.chandle);
+    expression_binding::check_chandle_assignment(chandle, id, tree, native, dims, session)?;
     if matches!(
         target.layout.kind,
         ContainerKind::Associative { string: true, .. }
@@ -548,7 +559,7 @@ fn index_value(
             left,
             operator,
             right,
-        } if operator == "+" || operator == "-" => Expr::Binary {
+        } if !chandle && (operator == "+" || operator == "-") => Expr::Binary {
             left: Box::new(index_value(*left, base, tree, session, dims, target)?),
             op: if operator == "+" {
                 BinaryOp::Add
@@ -557,6 +568,9 @@ fn index_value(
             },
             right: Box::new(index_value(*right, base, tree, session, dims, target)?),
         },
+        _ if chandle => {
+            expression_binding::bind_chandle_value(id, native, tree, session, dims, None)?
+        }
         _ => expression_binding::value(id, native, tree, session, dims)?,
     };
     Ok(
@@ -718,6 +732,12 @@ pub(super) fn value(
                     if op != ContainerOp::Reverse && target.record.is_some() {
                         return Err(unsupported("sorting elements wider than 64 bits"));
                     }
+                    // Chandles have no relational operators (6.14, 7.12.2).
+                    if op != ContainerOp::Reverse && target.element.chandle {
+                        return Err(AnalyzerError::IllegalChandleUse {
+                            detail: "sorting chandles".into(),
+                        });
+                    }
                     if op != ContainerOp::Reverse
                         && target.layout.handle == Some(HandleProperty::Object)
                     {
@@ -812,6 +832,14 @@ pub(super) fn value(
                     // reference, so it has the index's class (IEEE 1800-2023
                     // 7.9.4).
                     let key_class = target.key.as_ref().and_then(|key| key.class());
+                    // So is the variable of a chandle index, which is no
+                    // integral variable (6.14).
+                    if shape.chandle != target.key.as_ref().is_some_and(|key| key.chandle) {
+                        return Err(AnalyzerError::IllegalChandleUse {
+                            detail: "an associative traversal index of another type than the index"
+                                .into(),
+                        });
+                    }
                     if let ContainerKind::Associative { string, object, .. } = target.layout.kind
                         && (shape.string != string
                             || shape.container.is_some()
@@ -822,7 +850,13 @@ pub(super) fn value(
                             "incompatible associative traversal index variable",
                         ));
                     }
-                    args.push(expression_binding::value(id, native, tree, session, dims)?);
+                    args.push(if shape.chandle {
+                        expression_binding::bind_chandle_value(
+                            id, native, tree, session, dims, None,
+                        )?
+                    } else {
+                        expression_binding::value(id, native, tree, session, dims)?
+                    });
                 } else if matches!(op, ContainerOp::PushFront | ContainerOp::PushBack)
                     || op == ContainerOp::Insert && index == 1
                 {
@@ -905,12 +939,14 @@ fn query(
             if name.spelling == "$unpacked_dimensions" {
                 unpacked
             } else {
+                // A chandle has no packed dimensions (IEEE 1800-2023 6.14).
                 unpacked
                     // An integral element kept in a record keeps its
                     // packed dimensions; a structure has none.
                     + if innermost.layout.handle.is_some()
                         && (innermost.record.is_none()
                             || innermost.element.unpacked_struct().is_some())
+                        || innermost.element.chandle
                     {
                         0
                     } else {

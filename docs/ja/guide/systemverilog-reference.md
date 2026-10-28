@@ -30,6 +30,7 @@ outline: [2, 3]
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
 | パターン | packed・unpacked 構造体、packed 配列、unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
 | クラス | モジュール・package・コンパイル単位で宣言したクラス。任意の幅の 2 値・4 値整数型（4 値のプロパティは X で始まり、X/Z ビットを保持します）・`string`・クラスハンドル型と、それらをメンバとする unpacked 構造体（[unpacked 構造体](#unpacked-structures)を参照）のプロパティ（初期値つきも可）、引数あり・なしの `new`、暗黙と明示のコンストラクタ、ハンドル経由またはクラス内から修飾なしで呼ぶメソッド（`function` と `task`、本体をクラス外に書く `extern` も可）、`this`、`null`、ハンドルの代入と比較、プロパティとメソッドの継承（基底クラスのコンストラクタは `super.new(...)` か `extends Base(...)` で呼ぶ）、`super.` によるメンバ参照、virtual メソッド、抽象クラス（`virtual class`）と pure virtual メソッド、interface クラスを実装するクラスと interface クラスのハンドルを通したメソッド呼び出し、関数とタスクとしてのクラスハンドルの `$cast`、static プロパティとメソッド、static メンバと `C::new` の `C::` によるスコープ解決、ハンドルの配列、値パラメータと型パラメータを持つパラメータ付きクラス、ハンドルや `C#(...)::` を通したパラメータの参照、クラスと interface クラスの typedef と `C::T`、名前付きのコンストラクタ引数、浅いコピー（`new h`）、変数の選択と同じように読み書きするプロパティのビット選択・部分選択（11.5.1）。[クラス](#classes)を参照 |
+| chandle | `chandle` 型の変数、クラスプロパティ、動的配列・キュー・連想配列の要素、サブルーチンの引数と戻り値、DPI-C の引数と戻り値（C のポインタとして渡す）。初期値は `null`。別の chandle または `null` との `==`・`!=`・`===`・`!==`、真偽値としての判定、別の chandle または `null` からの代入に対応。それ以外の演算子、他の型との代入、キャスト、ポート、イベント式、連続代入、packed 型での使用は拒否します（IEEE 1800-2023 6.14）。固定長の unpacked 配列（`chandle a[4]`、typedef 経由も含む）は未対応です |
 | 文字列 | `string` 型の変数、関数の引数と戻り値。文字列・文字列リテラル・キャスト（`string'(x)`）の代入、`==` / `!=` と大小比較、連結と複製（実行時の回数も可）、文字の読み書き（`s[i]`）、メソッド `len`、`getc`、`putc`、`toupper`、`tolower`、`compare`、`icompare`、`substr`、`atoi` / `atohex` / `atooct` / `atobin`、`itoa` / `hextoa` / `octtoa` / `bintoa`。`%s` と書式なしの表示。[文字列](#strings)を参照 |
 | パラメータ | 整数のパラメータ、128ビットを超える幅と X/Z を保持するパラメータ上書き、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 
@@ -932,7 +933,7 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 `dpi_function` または `dpi_library` で関数を登録します。どちらも C 側の型との一致を呼び出し側が保証する `unsafe` API です。
 
 対応するのは、モジュール・package で宣言した関数を `always_ff` とそこから呼ぶ関数で使う場合です。
-最大16個の `input` 引数を扱い、型は `bit`、`logic`、`byte`、`shortint`、`int`、`longint`（符号付き・符号なし）、戻り値はそれらか `void` です。
+最大16個の `input` 引数を扱い、型は `bit`、`logic`、`byte`、`shortint`、`int`、`longint`（符号付き・符号なし）と `chandle`（C のポインタとして渡す）、戻り値はそれらか `void` です。
 組み合わせ回路からの呼び出し、`context`、task import、`output` / `inout`、packed vector、`real`、`string` などは未対応です。
 同じモジュール・package で定義した関数・task の `export "DPI-C"` 宣言は受理して検査します（1 つのサブルーチンにつき 1 回、C 名の重複なし、`ref` 仮引数とクラスハンドルなし、35.7）。export はサブルーチンを変えず（35.7）、export したサブルーチンを呼べるのは `context` import だけなので（35.5.3）、C から呼ばれることはありません。
 

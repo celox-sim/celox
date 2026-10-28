@@ -40,6 +40,9 @@ impl Message {
                 "mailbox messages that are not integral values, strings or handles",
             ));
         }
+        if ty.is_chandle() {
+            return Err(unsupported("mailbox messages that are chandles"));
+        }
         let shape = casts::expr_type_from_type(functions, ty, env)
             .ok_or_else(|| unsupported("mailbox message type"))?;
         if shape.width == 0 || shape.width > 64 {

@@ -133,8 +133,10 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             port.name().to_string(),
             VariableDimensions {
                 declared: type_names::Declared::new(port.r#type()),
+                chandle: port.r#type().chandle,
                 container: port.r#type().container.clone(),
                 randomizable: port.r#type().container.is_none()
+                    && !port.r#type().holds_chandle()
                     && (!port.r#type().is_enum || port.r#type().enum_domain.is_some())
                     && port.randomizable,
                 enum_domain: port.r#type().enum_domain.clone(),
@@ -180,8 +182,10 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             signal.name().to_string(),
             VariableDimensions {
                 declared: type_names::Declared::new(signal.r#type()),
+                chandle: signal.r#type().chandle,
                 container: signal.r#type().container.clone(),
                 randomizable: signal.r#type().container.is_none()
+                    && !signal.r#type().holds_chandle()
                     && (!signal.r#type().is_enum || signal.r#type().enum_domain.is_some())
                     && !signal.is_net()
                     && !signal.is_const,
@@ -384,6 +388,7 @@ fn extend_variable_dimensions_from_const_env(
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type {
             container: None,
+            chandle: false,
             is_enum: false,
             enum_domain: None,
             packed_enum: false,
@@ -601,6 +606,7 @@ pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariableP
                 VariableDimensions {
                     declared: type_names::Declared::default(),
                     container: None,
+                    chandle: false,
                     randomizable: true,
                     enum_domain: parameter.enum_domain.clone(),
                     packed_enum: false,

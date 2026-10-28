@@ -229,6 +229,9 @@ pub enum AnalyzerError {
     UnknownClassParameter { class: String, name: String },
     /// A `ref` or `const ref` formal bound to an actual, or used in a way,
     /// that IEEE 1800-2023 13.5.2 forbids.
+    /// A use of a `chandle` that IEEE 1800-2023 6.14 does not allow.
+    #[error("chandle: {detail} (IEEE 1800-2023 6.14)")]
+    IllegalChandleUse { detail: String },
     #[error("ref argument `{argument}` of `{subroutine}`: {detail}")]
     InvalidRefArgument {
         subroutine: String,
