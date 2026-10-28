@@ -15,7 +15,13 @@ fn packed_word(backend: &NativeBackend, signal: SignalRef) -> BigUint {
         let mask = u64::MAX
             .checked_shr((64 - signal.width) as u32)
             .unwrap_or(0);
-        BigUint::from(u64::from_le(backend.get_as::<u64>(signal)) & mask)
+        let value = match signal.width {
+            0..=8 => u64::from(backend.get_as::<u8>(signal)),
+            9..=16 => u64::from(u16::from_le(backend.get_as::<u16>(signal))),
+            17..=32 => u64::from(u32::from_le(backend.get_as::<u32>(signal))),
+            _ => u64::from_le(backend.get_as::<u64>(signal)),
+        };
+        BigUint::from(value & mask)
     } else {
         let mask = u128::MAX
             .checked_shr((128 - signal.width) as u32)
@@ -309,7 +315,9 @@ mod tests {
 
     #[test]
     fn packed_reads_match_backend_across_word_boundaries_and_padding() {
-        let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129];
+        let widths = [
+            1usize, 3, 8, 9, 16, 17, 24, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129,
+        ];
         let ports = widths
             .iter()
             .flat_map(|width| {
@@ -371,7 +379,9 @@ mod tests {
     }
     #[test]
     fn packed_writes_match_backend_and_preserve_neighboring_planes() {
-        let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129];
+        let widths = [
+            1usize, 3, 8, 9, 16, 17, 24, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129,
+        ];
         let ports = widths
             .iter()
             .flat_map(|width| {
