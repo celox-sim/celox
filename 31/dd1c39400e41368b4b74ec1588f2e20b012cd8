@@ -1,0 +1,1 @@
+Rebased onto master after #2411 (ref arguments): output copy-out keeps the structure concat flag beside forwarded properties; ref formals of unpacked structure type are rejected. Review fixes: nested singleton members in static initializers, class checks of handle pattern members. Evidence merged per entry onto master's text.
