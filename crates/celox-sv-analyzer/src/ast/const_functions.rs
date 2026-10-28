@@ -342,6 +342,7 @@ impl ConstantFunctions {
                         direction: crate::procedural::ParamDirection::Input,
                         r#type: ty.clone(),
                         default: function.argument_defaults[position].clone().map(Into::into),
+                        leaves: Vec::new(),
                     })
                     .collect(),
                 body: function

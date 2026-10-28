@@ -4628,12 +4628,12 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut activation = Vec::new();
         if self.kernel.is_some() && (subroutine.is_task || self.forked) {
             for name in &subroutine.automatic_locals {
-                // A reference formal has no storage of its own.
-                if subroutine
-                    .params
-                    .iter()
-                    .any(|param| &param.name == name && param.direction.is_reference())
-                {
+                // A reference formal, or a member of one, has no storage of
+                // its own.
+                if subroutine.params.iter().any(|param| {
+                    param.direction.is_reference()
+                        && (&param.name == name || param.leaves.contains(name))
+                }) {
                     continue;
                 }
                 let original = self
@@ -4701,11 +4701,42 @@ impl<'p, 'a> Ff<'p, 'a> {
                 .cloned()
                 .flatten()
                 .or_else(|| param.default.clone());
-            match self.reference(name, param, actual)? {
-                Reference::Variable(target) => {
-                    references.push((param.name.clone(), id, target));
+            if param.leaves.is_empty() {
+                match self.reference(name, param, actual)? {
+                    Reference::Variable(target) => {
+                        references.push((param.name.clone(), id, target));
+                    }
+                    Reference::Alias(alias) => aliases.push(*alias),
                 }
-                Reference::Alias(alias) => aliases.push(*alias),
+                continue;
+            }
+            // Each member of a formal of unpacked structure type refers to
+            // the matching member of the actual, which the analyzer binds as
+            // the concatenation of its members.
+            let parts = match actual {
+                Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts,
+                _ => {
+                    return Err(unsupported(format!(
+                        "ref argument `{}` of `{name}`",
+                        param.source_name
+                    )));
+                }
+            };
+            for (leaf, part) in param.leaves.iter().zip(parts) {
+                let id = self
+                    .m
+                    .id(leaf)
+                    .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+                let member = sv::ir::SubroutineParam {
+                    name: leaf.clone(),
+                    leaves: Vec::new(),
+                    default: None,
+                    ..param.clone()
+                };
+                match self.reference(name, &member, Some(part))? {
+                    Reference::Variable(target) => references.push((leaf.clone(), id, target)),
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
             }
         }
         // An input evaluates into a register, which a host request in a later
@@ -4748,8 +4779,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .ok_or_else(|| unsupported("missing output argument"))?;
                 // A reference formal bound to a class property, forwarded:
                 // its object was evaluated when the reference was made.
-                if let Some(store) = forwarded_property(reference, &param.name) {
+                if let Some(store) =
+                    forwarded_property(reference, sv::ir::Expr::Ident(param.name.clone()))
+                {
                     property_outputs.push(store);
+                } else if let Some(stores) = forwarded_members(reference, &param.name) {
+                    property_outputs.extend(stores);
                 } else {
                     let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
                         unsupported(format!(
@@ -4859,6 +4894,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         let constant = |position: &sv::ir::ConstExpr| {
             sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
         };
+        self.split_property_concats(&mut body, &aliases);
         for alias in &aliases {
             body = alias.rewrite(body, &constant)?;
         }
@@ -4900,6 +4936,67 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.m.name_to_id.insert(name, original);
         }
         Ok(result)
+    }
+
+    /// Rewrite each assignment in `body` to a concatenation that has members
+    /// of a structure reference formal bound to a class property, which
+    /// [`references::Alias::rewrite`] stores one property at a time: the
+    /// concatenation writes temporaries in their place, so every position
+    /// of its other parts is taken before any write, and each property is
+    /// then stored from its temporary.
+    fn split_property_concats(&mut self, body: &mut [sv::ir::Stmt], aliases: &[references::Alias]) {
+        let properties: HashSet<&str> = aliases
+            .iter()
+            .filter(|alias| matches!(alias.target, references::Target::Property { .. }))
+            .map(|alias| alias.formal.as_str())
+            .collect();
+        if properties.is_empty() {
+            return;
+        }
+        for stmt in body {
+            stmt.walk_mut(&mut |stmt| {
+                let sv::ir::Stmt::AssignConcat {
+                    parts,
+                    nonblocking,
+                    ..
+                } = stmt
+                else {
+                    return;
+                };
+                if !parts.iter().any(|part| properties.contains(part.name())) {
+                    return;
+                }
+                let nonblocking = *nonblocking;
+                let mut stores = Vec::new();
+                for part in parts.iter_mut() {
+                    if !matches!(part, sv::ir::LValue::Ident(name) if properties.contains(name.as_str()))
+                    {
+                        continue;
+                    }
+                    // A select of a member is left to the rewrite to reject.
+                    let Ok(width) = self.lvalue_width(part) else {
+                        continue;
+                    };
+                    let (_, temp) = self.m.temp("ref_member", width, false, self.m.four_state);
+                    let member = std::mem::replace(part, sv::ir::LValue::Ident(temp.clone()));
+                    stores.push(sv::ir::Stmt::Assign {
+                        lhs: member,
+                        rhs: sv::ir::Expr::Ident(temp),
+                        nonblocking,
+                    });
+                }
+                if stores.is_empty() {
+                    return;
+                }
+                let assignment = std::mem::replace(stmt, sv::ir::Stmt::Break);
+                stores.insert(0, assignment);
+                *stmt = sv::ir::Stmt::If {
+                    condition: sv::ir::Expr::Literal("1'b1".into()),
+                    then_body: stores,
+                    else_body: Vec::new(),
+                };
+            });
+        }
     }
 
     /// What reference formal `param` of `name` refers to for a call with
@@ -8380,10 +8477,10 @@ enum Reference {
     Alias(Box<references::Alias>),
 }
 
-/// The store that copies formal `formal` back into the class property that
-/// `actual` reads through the object of a reference formal (see
+/// The store that copies `value` back into the class property that `actual`
+/// reads through the object of a reference formal (see
 /// [`references::Alias`]), when it is such a read.
-fn forwarded_property(actual: &sv::ir::Expr, formal: &str) -> Option<sv::ir::Stmt> {
+fn forwarded_property(actual: &sv::ir::Expr, value: sv::ir::Expr) -> Option<sv::ir::Stmt> {
     let sv::ir::Expr::Call {
         callee: sv::ir::Callee::Object(op),
         args,
@@ -8400,11 +8497,45 @@ fn forwarded_property(actual: &sv::ir::Expr, formal: &str) -> Option<sv::ir::Stm
     handle.starts_with(references::OBJECT_TEMP).then(|| {
         sv::ir::Stmt::Eval(sv::ir::Expr::Call {
             callee: sv::ir::Callee::Object(Box::new(sv::ir::ObjectOp::Store(*field))),
-            args: vec![
-                Some(sv::ir::Expr::Ident(handle.clone())),
-                Some(sv::ir::Expr::Ident(formal.to_owned())),
-            ],
+            args: vec![Some(sv::ir::Expr::Ident(handle.clone())), Some(value)],
             arg_order: Vec::new(),
         })
     })
+}
+
+/// The stores that copy the members of formal `formal` of unpacked
+/// structure type back into the class properties that `actual`, the members
+/// of a structure reference formal bound to a property, read.
+fn forwarded_members(actual: &sv::ir::Expr, formal: &str) -> Option<Vec<sv::ir::Stmt>> {
+    let sv::ir::Expr::Concat(parts) = actual else {
+        return None;
+    };
+    let widths = parts
+        .iter()
+        .map(|part| match part {
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                ..
+            } => match **op {
+                sv::ir::ObjectOp::Load(field) => Some(field.width as usize),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut lsb = widths.iter().sum::<usize>();
+    parts
+        .iter()
+        .zip(widths)
+        .map(|(part, width)| {
+            lsb -= width;
+            let bits = sv::ir::Expr::Select {
+                expr: Box::new(sv::ir::Expr::Ident(formal.to_owned())),
+                msb: sv::ir::ConstExpr::Literal((lsb + width - 1).to_string()),
+                lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
+                signed: false,
+            };
+            forwarded_property(part, bits)
+        })
+        .collect()
 }

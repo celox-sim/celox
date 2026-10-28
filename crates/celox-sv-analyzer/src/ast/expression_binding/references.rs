@@ -48,12 +48,20 @@ pub(super) fn check_actual(
                         "a constant is not a variable (IEEE 1800-2023 13.5.2)",
                     ));
                 }
-                None => objects::property(tree, actual, native, dimensions)?
-                    .map(|(property, _)| procedural::dimensions_from_type(&property.r#type)),
+                None => property_shape(tree, actual, native, dimensions)?,
             }
         }
-        ExprKind::Member { .. } => match objects::property(tree, actual, native, dimensions)? {
-            Some((property, _)) => Some(procedural::dimensions_from_type(&property.r#type)),
+        ExprKind::Member { .. } => match property_shape(tree, actual, native, dimensions)? {
+            Some(shape) => Some(shape),
+            // A member of a variable of unpacked structure type is a
+            // variable of its own (see `unpacked_structs`).
+            None if let (parts, None) = direct::path(actual, native, tree, dimensions)?
+                && let [variable] = parts.as_slice()
+                && let Some(shape) = dimensions.get(variable)
+                && !dimensions.const_env.contains_key(variable) =>
+            {
+                Some(shape.clone())
+            }
             // A static property is a variable of its class's scope.
             None if let Some(variable) =
                 objects::static_property(tree, actual, native, dimensions)? =>
@@ -134,15 +142,6 @@ pub(super) fn check_actual(
         .subroutine_param_shapes
         .get(name)
         .and_then(|shapes| shapes.get(position));
-    // The members of a structure are separate variables, which one reference
-    // cannot alias.
-    if formal.is_some_and(|formal| formal.unpacked_struct.is_some())
-        || shape.unpacked_struct.is_some()
-    {
-        return Err(unsupported(format!(
-            "ref argument of `{name}` of unpacked structure type"
-        )));
-    }
     // Bounded and unbounded queues are equivalent (6.22.2), but a formal's
     // operations would apply its own bound to the actual.
     if let (Some(formal), Some(actual)) = (
@@ -167,9 +166,29 @@ pub(super) fn check_actual(
     Ok(())
 }
 
+/// The shape of class property `actual`, also of unpacked structure type.
+fn property_shape(
+    tree: &AnalysisContext<'_>,
+    actual: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<VariableDimensions>> {
+    if let Some((property, _)) = objects::property(tree, actual, native, dimensions)? {
+        return Ok(Some(procedural::dimensions_from_type(&property.r#type)));
+    }
+    // `objects::aggregate_load` rejects a receiver that calls a subroutine,
+    // which each member would evaluate again.
+    let Some((aggregate, _, _)) = objects::aggregate_property(tree, actual, native, dimensions)?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(procedural::dimensions_from_type(&aggregate.r#type)))
+}
+
 /// Whether variables of shapes `a` and `b` have equivalent types (IEEE
 /// 1800-2023 6.22.2). Integral types compare by total width, signedness and
-/// state count; an enumeration only by its members.
+/// state count; an enumeration only by its members; an unpacked structure
+/// only with the same structure type.
 fn equivalent(
     state: &AnalysisState,
     a: &VariableDimensions,
@@ -218,6 +237,11 @@ fn equivalent(
     }
     if a.real != b.real || a.string != b.string || a.class != b.class {
         return false;
+    }
+    match (&a.unpacked_struct, &b.unpacked_struct) {
+        (None, None) => {}
+        (Some(a), Some(b)) if a.same_type(b) => {}
+        _ => return false,
     }
     if (a.enum_domain.is_some() || b.enum_domain.is_some()) && a.enum_domain != b.enum_domain {
         return false;

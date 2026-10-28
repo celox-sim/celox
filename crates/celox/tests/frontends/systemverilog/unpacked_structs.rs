@@ -271,6 +271,46 @@ sv_backends! {
         let done = sim.signal("done");
         assert_eq!(sim.get(done), BigUint::from(1u8));
     }
+    fn property_bound_structure_references_forward_and_capture(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { int a; string s; } pair_t;
+                class H;
+                    pair_t p;
+                endclass
+                int arr[2];
+                function automatic void set_pair(output pair_t p);
+                    p = '{7, "s"};
+                endfunction
+                function automatic void bump_pair(inout pair_t p);
+                    p.a++;
+                    p.s = {p.s, "!"};
+                endfunction
+                function automatic void forward(ref pair_t r);
+                    set_pair(r);
+                    bump_pair(r);
+                endfunction
+                function automatic void place(ref pair_t r);
+                    {r.a, arr[r.a]} = {32'd1, 32'd7};
+                endfunction
+                initial begin
+                    H h;
+                    pair_t v;
+                    h = new;
+                    forward(h.p);
+                    forward(v);
+                    value = h.p.a * 1000 + v.a * 100 + h.p.s.len() * 10 + v.s.len();
+                    h.p.a = 0;
+                    place(h.p);
+                    value = value * 100 + h.p.a * 10 + arr[0] + arr[1];
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(882217u32));
+    }
     fn redeclared_structure_properties_hide_their_members(sim) {
         @setup {
             let source = r#"module Top(output int value);
@@ -309,6 +349,21 @@ sv_backends! {
     }
     fn unpacked_struct_four_state_members(sim) {
         @case "unpacked_structs::four_state_members";
+    }
+    fn unpacked_struct_reference_formals(sim) {
+        @case "unpacked_structs::reference_formals";
+    }
+    fn unpacked_struct_reference_formals_of_virtual_methods(sim) {
+        @case "unpacked_structs::reference_formals_of_virtual_methods";
+    }
+    fn unpacked_struct_reference_formals_across_time(sim) {
+        @case "unpacked_structs::reference_formals_across_time";
+    }
+    fn unpacked_struct_reference_formals_four_state(sim) {
+        @case "unpacked_structs::reference_formals_four_state";
+    }
+    fn unpacked_struct_reference_formal_handles_survive_heap_collections(sim) {
+        @case "unpacked_structs::reference_formal_handles_survive_heap_collections";
     }
     fn unpacked_struct_class_properties(sim) {
         @case "unpacked_structs::class_properties";
@@ -446,8 +501,32 @@ fn unsupported_and_illegal_uses_are_rejected() {
             "whole unpacked structure property read through a receiver with a side effect",
         ),
         (
-            "function automatic void f(ref i_t r); r.a++; endfunction i_t v; initial f(v);",
-            "ref argument of `f` of unpacked structure type",
+            "typedef struct { int a; bit b; } j_t; function automatic void f(ref i_t r); r.a++; endfunction j_t v; initial f(v);",
+            "not equivalent",
+        ),
+        (
+            "typedef struct { int a; bit b; } j_t; function automatic void f(ref i_t q[$]); endfunction j_t v[$]; initial f(v);",
+            "not equivalent",
+        ),
+        (
+            "function automatic void f(const ref i_t r); r = '{1, 0}; endfunction i_t v; initial f(v);",
+            "const ref argument cannot be",
+        ),
+        (
+            "function automatic void f(const ref i_t r); r.a = 1; endfunction i_t v; initial f(v);",
+            "const ref argument cannot be",
+        ),
+        (
+            "function automatic void g(ref int x); endfunction function automatic void f(const ref i_t r); g(r.a); endfunction i_t v; initial f(v);",
+            "const ref argument cannot be",
+        ),
+        (
+            "function automatic void f(ref i_t r); endfunction i_t q[$]; initial f(q[0]);",
+            "ref argument of `f` bound to an element of a dynamic array",
+        ),
+        (
+            "class C; i_t v; endclass C cs[$]; function automatic void f(ref i_t r); endfunction initial f(cs[$urandom_range(0, 1)].v);",
+            "whole unpacked structure property read through a receiver with a side effect",
         ),
         (
             "class B; i_t p; endclass class D extends B; int p; endclass D d; int x; initial begin d = new; x = d.p.a; end",

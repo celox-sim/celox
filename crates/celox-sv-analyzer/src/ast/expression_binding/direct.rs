@@ -1594,7 +1594,7 @@ fn read_index_value(
     Ok(value)
 }
 
-fn path(
+pub(super) fn path(
     mut root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
