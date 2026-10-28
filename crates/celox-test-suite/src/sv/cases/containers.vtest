@@ -957,3 +957,133 @@ endmodule
 "#)
   (four_state)
   (top Top) (run_until 0) (assert_eq flags 255))
+
+(case nested_containers_and_class_keys
+  (source "nested_containers.sv" #"
+module Top(output bit done);
+    class Obj;
+        string n;
+        function new(string n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef enum { NEVER, STARTED, FINISHED } state_e;
+    typedef enum { DEEP, SHALLOW } policy_e;
+    typedef struct { state_e state; bit ret_val; } info_t;
+    class Comparer;
+        info_t m[Obj][Obj][policy_e];
+        state_e s[Obj][Obj];
+        function void start(Obj l, Obj r);
+            m[l][r][DEEP] = '{STARTED, 0};
+        endfunction
+    endclass
+    initial begin
+        Comparer c;
+        Obj a, b, k;
+        int grid[][];
+        c = new;
+        a = new("a");
+        b = new("b");
+        c.start(a, b);
+        $display("%0d %0d %0d", c.m[a][b][DEEP].state, c.m[a][b][DEEP].ret_val, c.m.exists(a));
+        c.m[a][b][DEEP] = '{FINISHED, 1};
+        c.m[b][a][SHALLOW] = '{STARTED, 1};
+        $display("%0d %0d %0d %0d", c.m[a][b][DEEP].state, c.m[a][b][DEEP].ret_val, c.m.num(),
+            c.m[b][a][SHALLOW].ret_val);
+        c.s[a][b] = FINISHED;
+        $display("%0d %0d", c.s[a][b], c.s[b][a]);
+        if (c.m.first(k)) $display("first %s", k.n);
+        foreach (c.m[x]) $display("key %s", x.n);
+        c.m.delete();
+        grid = new[2];
+        grid[1] = new[3];
+        grid[1][2] = 7;
+        $display("%0d %0d", c.m.num(), grid[1][2]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 0 1\n2 1 2 1\n2 0\nfirst a\nkey a\nkey b\n0 7\n"))
+
+(case methods_of_nested_container_elements
+  (source "nested_container_methods.sv" #"
+module Top(output bit done);
+    initial begin
+        int m[string][int];
+        int counts[string][$];
+        int grid[][];
+        m["a"][1] = 10;
+        m["a"][2] = 20;
+        m["b"][3] = 30;
+        $display("%0d %0d %0d %0d", m.num(), m["a"].num(), m["a"].exists(2), m["b"].exists(2));
+        m["a"].delete(1);
+        $display("%0d %0d", m["a"].num(), m.num());
+        counts["x"].push_back(3);
+        counts["x"].push_back(4);
+        counts["y"].push_back(5);
+        $display("%0d %0d %0d %0d", counts["x"].size(), counts["x"][1], counts["y"][0],
+            counts["z"].size());
+        grid = new[2];
+        grid[1] = new[3];
+        $display("%0d %0d %0d", grid.size(), grid[0].size(), grid[1].size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 2 1 0\n1 2\n2 4 5 0\n2 0 3\n"))
+
+(case nested_updates_evaluate_indices_once
+  (source "nested_updates.sv" #"
+module Top(output bit done);
+    int i;
+    function automatic int next_index();
+        i++;
+        return i;
+    endfunction
+    initial begin
+        int m[int][$];
+        int grid[][];
+        m[next_index()].push_back(7);
+        m[next_index()].push_back(8);
+        $display("%0d %0d %0d %0d %0d", m.num(), m[1].size(), m[1][0], m[2][0], i);
+        grid = new[2];
+        grid[1] = new[2];
+        $display("%0d %0d", $unpacked_dimensions(grid), $dimensions(grid));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 1 7 8 2\n2 3\n"))
+
+(case class_keys_survive_heap_collections
+  (source "class_keys.sv" #"
+module Top(output int n);
+    class Obj;
+        string n;
+    endclass
+    logic clk = 0;
+    always #1 clk = ~clk;
+    int seen[Obj];
+    Obj last;
+    string number;
+    always @(posedge clk) begin
+        Obj o;
+        o = new;
+        number.itoa(n);
+        o.n = number;
+        seen[o] = n;
+        n = n + 1;
+    end
+    initial begin
+        #6000;
+        foreach (seen[k]) if (seen[k] == 2999) last = k;
+        $display("%0d [%s] %0d", seen.num(), last.n, seen[last]);
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "3000 [2999] 2999\n"))

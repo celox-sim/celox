@@ -794,6 +794,18 @@
     "sv_rest-X89": {
       "title": "A whole class property of unpacked structure type is assigned member by member: a pattern reading the property sees members already written, and a receiver with a side-effecting index is evaluated per member",
       "standard": "IEEE 1800-2023 7.2, 10.9.2, 11.4.1"
+    },
+    "sv_rest-X86": {
+      "title": "first() of a class property that is an associative array of associative arrays indexed by class handles reports an empty array",
+      "standard": "IEEE 1800-2023 7.8.5, 7.9.5"
+    },
+    "sv_rest-X87": {
+      "title": "new[] assigned to an element of a dynamic array of dynamic arrays is lost",
+      "standard": "IEEE 1800-2023 7.5.1, 7.4.5"
+    },
+    "sv_rest-X90": {
+      "title": "An update of an element of a nested container evaluates the outer index expression again, and $unpacked_dimensions/$dimensions of a dynamic array of dynamic arrays count one level",
+      "standard": "IEEE 1800-2023 7.4.5, 11.4.1, 20.7"
     }
   },
   "cases": [
@@ -4651,6 +4663,30 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X89",
       "note": "h.p = '{h.p.b, h.p.a} prints \"2 2\" instead of \"2 1\", and items[next_index()].p = '{7, 8} calls next_index() once per member, writing items[1].p.a and items[2].p.b, with i = 3 instead of 1."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::nested_containers_and_class_keys",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X86",
+      "note": "c.m.first(k) on the Obj-indexed property returns 0, so \"first a\" is missing; grid[1] = new[3] is also lost (sv_rest-X87), so grid[1][2] reads 1 instead of 7. Reproduced by verification/repros/sv_xezim_nested_containers.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::methods_of_nested_container_elements",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X87",
+      "note": "grid[1] = new[3] leaves grid[1] empty, so grid[1].size() prints 0 instead of 3. Reproduced by verification/repros/sv_xezim_nested_containers.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::nested_updates_evaluate_indices_once",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X90",
+      "note": "m[next_index()].push_back(7) calls next_index() three times per statement (i = 6 after two statements, elements lost), and $unpacked_dimensions(grid)/$dimensions(grid) of int grid[][] print 1 2 instead of 2 3."
     }
   ]
 }

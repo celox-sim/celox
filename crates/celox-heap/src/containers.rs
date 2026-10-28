@@ -35,7 +35,9 @@ pub const RSORT: u64 = 99;
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
 /// kind (10..11: dynamic/queue/associative), queue capacity (12..43, 0 means
-/// unbounded), and associative key ordering (44 signed, 45 string).
+/// unbounded), associative key ordering (44 signed, 45 string), and whether
+/// associative keys are object handles that the collector traces (46).
+#[allow(clippy::too_many_arguments)]
 pub const fn parameter(
     width: u32,
     two_state: bool,
@@ -44,6 +46,7 @@ pub const fn parameter(
     capacity: u32,
     signed_key: bool,
     string_key: bool,
+    object_key: bool,
 ) -> u64 {
     width as u64
         | (two_state as u64) << 7
@@ -52,6 +55,7 @@ pub const fn parameter(
         | (capacity as u64) << 12
         | (signed_key as u64) << 44
         | (string_key as u64) << 45
+        | (object_key as u64) << 46
 }
 
 #[derive(Clone, Copy)]
@@ -171,19 +175,33 @@ impl Heap {
         let Some(container) = self.containers.get(&handle) else {
             return Vec::new();
         };
+        let mut roots = Vec::new();
+        // Object keys of an associative array keep their objects alive.
+        if container.layout & (1 << 46) != 0
+            && let Contents::Associative(v) = &container.contents
+        {
+            roots.extend(v.keys().filter_map(|key| match key {
+                Key::Integer(handle) => Some(Root {
+                    kind: crate::HandleKind::Object,
+                    handle: *handle as Handle,
+                }),
+                Key::String(_) => None,
+            }));
+        }
         let kind = match (container.layout >> 8) & 3 {
             1 => crate::HandleKind::String,
             2 => crate::HandleKind::Object,
-            _ => return Vec::new(),
+            _ => return roots,
         };
         let root = |element: &Element| Root {
             kind,
             handle: element.value as Handle,
         };
         match &container.contents {
-            Contents::Sequence(v) => v.iter().map(root).collect(),
-            Contents::Associative(v) => v.values().map(root).collect(),
+            Contents::Sequence(v) => roots.extend(v.iter().map(root)),
+            Contents::Associative(v) => roots.extend(v.values().map(root)),
         }
+        roots
     }
     /// Execute a container helper. Indices have already undergone language
     /// conversion; invalid four-state indices use an out-of-range sentinel.
@@ -435,7 +453,7 @@ mod tests {
     #[test]
     fn completed_updates_intern_values_and_collection_releases_lookup_entries() {
         let mut heap = Heap::new();
-        let p = parameter(8, true, 0, 0, 0, false, false);
+        let p = parameter(8, true, 0, 0, 0, false, false, false);
         let a = call(&mut heap, NEW, p, 2, 0, 0);
         let b = call(&mut heap, SET, p, a, 0, 7);
         let b = call(&mut heap, SET_MASK, p, b, 0, 0);
@@ -454,7 +472,7 @@ mod tests {
     #[test]
     fn resize_copy_delete_and_four_state_defaults() {
         let mut heap = Heap::new();
-        let p = parameter(32, false, 0, 0, 0, false, false);
+        let p = parameter(32, false, 0, 0, 0, false, false, false);
         let a = call(&mut heap, NEW, p, 2, 0, 0);
         assert_eq!(call(&mut heap, GET_MASK, p, a, 0, 0), u32::MAX as u64);
         let b = call(&mut heap, SET, p, a, 0, 42);
@@ -470,7 +488,7 @@ mod tests {
     #[test]
     fn bounded_queue_insert_and_value_copies() {
         let mut heap = Heap::new();
-        let p = parameter(8, true, 0, 1, 2, false, false);
+        let p = parameter(8, true, 0, 1, 2, false, false, false);
         let a = call(&mut heap, INSERT, p, 0, 0, 10);
         let b = call(&mut heap, INSERT, p, a, 0, 20);
         let c = call(&mut heap, INSERT, p, b, 0, 30);
@@ -484,7 +502,7 @@ mod tests {
     #[test]
     fn ordering_interns_unchanged_values_and_retains_nested_string_roots() {
         let mut heap = Heap::new();
-        let p = parameter(32, true, 1, 1, 0, false, false);
+        let p = parameter(32, true, 1, 1, 0, false, false, false);
         let z = heap.intern(b"z") as u64;
         let a = heap.intern(b"a") as u64;
         let first = call(&mut heap, INSERT, p, 0, 0, z);
@@ -509,7 +527,7 @@ mod tests {
     #[test]
     fn associative_order_and_gc_follow_element_handles() {
         let mut heap = Heap::new();
-        let p = parameter(32, true, 1, 2, 0, true, false);
+        let p = parameter(32, true, 1, 2, 0, true, false, false);
         let string = heap.intern(b"live");
         let a = call(&mut heap, SET, p, 0, 3, string as u64);
         let b = call(&mut heap, SET, p, a, (-2i64) as u64, string as u64);
