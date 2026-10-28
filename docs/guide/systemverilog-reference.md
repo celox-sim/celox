@@ -429,7 +429,8 @@ same as for a 32-bit integer; operations that read or build text call into the
 runtime. Strings are collected between time slots and after each `tick`.
 As IEEE 1800-2023 6.16 requires, NUL bytes are removed when text becomes a
 string, and an integral value assigned or cast to a string contributes its
-bytes from the most significant one.
+bytes from the most significant one. A character read as `s[i]` or `s.getc(i)` is a `byte`,
+which is signed (6.16, 6.11): a code above 127 reads as a negative value.
 
 Not yet supported: `$sformat` / `$sformatf`, `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
