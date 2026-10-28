@@ -98,13 +98,24 @@ fn eval_expr<B: SimBackend>(
     sim: &mut Simulator<B>,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
-    eval_backend_expr(&mut sim.backend, expr)
+    let (value, writes) = eval_backend_expr_tracked(&mut sim.backend, expr);
+    sim.dirty |= writes
+        .iter()
+        .any(|&(offset, len)| !private_testbench_range(sim, offset, len));
+    value
 }
 
 pub(crate) fn eval_backend_expr<B: SimBackend>(
     backend: &mut B,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
+    eval_backend_expr_tracked(backend, expr).0
+}
+
+fn eval_backend_expr_tracked<B: SimBackend>(
+    backend: &mut B,
+    expr: &celox_testbench::CompiledExpr,
+) -> (TbValue, Vec<(usize, usize)>) {
     // This pointer is used only during evaluation, never exposed to a host.
     // Observe VM stores explicitly instead of disabling tracking for reads;
     // they are marked once the heap is no longer borrowed.
@@ -124,10 +135,92 @@ pub(crate) fn eval_backend_expr<B: SimBackend>(
             }
         }
     }
-    for (offset, len) in writes {
+    for &(offset, len) in &writes {
         backend.mark_settle_range(offset, len);
     }
-    value
+    (value, writes)
+}
+
+fn private_testbench_range<B: SimBackend>(sim: &Simulator<B>, offset: usize, len: usize) -> bool {
+    if !sim.components.is_empty() || sim.schedule.timed {
+        return false;
+    }
+    let ranges = sim.testbench_hardware_ranges.get_or_init(|| {
+        let layout = sim.backend.layout();
+        let mut ranges: Vec<_> = sim
+            .program
+            .rtl_accesses
+            .iter()
+            .chain(sim.backend.id_to_addr_slice())
+            .filter_map(|addr| {
+                let start = *layout.offsets.get(addr)?;
+                let planes =
+                    if layout.four_state && layout.is_4states.get(addr).copied().unwrap_or(false) {
+                        2
+                    } else {
+                        1
+                    };
+                Some(start..start + layout.plane_size(addr) * planes)
+            })
+            .collect();
+        ranges.sort_unstable_by_key(|range| (range.start, range.end));
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+        for range in ranges {
+            if let Some(last) = merged.last_mut()
+                && range.start <= last.end
+            {
+                last.end = last.end.max(range.end);
+            } else {
+                merged.push(range);
+            }
+        }
+        merged
+    });
+    let first = ranges.partition_point(|range| range.end <= offset);
+    ranges
+        .get(first)
+        .is_none_or(|range| range.start >= offset.saturating_add(len.max(1)))
+}
+
+fn write_testbench_signal<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    signal: SignalRef,
+    write: impl FnOnce(&mut Simulator<B>),
+) {
+    let dirty = sim.dirty;
+    let private = private_testbench_range(sim, signal.offset, signal.width.div_ceil(8));
+    write(sim);
+    if private {
+        sim.dirty = dirty;
+    }
+}
+
+/// TB observations need settled hardware, but repeated observations without
+/// intervening writes must not execute the hardware again. Keep the public
+/// explicit-evaluation API unchanged.
+fn settle_testbench<B: SimBackend>(sim: &mut Simulator<B>) -> Result<(), RuntimeErrorCode> {
+    if sim.dirty {
+        sim.eval_comb()?;
+    }
+    Ok(())
+}
+
+fn settle_testbench_expr<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    expr: &celox_testbench::CompiledExpr,
+) -> Result<(), RuntimeErrorCode> {
+    let schema = &sim.program.runtime_schema;
+    // Only defer pure combinational work. Stateful comb, observers, process
+    // kernels and external components can observe intervening TB writes.
+    if !expr.observes_hardware()
+        && schema.persistent_comb_state.is_empty()
+        && schema.comb_observers.is_empty()
+        && !sim.schedule.timed
+        && sim.components.is_empty()
+    {
+        return Ok(());
+    }
+    settle_testbench(sim)
 }
 
 fn format_assert_arg<B: SimBackend>(
@@ -236,13 +329,13 @@ fn render_assert_message<B: SimBackend>(
 }
 
 fn sim_set_u64<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef, value: u64) {
-    match sig.width {
+    write_testbench_signal(sim, sig, |sim| match sig.width {
         0..=8 => sim.set(sig, value as u8),
         9..=16 => sim.set(sig, value as u16),
         17..=32 => sim.set(sig, value as u32),
         33..=64 => sim.set(sig, value),
         _ => sim.set_wide(sig, BigUint::from(value)),
-    }
+    });
 }
 
 fn sim_set_target<B: SimBackend>(
@@ -263,7 +356,7 @@ fn sim_set_target<B: SimBackend>(
                 is_4state: false,
                 array_layout: None,
             };
-            sim.set(element, handle);
+            write_testbench_signal(sim, element, |sim| sim.set(element, handle));
         }
         return;
     }
@@ -271,7 +364,9 @@ fn sim_set_target<B: SimBackend>(
         match value {
             TbValue::String(_) => unreachable!(),
             TbValue::U64(value) => sim_set_u64(sim, target.signal, value),
-            TbValue::Wide(value) => sim.set_wide(target.signal, value),
+            TbValue::Wide(value) => {
+                write_testbench_signal(sim, target.signal, |sim| sim.set_wide(target.signal, value))
+            }
         }
         return;
     };
@@ -284,15 +379,22 @@ fn sim_set_target<B: SimBackend>(
         return;
     }
 
-    let (root, root_mask) = sim.get_four_state(target.signal);
+    let (root, root_mask) =
+        if private_testbench_range(sim, target.signal.offset, target.signal.width.div_ceil(8)) {
+            sim.backend.get_four_state(target.signal)
+        } else {
+            sim.get_four_state(target.signal)
+        };
     let selected_mask = width_mask(width) << offset;
     let clear_mask = width_mask(target.signal.width) ^ &selected_mask;
     let selected_value = (value.to_biguint() & width_mask(width)) << offset;
-    sim.set_four_state(
-        target.signal,
-        (root & &clear_mask) | selected_value,
-        root_mask & clear_mask,
-    );
+    write_testbench_signal(sim, target.signal, |sim| {
+        sim.set_four_state(
+            target.signal,
+            (root & &clear_mask) | selected_value,
+            root_mask & clear_mask,
+        )
+    });
 }
 
 /// Collect the heap between concurrent process polls. The saved temporaries of
@@ -452,7 +554,7 @@ fn eval_clock_count<B: SimBackend>(
     Ok(match count {
         ClockCount::Static(n) => *n,
         ClockCount::Dynamic(expr) => {
-            sim.eval_comb()
+            settle_testbench_expr(sim, expr)
                 .map_err(|source| TestbenchEvaluationError::EvalComb { source })?;
             eval_expr(sim, expr).to_u64()
         }
@@ -472,7 +574,7 @@ fn eval_loop_bound<B: SimBackend>(
             width,
             signed,
         } => {
-            sim.eval_comb()
+            settle_testbench_expr(sim, expr)
                 .map_err(|source| TestbenchEvaluationError::EvalComb { source })?;
             let value = eval_expr(sim, expr);
             if *signed {
@@ -647,11 +749,13 @@ fn sim_set_i128<B: SimBackend>(
     if width <= 64 {
         sim_set_u64(sim, sig, value as u64);
     } else if value >= 0 {
-        sim.set_wide(sig, BigUint::from(value as u128));
+        write_testbench_signal(sim, sig, |sim| {
+            sim.set_wide(sig, BigUint::from(value as u128))
+        });
     } else {
         let modulus = BigUint::from(1u8) << width;
         let mag = BigUint::from(value.unsigned_abs());
-        sim.set_wide(sig, modulus - mag);
+        write_testbench_signal(sim, sig, |sim| sim.set_wide(sig, modulus - mag));
     }
 }
 
@@ -659,7 +763,9 @@ fn sim_set_biguint<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef,
     if sig.width <= 64 {
         sim_set_u64(sim, sig, value.to_u64().unwrap_or(0));
     } else {
-        sim.set_wide(sig, mask_to_width(value, sig.width));
+        write_testbench_signal(sim, sig, |sim| {
+            sim.set_wide(sig, mask_to_width(value, sig.width))
+        });
     }
 }
 
@@ -1629,7 +1735,7 @@ fn exec_process<'a, B: SimBackend>(
                 } => {
                     let condition = {
                         let mut sim = sim.borrow_mut();
-                        if let Err(error) = sim.eval_comb() {
+                        if let Err(error) = settle_testbench_expr(&mut sim, expr) {
                             return ExecResult::Fail(format!("eval_comb: {error}"));
                         }
                         !eval_expr(&mut sim, expr).is_zero()
@@ -1790,7 +1896,7 @@ fn exec_processes<B: SimBackend>(
     {
         let mut sim = sim.borrow_mut();
         if sim.dirty
-            && let Err(error) = sim.eval_comb()
+            && let Err(error) = settle_testbench(&mut sim)
         {
             return ExecResult::Fail(format!("eval_comb: {error}"));
         }
@@ -1856,8 +1962,9 @@ fn exec_processes<B: SimBackend>(
             }
             let Some(future) = process else { continue };
             for (&signal, (value, mask)) in testbench.private_signals().iter().zip(locals.iter()) {
-                sim.borrow_mut()
-                    .set_four_state(signal, value.clone(), mask.clone());
+                write_testbench_signal(&mut sim.borrow_mut(), signal, |sim| {
+                    sim.set_four_state(signal, value.clone(), mask.clone());
+                });
             }
             let result = future.as_mut().poll(&mut task_context);
             for (&signal, value) in testbench.private_signals().iter().zip(locals.iter_mut()) {
@@ -1993,8 +2100,40 @@ fn step_process_events<B: SimBackend>(
         .component_simulation
         .take()
         .unwrap_or_else(|| crate::simulation::simulation_state(sim));
-    if sim.dirty
-        && let Err(error) = sim.eval_comb()
+    let edges = sim.event_edges();
+    let schema = &sim.program.runtime_schema;
+    // Plain RTL needs simultaneous edge evaluation, not the timed process
+    // queue. The edge engine already skips inactive clock edges that cannot
+    // run a domain. Keep reset transitions on the queue: reset_gen writes
+    // their levels before submitting them, so its saved baseline matters.
+    // Latches need inactive phases settled before the next edge. VCD needs
+    // the queue's per-timestamp publication, even when no domain fires.
+    // A TB assignment can change an unrelated event (including an async
+    // reset). Preserve the queue's old baseline until it detects that change.
+    // Dirty combinational logic may propagate such a change, so it also takes
+    // the queue path even when no event signal has changed yet.
+    let direct_edges = !events.is_empty()
+        && !sim.dirty
+        && !state.has_unsampled_event_changes(&sim.backend)
+        && sim.vcd_writer.is_none()
+        && schema.persistent_comb_state.is_empty()
+        && sim.components.is_empty()
+        && !sim.schedule.timed
+        && schema.time_slots.is_empty()
+        && schema.watches.is_empty()
+        && schema.comb_observers.is_empty()
+        && schema.sample_shadows.is_empty()
+        && events.iter().all(|(event, _)| {
+            matches!(
+                edges[event.id()].kind,
+                Some(
+                    celox_design::DomainKind::ClockPosedge | celox_design::DomainKind::ClockNegedge
+                )
+            )
+        });
+    if !direct_edges
+        && sim.dirty
+        && let Err(error) = settle_testbench(sim)
     {
         sim.component_simulation = Some(state);
         return ExecResult::Fail(format!("eval_comb: {error}"));
@@ -2005,18 +2144,43 @@ fn step_process_events<B: SimBackend>(
     }
     // Submit all simultaneous edges before stepping: every clocked process
     // samples pre-edge values, before any nonblocking assignment is committed.
-    for &(event, value) in events {
-        state.schedule(
-            event,
-            sim.backend.resolve_signal(&event.addr()),
-            time,
-            value,
-        );
-    }
-    let result = if events.is_empty() {
-        state.settle_at(sim, time)
+    let result = if direct_edges {
+        let moves: Vec<_> = events
+            .iter()
+            .map(|&(event, value)| {
+                (
+                    event,
+                    if value == 0 {
+                        celox_runtime::Edge::Falling
+                    } else {
+                        celox_runtime::Edge::Rising
+                    },
+                )
+            })
+            .collect();
+        let result = sim
+            .edges(&moves)
+            .map(|()| None)
+            .map_err(|error| error.to_string());
+        // A later reset can return to the queue. Its pre-write baseline must
+        // include every clock and derived-domain update performed here.
+        state.synchronize_event_values(&sim.backend);
+        result
     } else {
-        state.step(sim)
+        for &(event, value) in events {
+            state.schedule(
+                event,
+                sim.backend.resolve_signal(&event.addr()),
+                time,
+                value,
+            );
+        }
+        if events.is_empty() {
+            state.settle_at(sim, time)
+        } else {
+            state.step(sim)
+        }
+        .map_err(|error| error.to_string())
     };
     sim.components.end_reset_cycles();
     sim.component_simulation = Some(state);
@@ -2203,7 +2367,12 @@ fn exec_one_detailed<B: SimBackend>(
             message,
             location,
         } => {
-            if let Err(e) = sim.eval_comb() {
+            let settle = if message.is_some() {
+                settle_testbench(sim)
+            } else {
+                settle_testbench_expr(sim, expr)
+            };
+            if let Err(e) = settle {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let passed = !eval_expr(sim, expr).is_zero();
@@ -2230,7 +2399,7 @@ fn exec_one_detailed<B: SimBackend>(
             }
         }
         GenericTestbenchStatement::Display { message, newline } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let rendered =
@@ -2243,7 +2412,7 @@ fn exec_one_detailed<B: SimBackend>(
             then_block,
             else_block,
         } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench_expr(sim, expr) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             if !eval_expr(sim, expr).is_zero() {
@@ -2273,7 +2442,12 @@ fn exec_one_detailed<B: SimBackend>(
             |sim| exec_detailed(sim, body, ctx),
         ),
         GenericTestbenchStatement::Assign { dst, expr } => {
-            if let Err(e) = sim.eval_comb() {
+            let settle = if dst.selection.is_some() {
+                settle_testbench(sim)
+            } else {
+                settle_testbench_expr(sim, expr)
+            };
+            if let Err(e) = settle {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let val = eval_expr(sim, expr);
@@ -2281,14 +2455,16 @@ fn exec_one_detailed<B: SimBackend>(
             ExecResult::Continue
         }
         GenericTestbenchStatement::WriteMemory { signal, writes } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            sim.apply_testbench_memory_writes(*signal, writes);
+            write_testbench_signal(sim, *signal, |sim| {
+                sim.apply_testbench_memory_writes(*signal, writes)
+            });
             ExecResult::Continue
         }
         GenericTestbenchStatement::RandomSeed { handle, value } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             ctx.random.seed(handle, eval_expr(sim, value).to_u64());
@@ -2303,7 +2479,7 @@ fn exec_one_detailed<B: SimBackend>(
             let value = ctx.random.get(handle, *width);
             if let Some(ret) = ret {
                 if ret.selection.is_some()
-                    && let Err(e) = sim.eval_comb()
+                    && let Err(e) = settle_testbench(sim)
                 {
                     return ExecResult::Fail(format!("eval_comb: {e}"));
                 }
@@ -2319,7 +2495,7 @@ fn exec_one_detailed<B: SimBackend>(
             signed,
             ret,
         } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let min = eval_expr(sim, min).to_u64();
@@ -2334,7 +2510,7 @@ fn exec_one_detailed<B: SimBackend>(
             let seed = ctx.random.get_seed(handle);
             if let Some(ret) = ret {
                 if ret.selection.is_some()
-                    && let Err(e) = sim.eval_comb()
+                    && let Err(e) = settle_testbench(sim)
                 {
                     return ExecResult::Fail(format!("eval_comb: {e}"));
                 }
@@ -2352,7 +2528,7 @@ fn exec_one_detailed<B: SimBackend>(
             ret_strict,
         } => {
             if sim.dirty
-                && let Err(error) = sim.eval_comb()
+                && let Err(error) = settle_testbench(sim)
             {
                 return ExecResult::Fail(format!("eval_comb: {error}"));
             }
@@ -2458,7 +2634,7 @@ fn tick_component_clock<B: SimBackend>(
         .take()
         .ok_or_else(|| "component event scheduler is not initialized".to_string())?;
     if sim.dirty {
-        if let Err(error) = sim.eval_comb() {
+        if let Err(error) = settle_testbench(sim) {
             sim.component_simulation = Some(state);
             return Err(error.to_string());
         }
@@ -2629,6 +2805,237 @@ mod tests {
             sim.vcd_statistics().unwrap().comparisons,
             before.comparisons
         );
+    }
+
+    #[test]
+    fn private_tb_writes_do_not_invalidate_hardware_but_port_aliases_do() {
+        let source = r#"
+            module Dut(a: input logic<8>, q: output logic<8>) { assign q = a + 1; }
+            #[test(Top)] module Top {
+                var a: logic<8>;
+                var q: logic<8>;
+                var scratch: logic<8>;
+                inst dut: Dut(a, q);
+                initial { scratch = 3; a = scratch; $assert(q == 4); $finish(); }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .build_interpreter()
+            .unwrap();
+        let scratch = sim.signal("scratch");
+        let a = sim.signal("a");
+        let q = sim.signal("q");
+        settle_testbench(&mut sim).unwrap();
+        sim_set_u64(&mut sim, scratch, 3);
+        assert!(!sim.dirty);
+        sim_set_u64(&mut sim, a, 3);
+        assert!(sim.dirty);
+        settle_testbench(&mut sim).unwrap();
+        assert_eq!(sim.get_as::<u8>(q), 4);
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn native_image_retains_latch_observation_and_tb_dependencies() {
+        let source = include_str!("../testdata/veryl/latch_initial.veryl");
+        let image = Simulator::builder(source, "Top")
+            .allow_inferred_latches(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        let image =
+            crate::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let mut sim = Simulator::builder("", "Top")
+            .build_native_from_image(image)
+            .unwrap();
+        assert!(!sim.program.runtime_schema.persistent_comb_state.is_empty());
+        assert!(!sim.program.rtl_accesses.is_empty());
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+
+    #[test]
+    fn concurrent_tb_preserves_direct_async_reset_writes() {
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset_async_high,
+                           q: output logic<8>) {
+                always_ff (clk, rst) { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst fast: $tb::clock_gen #(period: 2);
+                inst slow: $tb::clock_gen #(period: 20);
+                var rst: reset_async_high;
+                var q: logic<8>;
+                inst dut: Counter(clk: slow, rst, q);
+                initial {
+                    rst = 0;
+                    fast.next();
+                    $assert(q == 1);
+                    rst = 1;
+                    __OBSERVE__
+                    fast.next();
+                    $assert(q == 0);
+                    $finish();
+                }
+                initial { slow.next(100); }
+            }
+        "#;
+        // Reading the reset settles hardware and clears `dirty`; its edge
+        // must still be detected against the queue's previous sample.
+        for observation in ["", "$assert(rst == 1);"] {
+            let source = source.replace("__OBSERVE__", observation);
+            let mut sim = Simulator::builder(&source, "Top")
+                .build_interpreter()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+        }
+    }
+
+    #[test]
+    fn concurrent_tb_preserves_low_phase_latch_updates() {
+        let source = r#"
+            module Pipeline(clk: input clock, upstream: output logic<8>,
+                            held: output logic<8>, downstream: output logic<8>) {
+                always_ff (clk) { upstream += 1; downstream = held; }
+                always_comb { if !clk { held = upstream; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen #(period: 2);
+                var upstream: logic<8>;
+                var held: logic<8>;
+                var downstream: logic<8>;
+                inst dut: Pipeline(clk, upstream, held, downstream);
+                initial {
+                    clk.next(4);
+                    $assert(upstream == 4);
+                    $assert(held == 4);
+                    $assert(downstream == 3);
+                    $finish();
+                }
+                initial { clk.next(100); }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .allow_inferred_latches(true)
+            .build_interpreter()
+            .unwrap();
+        assert!(!sim.program.runtime_schema.persistent_comb_state.is_empty());
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+
+    #[test]
+    fn concurrent_tb_publishes_each_clock_phase_to_vcd() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff (clk) { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen #(period: 2);
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(4); $assert(q == 4); $finish(); }
+                initial { clk.next(100); }
+            }
+        "#;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("concurrent.vcd");
+        let mut sim = Simulator::builder(source, "Top")
+            .vcd(&path)
+            .build_interpreter()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        sim.flush_vcd().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let timestamps: Vec<_> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix('#'))
+            .map(|time| time.parse::<u64>().unwrap())
+            .collect();
+        for falling_edge in [1, 3, 5, 7] {
+            assert!(
+                timestamps.contains(&falling_edge),
+                "missing low phase {falling_edge}: {timestamps:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn constant_clock_wait_loop_binds_as_one_wait() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<32>) {
+                always_ff (clk) { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<32>;
+                inst dut: Counter(clk, q);
+                initial {
+                    for _i in 0..8 { clk.next(1); }
+                    $assert(q == 8);
+                    $finish();
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .build_interpreter()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert!(matches!(
+            tb.statements().first(),
+            Some(GenericTestbenchStatement::ClockNext {
+                count: ClockCount::Static(8),
+                ..
+            })
+        ));
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+
+    #[test]
+    fn expression_stores_invalidate_settled_hardware() {
+        use celox_testbench::{CompiledExpr, ExprBytecode, ExprOpcode};
+        let mut sim = Simulator::builder(
+            "module Top(a: input logic<8>, q: output logic<8>) { assign q = a + 1; }",
+            "Top",
+        )
+        .build_interpreter()
+        .unwrap();
+        let a = sim.signal("a");
+        let q = sim.signal("q");
+        settle_testbench(&mut sim).unwrap();
+        let pure = CompiledExpr::new(ExprBytecode::new(vec![ExprOpcode::ConstU64(42)]));
+        assert_eq!(eval_expr(&mut sim, &pure).to_u64(), 42);
+        assert!(!sim.dirty);
+        let store = CompiledExpr::new(ExprBytecode::new(vec![
+            ExprOpcode::ConstU64(7),
+            ExprOpcode::StoreU64 {
+                location: a.offset,
+                byte_size: 1,
+            },
+            ExprOpcode::ConstU64(7),
+        ]));
+        assert_eq!(eval_expr(&mut sim, &store).to_u64(), 7);
+        assert!(sim.dirty);
+        settle_testbench(&mut sim).unwrap();
+        assert_eq!(sim.get_as::<u8>(q), 8);
     }
 
     #[test]

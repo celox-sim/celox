@@ -131,6 +131,7 @@ mod host {
         /// Set while handles live outside state memory, where no collection
         /// may run: between the polls of concurrent testbench processes.
         pub(crate) heap_safepoints_blocked: bool,
+        pub(crate) testbench_hardware_ranges: std::sync::OnceLock<Vec<std::ops::Range<usize>>>,
         pub(crate) process_heap_roots: Vec<celox_heap::Root>,
         pub(super) file_io: celox_runtime::file_io::FileIo,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
@@ -1232,6 +1233,7 @@ mod host {
                 warnings,
                 handle_slots: Default::default(),
                 heap_safepoints_blocked: false,
+                testbench_hardware_ranges: Default::default(),
                 process_heap_roots: Vec::new(),
                 file_io: Default::default(),
                 pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
