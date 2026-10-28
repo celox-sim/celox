@@ -367,7 +367,7 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   assert.match(warm, /cancel-in-progress: false/);
   assert.doesNotMatch(
     warm,
-    /pull_request:|cargo nextest run|shared-key:/,
+    /pull_request:|cargo nextest run/,
   );
   assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
   for (const text of [warm, job("rust-tests")]) {
@@ -497,7 +497,7 @@ test("full cocotb runs reuse the workspace build and report failures before uplo
   const rust = job("rust-tests");
   const full = rust.match(/run: >-\n\s+(cargo nextest run[^\n]*)\n\s+(--features [^\n]*)/);
   assert.ok(full);
-  const original = `${full[1]} ${full[2]}`.replace(' -E "$RUST_BACKEND_FILTER"', "").replaceAll("'", "").split(/\s+/).slice(1);
+  const original = `${full[1]} ${full[2]}`.replace(' -E "$CELOX_BACKEND_FILTER"', "").replaceAll("'", "").split(/\s+/).slice(1);
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", { RUST_FULL: "true" });
   assert.deepEqual(args.slice(0, -4), original);
   assert.ok(rust.indexOf("Collect Rust test reports") < rust.indexOf("Run cocotb VPI end-to-end test"));
@@ -574,7 +574,7 @@ test("evicted default-branch dependency caches recover without dependency change
   const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
   assert.match(warm, /schedule:\n    - cron: "17 \* \* \* \*"/);
   assert.match(warm, /workflow_dispatch:/);
-  for (const id of ["rust-tests", "rust-default-tests", "napi-windows"]) {
+  for (const id of cacheJobs(workflow)) {
     const block = warm.split(`  ${id}:\n`)[1].split(/\n  [a-z][a-z-]*:/)[0];
     assert.match(block, /if: github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
     assert.match(block, /if: steps.cache.outputs.cache-hit != 'true'/);
@@ -586,12 +586,75 @@ test("evicted default-branch dependency caches recover without dependency change
 test("PR backend policy reaches scoped, workspace fallback and queue execution", () => {
   assert.match(job("changes"), /rust_backend_filter: \$\{\{ steps\.classify\.outputs\.rust_backend_filter \}\}/);
   const rust = job("rust-tests");
-  assert.match(rust, /RUST_BACKEND_FILTER: \$\{\{ needs\.changes\.outputs\.rust_backend_filter \|\| 'all\(\)' \}\}/);
-  assert.equal((rust.match(/-E "\$RUST_BACKEND_FILTER"/g) ?? []).length, 2);
+  assert.match(rust, /CELOX_BACKEND_FILTER: \$\{\{ needs\.changes\.outputs\.rust_backend_filter \|\| 'all\(\)' \}\}/);
+  assert.equal((rust.match(/-E "\$CELOX_BACKEND_FILTER"/g) ?? []).length, 2);
   const args = cargoArguments("rust-tests", "Run the tests this pull request can affect", {
     BUILDS: JSON.stringify([{ packages: ["celox"], targets: ["counter"], features: [] }]),
-    FILTER: "binary_id(celox::counter)", RUST_BACKEND_FILTER: "not test(parallel)",
+    FILTER: "binary_id(celox::counter)", CELOX_BACKEND_FILTER: "not test(parallel)",
     CELOX_VTEST_RUNNER: "/executor",
   });
   assert.equal(args.at(-1), "(binary_id(celox::counter)) & (not test(parallel))");
+});
+
+
+// rust-cache keys hash the job ID (or `shared-key`), the runner, the toolchain
+// and every environment variable with these prefixes, so a job-level variable
+// that varies between pull requests gives each of them a key no warm run saved.
+const CACHE_KEY_ENV = /^(CARGO|CC|CFLAGS|CXX|CMAKE|RUST)/;
+
+function jobBlocks(text) {
+  const jobs = text.split(/^jobs:\n/m)[1];
+  const parts = jobs.split(/^  ([\w-]+):\n/m);
+  const blocks = new Map();
+  for (let i = 1; i < parts.length; i += 2) blocks.set(parts[i], parts[i + 1]);
+  return blocks;
+}
+
+function cacheJobs(text) {
+  return [...jobBlocks(text)]
+    .filter(([, block]) => block.includes("uses: Swatinem/rust-cache@v2"))
+    .map(([id]) => id);
+}
+
+function stepWith(block, uses) {
+  const step = block.match(new RegExp(`      - uses: ${uses.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\n((?:        .*\n?)*)`));
+  if (!step) return null;
+  const inputs = step[1].match(/        with:\n((?:          .*\n?)*)/);
+  return (inputs ? inputs[1] : "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("save-if:"))
+    .sort();
+}
+
+function keyEnv(block) {
+  const env = block.match(/^    env:\n((?:      .*\n)*)/m);
+  return (env ? env[1] : "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => CACHE_KEY_ENV.test(line));
+}
+
+function workflowKeyEnv(text) {
+  const env = text.match(/^env:\n((?:  .*\n)*)/m);
+  return (env ? env[1] : "").split("\n").map((line) => line.trim()).filter((line) => CACHE_KEY_ENV.test(line));
+}
+
+test("every rust-cache job of CI has a warm job that computes the same key", () => {
+  const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
+  const ci = jobBlocks(workflow);
+  const warming = jobBlocks(warm);
+  assert.deepEqual(workflowKeyEnv(warm), workflowKeyEnv(workflow));
+  const ids = cacheJobs(workflow);
+  assert.ok(ids.length >= 10, ids.join(","));
+  for (const id of ids) {
+    const job = ci.get(id);
+    const twin = warming.get(id);
+    assert.ok(twin, `rust-cache.yml warms no cache for CI job ${id}`);
+    assert.equal(twin.match(/^    runs-on: (.*)$/m)?.[1], job.match(/^    runs-on: (.*)$/m)?.[1], id);
+    assert.deepEqual(stepWith(twin, "./.github/actions/setup-rust"), stepWith(job, "./.github/actions/setup-rust"), id);
+    assert.deepEqual(stepWith(twin, "Swatinem/rust-cache@v2"), stepWith(job, "Swatinem/rust-cache@v2"), id);
+    assert.deepEqual(keyEnv(job), [], `${id} sets a job-level variable that enters its cache key`);
+    assert.deepEqual(keyEnv(twin), [], id);
+  }
 });
