@@ -94,11 +94,39 @@ impl Ff<'_, '_> {
                 }
                 object
             }
+            ObjectOp::Load(field) if field.four_state && self.m.four_state => {
+                let object = self.handle(&args[0])?;
+                let [value, mask] = [0, field.bytes()].map(|plane| {
+                    let offset = self.constant64(u64::from(field.offset + plane));
+                    let count = self.constant64(u64::from(field.bytes()));
+                    let stored = self.heap_call(ops::OBJECT_LOAD, &[object, offset, count]);
+                    self.complement(stored)
+                });
+                let width = field.width as usize;
+                let result = self.container_join(value, mask, width, true);
+                let (temp, name) = self.m.temp("object", width, field.signed, true);
+                self.store(temp, SIROffset::Static(0), width, result);
+                return Ok(sv::ir::Expr::Ident(name));
+            }
             ObjectOp::Load(field) => {
                 let object = self.handle(&args[0])?;
                 let offset = self.constant64(u64::from(field.offset));
                 let count = self.constant64(u64::from(field.bytes()));
                 self.heap_call(ops::OBJECT_LOAD, &[object, offset, count])
+            }
+            ObjectOp::Store(field) if field.four_state && self.m.four_state => {
+                let object = self.handle(&args[0])?;
+                let expr = self.hoist(&args[1])?;
+                let value = self.eval(&expr, Some((field.width as usize, field.signed)))?;
+                let (value, mask) = self.container_split(value);
+                for (plane, bits) in [(0, value), (field.bytes(), mask)] {
+                    let place = self.constant64(
+                        u64::from(field.offset + plane) | u64::from(field.bytes()) << 32,
+                    );
+                    let stored = self.complement(bits);
+                    self.heap_call(ops::OBJECT_STORE, &[object, place, stored]);
+                }
+                self.constant64(0)
             }
             ObjectOp::Store(field) => {
                 let object = self.handle(&args[0])?;
@@ -199,5 +227,14 @@ impl Ff<'_, '_> {
         }
         self.store(temp, SIROffset::Static(0), width, value);
         Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// A 4-state property holds the complement of its value and mask planes,
+    /// so the zeroed bytes of a new object read as X (IEEE 1800-2023 6.8).
+    fn complement(&mut self, plane: RegisterId) -> RegisterId {
+        let complement = self.b.alloc_bit(64, false);
+        self.b
+            .emit(SIRInstruction::Unary(complement, UnaryOp::BitNot, plane));
+        complement
     }
 }

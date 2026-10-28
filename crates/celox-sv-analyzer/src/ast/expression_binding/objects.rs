@@ -813,6 +813,11 @@ pub(super) fn random_selection(
                 if property.constant {
                     return Err(unsupported("randomize argument is a const property"));
                 }
+                // The constraint solver writes plain property bytes, not
+                // the planes of a 4-state value (IEEE 1800-2023 18.4).
+                if property.field.four_state {
+                    return Err(unsupported("randomization of a 4-state class property"));
+                }
                 if property.field.handle.is_some()
                     || (property.r#type.is_enum && property.r#type.enum_values.is_none())
                     || (property.randc && property.cyclic_domain_size().is_none())

@@ -2757,3 +2757,37 @@ module Top(output int sum, output bit done);
 endmodule
 "#)
   (top Top) (run_until 2) (assert_eq sum 1212) (assert_eq done 1))
+
+(case four_state_properties
+  (four_state)
+  (source "class.sv" #"
+module Top(output bit done);
+    class C;
+        time t;
+        logic [3:0] l;
+        integer i = 7;
+        reg signed [7:0] r;
+        bit [3:0] b;
+        logic [63:0] w;
+    endclass
+    C x, y;
+    initial begin
+        x = new;
+        $display("init %0d %b %0d %0d %b %h", x.t, x.l, x.i, x.r, x.b, x.w);
+        #5 x.t = $time;
+        x.l = 4'b1z0x;
+        x.r = -3;
+        x.i += 1;
+        x.w = 64'hdead_beef_0123_4567;
+        $display("set %0d %b %0d %0d %h", x.t, x.l, x.i, x.r, x.w);
+        y = new x;
+        y.l = 4'b1110;
+        $display("copy %b %b %0d %0d", x.l, y.l, y.t, x.l === 4'b1z0x);
+        x.w = 'x;
+        $display("x %h %0d", x.w, x.w === 64'bx);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq done 1)
+  (expect_output "init x xxxx 7 x 0000 xxxxxxxxxxxxxxxx\nset 5 1z0x 8 -3 deadbeef01234567\ncopy 1z0x 1110 5 1\nx xxxxxxxxxxxxxxxx 1\n"))

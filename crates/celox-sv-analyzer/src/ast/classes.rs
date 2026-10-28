@@ -162,6 +162,9 @@ impl Class {
                     "randc requires a 1-8 bit integer or an enum with at most 256 declared values",
                 ));
             }
+            if (property.rand || property.randc) && property.field.four_state {
+                return Err(unsupported("randomization of a 4-state class property"));
+            }
             if (property.rand || property.randc)
                 && (property.field.handle.is_some()
                     || (property.r#type.is_enum && property.r#type.enum_values.is_none()))
@@ -762,7 +765,7 @@ pub(super) fn class(
             let owner = name.to_owned();
             let name = property_name;
             let field = field(&tree.state, &ty, env, size)?;
-            size = field.offset + field.bytes();
+            size = field.offset + field.storage();
             properties.push(Property {
                 name,
                 owner,
@@ -1135,7 +1138,7 @@ fn field(
         _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
-        TypeKind::Bit => {
+        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
             let shape = casts::expr_type_from_type(state, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;
             if shape.width > 64 {
@@ -1146,15 +1149,14 @@ fn field(
         TypeKind::Real | TypeKind::Shortreal => {
             return Err(unsupported("real class property"));
         }
-        TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
-            return Err(unsupported("4-state class property"));
-        }
     };
     Ok(ObjectField {
         offset: offset.next_multiple_of(8),
         width: width as u32,
         signed,
         handle,
+        // A 4-state property keeps its X and Z bits (IEEE 1800-2023 6.3.1).
+        four_state: handle.is_none() && ty.kind() != TypeKind::Bit,
     })
 }
 
