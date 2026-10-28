@@ -1,0 +1,1 @@
+Fix WASM CI: collect native TB hardware dependency metadata only on host targets
