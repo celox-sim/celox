@@ -1,4 +1,6 @@
 use crate::HashMap;
+#[cfg(feature = "host-runtime")]
+use crate::HashSet;
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
     AbsoluteAddrBase, BitAccess, InstanceId, ModuleId, RegionedAbsoluteAddrBase,
@@ -456,6 +458,10 @@ pub struct RuntimeProgram {
     pub design: RuntimeDesign,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+    /// Objects accessed by RTL before optimization. Retained so host-side
+    /// testbench writes can distinguish private variables from hardware.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) rtl_accesses: HashSet<AbsoluteAddr>,
 }
 
 /// Lowered SIR whose backend-independent optimization pipeline has not run.
@@ -1163,12 +1169,51 @@ impl RuntimeProgram {
         scheduled: celox_frontend_core::ScheduledRtl,
     ) -> Result<(SirProgram, Self), DesignProjectionError> {
         let design = RuntimeDesign::from_projection(scheduled.design, scheduled.frontend_lookup)?;
+        #[cfg(feature = "host-runtime")]
+        let rtl_accesses = {
+            let mut rtl_accesses = HashSet::default();
+            for unit in scheduled
+                .sir
+                .eval_comb
+                .iter()
+                .chain(scheduled.sir.eval_apply_ffs.values().flatten())
+                .chain(scheduled.sir.eval_comb_apply_ffs.values().flatten())
+                .chain(scheduled.sir.eval_only_ffs.values().flatten())
+                .chain(scheduled.sir.apply_ffs.values().flatten())
+                .chain(scheduled.sir.processes.iter())
+            {
+                for inst in unit.blocks.values().flat_map(|block| &block.instructions) {
+                    match inst {
+                        SIRInstruction::Load(_, addr, ..) | SIRInstruction::Store(addr, ..) => {
+                            rtl_accesses.insert(addr.absolute_addr());
+                        }
+                        SIRInstruction::Commit(src, dst, ..) => {
+                            rtl_accesses.insert(src.absolute_addr());
+                            rtl_accesses.insert(dst.absolute_addr());
+                        }
+                        SIRInstruction::Imm(..)
+                        | SIRInstruction::Binary(..)
+                        | SIRInstruction::Unary(..)
+                        | SIRInstruction::Concat(..)
+                        | SIRInstruction::Slice(..)
+                        | SIRInstruction::Mux(..)
+                        | SIRInstruction::RuntimeEvent { .. }
+                        | SIRInstruction::CombCaptureEvent { .. }
+                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                        | SIRInstruction::ExternCall { .. } => {}
+                    }
+                }
+            }
+            rtl_accesses
+        };
         Ok((
             scheduled.sir,
             Self {
                 design,
                 runtime_schema: scheduled.runtime_schema,
                 testbench: None,
+                #[cfg(feature = "host-runtime")]
+                rtl_accesses,
             },
         ))
     }
