@@ -585,12 +585,11 @@ fn record_pending_write(
     value: BigUint,
     mask: BigUint,
     domain_kind: DomainKind,
-    old_level: LogicLevel,
-    new_level: LogicLevel,
+    edge_levels: Option<(LogicLevel, LogicLevel)>,
 ) {
-    let active = is_active_edge(domain_kind, old_level, new_level);
-    let level_changed = old_level != new_level;
-    let event_transition = domain_kind != DomainKind::Other && level_changed;
+    let active = edge_levels.is_some_and(|(old, new)| is_active_edge(domain_kind, old, new));
+    let event_transition =
+        domain_kind != DomainKind::Other && edge_levels.is_some_and(|(old, new)| old != new);
     let open_contains_signal = pending.open_edge_batch.is_some_and(|index| {
         pending.edge_batches[index]
             .transition_signals
@@ -1608,8 +1607,18 @@ unsafe fn decode_value(value: *const VpiValue, width: usize) -> Option<(BigUint,
                 4
             };
             if width <= 64 {
+                if !string.starts_with('+')
+                    && let Ok(value) = u64::from_str_radix(string, 1 << radix_bits)
+                {
+                    return Some((BigUint::from(value), BigUint::default()));
+                }
                 decode_digits::<u64>(string, radix_bits)
             } else if width <= 128 {
+                if !string.starts_with('+')
+                    && let Ok(value) = u128::from_str_radix(string, 1 << radix_bits)
+                {
+                    return Some((BigUint::from(value), BigUint::default()));
+                }
                 decode_digits::<u128>(string, radix_bits)
             } else {
                 decode_digits::<BigUint>(string, radix_bits)
@@ -1713,8 +1722,7 @@ pub unsafe extern "C" fn vpi_put_value(
                             released_value.clone(),
                             released_mask.clone(),
                             signal.domain_kind,
-                            old_level,
-                            new_level,
+                            Some((old_level, new_level)),
                         );
                     });
                 }
@@ -1811,11 +1819,24 @@ fn apply_signal_value(
         let Some(domain_kind) = id.domain_kind(runtime) else {
             return false;
         };
-        let Some((old_value, old_mask)) = id.read(runtime) else {
-            return false;
+        let schedules_writes = runtime.schedules_writes();
+        let edge_levels = if schedules_writes && domain_kind != DomainKind::Other {
+            let Some((old_value, old_mask)) = id.read(runtime) else {
+                return false;
+            };
+            Some((
+                logic_level(&old_value, &old_mask),
+                logic_level(&bits, &mask),
+            ))
+        } else {
+            // Ordinary deposits still write and participate in queued-edge
+            // replay, even when the value is unchanged. Their previous value
+            // is irrelevant to edge detection; retain selection validation.
+            if id.signal(runtime).is_none() {
+                return false;
+            }
+            None
         };
-        let old_level = logic_level(&old_value, &old_mask);
-        let new_level = logic_level(&bits, &mask);
         if flags == VPI_FORCE_FLAG {
             if !runtime.force(id.root, bits.clone(), mask.clone()) {
                 return false;
@@ -1824,7 +1845,7 @@ fn apply_signal_value(
             id.write(runtime, bits.clone(), mask.clone());
         }
         // A timed simulation schedules the edges of its host writes itself.
-        if runtime.schedules_writes() {
+        if schedules_writes {
             borrow_cell_mut(&host.pending_writes, |pending| {
                 record_pending_write(
                     pending,
@@ -1833,8 +1854,7 @@ fn apply_signal_value(
                     bits.clone(),
                     mask.clone(),
                     domain_kind,
-                    old_level,
-                    new_level,
+                    edge_levels,
                 );
             });
         }
