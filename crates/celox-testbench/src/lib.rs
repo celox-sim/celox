@@ -8,13 +8,18 @@ use num_bigint::BigUint;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+mod expression;
+#[cfg(all(test, target_arch = "x86_64"))]
+mod expression_tests;
 mod format;
-mod vm;
+pub mod lowering;
+mod value;
+pub use expression::CompiledExpr;
 pub use format::{
     DisplayFormatArg, FieldSpec, MAX_FIELD_WIDTH, format_display_arg, format_sized_display_arg,
     format_sv_display_arg, format_veryl_display_arg, pad_veryl_field,
 };
-pub use vm::{CompiledExpr, TestbenchValue};
+pub use value::TestbenchValue;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StateLocation<A> {
@@ -282,7 +287,24 @@ pub struct TestbenchClock<Event> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum KernelRequest<A> {
+    Statement(usize),
+    Settle,
+    Written { address: A, width: usize },
+    Error(String),
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TestbenchKernel<A> {
+    pub entry: usize,
+    pub resume: A,
+    pub status: A,
+    pub request: A,
+    pub requests: Vec<KernelRequest<A>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchProgram<A> {
+    kernels: Vec<TestbenchKernel<A>>,
     statements: Vec<SemanticStatement<A>>,
     process_lengths: Vec<usize>,
     clocks: Vec<TestbenchClock<A>>,
@@ -297,6 +319,7 @@ pub struct TestbenchProgram<A> {
 impl<A> Default for TestbenchProgram<A> {
     fn default() -> Self {
         Self {
+            kernels: Vec::new(),
             statements: Vec::new(),
             process_lengths: Vec::new(),
             clocks: Vec::new(),
@@ -311,8 +334,16 @@ impl<A> Default for TestbenchProgram<A> {
 }
 
 impl<A> TestbenchProgram<A> {
+    pub fn kernels(&self) -> &[TestbenchKernel<A>] {
+        &self.kernels
+    }
+    pub fn set_kernels(&mut self, kernels: Vec<TestbenchKernel<A>>) {
+        self.kernels = kernels;
+    }
+
     pub fn new(statements: Vec<SemanticStatement<A>>) -> Self {
         Self {
+            kernels: Vec::new(),
             process_lengths: vec![statements.len()],
             clocks: Vec::new(),
             private_variables: Vec::new(),
@@ -353,6 +384,13 @@ impl<A> TestbenchProgram<A> {
         &self.private_variables
     }
 
+    pub fn processes(&self) -> impl Iterator<Item = &[SemanticStatement<A>]> {
+        self.process_lengths.iter().scan(0, |offset, &length| {
+            let start = *offset;
+            *offset += length;
+            Some(&self.statements[start..*offset])
+        })
+    }
     pub fn process_lengths(&self) -> &[usize] {
         &self.process_lengths
     }
@@ -365,6 +403,14 @@ impl<A> TestbenchProgram<A> {
     pub fn with_random_seed_option(mut self, random_seed: Option<u64>) -> Self {
         self.random_seed = random_seed;
         self
+    }
+
+    pub fn statements_mut(&mut self) -> &mut [SemanticStatement<A>] {
+        &mut self.statements
+    }
+
+    pub fn component_bindings_mut(&mut self) -> &mut [SemanticComponentBinding<A>] {
+        &mut self.component_bindings
     }
 
     pub fn statements(&self) -> &[SemanticStatement<A>] {
@@ -555,15 +601,66 @@ pub enum ExprOpcode<L = usize> {
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(serialize = "L: Serialize", deserialize = "L: Deserialize<'de>"))]
 pub struct ExprBytecode<L = usize> {
     ops: Vec<ExprOpcode<L>>,
+    #[serde(default)]
+    kernel: Option<ExpressionKernel<L>>,
 }
 
 impl<L> ExprBytecode<L> {
     pub fn new(ops: Vec<ExprOpcode<L>>) -> Self {
-        Self { ops }
+        Self { ops, kernel: None }
     }
 
+    pub fn kernel(&self) -> Option<&ExpressionKernel<L>> {
+        self.kernel.as_ref()
+    }
+    pub fn set_kernel(&mut self, kernel: ExpressionKernel<L>) {
+        self.kernel = Some(kernel);
+    }
+
+    /// Fold literal casts without executing a testbench expression.
+    pub fn literal_u64(&self) -> Option<u64> {
+        let [ExprOpcode::ConstU64(value), rest @ ..] = self.ops.as_slice() else {
+            return None;
+        };
+        let mut value = *value;
+        for op in rest {
+            let ExprOpcode::Resize {
+                source_width,
+                target_width,
+                signed,
+            } = op
+            else {
+                return None;
+            };
+            if *source_width > 64 || *target_width > 64 {
+                return None;
+            }
+            let mask = |width: usize| {
+                if width >= 64 {
+                    u64::MAX
+                } else {
+                    (1u64 << width) - 1
+                }
+            };
+            if *source_width == 0 {
+                value = if value & 1 != 0 {
+                    mask(*target_width)
+                } else {
+                    0
+                };
+            } else {
+                value &= mask(*source_width);
+                if *signed && *target_width > *source_width && value >> (source_width - 1) != 0 {
+                    value |= !mask(*source_width);
+                }
+                value &= mask(*target_width);
+            }
+        }
+        Some(value)
+    }
     pub fn ops(&self) -> &[ExprOpcode<L>] {
         &self.ops
     }
@@ -571,6 +668,17 @@ impl<L> ExprBytecode<L> {
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
+}
+
+/// A native expression entry point and its ordinary state result slot.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExpressionKernel<L> {
+    pub constant: Option<u64>,
+    pub entry: usize,
+    pub result: L,
+    pub width: usize,
+    pub is_string: bool,
+    pub writes: Vec<(L, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -599,6 +707,7 @@ pub type ExecutableStatement<Event, Signal> = TestbenchStatement<
 pub type ExecutableComponentBinding<Event, Signal> = ComponentBinding<Event, Signal, CompiledExpr>;
 
 pub struct ExecutableTestbench<Event, Signal> {
+    kernels: Vec<TestbenchKernel<Signal>>,
     statements: Vec<ExecutableStatement<Event, Signal>>,
     process_lengths: Vec<usize>,
     clocks: Vec<TestbenchClock<Event>>,
@@ -611,6 +720,14 @@ pub struct ExecutableTestbench<Event, Signal> {
 }
 
 impl<Event, Signal> ExecutableTestbench<Event, Signal> {
+    pub fn kernels(&self) -> &[TestbenchKernel<Signal>] {
+        &self.kernels
+    }
+    pub fn with_kernels(mut self, kernels: Vec<TestbenchKernel<Signal>>) -> Self {
+        self.kernels = kernels;
+        self
+    }
+
     pub fn new(statements: Vec<ExecutableStatement<Event, Signal>>, random_seed: u64) -> Self {
         Self::new_with_random_seed(statements, Some(random_seed))
     }
@@ -620,6 +737,7 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
         random_seed: Option<u64>,
     ) -> Self {
         Self {
+            kernels: Vec::new(),
             process_lengths: vec![statements.len()],
             clocks: Vec::new(),
             private_signals: Vec::new(),
@@ -718,21 +836,21 @@ impl<Event, Signal> ExecutableTestbench<Event, Signal> {
     }
 }
 
-impl<A> ExprBytecode<StateLocation<A>> {
-    pub fn bind_with(
+impl<L> ExprBytecode<L> {
+    pub fn try_map_locations<M, E>(
         self,
-        mut resolve: impl FnMut(&A) -> Option<usize>,
-    ) -> Result<ExprBytecode, BindError<A>> {
+        mut map: impl FnMut(L) -> Result<M, E>,
+    ) -> Result<ExprBytecode<M>, E> {
         let mut ops = Vec::with_capacity(self.ops.len());
         for op in self.ops {
             let bound = match op {
                 ExprOpcode::ConstString(value) => ExprOpcode::ConstString(value),
                 ExprOpcode::LoadString { location, elements } => ExprOpcode::LoadString {
-                    location: bind_location(location, &mut resolve)?,
+                    location: map(location)?,
                     elements,
                 },
                 ExprOpcode::StoreString { location } => ExprOpcode::StoreString {
-                    location: bind_location(location, &mut resolve)?,
+                    location: map(location)?,
                 },
                 ExprOpcode::ConstU64(value) => ExprOpcode::ConstU64(value),
                 ExprOpcode::ConstWide(value) => ExprOpcode::ConstWide(value),
@@ -741,7 +859,7 @@ impl<A> ExprBytecode<StateLocation<A>> {
                     byte_size,
                     mask,
                 } => ExprOpcode::LoadU64 {
-                    location: bind_location(location, &mut resolve)?,
+                    location: map(location)?,
                     byte_size,
                     mask,
                 },
@@ -750,7 +868,7 @@ impl<A> ExprBytecode<StateLocation<A>> {
                     byte_size,
                     width,
                 } => ExprOpcode::LoadWide {
-                    location: bind_location(location, &mut resolve)?,
+                    location: map(location)?,
                     byte_size,
                     width,
                 },
@@ -810,7 +928,7 @@ impl<A> ExprBytecode<StateLocation<A>> {
                     base_bit_offset,
                     element_width,
                 } => ExprOpcode::LoadIndexed {
-                    location: bind_location(location, &mut resolve)?,
+                    location: map(location)?,
                     stride_bits,
                     base_bit_offset,
                     element_width,
@@ -820,7 +938,7 @@ impl<A> ExprBytecode<StateLocation<A>> {
                     base_byte_size,
                     select_width,
                 } => ExprOpcode::LoadBitSelect {
-                    location: bind_location(location, &mut resolve)?,
+                    location: map(location)?,
                     base_byte_size,
                     select_width,
                 },
@@ -828,13 +946,39 @@ impl<A> ExprBytecode<StateLocation<A>> {
                     location,
                     byte_size,
                 } => ExprOpcode::StoreU64 {
-                    location: bind_location(location, &mut resolve)?,
+                    location: map(location)?,
                     byte_size,
                 },
             };
             ops.push(bound);
         }
-        Ok(ExprBytecode::new(ops))
+        let kernel = self
+            .kernel
+            .map(|kernel| -> Result<_, E> {
+                Ok(ExpressionKernel {
+                    constant: kernel.constant,
+                    entry: kernel.entry,
+                    result: map(kernel.result)?,
+                    width: kernel.width,
+                    is_string: kernel.is_string,
+                    writes: kernel
+                        .writes
+                        .into_iter()
+                        .map(|(location, size)| Ok((map(location)?, size)))
+                        .collect::<Result<_, E>>()?,
+                })
+            })
+            .transpose()?;
+        Ok(ExprBytecode { ops, kernel })
+    }
+}
+
+impl<A> ExprBytecode<StateLocation<A>> {
+    pub fn bind_with(
+        self,
+        mut resolve: impl FnMut(&A) -> Option<usize>,
+    ) -> Result<ExprBytecode, BindError<A>> {
+        self.try_map_locations(|location| bind_location(location, &mut resolve))
     }
 }
 
@@ -933,3 +1077,5 @@ mod tests {
         assert!(matches!(statement, SemanticStatement::If { .. }));
     }
 }
+
+mod visit;

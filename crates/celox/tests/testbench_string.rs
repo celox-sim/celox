@@ -388,3 +388,34 @@ fn unsupported_string_operations_are_rejected() {
         );
     }
 }
+
+#[test]
+fn compiled_conditions_collect_temporary_string_arguments() {
+    use celox::testbench::{compile_initial_testbench, run_compiled_testbench};
+    let values: Vec<String> = (0..1500)
+        .map(|index| format!("temporary {index}"))
+        .collect();
+    let conditions: String = values
+        .iter()
+        .map(|value| format!("if nonempty(\"{value}\") {{ }}\n"))
+        .collect();
+    let source = format!(
+        r#"
+        #[test(Top)] module Top {{
+            function nonempty(value: input string) -> logic {{ return value != ""; }}
+            initial {{ {conditions} $finish(); }}
+        }}
+    "#
+    );
+    let mut sim = celox::Simulator::builder(&source, "Top")
+        .build_interpreter()
+        .unwrap();
+    let program = compile_initial_testbench(&sim).unwrap();
+    let empty_size = sim.checkpoint().unwrap().state_size();
+    assert_eq!(
+        run_compiled_testbench(&mut sim, &program),
+        celox::TestResult::Pass
+    );
+    let all_values: usize = values.iter().map(String::len).sum();
+    assert!(sim.checkpoint().unwrap().state_size() - empty_size < all_values / 2);
+}

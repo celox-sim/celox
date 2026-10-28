@@ -2030,7 +2030,7 @@ fn test_for_loop_dynamic_wide_signed_bound_small_value_still_runs() {
 }
 
 #[test]
-fn test_expression_vm_preserves_width_signedness_and_casts() {
+fn test_compiled_expression_preserves_width_signedness_and_casts() {
     let code = r#"
         #[test(t)]
         module t {
@@ -2118,7 +2118,7 @@ fn test_expression_vm_preserves_width_signedness_and_casts() {
 }
 
 #[test]
-fn test_expression_vm_preserves_wide_fixed_width_semantics() {
+fn test_compiled_expression_preserves_wide_fixed_width_semantics() {
     let code = r#"
         #[test(t)]
         module t {

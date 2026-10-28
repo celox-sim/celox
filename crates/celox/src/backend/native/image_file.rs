@@ -11,7 +11,7 @@ use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
 // Concurrent assertion kernels suspend into Observed and Reactive regions.
-const CONTAINER_VERSION: u16 = 52;
+const CONTAINER_VERSION: u16 = 53;
 const TRAILER_SIZE: usize = 32;
 const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
 const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
