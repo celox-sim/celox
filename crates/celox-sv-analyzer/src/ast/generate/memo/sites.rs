@@ -159,6 +159,7 @@ impl CallSites for Type {
             signed_element_depth: _,
             class: _,
             container: _,
+            nominal: _,
         } = self;
         packed_ranges.call_sites(visit);
         unpacked_ranges.call_sites(visit);
