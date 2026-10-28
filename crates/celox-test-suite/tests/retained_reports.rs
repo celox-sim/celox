@@ -306,6 +306,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "class::imported_member_type_dimensions"
                             | "class::imported_member_type_inheritance",
                         ) => ("compile_error", "compile", "source_0.sv:3: syntax error"),
+                        ("icarus", "class::package_constant_class_defaults") => {
+                            ("compile_error", "compile", "source_0.sv:4: syntax error")
+                        }
                         ("icarus", "class::type_alias_members") => {
                             ("compile_error", "compile", "source_0.sv:3: syntax error")
                         }

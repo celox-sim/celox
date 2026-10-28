@@ -7621,3 +7621,44 @@ fn interface_header_members_preserve_parameter_dependent_types() {
         Some(11),
     );
 }
+
+#[test]
+fn class_alias_defaults_wait_for_package_constants() {
+    for aliases in [
+        "typedef Box#() Small; typedef Box Implicit;",
+        "typedef Box#()::element_t Word;",
+    ] {
+        let source = format!(
+            r#"package p;
+            parameter int WIDTH = 5;
+            class Box #(int N = WIDTH, int M = N + 2);
+                typedef bit [N-1:0] element_t;
+                function int get(); return 10 * N + M; endfunction
+            endclass
+            {aliases}
+        endpackage
+        module Top; endmodule"#
+        );
+        analyze_source(&source, Path::new("class-constant-default.sv"))
+            .expect("class defaults see their package constants after parameter collection");
+    }
+}
+
+#[test]
+fn unresolved_class_alias_defaults_still_fail() {
+    for default in ["MISSING", "WIDTH"] {
+        let source = format!(
+            "package p; class Box #(int N = {default}); endclass \
+             typedef Box#() Small; endpackage \
+             module Top; localparam int WIDTH=29; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("unresolved-class-default.sv"))
+            .expect_err("caller constants cannot supply missing class defaults");
+        assert!(
+            error
+                .to_string()
+                .contains("class parameter `N` without a constant value"),
+            "{error}"
+        );
+    }
+}

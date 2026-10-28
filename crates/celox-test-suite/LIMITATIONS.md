@@ -972,3 +972,23 @@ misorders gates and does not reflect the shared automatic gate update. Its six
 failures remain executed evidence, not exclusions. The current flake pin could
 not be built because the dependency lock references a different xezim-core revision;
 the evidence identifies the installed binary and does not claim current-pin coverage.
+### Package constants in class defaults
+
+`class::package_constant_class_defaults` binds class parameter defaults and
+method references to the declaring package's `WIDTH=5`, despite a caller module
+with its own `WIDTH=29` (IEEE 1800-2023 8.25 and 23.9). The two default
+specializations and one explicit specialization return a sum of 230.
+Verilator 5.052 passes. Icarus 13.0 rejects the generic class declaration;
+its exact compile diagnostic remains an executed failure in
+[the Icarus class report](verification/sv/icarus/class.json).
+
+The pinned xezim 0.11.3 (`5eab5f2`, core `1947ac68`) instead returns 830,
+consistent with capturing the caller's constant. This is the existing
+`sv_class-X5` default-scope discrepancy in [the review](verification/xezim-review.json).
+The [adapter-free source](verification/repros/sv_class_constant_defaults_xezim.sv)
+and [observations](verification/repros/sv_class_constant_defaults_xezim.json)
+reproduce it as both Top and Wrapped. The validation build uses the pinned
+sources and a regenerated dependency lock, without simulator source changes.
+Its exact mismatch remains an executed failure in
+[the xezim class report](verification/sv/xezim/class.json).
+No assertions or exclusions are weakened.

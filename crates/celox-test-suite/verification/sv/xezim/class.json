@@ -266,6 +266,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::package_constant_class_defaults at 2665:27: assert_eq sum: expected 0xe6, got 0x33e",
+      "expectation": "Simulation",
+      "name": "class::package_constant_class_defaults",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "class::parameter_defaults_bind_where_the_class_is_declared at 1778:3: expect_output: expected [49, 10], got [50, 10]",
       "expectation": "Simulation",
       "name": "class::parameter_defaults_bind_where_the_class_is_declared",
