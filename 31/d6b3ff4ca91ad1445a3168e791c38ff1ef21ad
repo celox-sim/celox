@@ -1,0 +1,1 @@
+Review fixes: property-bound structure references forwarded to output/inout copy each member back; concatenations with property-bound members write temporaries first, keeping destination positions; effectful receivers are rejected.
