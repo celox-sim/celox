@@ -4686,6 +4686,8 @@ fn deposits_preserve_formats_at_word_boundaries() {
                         "aF_xZ01".repeat(40),
                         "10101111xxxxzzzz00000001".repeat(40),
                     ),
+                    (VPI_BIN_STR_VAL, "10101".repeat(40), "10101".repeat(40)),
+                    (VPI_HEX_STR_VAL, "a5".repeat(40), "10100101".repeat(40)),
                 ] {
                     let expected = expanded[expanded.len() - width..]
                         .chars()
@@ -4707,20 +4709,25 @@ fn deposits_preserve_formats_at_word_boundaries() {
                         },
                         &expected,
                     );
-                    let invalid = std::ffi::CString::new(format!("!{}", "0".repeat(200))).unwrap();
-                    let value = VpiValue {
-                        format,
-                        value: VpiValueData {
-                            str_: invalid.as_ptr().cast_mut(),
-                        },
-                    };
-                    assert!(vpi_put_value(handle, &value, ptr::null(), VPI_NO_DELAY).is_null());
-                    let mut read = VpiValue {
-                        format: VPI_BIN_STR_VAL,
-                        value: VpiValueData { integer: 0 },
-                    };
-                    vpi_get_value(handle, &mut read);
-                    assert_eq!(CStr::from_ptr(read.value.str_).to_str().unwrap(), expected);
+                    for invalid_text in [
+                        format!("!{}", "0".repeat(200)),
+                        format!("+{}", "1".repeat(width)),
+                    ] {
+                        let invalid = std::ffi::CString::new(invalid_text).unwrap();
+                        let value = VpiValue {
+                            format,
+                            value: VpiValueData {
+                                str_: invalid.as_ptr().cast_mut(),
+                            },
+                        };
+                        assert!(vpi_put_value(handle, &value, ptr::null(), VPI_NO_DELAY).is_null());
+                        let mut read = VpiValue {
+                            format: VPI_BIN_STR_VAL,
+                            value: VpiValueData { integer: 0 },
+                        };
+                        vpi_get_value(handle, &mut read);
+                        assert_eq!(CStr::from_ptr(read.value.str_).to_str().unwrap(), expected);
+                    }
                 }
                 vpi_free_object(handle);
             }
