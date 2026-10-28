@@ -1,0 +1,1 @@
+Address Codex review: resolve scope-qualified type operands, keep the string type of the result (constant contexts still fold it), and keep declared types when generate-local shapes are rebuilt from markers; add a shared regression case.
