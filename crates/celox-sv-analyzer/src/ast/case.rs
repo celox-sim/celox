@@ -87,9 +87,23 @@ pub(super) fn expr_is_two_state(
         Expr::Call {
             callee: Callee::Object(op),
             ..
-        } => {
-            !matches!(**op, ObjectOp::Container { op, layout } if !layout.two_state && (op.reduction().is_some() || matches!(op, ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack | ContainerOp::Equal)))
-        }
+        } => match **op {
+            // A 4-state property or member of a record may hold X or Z.
+            ObjectOp::Load(field) => !field.four_state,
+            ObjectOp::Unbox(ref record) => !record.fields.iter().any(|field| field.four_state),
+            ObjectOp::Container { op, layout } => {
+                layout.two_state
+                    || !(op.reduction().is_some()
+                        || matches!(
+                            op,
+                            ContainerOp::Get
+                                | ContainerOp::PopFront
+                                | ContainerOp::PopBack
+                                | ContainerOp::Equal
+                        ))
+            }
+            _ => true,
+        },
         Expr::Call {
             callee: Callee::Subroutine(name),
             ..

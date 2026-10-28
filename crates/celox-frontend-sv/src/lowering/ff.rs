@@ -3622,9 +3622,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut arena = SLTNodeArena::new();
         let node = self.expr_slt(rhs, Some((total, signed)), &mut arena)?;
         let node = coerce_node_width(&mut arena, node, Some(total), signed).map_err(slt_error)?;
-        // Capture the value before any part is written.
-        let (temp, temp_name) = self.m.temp("concat", total, false, true);
+        // Capture the value before any part is written, in a temporary of
+        // the value's state kind.
         let value = self.lower_slt(&arena, node)?;
+        let four_state = matches!(self.b.register(&value), RegisterType::Logic { .. });
+        let (temp, temp_name) = self.m.temp("concat", total, false, four_state);
         self.store(temp, SIROffset::Static(0), total, value);
         let mut lsb = total;
         for (part, width) in parts.iter().zip(widths) {
@@ -7838,14 +7840,15 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                 // Container contents are immutable: reading an element is a
                 // value of the container handle and index, unlike a class
                 // property that can change without its handle changing.
+                // A record of a structure element is immutable as well.
                 sv::ir::Callee::Object(op)
                     if matches!(
                         *op,
                         sv::ir::ObjectOp::Container {
                             op: sv::ir::ContainerOp::Get,
                             ..
-                        }
-                    ) =>
+                        } | sv::ir::ObjectOp::Unbox(_)
+                    ) || matches!(*op, sv::ir::ObjectOp::Load(field) if field.nullable) =>
                 {
                     continue;
                 }

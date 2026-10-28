@@ -449,3 +449,132 @@ endmodule
   (top Top)
   (run_until 6000)
   (expect_output "x 1\no x\n[2999!] [2999] 3000\n"))
+
+(case container_elements
+  (source "unpacked_struct_containers.sv" #"
+module Top(output bit done);
+    class Node;
+        string n;
+        function new(string n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef struct { string name; string regex; } acs_t;
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    typedef struct { pair_t orig; string alias_name; } alias_t;
+    typedef struct { int read_time; int write_time; int unsigned read_count; } access_t;
+    typedef enum { NEVER, STARTED, FINISHED } state_e;
+    typedef struct { state_e state; bit ret_val; } info_t;
+    initial begin
+        acs_t q[$];
+        acs_t s, t;
+        alias_t aliases[$];
+        access_t access[string];
+        access_t ar;
+        info_t states[int];
+        info_t da[];
+        Node a;
+        s.name = "foo";
+        s.regex = "";
+        q.push_back(s);
+        q.push_back('{name: "", regex: "b.*"});
+        s.name = "changed";
+        $display("size %0d %s|%s %s", q.size(), q[0].name, q[1].regex, q[$].regex);
+        while (q.size()) begin
+            t = q.pop_front();
+            $display("acs %s|%s", t.name, t.regex);
+        end
+        a = new("A");
+        aliases.push_back('{orig: '{a, "A"}, alias_name: "al"});
+        $display("alias %s %s %s", aliases[0].orig.m_type.n, aliases[0].orig.m_type_name,
+            aliases[0].alias_name);
+        ar = access["x"];
+        $display("miss %0d %0d %0d", ar.read_time, ar.read_count, access.exists("x"));
+        ar.read_count++;
+        ar.read_time = 5;
+        access["x"] = ar;
+        ar.read_count = 99;
+        $display("hit %0d %0d %0d", access["x"].read_count, access["x"].read_time, access.num());
+        states[3] = '{STARTED, 1};
+        $display("info %0d %0d %0d", states[3].state, states[3].ret_val, states[4].state);
+        da = new[2];
+        da[1] = '{FINISHED, 1};
+        $display("da %0d %0d %0d", da[0].state, da[1].state, da[1] == info_t'{FINISHED, 1});
+        foreach (access[k]) $display("key %s %0d", k, access[k].read_count);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "size 2 foo|b.* b.*\nacs foo|\nacs |b.*\nalias A A al\nmiss 0 0 0\nhit 1 5 1\ninfo 1 1 0\nda 0 2 1\nkey x 1\n"))
+
+(case container_element_member_selects
+  (source "unpacked_struct_element_selects.sv" #"
+module Top(output bit done);
+    typedef struct { int x, y; } inner_t;
+    typedef struct { inner_t inner; bit [7:0] data; string s; } element_t;
+    initial begin
+        element_t q[$];
+        inner_t i;
+        int k;
+        q.push_back('{'{1, 2}, 8'hA5, "a"});
+        q.push_back('{'{3, 4}, 8'h3C, "b"});
+        k = 1;
+        $display("%h %h %b %0d", q[0].data[3:0], q[k].data[7:4], q[1].data[0], q[0].inner.y);
+        i = q[1].inner;
+        $display("%0d %0d %0d", i.x, i.y, q.size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "5 3 0 2\n3 4 2\n"))
+
+(case container_element_four_state_defaults
+  (four_state)
+  (source "unpacked_struct_container_states.sv" #"
+module Top(output bit done);
+    typedef struct { time t; int unsigned n; logic [3:0] l; } access_t;
+    typedef struct { logic [3:0] a; logic [3:0] b; } nibbles_t;
+    initial begin
+        access_t access[string];
+        nibbles_t q[];
+        access_t x;
+        x = access["missing"];
+        $display("%0d %0d %b", x.t, x.n, x.l);
+        x.l = 4'b1z0x;
+        access["k"] = x;
+        $display("%0d %b", access["k"].t, access["k"].l);
+        q = new[2];
+        q[0] = '{4'bx01z, 4'b0011};
+        $display("%b %b %b", q[0].a, q[0].b, q[1].a);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "x 0 xxxx\nx 1z0x\nx01z 0011 xxxx\n"))
+
+(case container_records_survive_heap_collections
+  (source "unpacked_struct_container_heap.sv" #"
+module Top(output int n);
+    typedef struct { string name; string regex; } acs_t;
+    logic clk = 0;
+    always #1 clk = ~clk;
+    acs_t names[$];
+    acs_t byname[string];
+    string number;
+    always @(posedge clk) begin
+        number.itoa(n);
+        names.push_back('{name: number, regex: {number, "*"}});
+        if (names.size() > 3) void'(names.pop_front());
+        byname[number] = '{name: {"n", number}, regex: ""};
+        n = n + 1;
+    end
+    initial #6000 $display("%0d [%s] [%s] [%s] %0d", names.size(), names[0].name, names[$].regex,
+        byname["2999"].name, byname.num());
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "3 [2997] [2999*] [n2999] 3000\n"))

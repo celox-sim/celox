@@ -209,6 +209,7 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列挙型、`string`、
 クラスハンドル、packed 構造体、入れ子の unpacked 構造体を使え、各メンバは自身の
 2 値・4 値の型を保ちます。この型の変数は、モジュール変数、手続き内のローカル変数、クラスプロパティ、
+キュー・動的配列・連想配列の要素（`q[i].m` でメンバを読めます）、
 任意の方向のサブルーチン引数と戻り値にできます。メンバはその型の変数と同じように
 読み書きできます。構造体全体は、同じ型の値との代入と `==`・`!=`・`===`・`!==` による
 比較、`?:` による選択、assignment pattern（`'{a, b}`、`'{m: v, default: d}`、
@@ -236,7 +237,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・配列やコンテナの要素としての unpacked 構造体、配列・`real`・既定値を持つメンバ。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・固定長配列の要素としての unpacked 構造体、配列・`real`・既定値を持つメンバ。
 - 順序回路のプロセス：`always_ff` のイベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。

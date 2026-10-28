@@ -2291,6 +2291,9 @@ struct ContainerType {
     key: Option<Type>,
     layout: system_functions::ContainerLayout,
     element: Type,
+    /// The record that holds an element of unpacked structure type which is
+    /// not kept as a flat value.
+    record: Option<system_functions::Record>,
 }
 
 impl Type {

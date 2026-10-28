@@ -1266,7 +1266,7 @@ fn out_of_block_definition(
 
 /// The layout of a property of type `ty` at the first aligned offset at or
 /// after `offset`.
-fn field(
+pub(super) fn field(
     state: &AnalysisState,
     ty: &Type,
     env: &HashMap<String, i128>,
@@ -1303,6 +1303,7 @@ fn field(
                 ty.kind(),
                 TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
             ),
+        nullable: false,
     })
 }
 
