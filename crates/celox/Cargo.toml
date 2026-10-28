@@ -259,6 +259,10 @@ name = "sv_plusargs"
 required-features = ["wasm-runtime"]
 
 [[test]]
+name = "sv_uvm_dpi"
+required-features = ["wasm-runtime"]
+
+[[test]]
 name = "sv_real_math"
 required-features = ["wasm-runtime"]
 

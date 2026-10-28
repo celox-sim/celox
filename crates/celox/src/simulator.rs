@@ -1403,6 +1403,26 @@ mod host {
                 .restore_initial_state(initial_memory_values);
         }
 
+        /// Set the simulation's plusargs (IEEE 1800-2023 21.6). The tool's
+        /// command line, which UVM reads through `uvm_dpi_get_next_arg_c`,
+        /// is the program name followed by them, each with the leading `+`
+        /// that UVM recognizes plusargs by and that the builder lets callers
+        /// leave out.
+        pub(crate) fn set_plusargs(&mut self, plusargs: Vec<String>) {
+            self.backend.heap_mut().set_tool_arguments(
+                std::iter::once("celox".to_owned())
+                    .chain(plusargs.iter().map(|argument| {
+                        if argument.starts_with('+') {
+                            argument.clone()
+                        } else {
+                            format!("+{argument}")
+                        }
+                    }))
+                    .collect(),
+            );
+            self.plusargs = celox_runtime::plusargs::Plusargs(plusargs);
+        }
+
         pub(crate) fn run_plusargs_request(
             &mut self,
             site: &celox_design::HostRequestSite<SignalRef>,

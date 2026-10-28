@@ -1372,6 +1372,7 @@ fn kernel_window_writes(
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
 ) -> HashSet<String> {
     let subroutines = module.subroutines();
+    let scan = DriverScan::of(module);
     let mut names = HashSet::default();
     for process in module
         .initial_processes()
@@ -1387,7 +1388,7 @@ fn kernel_window_writes(
                 .unwrap_or(body.len())
         };
         kernel_written_names(
-            subroutines,
+            &scan,
             &body[first..],
             &mut names,
             &mut HashSet::default(),
@@ -1435,7 +1436,7 @@ fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> 
 /// Adds the names of the variables `body` writes, directly or in the
 /// subroutines it calls, to `names` (see [`DriverScan`]).
 fn kernel_written_names(
-    subroutines: &[sv::ir::Subroutine],
+    scan: &DriverScan<'_>,
     body: &[sv::ir::Stmt],
     names: &mut HashSet<String>,
     visited: &mut HashSet<String>,
@@ -1488,7 +1489,16 @@ fn kernel_written_names(
             | sv::ir::Callee::Stream(_) => continue,
             sv::ir::Callee::Subroutine(name) => name,
         };
-        let Some(subroutine) = subroutines
+        if let Some(import) = scan.dpi_import(&name) {
+            names.extend(
+                procedural::written_dpi_arguments(import, &args)
+                    .iter()
+                    .map(|lvalue| lvalue.name().to_string()),
+            );
+            continue;
+        }
+        let Some(subroutine) = scan
+            .subroutines
             .iter()
             .find(|subroutine| subroutine.name == name)
         else {
@@ -1503,7 +1513,7 @@ fn kernel_written_names(
             }
         }
         if visited.insert(name) {
-            kernel_written_names(subroutines, &subroutine.body, names, visited, depth + 1);
+            kernel_written_names(scan, &subroutine.body, names, visited, depth + 1);
         }
     }
 }
@@ -1644,9 +1654,21 @@ fn validate_variable_driver_ranges(
 /// the calling process (IEEE 1800-2023 9.2.2.2).
 struct DriverScan<'a> {
     subroutines: &'a [sv::ir::Subroutine],
+    dpi_imports: &'a [sv::ir::DpiImport],
 }
 
-impl DriverScan<'_> {
+impl<'a> DriverScan<'a> {
+    fn of(module: &'a sv::ir::Module) -> Self {
+        Self {
+            subroutines: module.subroutines(),
+            dpi_imports: module.dpi_imports(),
+        }
+    }
+
+    fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
+        self.dpi_imports.iter().find(|import| import.name() == name)
+    }
+
     /// Calls `record` with each assignment target of `body`.
     fn body(&self, record: &mut dyn FnMut(&sv::ir::LValue), body: &[sv::ir::Stmt]) {
         self.body_at(record, body, &mut HashSet::default(), 0);
@@ -1694,6 +1716,12 @@ impl DriverScan<'_> {
                 | sv::ir::Callee::Stream(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
+            if let Some(import) = self.dpi_import(&name) {
+                for lvalue in procedural::written_dpi_arguments(import, &args) {
+                    record(&lvalue);
+                }
+                continue;
+            }
             let Some(subroutine) = self
                 .subroutines
                 .iter()
@@ -1822,9 +1850,7 @@ impl ModuleDrivers {
         // run-time element.
         let mut shapes: HashMap<String, Option<(usize, usize)>> = HashMap::default();
         let mut writes: HashMap<String, Vec<DriverWrite>> = HashMap::default();
-        let scan = DriverScan {
-            subroutines: module.subroutines(),
-        };
+        let scan = DriverScan::of(module);
         let mut walk = |body: &[sv::ir::Stmt],
                         local: Option<usize>,
                         continuous: Option<usize>,
@@ -3282,9 +3308,7 @@ fn demote_level_lists(
         else {
             continue;
         };
-        let scan = DriverScan {
-            subroutines: lowered.source.subroutines(),
-        };
+        let scan = DriverScan::of(&lowered.source);
         for process in lowered.source.comb_processes() {
             let creation_order = process.creation_order();
             if process.kind() != sv::ir::CombProcessKind::AlwaysStar
@@ -4065,7 +4089,13 @@ fn lower_module_with_overrides(
         }
     }
 
-    if !cfg!(feature = "dpi") && !module.dpi_imports().is_empty() {
+    // The functions Celox provides need no C library.
+    if !cfg!(feature = "dpi")
+        && module
+            .dpi_imports()
+            .iter()
+            .any(|import| import.builtin().is_none())
+    {
         return Err(sv::AnalyzerError::Unsupported(
             "DPI-C import (enable the `sv-dpi` feature of `celox`)".to_string(),
         ));

@@ -10,6 +10,7 @@
 //! four-state semantics identical to the combinational lowering.
 
 mod containers;
+mod dpi_builtins;
 mod file_io;
 mod format;
 mod fread;
@@ -941,6 +942,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 | sv::ir::Callee::Stream(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
+            if let Some(import) = self.m.dpi_imports.get(&name) {
+                for lvalue in written_dpi_arguments(import, &args) {
+                    self.record_target(&lvalue, true);
+                }
+                continue;
+            }
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
@@ -1825,6 +1832,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                     r#type.is_signed(),
                     r#type.is_4state(),
                 );
+                if r#type == sv::ir::DpiType::String {
+                    self.m.variables.get_mut(&temp).unwrap().value_kind =
+                        celox_design::ValueKind::StrRef;
+                }
                 self.store(temp, SIROffset::Static(0), r#type.width(), result);
                 Expr::Ident(temp_name)
             }
@@ -2004,6 +2015,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args.len(),
                 import.arguments().len()
             )));
+        }
+        if let Some(builtin) = import.builtin() {
+            // Keeps a process whose only effect is the call (see `extern_calls`).
+            self.m.extern_calls += 1;
+            return self.builtin_dpi_call(import, builtin, args, arg_order);
         }
         let mut registers = vec![None; args.len()];
         let positions: Vec<_> = if arg_order.is_empty() {

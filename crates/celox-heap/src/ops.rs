@@ -116,6 +116,37 @@ pub const fn radix_parameter(radix: u32, width: u32, signed: bool) -> u64 {
 /// instead of exhausting memory.
 const MAX_REPLICATE_BYTES: usize = 1 << 30;
 
+/// UVM DPI-C functions (see `uvm_dpi`): `uvm_re_comp(re, deglob)`.
+pub const UVM_RE_COMP: u64 = 128;
+/// `uvm_re_exec(rexp, str)`.
+pub const UVM_RE_EXEC: u64 = 129;
+/// `uvm_re_free(rexp)`.
+pub const UVM_RE_FREE: u64 = 130;
+/// `uvm_re_compexec(re, str, deglob)`; [`UVM_RE_LAST_EXEC`] gives `exec_ret`.
+pub const UVM_RE_COMPEXEC: u64 = 131;
+/// `uvm_re_compexecfree(re, str, deglob)`; [`UVM_RE_LAST_EXEC`] gives
+/// `exec_ret`.
+pub const UVM_RE_COMPEXECFREE: u64 = 132;
+/// The `exec_ret` of the last compile-and-execute operation.
+pub const UVM_RE_LAST_EXEC: u64 = 133;
+/// `uvm_re_buffer()`.
+pub const UVM_RE_BUFFER: u64 = 134;
+/// `uvm_re_deglobbed(glob, with_brackets)`.
+pub const UVM_RE_DEGLOBBED: u64 = 135;
+/// `uvm_dpi_get_next_arg_c(init)`.
+pub const UVM_NEXT_ARG: u64 = 136;
+/// `uvm_dpi_get_tool_name_c()`.
+pub const UVM_TOOL_NAME: u64 = 137;
+/// `uvm_dpi_get_tool_version_c()`.
+pub const UVM_TOOL_VERSION: u64 = 138;
+// `call` dispatches the low opcode byte by range, so the UVM range shares no
+// operation with the container and stream ranges.
+const _: () = assert!(
+    crate::containers::RSORT < UVM_RE_COMP
+        && crate::streams::TRUNCATE < UVM_RE_COMP
+        && UVM_TOOL_VERSION <= 0xff
+);
+
 impl Heap {
     /// Perform the operation selected by `code` on `a`, `b` and `c`.
     pub fn call(&mut self, code: u64, a: u64, b: u64, c: u64) -> u64 {
@@ -135,6 +166,7 @@ impl Heap {
             crate::containers::HANDLE_PATTERN => {
                 self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
             }
+            op @ UVM_RE_COMP..=UVM_TOOL_VERSION => self.uvm_call(op, a, b, c),
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {

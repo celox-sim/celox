@@ -110,6 +110,12 @@ impl<'a> ProcModule<'a> {
                 ..
             } => op.returns_string(),
             sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } if self.dpi_imports.contains_key(name) => {
+                self.dpi_imports[name].return_type() == Some(sv::ir::DpiType::String)
+            }
+            sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Object(op),
                 ..
             } => {
@@ -1288,6 +1294,7 @@ impl<'a> ProcModule<'a> {
             sv::ir::DpiType::Bit => ExternType::Bit,
             sv::ir::DpiType::Logic => ExternType::Logic,
             sv::ir::DpiType::Integer { width, signed } => ExternType::Integer { width, signed },
+            sv::ir::DpiType::String => unreachable!("only a builtin passes a string"),
             // A pointer, 64 bits on the supported hosts.
             sv::ir::DpiType::Chandle => ExternType::Integer {
                 width: 64,
@@ -2940,7 +2947,7 @@ pub(super) fn written_names_with_calls(
     names: &mut HashSet<String>,
 ) {
     super::kernel_written_names(
-        module.subroutines(),
+        &super::DriverScan::of(module),
         stmts,
         names,
         &mut HashSet::default(),
@@ -2958,6 +2965,22 @@ pub(super) fn written_system_arguments(
     args.iter()
         .enumerate()
         .filter(|(position, _)| function.writes_argument(*position))
+        .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
+        .flatten()
+        .collect()
+}
+
+/// The variables a call of DPI-C import `import` writes through its output
+/// arguments (IEEE 1800-2023 35.5.1.2).
+pub(super) fn written_dpi_arguments(
+    import: &sv::ir::DpiImport,
+    args: &[Option<sv::ir::Expr>],
+) -> Vec<sv::ir::LValue> {
+    import
+        .arguments()
+        .iter()
+        .zip(args)
+        .filter(|(argument, _)| argument.is_output())
         .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
         .flatten()
         .collect()

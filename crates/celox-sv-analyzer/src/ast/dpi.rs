@@ -8,9 +8,13 @@
 //! and does not change it (35.7). Only a `context` import may call an
 //! exported subroutine (35.5.3), so an accepted export is checked and has no
 //! further effect.
+//!
+//! The functions of UVM's C library (UVM `src/dpi`) are provided by Celox
+//! instead: an import with one of their C names and UVM's prototype binds to
+//! a [`DpiBuiltin`], so UVM runs without `UVM_NO_DPI` or a C library.
 
 use super::*;
-use crate::ir::{DpiArgument, DpiImport, DpiType};
+use crate::ir::{DpiArgument, DpiBuiltin, DpiImport, DpiType};
 
 /// The largest number of arguments an imported function may take; the
 /// limit of `celox_sir::MAX_EXTERN_CALL_ARGUMENTS`.
@@ -150,6 +154,228 @@ pub(super) fn import(
     lower_native_dpi(syntax.dpi_declaration(id), syntax)
 }
 
+/// A type in the prototype of a UVM DPI-C function.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    String,
+    Chandle,
+    Bit,
+    Int,
+    /// `uvm_hdl_data_t`, a `logic` vector.
+    HdlData,
+}
+
+/// The UVM DPI-C functions Celox provides: C name, function, result (`None`
+/// for `void`), and arguments with whether they are written.
+const BUILTINS: &[(&str, DpiBuiltin, Option<Kind>, &[(Kind, bool)])] = {
+    use DpiBuiltin::*;
+    use Kind::{Bit, Chandle, HdlData, Int, String};
+    &[
+        (
+            "uvm_re_comp",
+            ReComp,
+            Some(Chandle),
+            &[(String, false), (Bit, false)],
+        ),
+        (
+            "uvm_re_exec",
+            ReExec,
+            Some(Int),
+            &[(Chandle, false), (String, false)],
+        ),
+        ("uvm_re_free", ReFree, None, &[(Chandle, false)]),
+        (
+            "uvm_re_compexec",
+            ReCompExec,
+            Some(Chandle),
+            &[(String, false), (String, false), (Bit, false), (Int, true)],
+        ),
+        (
+            "uvm_re_compexecfree",
+            ReCompExecFree,
+            Some(Bit),
+            &[(String, false), (String, false), (Bit, false), (Int, true)],
+        ),
+        ("uvm_re_buffer", ReBuffer, Some(String), &[]),
+        (
+            "uvm_re_deglobbed",
+            ReDeglobbed,
+            Some(String),
+            &[(String, false), (Bit, false)],
+        ),
+        (
+            "uvm_dpi_get_next_arg_c",
+            NextArg,
+            Some(String),
+            &[(Int, false)],
+        ),
+        ("uvm_dpi_get_tool_name_c", ToolName, Some(String), &[]),
+        ("uvm_dpi_get_tool_version_c", ToolVersion, Some(String), &[]),
+        (
+            "uvm_hdl_check_path",
+            Unavailable,
+            Some(Int),
+            &[(String, false)],
+        ),
+        (
+            "uvm_hdl_deposit",
+            Unavailable,
+            Some(Int),
+            &[(String, false), (HdlData, false)],
+        ),
+        (
+            "uvm_hdl_force",
+            Unavailable,
+            Some(Int),
+            &[(String, false), (HdlData, false)],
+        ),
+        (
+            "uvm_hdl_read",
+            Unavailable,
+            Some(Int),
+            &[(String, false), (HdlData, true)],
+        ),
+        (
+            "uvm_hdl_release",
+            Unavailable,
+            Some(Int),
+            &[(String, false)],
+        ),
+        (
+            "uvm_hdl_release_and_read",
+            Unavailable,
+            Some(Int),
+            &[(String, false), (HdlData, true)],
+        ),
+        (
+            "uvm_hdl_signal_size",
+            Unavailable,
+            Some(Int),
+            &[(String, false)],
+        ),
+        (
+            "uvm_polling_create",
+            Unavailable,
+            Some(Chandle),
+            &[(String, false), (Int, false)],
+        ),
+        (
+            "uvm_polling_get_callback_enable",
+            Unavailable,
+            Some(Int),
+            &[(Chandle, false)],
+        ),
+        (
+            "uvm_polling_setup_notifier",
+            Unavailable,
+            Some(Int),
+            &[(String, false)],
+        ),
+        ("uvm_polling_process_changelist", Unavailable, None, &[]),
+        (
+            "uvm_polling_set_enable_callback",
+            Unavailable,
+            None,
+            &[(Chandle, false), (Int, false)],
+        ),
+        ("uvm_polling_free_mem_structures", Unavailable, None, &[]),
+    ]
+};
+
+/// The kind of a prototype type, as UVM writes it.
+fn kind(id: celox_sv_syntax::TypeId, syntax: &celox_sv_syntax::Declarations) -> Option<Kind> {
+    use celox_sv_syntax::DataTypeKind;
+    let data = syntax.data_type(id);
+    match &data.kind {
+        DataTypeKind::Builtin(name) if data.packed_dimensions.is_empty() => match name.as_str() {
+            "string" => Some(Kind::String),
+            "chandle" => Some(Kind::Chandle),
+            "bit" if data.signed.is_none() => Some(Kind::Bit),
+            "int" if data.signed.is_none() => Some(Kind::Int),
+            _ => None,
+        },
+        DataTypeKind::Builtin(name) if name == "logic" => Some(Kind::HdlData),
+        DataTypeKind::Named(path)
+            if path
+                .last()
+                .is_some_and(|part| part.name.spelling == "uvm_hdl_data_t") =>
+        {
+            Some(Kind::HdlData)
+        }
+        _ => None,
+    }
+}
+
+fn builtin_type(kind: Kind) -> DpiType {
+    match kind {
+        Kind::String => DpiType::String,
+        Kind::Chandle => DpiType::Chandle,
+        Kind::Bit => DpiType::Bit,
+        Kind::Int => DpiType::Integer {
+            width: 32,
+            signed: true,
+        },
+        // `UVM_HDL_MAX_WIDTH` bits, written by no builtin yet.
+        Kind::HdlData => DpiType::Integer {
+            width: 64,
+            signed: false,
+        },
+    }
+}
+
+/// The builtin that a UVM import with C name `c_name` binds to, when it
+/// declares UVM's prototype.
+fn builtin(
+    declaration: &celox_sv_syntax::DpiDeclaration,
+    c_name: &str,
+    syntax: &celox_sv_syntax::Declarations,
+) -> Option<DpiImport> {
+    use celox_sv_syntax::{DataTypeKind, Direction, DpiKind};
+    let &(_, builtin, result, arguments) = BUILTINS.iter().find(|(name, ..)| *name == c_name)?;
+    if !declaration.import || declaration.kind != DpiKind::Function {
+        return None;
+    }
+    let declared_result = declaration.return_type?;
+    let declared_result = match &syntax.data_type(declared_result).kind {
+        DataTypeKind::Builtin(name) if name == "void" => None,
+        _ => Some(kind(declared_result, syntax)?),
+    };
+    if declared_result != result || declaration.ports.len() != arguments.len() {
+        return None;
+    }
+    let mut written = false;
+    let mut lowered = Vec::with_capacity(arguments.len());
+    for (port, &(expected, output)) in declaration.ports.iter().zip(arguments) {
+        if let Some(direction) = port.direction {
+            written = direction != Direction::Input;
+        }
+        if written != output
+            || port.constant
+            || !port.dimensions.is_empty()
+            || port.default.is_some()
+            || kind(port.data_type, syntax) != Some(expected)
+        {
+            return None;
+        }
+        let name = port.name.as_ref()?.spelling.clone();
+        lowered.push(if output {
+            DpiArgument::output(name, builtin_type(expected))
+        } else {
+            DpiArgument::new(name, builtin_type(expected))
+        });
+    }
+    Some(
+        DpiImport::new(
+            declaration.name.spelling.clone(),
+            c_name.to_owned(),
+            false,
+            result.map(builtin_type),
+            lowered,
+        )
+        .with_builtin(builtin),
+    )
+}
+
 /// Bind an owned native body declaration to the existing C ABI/IR contract.
 /// No legacy declaration, prototype or type nodes participate in this conversion.
 fn lower_native_dpi(
@@ -157,6 +383,16 @@ fn lower_native_dpi(
     syntax: &celox_sv_syntax::Declarations,
 ) -> Result<DpiImport, AnalyzerError> {
     use celox_sv_syntax::{DataTypeKind, Direction, DpiKind, DpiProperty};
+    {
+        let name = &declaration.name.spelling;
+        let c_name = declaration
+            .c_name
+            .as_ref()
+            .map_or(name, |name| &name.spelling);
+        if let Some(import) = builtin(declaration, c_name, syntax) {
+            return Ok(import);
+        }
+    }
     if !declaration.import {
         return Err(unsupported("DPI-C export"));
     }
@@ -274,6 +510,26 @@ fn native_dpi_type(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uvm_prototypes_bind_to_builtins_by_c_name() {
+        let code = "module M;
+            import \"DPI-C\" function chandle uvm_re_comp(string re, bit deglob);
+            import \"DPI-C\" function bit uvm_re_compexecfree(string re, string str, bit deglob, output int exec_ret);
+            import \"DPI-C\" context function int uvm_hdl_read(string path, output logic [1023:0] value);
+            import \"DPI-C\" mine = function void uvm_re_free(chandle rexp);
+            import \"DPI-C\" function int uvm_re_exec(int other);
+        endmodule";
+        let source = crate::analyze_source(code, Path::new("uvm_dpi.sv")).unwrap();
+        let imports = source.modules()[0].dpi_imports();
+        assert_eq!(imports[0].builtin(), Some(DpiBuiltin::ReComp));
+        assert_eq!(imports[1].builtin(), Some(DpiBuiltin::ReCompExecFree));
+        assert!(imports[1].arguments()[3].is_output());
+        assert_eq!(imports[2].builtin(), Some(DpiBuiltin::Unavailable));
+        // Another C name, or another prototype, is an ordinary import.
+        assert_eq!(imports[3].builtin(), None);
+        assert_eq!(imports[4].builtin(), None);
+    }
 
     #[test]
     fn native_body_prototypes_bind_linkage_signedness_and_empty_argument_lists() {
