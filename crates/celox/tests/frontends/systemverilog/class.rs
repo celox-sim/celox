@@ -7,6 +7,8 @@ sv_backends! {
     fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
     fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
     fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
+    fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
+    fn class_generate_scope_enum_type_arguments(sim) { @case "class::generate_scope_enum_type_arguments"; }
     fn class_type_alias_members(sim) { @case "class::type_alias_members"; }
     fn class_type_alias_lexical_scopes(sim) { @case "class::type_alias_lexical_scopes"; }
     fn constraint_mode_ordinary_struct_members(sim) {
@@ -323,11 +325,11 @@ fn misused_parameterized_classes_are_rejected() {
             ["class `Plain`, which has no parameters", ""],
         ),
         (
-            "typedef enum {A, B} e_t; class Typed #(type T = int); endclass Typed#(e_t) typed;",
+            "class Typed #(type T = int); endclass Typed#(enum {A, B}) typed;",
             ["enumeration type as a class type parameter value", ""],
         ),
         (
-            "typedef struct packed { int x; } s_t; class Typed #(type T = int); endclass Typed#(s_t) typed;",
+            "class Typed #(type T = int); endclass Typed#(struct packed { int x; }) typed;",
             ["struct or union type as a class type parameter value", ""],
         ),
         (

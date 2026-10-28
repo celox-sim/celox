@@ -2155,6 +2155,27 @@ pub struct Type {
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
     class: Option<Arc<str>>,
+    /// The typedef that names an enumeration, struct or union type.
+    nominal: Nominal,
+}
+
+/// The declaration that names an enumeration, struct or union type, which
+/// tells it apart from another type of the same structure (IEEE 1800-2023
+/// 6.19, 6.22.1) where a class specialization is keyed by its type
+/// arguments (8.25). Type equality does not compare it.
+#[derive(Debug, Clone, Default)]
+struct Nominal(Option<Arc<str>>);
+
+impl PartialEq for Nominal {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Nominal {}
+
+impl std::hash::Hash for Nominal {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2177,6 +2198,7 @@ impl Type {
             signed_element_depth: None,
             class: None,
             container: None,
+            nominal: Nominal::default(),
         }
     }
 
@@ -2192,7 +2214,22 @@ impl Type {
             signed_element_depth: None,
             class: None,
             container: None,
+            nominal: Nominal::default(),
         }
+    }
+
+    /// Name an enumeration, struct or union type after typedef `name`,
+    /// unless an earlier typedef already named it (`typedef A B` names the
+    /// type of `A`).
+    fn name_declaration(&mut self, name: impl FnOnce() -> String) {
+        if (self.is_enum || !self.members.is_empty()) && self.nominal.0.is_none() {
+            self.nominal = Nominal(Some(name().into()));
+        }
+    }
+
+    /// The typedef that names this enumeration, struct or union type.
+    fn declaration_name(&self) -> Option<&str> {
+        self.nominal.0.as_deref()
     }
 
     /// The class of an object handle type.

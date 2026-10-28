@@ -371,6 +371,7 @@ fn extend_variable_dimensions_from_const_env(
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            nominal: Nominal::default(),
         };
         let mut shape = procedural::dimensions_from_type(&ty);
         if let Some(existing) = context.get(name) {
