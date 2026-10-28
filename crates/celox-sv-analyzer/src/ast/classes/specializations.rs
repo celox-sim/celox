@@ -1264,6 +1264,7 @@ fn spelling(ty: &Type) -> String {
             (None, TypeKind::String) => "string".to_owned(),
             (None, TypeKind::Object) => "object".to_owned(),
             (None, TypeKind::Process) => "process".to_owned(),
+            (None, TypeKind::Event) => "event".to_owned(),
             (None, TypeKind::Bit) => "bit".to_owned(),
             // `reg` is `logic` (6.11.2).
             (None, TypeKind::Logic | TypeKind::Implicit | TypeKind::Reg) => "logic".to_owned(),
@@ -1278,6 +1279,7 @@ fn spelling(ty: &Type) -> String {
                 | TypeKind::String
                 | TypeKind::Object
                 | TypeKind::Process
+                | TypeKind::Event
         );
     if integral && ty.is_signed() {
         spelled.push_str(" signed");

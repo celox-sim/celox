@@ -144,6 +144,7 @@ mod case;
 mod casts;
 mod classes;
 mod comb_process;
+mod events;
 mod processes;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
@@ -2429,6 +2430,9 @@ pub enum TypeKind {
     Object,
     /// A scheduler-owned process reference (9.7), independent of the heap.
     Process,
+    /// A handle of the synchronization object of a named event (15.5), or
+    /// `null`.
+    Event,
     Bit,
     Logic,
     Reg,

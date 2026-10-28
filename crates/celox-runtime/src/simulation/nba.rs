@@ -76,10 +76,18 @@ impl<B: SimBackend> SimulationState<B> {
         } else {
             0
         };
+        // `->>` triggers its events in this region (IEEE 1800-2023 15.5.1).
+        let events = !self.process_state.nba_events.is_empty();
+        if events {
+            let now = self.scheduler.time;
+            for handle in std::mem::take(&mut self.process_state.nba_events) {
+                self.trigger_event(handle, now);
+            }
+        }
         let mut queued = std::mem::take(&mut self.process_state.nba_queue);
         if queued.is_empty() && flagged == 0 {
             self.process_state.nba_queue = queued;
-            return Ok(false);
+            return Ok(events);
         }
         // Several updates may pulse an event signal: each is an update the
         // event domains see, not only the final value.

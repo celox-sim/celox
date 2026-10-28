@@ -582,7 +582,8 @@ impl HostRequestKind {
     }
 }
 
-/// Operations on the built-in process class (IEEE 1800-2023 9.7).
+/// Operations on the built-in process class (IEEE 1800-2023 9.7) and the
+/// other synchronization objects the scheduler owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum ProcessOp {
@@ -597,6 +598,20 @@ pub enum ProcessOp {
     SetRandstate,
     /// Begin evaluation of a level-wait predicate; clear its old observations.
     Observe,
+    /// `-> e`: unblock the processes waiting for named event `e` (IEEE
+    /// 1800-2023 15.5.1).
+    Trigger,
+    /// `->> e`: trigger `e` in the nonblocking assignment region.
+    TriggerNonblocking,
+    /// `@ e`, `@(e1 or e2)`: block until one of the events is triggered
+    /// (15.5.2).
+    WaitEvent,
+    /// `e.triggered`: whether `e` was triggered in the current time step
+    /// (15.5.3).
+    Triggered,
+    /// `wait(e.triggered)`: block unless `e` was triggered in the current time
+    /// step, until it is.
+    WaitTriggered,
 }
 impl ProcessOp {
     pub fn from_code(code: u32) -> Option<Self> {
@@ -611,6 +626,11 @@ impl ProcessOp {
             7 => Self::GetRandstate,
             8 => Self::SetRandstate,
             9 => Self::Observe,
+            10 => Self::Trigger,
+            11 => Self::TriggerNonblocking,
+            12 => Self::WaitEvent,
+            13 => Self::Triggered,
+            14 => Self::WaitTriggered,
             _ => return None,
         })
     }

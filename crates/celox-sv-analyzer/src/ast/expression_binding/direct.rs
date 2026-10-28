@@ -516,6 +516,16 @@ pub(in crate::ast) fn bind_value(
                     values.push(call);
                     continue;
                 }
+                // `e.triggered` (IEEE 1800-2023 15.5.3).
+                if let Some(event) = super::super::events::triggered(tree, id, native, dimensions)?
+                {
+                    let event = super::value(event, native, tree, dimensions)?;
+                    values.push(super::super::events::call(
+                        celox_design::ProcessOp::Triggered,
+                        vec![event],
+                    ));
+                    continue;
+                }
                 if let Some((value, _)) = array_reductions::bind(id, native, tree, dimensions)? {
                     values.push(value);
                     continue;

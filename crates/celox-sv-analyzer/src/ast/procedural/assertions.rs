@@ -40,22 +40,23 @@ pub(super) fn concurrent_action(body: &[Stmt]) -> Result<(), AnalyzerError> {
     let mut unsupported_action = false;
     for stmt in body {
         stmt.walk(&mut |stmt| {
-            unsupported_action |= matches!(
-                stmt,
-                Stmt::Delay { .. }
-                    | Stmt::WaitEvent(_)
-                    | Stmt::WaitImplicit(_)
-                    | Stmt::Wait(_)
-                    | Stmt::WaitFork
-                    | Stmt::DisableFork
-                    | Stmt::Fork { .. }
-                    | Stmt::Call { .. }
-                    | Stmt::Assign {
-                        nonblocking: true,
-                        ..
-                    }
-                    | Stmt::AssertionRegion { .. }
-            );
+            unsupported_action |= events::blocks(stmt)
+                || matches!(
+                    stmt,
+                    Stmt::Delay { .. }
+                        | Stmt::WaitEvent(_)
+                        | Stmt::WaitImplicit(_)
+                        | Stmt::Wait(_)
+                        | Stmt::WaitFork
+                        | Stmt::DisableFork
+                        | Stmt::Fork { .. }
+                        | Stmt::Call { .. }
+                        | Stmt::Assign {
+                            nonblocking: true,
+                            ..
+                        }
+                        | Stmt::AssertionRegion { .. }
+                );
         });
     }
     if unsupported_action {

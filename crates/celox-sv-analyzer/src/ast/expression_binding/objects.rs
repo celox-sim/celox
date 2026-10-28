@@ -366,7 +366,7 @@ pub(in crate::ast) fn static_property_declaration(
     let Some(class_name) = class_name else {
         return Ok(None);
     };
-    if class_name == super::super::processes::CLASS {
+    if classes::builtin(&class_name) {
         return Ok(None);
     }
     let class = class(tree, dimensions, &class_name)?;
@@ -438,7 +438,7 @@ fn property_in(
     name: &str,
     receiver: Option<ExprId>,
 ) -> Converted<Option<(classes::Property, Option<ExprId>)>> {
-    if class_name == super::super::processes::CLASS {
+    if classes::builtin(class_name) {
         return Ok(None);
     }
     let class = class(tree, dimensions, class_name)?;
@@ -589,8 +589,9 @@ fn member_chain(
         }
     };
     names.reverse();
-    // A process handle has no properties (IEEE 1800-2023 9.7).
-    if class_name == super::super::processes::CLASS {
+    // A process or event handle has no properties (IEEE 1800-2023 9.7,
+    // 15.5).
+    if classes::builtin(&class_name) {
         return Ok(None);
     }
     Ok(Some((
@@ -631,7 +632,7 @@ pub(in crate::ast) fn unqualified_property(
     let Some(class_name) = scope_class(dimensions) else {
         return Ok(None);
     };
-    if class_name == super::super::processes::CLASS {
+    if classes::builtin(&class_name) {
         return Ok(None);
     }
     let class = class(tree, dimensions, &class_name)?;
@@ -721,7 +722,7 @@ pub(in crate::ast) fn method(
         }
         _ => return Ok(None),
     };
-    if class_name == super::super::processes::CLASS {
+    if classes::builtin(&class_name) {
         return Ok(None);
     }
     let class = class(tree, dimensions, &class_name)?;
@@ -832,7 +833,7 @@ fn derives_from(
     if class_name == ancestor {
         return Ok(true);
     }
-    if class_name == super::super::processes::CLASS || ancestor == super::super::processes::CLASS {
+    if classes::builtin(class_name) || classes::builtin(ancestor) {
         return Ok(false);
     }
     Ok(class(tree, dimensions, class_name)?.derives_from(
@@ -922,8 +923,8 @@ pub(in crate::ast) fn constructor(
     // of its class; handles are copied, not the objects they refer to (IEEE
     // 1800-2023 8.12).
     if let ExprKind::Copy(source) = &native.expression(ungroup(id, native)).kind {
-        if class_name == super::super::processes::CLASS {
-            return Err(unsupported("constructing a process with new"));
+        if classes::builtin(class_name) {
+            return Err(unsupported("copying a process or event with new"));
         }
 
         let source_class = match native_class(tree, *source, native, dimensions) {
@@ -976,8 +977,8 @@ pub(in crate::ast) fn constructor(
         }
         _ => return Ok(None),
     };
-    if class_name == super::super::processes::CLASS {
-        return Err(unsupported("constructing a process with new"));
+    if classes::builtin(&class_name) {
+        return Err(unsupported("constructing a process or event with new"));
     }
     let class = class(tree, dimensions, &class_name)?;
     if let Some(method) = class.method("new") {
@@ -1489,7 +1490,7 @@ pub(in crate::ast) fn method_result(
         }
         _ => return Ok(None),
     };
-    let Some(class_name) = class_name.filter(|name| name != super::super::processes::CLASS) else {
+    let Some(class_name) = class_name.filter(|name| !classes::builtin(name)) else {
         return Ok(None);
     };
     Ok(class(tree, dimensions, &class_name)?

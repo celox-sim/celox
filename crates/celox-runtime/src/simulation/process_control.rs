@@ -142,6 +142,16 @@ impl<B: SimBackend> SimulationState<B> {
     ) -> Result<bool, Halt> {
         let op = ProcessOp::from_code(request.operation & 0xff)
             .ok_or(SimulatorErrorCode::InternalError)?;
+        if matches!(
+            op,
+            ProcessOp::Trigger
+                | ProcessOp::TriggerNonblocking
+                | ProcessOp::WaitEvent
+                | ProcessOp::Triggered
+                | ProcessOp::WaitTriggered
+        ) {
+            return self.event_request(executor, now, current, op, request);
+        }
         let count = match op {
             ProcessOp::SelfHandle | ProcessOp::Observe => 0,
             ProcessOp::Srandom | ProcessOp::SetRandstate => 2,
@@ -304,7 +314,11 @@ impl<B: SimBackend> SimulationState<B> {
                             && self.process_state.activations[target]
                                 .control
                                 .awaiting
-                                .is_none())
+                                .is_none()
+                            && self.process_state.activations[target]
+                                .control
+                                .events
+                                .is_empty())
                     {
                         self.wake_controlled(target);
                     }
@@ -359,7 +373,12 @@ impl<B: SimBackend> SimulationState<B> {
                     _ => unreachable!(),
                 }
             }
-            ProcessOp::Observe => unreachable!(),
+            ProcessOp::Observe
+            | ProcessOp::Trigger
+            | ProcessOp::TriggerNonblocking
+            | ProcessOp::WaitEvent
+            | ProcessOp::Triggered
+            | ProcessOp::WaitTriggered => unreachable!(),
         }
         if let Some(result) = request.results.first() {
             executor.backend_mut().set(result.id, value);
@@ -369,5 +388,145 @@ impl<B: SimBackend> SimulationState<B> {
                 .control
                 .suspended
                 .is_none())
+    }
+
+    /// Operations on named events (IEEE 1800-2023 15.5). A handle of 0 is
+    /// `null`: triggering it has no effect and it is never triggered, and a
+    /// process waiting only for it blocks forever (15.5.5.2).
+    fn event_request<E: SimulationExecutor<Backend = B>>(
+        &mut self,
+        executor: &mut E,
+        now: u64,
+        current: usize,
+        op: ProcessOp,
+        request: &HostRequestSite<SignalRef>,
+    ) -> Result<bool, Halt> {
+        let valid = match op {
+            ProcessOp::WaitEvent => !request.args.is_empty(),
+            _ => request.args.len() == 1,
+        };
+        if !valid || request.results.len() != 1 {
+            return Err(SimulatorErrorCode::InternalError.into());
+        }
+        let handles: Vec<u32> = request
+            .args
+            .iter()
+            .map(|arg| executor.backend().get_as(arg.id))
+            .collect();
+        self.expire_events(now);
+        let triggered = |state: &crate::timing::ProcessState, handle: u32| {
+            handle != 0
+                && state
+                    .events
+                    .get(&handle)
+                    .is_some_and(|event| event.triggered == Some(now))
+        };
+        let mut value = 0u32;
+        let blocked = match op {
+            ProcessOp::Trigger => {
+                self.trigger_event(handles[0], now);
+                false
+            }
+            ProcessOp::TriggerNonblocking => {
+                if handles[0] != 0 {
+                    self.process_state.nba_events.push(handles[0]);
+                }
+                false
+            }
+            ProcessOp::Triggered => {
+                value = u32::from(triggered(&self.process_state, handles[0]));
+                false
+            }
+            ProcessOp::WaitTriggered if triggered(&self.process_state, handles[0]) => false,
+            ProcessOp::WaitEvent | ProcessOp::WaitTriggered => {
+                let mut events: Vec<u32> = handles.into_iter().filter(|&h| h != 0).collect();
+                for &handle in &events {
+                    self.process_state
+                        .events
+                        .entry(handle)
+                        .or_default()
+                        .waiters
+                        .push(current);
+                }
+                // A wait for only null events blocks forever; 0 is never
+                // triggered.
+                if events.is_empty() {
+                    events.push(0);
+                }
+                self.process_state.activations[current].control.events = events;
+                true
+            }
+            _ => unreachable!(),
+        };
+        if let Some(result) = request.results.first() {
+            executor.backend_mut().set(result.id, value);
+        }
+        Ok(!blocked
+            && self.process_state.activations[current].live
+            && self.process_state.activations[current]
+                .control
+                .suspended
+                .is_none())
+    }
+
+    /// Forget the events that were last triggered before time `now` and that
+    /// no process waits for: their state is as if they were never used. Each
+    /// time this runs at a later time it scans the events once.
+    fn expire_events(&mut self, now: u64) {
+        let state = &mut self.process_state;
+        if state.event_time >= now {
+            return;
+        }
+        state.event_time = now;
+        let activations = &state.activations;
+        state.events.retain(|&handle, event| {
+            event.waiters.retain(|&process| {
+                activations.get(process).is_some_and(|activation| {
+                    activation.live && activation.control.events.contains(&handle)
+                })
+            });
+            !event.waiters.is_empty() || event.triggered == Some(now)
+        });
+    }
+
+    /// Trigger named event `handle` at time `now`: unblock the processes
+    /// waiting for it (IEEE 1800-2023 15.5.1).
+    pub(super) fn trigger_event(&mut self, handle: u32, now: u64) {
+        if handle == 0 {
+            return;
+        }
+        self.expire_events(now);
+        let event = self.process_state.events.entry(handle).or_default();
+        event.triggered = Some(now);
+        let waiters = std::mem::take(&mut event.waiters);
+        let mut suspended = Vec::new();
+        for process in waiters {
+            let Some(activation) = self.process_state.activations.get_mut(process) else {
+                continue;
+            };
+            if !activation.live || !activation.control.events.contains(&handle) {
+                continue;
+            }
+            // A suspended process misses the trigger: once resumed, it still
+            // waits for a later one, as for a signal event (9.7).
+            if activation.control.suspended.is_some() {
+                suspended.push(process);
+                continue;
+            }
+            // A process waiting for several events stops waiting for all.
+            for other in std::mem::take(&mut activation.control.events) {
+                if other != handle
+                    && let Some(event) = self.process_state.events.get_mut(&other)
+                {
+                    event.waiters.retain(|&waiter| waiter != process);
+                }
+            }
+            self.wake_controlled(process);
+        }
+        if !suspended.is_empty()
+            && let Some(event) = self.process_state.events.get_mut(&handle)
+        {
+            event.waiters.extend(suspended);
+        }
     }
 }

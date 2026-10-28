@@ -310,6 +310,8 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::type_alias_members",
                 "class::type_parameter_imports",
                 "class::type_parameter_shadowing",
+                "events::events_of_class_objects",
+                "events::triggered_state_lasts_until_time_advances",
                 "fork::compound_event_activations_outlive_parent",
                 "fork::compound_event_four_state_lsb_edges",
                 "fork::compound_event_function_scratch_isolated",

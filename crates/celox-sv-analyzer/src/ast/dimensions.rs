@@ -154,6 +154,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                         | TypeKind::String
                         | TypeKind::Object
                         | TypeKind::Process
+                        | TypeKind::Event
                 ),
                 members: port.r#type().members.clone(),
                 signed_element_depth: port.r#type().signed_element_depth,
@@ -188,6 +189,7 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                         | TypeKind::String
                         | TypeKind::Object
                         | TypeKind::Process
+                        | TypeKind::Event
                 ),
                 members: signal.r#type().members.clone(),
                 signed_element_depth: signal.r#type().signed_element_depth,

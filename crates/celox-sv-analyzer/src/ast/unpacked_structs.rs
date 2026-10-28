@@ -124,7 +124,12 @@ pub(in crate::ast) fn native_type(
         .map(|(name, ty)| {
             if !ty.unpacked_ranges.is_empty()
                 || ty.container.is_some()
-                || matches!(ty.kind, TypeKind::Real | TypeKind::Shortreal)
+                // Each event member would need its own synchronization
+                // object (IEEE 1800-2023 15.5).
+                || matches!(
+                    ty.kind,
+                    TypeKind::Real | TypeKind::Shortreal | TypeKind::Event
+                )
             {
                 return None;
             }

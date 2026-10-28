@@ -228,7 +228,12 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
-  named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、下記のBoolean部分集合を超える並行アサーション、`force` / `release`。
+  `fork` / `join`、`wait fork` / `disable fork`、下記のBoolean部分集合を超える並行アサーション、`force` / `release`。
+- [対応範囲](#named-events)を超える named event：event の配列、event のポート、unpacked 構造体の event メンバ、event を返す関数、
+  `always_comb` / `always_latch` の中の trigger、
+  遅延やイベント制御付きの `->>`、
+  event と信号の変化やエッジを並べたイベント制御（`@(e or posedge clk)`）、他のオペランドを持つ
+  `wait` 条件の中の `triggered`、`wait` 条件が呼ぶ関数が読む `triggered`、`wait_order`。
 - プロセス内のタイミング制御：イベント式と `iff` 条件内の impure な関数呼び出し、
   static task 引数を読む `wait` 条件、イベント式、`iff` 条件。クラスのプロパティを（直接、ハンドルや関数を通じて、
   またはプロパティが持つコンテナとして）読む `wait` 条件とイベント式。プロパティへの書き込みで待機中のプロセスが
@@ -491,6 +496,29 @@ Rust の `.allow_inferred_latches(true)` と JavaScript の `allowInferredLatche
   そのプロセスがタイミング制御に達するか終了した時点で参照します（4.7）。ホストが
   `Simulation::note_raw_writes` で通知した生のメモリ書き込みは、書き込み後の条件で判定します。単純な `always @(posedge clk iff en)` はプロセスとして
   実行し、`always_ff` の `iff` は拒否します（[#452](https://github.com/celox-sim/celox/issues/452)）。
+
+### Named event {#named-events}
+
+`event` は同期オブジェクトのハンドルです（IEEE 1800-2023 15.5）。初期化子のない event の宣言ごとに
+同期オブジェクトを1つ作ります。モジュール変数、ローカル変数、static クラスプロパティ、各オブジェクトの
+event プロパティが対象です。event は task や関数の引数、クラスプロパティにでき、代入と比較はクラス
+ハンドルと同じです。
+
+- `-> e` は、その時点で `e` を待っているプロセスだけを再開します（15.5.1、15.5.2）。`->> e` は
+  NBA 領域で、それより前に発行したノンブロッキング代入の後にトリガします。
+- `@e`、`@(e)`、`@(e1 or e2)` はトリガを待ちます。`e` は `obj.e` や `m[key].e` など、`event`
+  型の任意の式でかまいません。
+- `e.triggered` はトリガから時刻が進むまで 1 で、その時間ステップの `wait (e.triggered)` はすぐに
+  戻ります（15.5.3）。
+- `e1 = e2` は event を統合します。以後どちらの変数を通したトリガと待ちも同じオブジェクトを使います。
+  すでに `e1` を待っているプロセスは古いオブジェクトを待ち続けます（15.5.5.1）。`e = null` の後、
+  `-> e` は何もせず、`e.triggered` は 0 です。null の event を待つと永久に止まります（15.5.5.2）。
+- event は `==`、`!=`、`===`、`!==` と `null` で比較でき、null でない event は真です（15.5.5.3）。
+
+event をトリガする（関数経由を含む）ワイルドカードの `always` と `always_ff` はプロセスとして実行します。
+event の待ちとトリガがスケジューラを使うのは、それを使うプロセスだけです。他のプロセスのコンパイル結果は
+変わりません。named event は状態ファイルに保存しません。プロセスが event を待っている間や、
+現在のタイムステップのトリガが `triggered` から見える間は、保存を拒否します。
 
 ### 変数の寿命
 

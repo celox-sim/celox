@@ -52,6 +52,9 @@ pub const FREEZE: u64 = 32;
 /// `new_object(size)`: a new object of the class in the parameter, with
 /// `size` zeroed bytes.
 pub const OBJECT_NEW: u64 = 48;
+/// `new_event()`: the handle of a new named event (IEEE 1800-2023 15.5). The
+/// scheduler keeps the event's state; the heap only names it.
+pub const EVENT_NEW: u64 = 47;
 /// `declare_handle(object, offset, kind)`: the property at byte `offset`
 /// holds a handle; `kind` is 0 for a string and 1 for an object.
 pub const OBJECT_HANDLE: u64 = 49;
@@ -198,6 +201,7 @@ impl Heap {
                 let bytes = self.take_buffer(a);
                 self.intern(&bytes).into()
             }
+            EVENT_NEW => self.new_event().into(),
             OBJECT_NEW => self.new_object(parameter as u32, a as usize).into(),
             OBJECT_HANDLE => {
                 let kind = if c == 0 {

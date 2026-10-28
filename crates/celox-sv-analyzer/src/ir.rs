@@ -844,6 +844,9 @@ pub enum TypeKind {
     Object,
     /// A scheduler-owned process reference (9.7), independent of the heap.
     Process,
+    /// A handle of the synchronization object of a named event (15.5), or
+    /// `null`.
+    Event,
     Bit,
     Logic,
     Reg,
@@ -916,6 +919,7 @@ impl From<ast::TypeKind> for TypeKind {
             ast::TypeKind::String => TypeKind::String,
             ast::TypeKind::Object => TypeKind::Object,
             ast::TypeKind::Process => TypeKind::Process,
+            ast::TypeKind::Event => TypeKind::Event,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,
