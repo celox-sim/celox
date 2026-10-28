@@ -7662,3 +7662,38 @@ fn unresolved_class_alias_defaults_still_fail() {
         );
     }
 }
+
+#[test]
+fn class_alias_type_arguments_wait_for_package_constants() {
+    for aliases in [
+        "typedef bit signed [W-1:0] word_t; typedef Utils#(word_t) word_utils;",
+        "typedef Utils#(bit [W:0]) wide_utils;",
+        "typedef Utils#(bit [W:0])::item_t item_t;",
+    ] {
+        let source = format!(
+            r#"package p;
+            parameter int W = 6;
+            class Utils #(type T = int);
+                typedef T item_t;
+            endclass
+            {aliases}
+        endpackage
+        module Top; endmodule"#
+        );
+        analyze_source(&source, Path::new("class-constant-type-argument.sv"))
+            .expect("class type arguments see their package constants after parameter collection");
+    }
+}
+
+#[test]
+fn unresolved_class_alias_type_arguments_still_fail() {
+    let source = "package p; class Utils #(type T = int); endclass \
+         typedef Utils#(bit [MISSING:0]) wide_utils; endpackage \
+         module Top; localparam int MISSING = 29; endmodule";
+    let error = analyze_source(source, Path::new("unresolved-class-type-argument.sv"))
+        .expect_err("caller constants cannot bound a package type argument");
+    assert!(
+        error.to_string().contains("class type parameter value"),
+        "{error}"
+    );
+}
