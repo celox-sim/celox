@@ -290,7 +290,7 @@ package 内で具体化したクラスの typedef と型パラメータは、`Sm
 ### virtual interface {#virtual-interfaces}
 
 virtual interface（IEEE 1800-2023 25.9）は、変数、クラスのプロパティ、サブルーチンの引数・戻り値、
-配列やコンテナの要素として使えます。`null`、interface インスタンス（インスタンス配列の要素を含む）、
+配列やコンテナの要素として使え、型は `uvm_config_db#(virtual bus_if)` のようにクラスの型パラメータの値にもなります。`null`、interface インスタンス（インスタンス配列の要素を含む）、
 interface ポートに接続されたインスタンス、同じ interface の virtual interface を代入でき、modport なしから
 modport 付きへの代入はできますが、その逆はできません。メンバは virtual interface を通じて読み書きでき、
 ブロッキング・ノンブロッキング・複合代入に対応します。net への書き込みと、選んだ modport にないメンバは拒否します。

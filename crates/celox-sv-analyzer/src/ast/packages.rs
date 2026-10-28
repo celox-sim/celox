@@ -283,6 +283,9 @@ impl Packages {
             virtual_interfaces: options.virtual_interfaces.clone(),
             ..AnalysisState::default()
         });
+        state
+            .foreign
+            .set_virtual_interfaces(options.virtual_interfaces.clone());
         let mut packages = Self::analyze_packages(trees, timescales, &state)?;
         packages.virtual_interfaces = options.virtual_interfaces;
         if mixed_timescales {
