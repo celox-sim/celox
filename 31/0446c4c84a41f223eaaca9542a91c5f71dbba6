@@ -1,0 +1,1 @@
+Rebased on #2411 (ref arguments): the ref equivalence check compares enum_domain (members, base shape) in place of enum_values, so only the same enumeration matches (6.22.2), with a regression; Callee::Lookup writes no argument.
