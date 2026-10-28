@@ -127,6 +127,7 @@ impl CompiledBitCount {
 
 fn compile_bit_count(op: UnaryOp, source_width: usize, four_state: bool) -> CompiledBitCount {
     let expect_native_bsf = !four_state && matches!(op, UnaryOp::CountTrailingZeros);
+    let is_wide_parity = matches!(op, UnaryOp::Xor) && source_width > 64;
     let result_width = op.result_width(source_width);
     let input_bytes = source_width.div_ceil(8);
     let output_bytes = result_width.div_ceil(8);
@@ -229,6 +230,17 @@ fn compile_bit_count(op: UnaryOp, source_width: usize, four_state: bool) -> Comp
     };
 
     let mut function = lower_execution_unit(&eu, &layout, four_state);
+    if is_wide_parity {
+        assert_eq!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.insts)
+                .any(|inst| matches!(inst, MInst::Popcnt { .. })),
+            function.target_features.popcnt(),
+            "wide parity must respect the selected CPU features"
+        );
+    }
     function.verify();
     mir_legalize::legalize(&mut function);
     function.verify();
@@ -288,5 +300,43 @@ fn assert_bit_counts(
             (expected_trailing, 0),
             "ctz width={source_width} value={value:#x}"
         );
+    }
+}
+
+#[test]
+fn native_wide_parity_uses_target_features_and_preserves_padding_and_x() {
+    for width in [65usize, 95, 122, 127, 128, 129, 255, 257] {
+        let valid = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+        for four_state in [false, true] {
+            let compiled = compile_bit_count(UnaryOp::Xor, width, four_state);
+            let high = BigUint::from(1u8) << (width - 1);
+            let padding = BigUint::from(0xffu8) << width;
+            for value in [
+                BigUint::default(),
+                BigUint::from(1u8),
+                high.clone(),
+                &high | BigUint::from(1u8),
+                valid.clone(),
+                &padding | &high,
+                &valid ^ BigUint::from(3u8),
+            ] {
+                let expected = (&value & &valid)
+                    .iter_u64_digits()
+                    .map(|word| word.count_ones())
+                    .sum::<u32>()
+                    & 1;
+                assert_eq!(
+                    compiled.run(&value, &BigUint::default()),
+                    (u64::from(expected), 0),
+                    "width={width}, four_state={four_state}, value={value}"
+                );
+                if four_state {
+                    // An unknown bit anywhere in a logical source chunk is X.
+                    assert_eq!(compiled.run(&value, &high), (1, 1));
+                    // Padding outside the logical width must not produce X.
+                    assert_eq!(compiled.run(&value, &padding), (u64::from(expected), 0));
+                }
+            }
+        }
     }
 }
