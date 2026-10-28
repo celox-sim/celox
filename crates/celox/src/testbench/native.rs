@@ -80,7 +80,7 @@ impl<'a, B: SimBackend> Process<'a, B> {
                 ));
             };
             match request {
-                KernelRequest::Settle => {
+                KernelRequest::Settle { .. } => {
                     if let Err(error) = settle_testbench(sim) {
                         return Poll::Ready(ExecResult::Fail(format!("eval_comb: {error}")));
                     }

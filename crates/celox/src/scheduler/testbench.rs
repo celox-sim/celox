@@ -5,7 +5,9 @@ use celox_testbench::*;
 
 type Meta = TestbenchScheduler<AbsoluteAddr>;
 
-pub(super) fn attach(program: &mut LaidOutProgram) {
+/// `deferred` when the shared scheduler defers settles: the TB then
+/// observes what it reads itself and leaves a deferred settle pending.
+pub(super) fn attach(program: &mut LaidOutProgram, deferred: bool) {
     let Some(tb) = program.runtime.testbench.clone() else {
         return;
     };
@@ -15,7 +17,7 @@ pub(super) fn attach(program: &mut LaidOutProgram) {
     let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
         return;
     };
-    let unit = generate(program, &tb, &meta, &schema.slots);
+    let unit = generate(program, &tb, &meta, &schema.slots, deferred);
     meta.entry = Some(program.sir.processes.len());
     program.sir.processes.push(unit);
     program
@@ -24,6 +26,35 @@ pub(super) fn attach(program: &mut LaidOutProgram) {
         .as_mut()
         .unwrap()
         .set_scheduler(meta);
+}
+
+/// The parts of the settle that compute what TB reads load.
+struct Cones<'a> {
+    slicer: CombSlicer<'a>,
+    size: usize,
+    /// What keeps state from one settle to the next: a settle the TB
+    /// requests is an activation of its own.
+    stateful: Vec<AbsoluteAddr>,
+    known: HashMap<Vec<AbsoluteAddr>, Option<Vec<Unit>>>,
+}
+
+impl Cones<'_> {
+    /// `None` when the reads need (nearly) the whole settle, or none are
+    /// named: the settle itself runs then.
+    fn cone(&mut self, reads: &[AbsoluteAddr]) -> Option<Vec<Unit>> {
+        if reads.is_empty() {
+            return None;
+        }
+        let (slicer, size, stateful) = (&self.slicer, self.size, &self.stateful);
+        self.known
+            .entry(reads.to_vec())
+            .or_insert_with(|| {
+                let cone = slicer.slice(reads.iter().chain(stateful).copied());
+                let cone_size: usize = cone.iter().map(|unit| instructions(unit).count()).sum();
+                (cone_size * 2 < size).then_some(cone)
+            })
+            .clone()
+    }
 }
 
 fn put(g: &mut Generator<'_>, a: AbsoluteAddr, value: u64) {
@@ -165,6 +196,7 @@ fn generate(
     tb: &TestbenchProgram<AbsoluteAddr>,
     m: &Meta,
     slots: &SchedulerSlots<AbsoluteAddr>,
+    deferred: bool,
 ) -> Unit {
     let mut b = Builder::new();
     let comb = b.new_block();
@@ -178,6 +210,23 @@ fn generate(
         .filter(|(_, s)| matches!(s.kind, RuntimeEventKind::Finish | RuntimeEventKind::Stop))
         .map(|(i, _)| i as u32)
         .collect();
+    let mut cones = Cones {
+        slicer: CombSlicer::new(&program.sir.eval_comb, program.shared_storage()),
+        size: program
+            .sir
+            .eval_comb
+            .iter()
+            .map(|unit| instructions(unit).count())
+            .sum(),
+        stateful: program
+            .sir
+            .eval_comb_stateful
+            .iter()
+            .flatten()
+            .map(|target| target.absolute_addr())
+            .collect(),
+        known: HashMap::default(),
+    };
     let mut g = Generator {
         b,
         slots,
@@ -187,6 +236,8 @@ fn generate(
         shared: program.shared_storage(),
         comb,
         continuations: vec![],
+        eager: None,
+        eager_continuations: vec![],
     };
     let initialize = g.b.new_block();
     let start = g.b.new_block();
@@ -331,7 +382,7 @@ fn generate(
         for (request, block) in kernel.requests.iter().zip(requests) {
             g.b.switch_to_block(block);
             match request {
-                KernelRequest::Settle => {
+                KernelRequest::Settle { reads } => {
                     let native = equals_slot(&mut g, m.control[TB_NATIVE_SETTLE], 1);
                     let settle = g.b.new_block();
                     let host = g.b.new_block();
@@ -341,7 +392,22 @@ fn generate(
                     put(&mut g, m.control[TB_EXIT], TB_HOST);
                     g.b.seal_block(SIRTerminator::Return);
                     g.b.switch_to_block(settle);
-                    settle_then(&mut g, m, run[i]);
+                    match deferred.then(|| cones.cone(reads)).flatten() {
+                        // With settles deferred, computing what the TB reads
+                        // leaves the settle pending.
+                        Some(units) => {
+                            let dirty = g.load(slots.dirty, 8);
+                            let clean = g.equals(dirty, 0);
+                            let compute = g.b.new_block();
+                            branch(&mut g, clean, run[i], compute);
+                            g.b.switch_to_block(compute);
+                            for unit in &units {
+                                g.inline(unit, finish);
+                            }
+                            jump(&mut g, run[i]);
+                        }
+                        None => settle_then(&mut g, m, run[i]),
+                    }
                 }
                 KernelRequest::Written { .. } => {
                     let dirty = g.constant(1, 8);
@@ -442,9 +508,39 @@ fn generate(
         })
         .collect();
     if let (Some(unit), Some(positions)) = (schema.unit, positions) {
-        let mut allowed = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1);
-        let clean = equals_slot_width(&mut g, slots.dirty, 8, 0);
-        allowed = g.binary(1, allowed, BinaryOp::And, clean);
+        // A scheduler that defers settles finds a pending one itself, but
+        // the edges it and this unit judge need the levels of the event
+        // signals: compute those (the part of the settle they need, or the
+        // settle), or require a settled design.
+        let mut allowed = if deferred {
+            let levels: Vec<AbsoluteAddr> = schema
+                .events
+                .iter()
+                .chain(m.baselines.iter().map(|(source, _)| source))
+                .copied()
+                .collect();
+            let judge = g.b.new_block();
+            match cones.cone(&levels) {
+                Some(units) => {
+                    let dirty = g.load(slots.dirty, 8);
+                    let clean = g.equals(dirty, 0);
+                    let compute = g.b.new_block();
+                    branch(&mut g, clean, judge, compute);
+                    g.b.switch_to_block(compute);
+                    for unit in &units {
+                        g.inline(unit, finish);
+                    }
+                    jump(&mut g, judge);
+                }
+                None => settle_then(&mut g, m, judge),
+            }
+            g.b.switch_to_block(judge);
+            equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1)
+        } else {
+            let allowed = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1);
+            let clean = equals_slot_width(&mut g, slots.dirty, 8, 0);
+            g.binary(1, allowed, BinaryOp::And, clean)
+        };
         for &(source, saved) in &m.baselines {
             let before = g.load(saved, 1);
             let current = g.load(source, 1);
@@ -497,7 +593,11 @@ fn generate(
         let zero = g.constant(0, 8);
         g.store(slots.exit, 8, zero);
         g.store(slots.finish, 8, zero);
+        let defer = g.constant(u64::from(deferred), 8);
+        g.store(slots.defer_limit_settle, 8, defer);
         g.b.inline_execution_unit(&program.sir.processes[unit]);
+        let zero = g.constant(0, 8);
+        g.store(slots.defer_limit_settle, 8, zero);
         let exit = g.load(slots.exit, 8);
         let limit = g.equals(exit, SchedulerExit::Limit as u64);
         let finished = g.equals(exit, SchedulerExit::Finish as u64);

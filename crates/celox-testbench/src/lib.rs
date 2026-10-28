@@ -292,8 +292,15 @@ pub struct TestbenchClock<Event> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum KernelRequest<A> {
     Statement(usize),
-    Settle,
-    Written { address: A, width: usize },
+    /// Settle the DUT before the TB reads `reads`, the storage of DUT
+    /// signals its next expression loads.
+    Settle {
+        reads: Vec<A>,
+    },
+    Written {
+        address: A,
+        width: usize,
+    },
     Error(String),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

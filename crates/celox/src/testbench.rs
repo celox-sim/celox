@@ -2415,7 +2415,7 @@ mod tests {
         let settlements = tb.kernels()[0]
             .requests
             .iter()
-            .filter(|request| matches!(request, celox_testbench::KernelRequest::Settle))
+            .filter(|request| matches!(request, celox_testbench::KernelRequest::Settle { .. }))
             .count();
         assert_eq!(settlements, 2);
         assert_eq!(

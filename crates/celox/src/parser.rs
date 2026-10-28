@@ -1165,6 +1165,7 @@ mod fused_hint_tests {
                 .into_iter()
                 .collect(),
                 merge_comb_apply: true,
+                eval_comb_stateful: None,
                 eval_only_ffs: Default::default(),
                 apply_ffs: Default::default(),
                 parallel: None,

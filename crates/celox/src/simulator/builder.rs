@@ -4816,6 +4816,45 @@ endmodule"#;
         assert!(count_clean_clock_batch(false, false, true).0 > 0);
     }
 
+    /// A bit-level schedule may load a range before the bits it needs are
+    /// stored, and discard the stale ones: the settle is still a function of
+    /// its inputs, so it may be deferred.
+    #[test]
+    fn discarded_stale_bits_keep_settles_deferred() {
+        let source = r#"
+            module Child (
+                translate: input logic, frame: input logic<20>, pc: input logic<12>,
+                physical: output logic<12>,
+            ) {
+                var translated: logic<32>;
+                assign translated = {frame, pc};
+                assign physical = if translate ? translated[11:0] : pc;
+            }
+            module Top (
+                clk: input clock, rst: input reset, translate: input logic,
+                next_frame: input logic<20>, next_pc: input logic<12>,
+                physical: output logic<12>,
+            ) {
+                var frame_q: logic<20>;
+                var pc_q: logic<12>;
+                var frame: logic<20>;
+                always_ff {
+                    if_reset { frame_q = 0; pc_q = 0; } else { frame_q = next_frame; pc_q = next_pc; }
+                }
+                inst child: Child (translate, frame, pc: pc_q, physical);
+                assign frame = frame_q;
+            }
+        "#;
+        let (program, _, _, _, _) = crate::Simulation::builder(source, "Top")
+            .four_state(false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .unwrap();
+        assert_eq!(program.sir.eval_comb_stateful, Some(Vec::new()));
+        let (defers, by_loads) = crate::scheduler::defers_settles_for_test(&program);
+        assert!(defers);
+        assert!(!by_loads, "the fixture must load stale bits it discards");
+    }
+
     #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
     fn count_clean_clock_batch(clock_data: bool, alias: bool, dirty: bool) -> (u64, usize) {
         use crate::SimBackend;
