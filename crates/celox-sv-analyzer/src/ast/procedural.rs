@@ -341,8 +341,20 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// it (IEEE 1800-2023 8.9).
     fn enter_class_scope(&mut self, class: &classes::Class) {
         self.dims.class_scope = Some(class.name.clone());
-        for property in &class.properties {
-            let entry = self.take_binding(&property.name, None, 0);
+        // The name of a property of unpacked structure type, whose members
+        // are properties named by their member paths, is hidden too.
+        let aggregates = class
+            .aggregates
+            .iter()
+            .filter(|aggregate| !aggregate.name.contains('.'))
+            .map(|aggregate| aggregate.name.as_str());
+        for name in class
+            .properties
+            .iter()
+            .map(|property| property.name.as_str())
+            .chain(aggregates)
+        {
+            let entry = self.take_binding(name, None, 0);
             self.scopes
                 .last_mut()
                 .expect("a body always has a scope")
@@ -1193,6 +1205,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         "native assignment operator mode disagrees".into(),
                     ));
                 }
+                if let Some(stmts) =
+                    self.aggregate_property_assignment(operator, *nonblocking, *left, *right)?
+                {
+                    return Ok(stmts);
+                }
                 Ok(vec![self.assignment_value(
                     if *nonblocking { "=" } else { operator },
                     *nonblocking,
@@ -2040,7 +2057,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             Some(ForInitialization::Assignments(values)) => {
                 for value in values {
-                    init.push(self.assignment_value("=", false, (value.left, value.right))?);
+                    match self.aggregate_property_assignment("=", false, value.left, value.right)? {
+                        Some(stmts) => init.extend(stmts),
+                        None => init.push(self.assignment_value(
+                            "=",
+                            false,
+                            (value.left, value.right),
+                        )?),
+                    }
                 }
             }
         }
@@ -2050,6 +2074,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .transpose()?;
         let mut steps = Vec::new();
         for step in &header.steps {
+            if let ForStep::Assignment {
+                left,
+                operator,
+                right,
+                ..
+            } = step
+                && let Some(stmts) =
+                    self.aggregate_property_assignment(operator, false, *left, *right)?
+            {
+                steps.extend(stmts);
+                continue;
+            }
             steps.push(match step {
                 ForStep::Assignment { left, operator, right, .. } => self.assignment_value(operator, false, (*left, *right))?,
                 ForStep::Expression(id) => {
@@ -3285,7 +3321,9 @@ impl BodyBuilder<'_, '_, '_> {
                     .collect(),
             });
         }
-        for property in class.own_properties() {
+        let own = class.base_properties..class.properties.len();
+        for (index, property) in own.clone().zip(class.own_properties()) {
+            body.extend(self.aggregate_initializers(class, this, index)?);
             let Some(initializer) = property.initializer else {
                 continue;
             };
@@ -3326,6 +3364,135 @@ impl BodyBuilder<'_, '_, '_> {
             body.push(Stmt::Eval(classes::object_call(
                 system_functions::ObjectOp::Store(property.field),
                 vec![Expr::Ident(this.to_owned()), value],
+            )));
+        }
+        body.extend(self.aggregate_initializers(class, this, own.end)?);
+        Ok(body)
+    }
+
+    /// The initializers of the properties of unpacked structure type that
+    /// `class` declares before its property `position`.
+    fn aggregate_initializers(
+        &mut self,
+        class: &classes::Class,
+        this: &str,
+        position: usize,
+    ) -> Converted<Vec<Stmt>> {
+        let mut body = Vec::new();
+        for aggregate in &class.aggregates {
+            if aggregate.owner != class.name || aggregate.position != position {
+                continue;
+            }
+            if let Some(initializer) = aggregate.initializer {
+                body.extend(self.aggregate_store(
+                    aggregate,
+                    class,
+                    Expr::Ident(this.to_owned()),
+                    initializer,
+                )?);
+            }
+        }
+        Ok(body)
+    }
+
+    /// An assignment to a whole class property of unpacked structure type,
+    /// `h.p = v`: a store of each of its leaf properties.
+    fn aggregate_property_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let native = self.tree.declarations();
+        let Some((aggregate, class, receiver)) =
+            expression_binding::object_aggregate_property(self.tree, left, native, &self.dims)?
+        else {
+            return Ok(None);
+        };
+        if nonblocking {
+            return Err(unsupported("nonblocking assignment to a class property"));
+        }
+        if op != "=" {
+            return Err(unsupported(format!(
+                "operator `{op}` on an unpacked structure"
+            )));
+        }
+        let mut handle =
+            expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
+        self.rename_expr(&mut handle);
+        self.aggregate_store(&aggregate, &class, handle, right)
+            .map(Some)
+    }
+
+    /// Store the value of native `right` into each leaf property of
+    /// `aggregate` of the object `handle`.
+    fn aggregate_store(
+        &mut self,
+        aggregate: &classes::AggregateProperty,
+        class: &classes::Class,
+        handle: Expr,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Vec<Stmt>> {
+        let native = self.tree.declarations();
+        let structure = aggregate
+            .r#type
+            .unpacked_struct()
+            .expect("an unpacked structure property")
+            .clone();
+        unpacked_structs::check_value(&structure, right, native, self.tree, &self.dims)?;
+        let mut value = expression_binding::bind_value(
+            right,
+            native,
+            self.tree,
+            &self.dims,
+            Some(&dimensions_from_type(&aggregate.r#type)),
+        )?;
+        self.rename_expr(&mut value);
+        let leaves = structure.leaves();
+        let mut body = Vec::new();
+        // Evaluate the whole value, which may read the members it replaces,
+        // and the object it is stored in once, before any member is written.
+        let mut flat = aggregate.r#type.clone();
+        flat.unpacked_struct = None;
+        let temp = self.declare("$aggregate", flat);
+        body.push(Stmt::Local {
+            name: temp.clone(),
+            init: None,
+        });
+        body.push(Stmt::Assign {
+            lhs: LValue::Ident(temp.clone()),
+            rhs: value,
+            nonblocking: false,
+        });
+        let handle = if inlining::calls_subroutine(&handle) {
+            let receiver = self.declare("$receiver", classes::handle(&class.name));
+            body.push(Stmt::Local {
+                name: receiver.clone(),
+                init: None,
+            });
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(receiver.clone()),
+                rhs: handle,
+                nonblocking: false,
+            });
+            Expr::Ident(receiver)
+        } else {
+            handle
+        };
+        let parts = leaves.iter().map(|leaf| Expr::Select {
+            expr: Box::new(Expr::Ident(temp.clone())),
+            msb: ConstExpr::Literal((leaf.offset + leaf.width - 1).to_string()),
+            lsb: ConstExpr::Literal(leaf.offset.to_string()),
+            signed: false,
+        });
+        for (leaf, part) in leaves.iter().zip(parts) {
+            let property = class
+                .property(&leaf.name(&aggregate.name))
+                .ok_or_else(|| unsupported("unpacked structure property member"))?;
+            body.push(Stmt::Eval(classes::object_call(
+                system_functions::ObjectOp::Store(property.field),
+                vec![handle.clone(), part],
             )));
         }
         Ok(body)

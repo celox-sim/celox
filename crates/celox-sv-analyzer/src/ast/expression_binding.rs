@@ -18,12 +18,14 @@ pub(super) use direct::{
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
-    Cast as ObjectCast, Receiver as ObjectReceiver, cast as object_cast,
+    Cast as ObjectCast, Receiver as ObjectReceiver,
+    aggregate_property as object_aggregate_property, cast as object_cast,
     check_access as check_member_access, check_assignment as check_handle_assignment,
     constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
-    method as object_method, named_class, native_class as object_native_class,
-    property as object_property, rand_mode_call as object_rand_mode_call,
-    receiver as object_receiver, static_property as object_static_property, this as object_this,
+    method as object_method, method_result as object_method_result, named_class,
+    native_class as object_native_class, property as object_property,
+    rand_mode_call as object_rand_mode_call, receiver as object_receiver,
+    static_property as object_static_property, this as object_this,
 };
 pub(super) use strings::{
     call as string_call, method as string_method, native_string, string_value,

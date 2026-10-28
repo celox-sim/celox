@@ -58,6 +58,22 @@ impl Property {
     }
 }
 
+/// A property of unpacked structure type, or a member of one that is itself
+/// an unpacked structure. It is not laid out: its leaf members are
+/// properties named by their member path (see `unpacked_structs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AggregateProperty {
+    pub name: String,
+    pub owner: String,
+    pub local: bool,
+    pub protected: bool,
+    pub r#type: Type,
+    pub initializer: Option<celox_sv_syntax::ExprId>,
+    /// How many properties precede it: a later declaration of the same
+    /// name hides an earlier one.
+    pub position: usize,
+}
+
 /// A static property of a class: one variable of the module that declares
 /// the class, shared by all of its objects (IEEE 1800-2023 8.9).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,6 +139,8 @@ pub(super) struct Class {
     pub properties: Vec<Property>,
     /// How many of `properties` the bases declare.
     pub base_properties: usize,
+    /// Properties of unpacked structure type of the class and its bases.
+    pub aggregates: Vec<AggregateProperty>,
     /// Static properties of the class and its bases.
     pub statics: Vec<StaticProperty>,
     /// Methods visible in the class, overrides replacing inherited ones.
@@ -195,10 +213,42 @@ impl Class {
     /// The property `name`; one the class declares hides one of a base
     /// (IEEE 1800-2023 8.14).
     pub fn property(&self, name: &str) -> Option<&Property> {
-        self.properties
+        let (index, property) = self
+            .properties
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, property)| property.name == name)?;
+        (!self.hidden(name, index + 1, index)).then_some(property)
+    }
+
+    /// The property or member of unpacked structure type `name`.
+    pub fn aggregate(&self, name: &str) -> Option<&AggregateProperty> {
+        let aggregate = self
+            .aggregates
             .iter()
             .rev()
-            .find(|property| property.name == name)
+            .find(|aggregate| aggregate.name == name)?;
+        (!self.hidden(name, aggregate.position, aggregate.position)).then_some(aggregate)
+    }
+
+    /// Whether a later declaration hides the property or member `name`: a
+    /// property from position `properties` on, or a property of unpacked
+    /// structure type after position `aggregates`, of that name or of a
+    /// structure that contains it (`p` for `p.a`).
+    fn hidden(&self, name: &str, properties: usize, aggregates: usize) -> bool {
+        let paths = name
+            .match_indices('.')
+            .map(|(end, _)| &name[..end])
+            .chain([name])
+            .collect::<Vec<_>>();
+        self.properties
+            .iter()
+            .enumerate()
+            .any(|(index, property)| index >= properties && paths.contains(&property.name.as_str()))
+            || self.aggregates.iter().any(|aggregate| {
+                aggregate.position > aggregates && paths.contains(&aggregate.name.as_str())
+            })
     }
 
     pub fn static_property(&self, name: &str) -> Option<&StaticProperty> {
@@ -746,6 +796,10 @@ pub(super) fn class(
         .map(|base| base.properties.clone())
         .unwrap_or_default();
     let base_properties = properties.len();
+    let mut aggregates = base
+        .as_ref()
+        .map(|base| base.aggregates.clone())
+        .unwrap_or_default();
     let mut statics = base
         .as_ref()
         .map(|base| base.statics.clone())
@@ -782,6 +836,55 @@ pub(super) fn class(
                 return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
+            if let Some(aggregate) = ty.unpacked_struct() {
+                if property.qualifiers.is_static {
+                    return Err(unsupported(
+                        "static class property of unpacked structure type",
+                    ));
+                }
+                if property.qualifiers.rand || property.qualifiers.randc {
+                    return Err(unsupported(
+                        "random class property of unpacked structure type",
+                    ));
+                }
+                if property.declaration.constant {
+                    return Err(unsupported(
+                        "const class property of unpacked structure type",
+                    ));
+                }
+                for (aggregate_name, aggregate_type) in
+                    unpacked_structs::aggregates(&property_name, &ty)
+                {
+                    aggregates.push(AggregateProperty {
+                        initializer: (aggregate_name == property_name)
+                            .then_some(variable.value)
+                            .flatten(),
+                        name: aggregate_name,
+                        owner: name.to_owned(),
+                        local: property.qualifiers.local,
+                        protected: property.qualifiers.protected,
+                        r#type: aggregate_type,
+                        position: properties.len(),
+                    });
+                }
+                for leaf in aggregate.leaves() {
+                    let field = field(&tree.state, &leaf.r#type, env, size)?;
+                    size = field.offset + field.storage();
+                    properties.push(Property {
+                        name: leaf.name(&property_name),
+                        owner: name.to_owned(),
+                        constant: false,
+                        local: property.qualifiers.local,
+                        protected: property.qualifiers.protected,
+                        r#type: leaf.r#type,
+                        field,
+                        rand: false,
+                        randc: false,
+                        initializer: None,
+                    });
+                }
+                continue;
+            }
             if property.qualifiers.is_static {
                 statics.retain(|known| known.name != property_name);
                 statics.push(StaticProperty {
@@ -946,6 +1049,7 @@ pub(super) fn class(
         is_interface: false,
         properties,
         base_properties,
+        aggregates,
         statics,
         methods,
         declarations: Vec::new(),
@@ -1066,6 +1170,7 @@ fn interface_class(
         constraints: Vec::new(),
         properties: Vec::new(),
         base_properties: 0,
+        aggregates: Vec::new(),
         statics: Vec::new(),
         methods,
         declarations,

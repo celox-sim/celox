@@ -277,3 +277,175 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "def x xxxx 0 00\ncopy 1z0x x 1\npattern 5 xx11 0 01\ndefault 0 0000 0 00\n"))
+
+(case class_properties
+  (source "unpacked_struct_properties.sv" #"
+module Top(output bit done);
+    class Node;
+        string n;
+        function new(string n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    typedef struct { time read_time; int unsigned read_count; bit [3:0] l; } access_t;
+    class Override;
+        string path;
+        pair_t orig;
+        pair_t ovrd = '{null, "init"};
+        access_t acc;
+        function new(string p, string on, Node ot);
+            path = p;
+            this.orig.m_type_name = on;
+            this.orig.m_type = ot;
+        endfunction
+        function bit pair_matches(pair_t m, Node t);
+            return m.m_type == t && m.m_type_name != "";
+        endfunction
+        function void touch(time now);
+            acc.read_count++;
+            acc.read_time = now;
+        endfunction
+    endclass
+    initial begin
+        Node a;
+        Override o, c;
+        pair_t tp;
+        access_t x;
+        a = new("A");
+        o = new("p", "A", a);
+        $display("%s %s %s [%s]", o.orig.m_type_name, o.orig.m_type.n, o.ovrd.m_type_name, o.path);
+        tp = o.orig;
+        tp.m_type_name = "changed";
+        $display("%s %s %0d %0d", o.orig.m_type_name, tp.m_type_name, o.pair_matches(o.orig, a), o.orig == tp);
+        o.ovrd = tp;
+        o.ovrd.m_type = null;
+        $display("%s %0d %0d", o.ovrd.m_type_name, o.ovrd.m_type == null, o.orig.m_type == null);
+        $display("acc %0d %0d %b", o.acc.read_time, o.acc.read_count, o.acc.l);
+        o.touch(5);
+        o.acc.l = 4'b1011;
+        c = new o;
+        c.acc.read_count = 9;
+        x = c.acc;
+        $display("acc %0d %0d %b | %0d %0d %b", o.acc.read_time, o.acc.read_count, o.acc.l, x.read_time, x.read_count, x.l);
+        o.acc = '{default: 0};
+        $display("acc %0d %0d %b", o.acc.read_time, o.acc.read_count, o.acc.l);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "A A init [p]\nA changed 1 0\nchanged 1 0\nacc 0 0 0000\nacc 5 1 1011 | 5 9 1011\nacc 0 0 0000\n"))
+
+(case class_property_assignment_order
+  (source "unpacked_struct_property_order.sv" #"
+module Top(output bit done);
+    typedef struct { int a; int b; } pair_t;
+    class Holder;
+        pair_t p;
+    endclass
+    Holder items[3];
+    int i;
+    function automatic int next_index();
+        i++;
+        return i;
+    endfunction
+    initial begin
+        Holder h;
+        h = new;
+        h.p.a = 1;
+        h.p.b = 2;
+        h.p = '{h.p.b, h.p.a};
+        $display("%0d %0d", h.p.a, h.p.b);
+        foreach (items[k]) begin
+            items[k] = new;
+            items[k].p = '{k, k * 10};
+        end
+        i = 0;
+        items[next_index()].p = '{7, 8};
+        $display("%0d %0d %0d %0d %0d", items[1].p.a, items[1].p.b, items[2].p.a, items[2].p.b, i);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 1\n7 8 2 20 1\n"))
+
+(case class_property_four_state_members
+  (four_state)
+  (source "unpacked_struct_property_states.sv" #"
+module Top(output bit done);
+    typedef struct { time t; int i; logic [3:0] l; } access_t;
+    class Holder;
+        access_t acc;
+    endclass
+    Holder h;
+    access_t copy;
+    initial begin
+        h = new;
+        $display("%0d %0d %b", h.acc.t, h.acc.i, h.acc.l);
+        h.acc.l = 4'b1z0x;
+        copy = h.acc;
+        $display("%b %0d", copy.l, copy === h.acc);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "x 0 xxxx\n1z0x 1\n"))
+
+(case class_properties_inheritance_and_collections
+  (source "unpacked_struct_property_heap.sv" #"
+module Top(output int n);
+    class Node;
+        string text;
+    endclass
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    class Base;
+        pair_t orig;
+        function pair_t get();
+            return orig;
+        endfunction
+        function bit same(pair_t p);
+            return orig == p;
+        endfunction
+        function void set(string s);
+            orig = '{m_type: null, m_type_name: s};
+        endfunction
+    endclass
+    class Derived extends Base;
+        pair_t ovrd;
+        function void swap();
+            pair_t t;
+            t = orig;
+            orig = ovrd;
+            ovrd = t;
+        endfunction
+    endclass
+    logic clk = 0;
+    always #1 clk = ~clk;
+    Derived d;
+    string number;
+    always @(posedge clk) begin
+        number.itoa(n);
+        d.set({number, "!"});
+        d.ovrd.m_type = new;
+        d.ovrd.m_type.text = number;
+        n = n + 1;
+    end
+    initial begin
+        pair_t g;
+        d = new;
+        d.set("x");
+        g = d.get();
+        $display("%s %0d", g.m_type_name, d.same(g));
+        d.ovrd.m_type_name = "o";
+        d.swap();
+        $display("%s %s", d.orig.m_type_name, d.ovrd.m_type_name);
+        #6000 $display("[%s] [%s] %0d", d.orig.m_type_name, d.ovrd.m_type.text, n);
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "x 1\no x\n[2999!] [2999] 3000\n"))
