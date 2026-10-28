@@ -103,7 +103,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       - if: env.NIGHTLY == 'true'
         uses: ./.github/actions/set-nightly-version
@@ -187,7 +187,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       - if: env.NIGHTLY == 'true'
         uses: ./.github/actions/set-nightly-version
@@ -276,7 +276,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       - if: env.NIGHTLY == 'true'
         uses: ./.github/actions/set-nightly-version
@@ -318,7 +318,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           registry-url: https://registry.npmjs.org
 
       - if: env.NIGHTLY == 'true'
@@ -428,7 +428,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           registry-url: https://registry.npmjs.org
 
       - if: env.NIGHTLY == 'true'
