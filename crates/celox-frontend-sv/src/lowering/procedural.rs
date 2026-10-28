@@ -75,6 +75,9 @@ pub(super) struct ProcModule<'a> {
     /// Where the warnings found while lowering go. A process lowered more
     /// than once repeats its warnings; the frontend reports each once.
     warnings: &'a mut Vec<crate::warning::PendingWarning>,
+    /// Whether a call of each subroutine asked about can make a host
+    /// request, by name.
+    requesting_subroutines: std::cell::RefCell<HashMap<String, bool>>,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
@@ -268,7 +271,86 @@ impl<'a> ProcModule<'a> {
             event_assignments: Vec::new(),
             unpacked_bounds,
             warnings,
+            requesting_subroutines: Default::default(),
         }
+    }
+
+    /// Whether evaluating `expr` can make a host request, which suspends
+    /// the process: it calls a function that makes one directly, in the
+    /// defaults of omitted arguments, or through the subroutines it calls.
+    pub fn makes_host_request(&self, expr: &sv::ir::Expr) -> bool {
+        let mut calls = Vec::new();
+        collect_calls(expr, &mut calls);
+        while let Some((callee, args)) = calls.pop() {
+            match callee {
+                sv::ir::Callee::System(function) if function.is_host_request() => return true,
+                sv::ir::Callee::String(sv::ir::StringOp::Format { .. }) => return true,
+                sv::ir::Callee::Subroutine(name) => {
+                    let Some(subroutine) = self.subroutine(&name) else {
+                        continue;
+                    };
+                    // An omitted argument evaluates its default at the call.
+                    default_calls(subroutine, &args, &mut calls);
+                    if self.subroutine_makes_host_request(&name) {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Whether the body of subroutine `name` can make a host request,
+    /// including through the calls it makes and their omitted defaults.
+    fn subroutine_makes_host_request(&self, name: &str) -> bool {
+        if let Some(&known) = self.requesting_subroutines.borrow().get(name) {
+            return known;
+        }
+        let mut pending = vec![name.to_string()];
+        let mut visited = HashSet::default();
+        let mut found = false;
+        while let Some(name) = pending.pop() {
+            if found {
+                break;
+            }
+            if !visited.insert(name.clone()) {
+                continue;
+            }
+            let Some(subroutine) = self.subroutine(&name) else {
+                continue;
+            };
+            let mut calls = Vec::new();
+            for stmt in &subroutine.body {
+                stmt.walk(&mut |stmt| {
+                    if let sv::ir::Stmt::SystemTask { task, .. } = stmt {
+                        found |= task.is_host_request();
+                    }
+                    stmt_calls(stmt, &mut calls);
+                });
+            }
+            while let Some((callee, args)) = calls.pop() {
+                match callee {
+                    sv::ir::Callee::System(function) => found |= function.is_host_request(),
+                    sv::ir::Callee::String(op) => {
+                        found |= matches!(op, sv::ir::StringOp::Format { .. })
+                    }
+                    sv::ir::Callee::Subroutine(callee) => {
+                        if let Some(subroutine) = self.subroutine(&callee) {
+                            default_calls(subroutine, &args, &mut calls);
+                        }
+                        pending.push(callee);
+                    }
+                    sv::ir::Callee::Object(_)
+                    | sv::ir::Callee::Checked { .. }
+                    | sv::ir::Callee::Lookup { .. } => {}
+                }
+            }
+        }
+        self.requesting_subroutines
+            .borrow_mut()
+            .insert(name.to_string(), found);
+        found
     }
 
     /// Whether a process calls a system function that reads the state of

@@ -42,6 +42,7 @@ mod host {
     mod deferred_tests;
     mod distribution;
     mod file_io;
+    mod format;
     mod fread;
     mod scan;
     use super::*;

@@ -735,6 +735,11 @@ pub enum StringOp {
     Atoi(Radix),
     /// `str.itoa(i)` and its radix variants (6.16.11-14), as the new string.
     Itoa(Radix),
+    /// `$sformatf(format, args...)` (21.3.3): the arguments formatted as
+    /// `$display` formats them. A `%t` converts a value in the time unit of
+    /// the calling scope, of which `ticks_per_unit` simulation time units
+    /// make one.
+    Format { ticks_per_unit: u64 },
 }
 
 impl StringOp {
@@ -750,6 +755,7 @@ impl StringOp {
                 | Self::ToUpper
                 | Self::ToLower
                 | Self::Itoa(_)
+                | Self::Format { .. }
         )
     }
 
@@ -816,6 +822,7 @@ impl fmt::Display for StringOp {
             Self::Itoa(Radix::Hexadecimal) => "hextoa",
             Self::Itoa(Radix::Octal) => "octtoa",
             Self::Itoa(Radix::Binary) => "bintoa",
+            Self::Format { .. } => "$sformatf",
         };
         f.write_str(name)
     }
@@ -1554,6 +1561,9 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$swriteb", Task),
     unsupported("$swriteo", Task),
     unsupported("$swriteh", Task),
+    // The binders convert `$sformat` and `$sformatf` into string operations
+    // (`StringOp::Format`) before consulting the catalog, which rejects them
+    // anywhere else, such as in a constant expression.
     unsupported("$sformat", Task),
     unsupported("$sformatf", Function),
     function(SystemFunction::Fgetc, 1, Some(1)),

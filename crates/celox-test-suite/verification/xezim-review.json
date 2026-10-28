@@ -754,6 +754,14 @@
     "sv_class_foreign_package_constructor": {
       "title": "Constructing a package-class type argument through a generic in another package leaves initialized instance fields unknown",
       "standard": "IEEE 1800-2023 8.7, 8.25"
+    },
+    "sv_integral_format_string": {
+      "title": "An integral format of $sformatf or $sformat is displayed as a value instead of being read as the format",
+      "standard": "IEEE 1800-2023 21.3.3"
+    },
+    "sv_associative_index_cast": {
+      "title": "An associative index is evaluated at its own width instead of as a cast to the index type",
+      "standard": "IEEE 1800-2023 7.8.4, 6.24.1"
     }
   },
   "cases": [
@@ -4523,6 +4531,22 @@
       "classification": "xezim_bug",
       "bug": "sv_class_foreign_package_constructor",
       "note": "q::Factory#(p::Item)::create() calls Item::new(), which must assign value=42. The result contains unknown bits; a standalone prints X,7,1 for result/tag/count instead of 42,7,1. The static tag and factory counter are explicitly initialized. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::sformatf_packed_runtime_format",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_integral_format_string",
+      "note": "With bit [31:0] format = \"%0d\", $sformatf(format, 42) gives \"   2437220         42\" in xezim 0.11.3: the format's bits are printed as a decimal value followed by the argument. IEEE 1800-2023 21.3.3 interprets the content of an integral format expression as the format, so the result is \"42\"; Verilator 5.052 prints 42."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::sformatf_with_associative_index",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_associative_index_cast",
+      "note": "With int unsigned x = 32'hffffffff and string wide[bit [63:0]], wide[x + 32'd1] = ... stores key 0 in xezim 0.11.3 (prints 0 1); 7.8.4 evaluates the index as a cast to bit [63:0], so the key is 64'h100000000 (expected 1 0). See verification/repros/sv_associative_index_cast.json."
     }
   ]
 }

@@ -1,0 +1,343 @@
+(group string_format (category types))
+
+; IEEE 1800-2023 21.3.3: `$sformatf` returns what `$display` would print
+; for the same format and arguments.
+(case sformatf_matches_display
+  (source "sformatf_display.sv" #"
+module Top(output bit done);
+    int i;
+    bit [7:0] b;
+    bit [71:0] wide;
+    string s, name;
+    real r;
+    initial begin
+        i = -5;
+        b = 8'ha5;
+        wide = 72'h12_3456_789a_bcde_f012;
+        name = "cat";
+        r = 2.5;
+        $display("[%d|%0d|%h|%b|%o|%s|%c|%5s|%-5d|%0x|%%]", i, i, b, b, b, name, 8'h41, name, 7, wide);
+        s = $sformatf("[%d|%0d|%h|%b|%o|%s|%c|%5s|%-5d|%0x|%%]", i, i, b, b, b, name, 8'h41, name, 7, wide);
+        $display("%s", s);
+        $display("[%e|%f|%g|%0.2f|%10.3e]", r, r, r, r, -r);
+        s = $sformatf("[%e|%f|%g|%0.2f|%10.3e]", r, r, r, r, -r);
+        $display("%s", s);
+        $display("[%h|%d|%6d|%-3b|]", 4'sb1010, 4'sb1010, 10'd1023, 2'b10);
+        s = $sformatf("[%h|%d|%6d|%-3b|]", 4'sb1010, 4'sb1010, 10'd1023, 2'b10);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "[         -5|-5|a5|10100101|245|cat|A|  cat|7    |123456789abcdef012|%]\n[         -5|-5|a5|10100101|245|cat|A|  cat|7    |123456789abcdef012|%]\n[2.500000e+00|2.500000|2.5|2.50|-2.500e+00]\n[2.500000e+00|2.500000|2.5|2.50|-2.500e+00]\n[a|-6|  1023|10 |]\n[a|-6|  1023|10 |]\n"))
+
+; 21.2.1.5: unknown and high-impedance bits.
+(case sformatf_four_state_values
+  (four_state)
+  (source "sformatf_unknown.sv" #"
+module Top(output bit done);
+    logic [7:0] v;
+    logic [11:0] w;
+    string s;
+    initial begin
+        v = 8'b1x0z_0101;
+        w = 12'hz5x;
+        $display("[%b|%h|%o|%d|%h|%d]", v, v, v, v, w, 8'bx);
+        s = $sformatf("[%b|%h|%o|%d|%h|%d]", v, v, v, v, w, 8'bx);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "[1x0z0101|X5|XZ5|  X|z5x|  x]\n[1x0z0101|X5|XZ5|  X|z5x|  x]\n"))
+
+; 21.3.3: `$sformatf` can be used where a string value would be valid, and
+; `$sformat` assigns the same text to its output.
+(case sformatf_in_expressions
+  (source "sformatf_expressions.sv" #"
+class Item;
+    int id;
+    function string name();
+        return $sformatf("item%0d", id);
+    endfunction
+endclass
+
+module Top(output bit done);
+    function automatic string tag(int n);
+        return $sformatf("<%0d>", n);
+    endfunction
+    function automatic int length(string s);
+        return s.len();
+    endfunction
+    Item item;
+    string s, t;
+    int i, n;
+    initial begin
+        item = new;
+        item.id = 3;
+        i = -4;
+        s = {tag(1), "-", $sformatf("%0d", 2), "-", item.name()};
+        t = $sformatf("neg%0d", -i);
+        n = length($sformatf("%0d", 12345));
+        $display("%s %s %0d %0d", s, t, n, $sformatf("%0d", 10) == "10");
+        $sformat(t, "%0d+%0d=%s", 1, 2, $sformatf("%0d", 3));
+        $display("%s", t);
+        void'($sformatf("%0d", i));
+        $sformatf("unused");
+        s = $sformatf("plain text");
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "<1>-2-item3 neg4 5 1\n1+2=3\nplain text\n"))
+
+; 21.3.3: the output of `$sformat` can be a string property of a class
+; object, including one of the object whose method calls it.
+(case sformat_property_output
+  (source "sformat_property.sv" #"
+class Item;
+    int id;
+    string label;
+    function string name();
+        return $sformatf("item%0d", id);
+    endfunction
+    function void relabel(int n);
+        $sformat(label, "L%0d/%s", n, name());
+    endfunction
+endclass
+
+module Top(output bit done);
+    Item item;
+    initial begin
+        item = new;
+        item.id = 3;
+        item.relabel(9);
+        $display("%s", item.label);
+        $sformat(item.label, "%s!", item.name());
+        $display("%s", item.label);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "L9/item3\nitem3!\n"))
+
+; 21.3.3: a format that is not a constant is the text of a string or an
+; integral value when the call runs.
+(case sformatf_runtime_formats
+  (source "sformatf_runtime.sv" #"
+module Top(output bit done);
+    string format, s;
+    initial begin
+        format = "%0d:%s";
+        s = $sformatf(format, 7, "x");
+        $display("%s", s);
+        format = {format, "!%h"};
+        s = $sformatf(format, 8, "y", 4'ha);
+        $display("%s", s);
+        $sformat(s, format, 1, "z", 4'hb);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "7:x\n8:y!a\n1:z!b\n"))
+
+; 21.3.3: the format can be an expression of an integral type, whose
+; content is the format text.
+(case sformatf_packed_runtime_format
+  (source "sformatf_packed_format.sv" #"
+module Top(output bit done);
+    bit [8*4-1:0] format;
+    string s;
+    initial begin
+        format = "%0d";
+        s = $sformatf(format, 42);
+        $display("%s", s);
+        format = "<%h";
+        $sformat(s, format, 4'hc);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "42\n<c\n"))
+
+; 11.4.11: the operands of a conditional operator can be `$sformatf` calls,
+; of which only the selected one runs.
+(case sformatf_in_conditional_expressions
+  (source "sformatf_conditional.sv" #"
+module Top(output bit done);
+    string t;
+    int i;
+    initial begin
+        i = -4;
+        t = i > 0 ? $sformatf("pos%0d", i) : $sformatf("neg%0d", -i);
+        $display("%s", t);
+        i = 2;
+        $display("%s", i > 0 ? $sformatf("pos%0d", i) : $sformatf("neg%0d", -i));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "neg4\npos2\n"))
+
+; 20.4.3: `%t` converts a time value of the calling scope in the units of
+; `$timeformat`, the smallest time precision by default. Timed cases run at
+; 1 ns / 1 ps.
+(case sformatf_time_values
+  (source "sformatf_time.sv" #"
+module Top(output bit done);
+    string format, s;
+    initial begin
+        #1.5;
+        $display("[%t|%0t]", $time, $realtime);
+        s = $sformatf("[%t|%0t]", $time, $realtime);
+        $display("%s", s);
+        format = "[%t|%0t]";
+        s = $sformatf(format, $time, $realtime);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 10) (assert_eq done 1)
+  (expect_output "[                2000|1500]\n[                2000|1500]\n[                2000|1500]\n"))
+
+; 13.5.3: an omitted argument evaluates its default at the call, here a
+; `$sformatf` inside a string concatenation; an explicit `$sformatf` actual
+; follows a constant one.
+(case sformatf_in_omitted_default
+  (source "sformatf_default.sv" #"
+module Top(output bit done);
+    function automatic string label(int n, string prefix = $sformatf("<%0d>", 7));
+        return {prefix, $sformatf("%0d", n)};
+    endfunction
+    string s;
+    initial begin
+        s = {"a", label(1), "-", label(2, "["), "-", label(3, $sformatf("{%0d}", 4)), "b"};
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "a<7>1-[2-{4}3b\n"))
+
+; 21.3.3, 6.16: a run-time format keeps bytes that are not ASCII text.
+(case sformatf_runtime_format_bytes
+  (source "sformatf_bytes.sv" #"
+module Top(output bit done);
+    string format, s;
+    initial begin
+        format = string'(8'hff);
+        s = $sformatf(format);
+        $display("%0d %0d", s.len(), $unsigned(s[0]));
+        format = {format, "%0d", string'(8'h80)};
+        s = $sformatf(format, 5);
+        $display("%0d %0d %0d %0d", s.len(), $unsigned(s[0]), s[1], $unsigned(s[2]));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 255\n3 255 53 128\n"))
+
+; 13.5.1: an input is converted to its formal before a later input runs a
+; `$sformatf`; the addition is evaluated at the formal's 64 bits.
+(case sformatf_after_wider_input
+  (source "sformatf_input_width.sv" #"
+module Top(output bit done);
+    function automatic string show(bit [63:0] w, string text);
+        return $sformatf("%h %s", w, text);
+    endfunction
+    int unsigned x;
+    string s;
+    initial begin
+        x = 32'hffffffff;
+        s = show(x + 32'd1, $sformatf("%0d", 5));
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "0000000100000000 5\n"))
+
+; 7.10.2: a container method's operands are evaluated before it updates the
+; container, also when an operand formats a string.
+(case sformatf_in_container_operands
+  (source "sformatf_containers.sv" #"
+class Log;
+    string lines[$];
+endclass
+
+module Top(output bit done);
+    string q[$];
+    string m[string];
+    Log log;
+    int i, n;
+    initial begin
+        log = new;
+        q = {"a", "c"};
+        i = 1;
+        n = 7;
+        q.insert(i, $sformatf("b%0d", n));
+        q.push_back($sformatf("d%0d", n + 1));
+        m[$sformatf("k%0d", i)] = $sformatf("v%0d", n);
+        log.lines.push_back($sformatf("x%0d", i));
+        log.lines.insert(0, $sformatf("w%0d", n));
+        $display("%s %s %s %s %0d|%s|%s %s", q[0], q[1], q[2], q[3], q.size(), m["k1"],
+                 log.lines[0], log.lines[1]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "a b7 c d8 4|v7|w7 x1\n"))
+
+; 7.8.4: an integral associative index is evaluated as a cast to the index
+; type (6.24.1), here at 64 bits, also when the stored value formats a string.
+(case sformatf_with_associative_index
+  (source "sformatf_index.sv" #"
+module Top(output bit done);
+    string wide[bit [63:0]];
+    int unsigned x;
+    initial begin
+        x = 32'hffffffff;
+        wide[x + 32'd1] = $sformatf("%0d", 7);
+        $display("%0d %0d", wide.exists(64'h100000000), wide.exists(0));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 0\n"))
+
+; 13.5.2: a `ref` formal refers to its actual while another input runs a
+; `$sformatf`, before and after a constant input.
+(case sformatf_with_reference_argument
+  (source "sformatf_ref.sv" #"
+module Top(output bit done);
+    function automatic void append(ref string s, input int n, input string t);
+        s = $sformatf("%s%0d%s", s, n, t);
+    endfunction
+    string text;
+    initial begin
+        text = "a";
+        append(text, 1, $sformatf("<%0d>", 2));
+        append(text, 3, "-");
+        $display("%s", text);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "a1<2>3-\n"))

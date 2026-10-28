@@ -433,6 +433,40 @@ void_call_test!(
     parallel_partition(celox::ParallelPartition::Always)
 );
 
+// An actual evaluated before one that formats a string keeps its value
+// across the formatting host request.
+#[test]
+fn actuals_survive_a_later_formatting_request() {
+    let source = r#"
+        module Top(output int result);
+            import "DPI-C" function int digits(input int first, input int second);
+            function automatic int formatted_length(input int v);
+                string s = $sformatf("%0d", v);
+                return s.len();
+            endfunction
+            int a = 7;
+            initial result = digits(a, formatted_length(123));
+        endmodule
+    "#;
+    let builder = || unsafe {
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("dpi.sv"))], "Top")
+            .dpi_function("digits", dpi_digits as *const ())
+    };
+    macro_rules! check {
+        ($build:ident) => {{
+            let mut sim = builder().$build().unwrap();
+            sim.run_until(0).unwrap();
+            let result = sim.signal("result");
+            assert_eq!(sim.get(result), BigUint::from(73u32), stringify!($build));
+        }};
+    }
+    check!(build_cranelift);
+    check!(build_interpreter);
+    check!(build_wasm);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    check!(build_native);
+}
+
 #[test]
 fn logic_arguments_keep_unknown_bits_in_four_state_simulation() {
     let source = r#"
