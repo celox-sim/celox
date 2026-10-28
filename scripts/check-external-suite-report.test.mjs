@@ -418,6 +418,8 @@ test("every retained baseline accepts only its existing failures", () => {
                 "tagged_unions::writable_system_arguments",
                 "tagged_unions::writable_task_arguments",
                 "timing::final_procedure_output_survives_program_completion",
+                "unpacked_structs::reference_formal_handles_survive_heap_collections",
+                "unpacked_structs::reference_formals",
               ],
         );
       } else {

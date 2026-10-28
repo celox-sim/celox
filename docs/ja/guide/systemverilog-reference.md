@@ -210,7 +210,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 クラスハンドル、packed 構造体、入れ子の unpacked 構造体を使え、各メンバは自身の
 2 値・4 値の型を保ちます。この型の変数は、モジュール変数、手続き内のローカル変数、クラスプロパティ、
 キュー・動的配列・連想配列の要素（`q[i].m` でメンバを読めます）、
-任意の方向のサブルーチン引数と戻り値にできます。メンバはその型の変数と同じように
+任意の方向（[`ref`](#reference-arguments) を含む）のサブルーチン引数と戻り値にできます。メンバはその型の変数と同じように
 読み書きできます。構造体全体は、同じ型の値との代入と `==`・`!=`・`===`・`!==` による
 比較、`?:` による選択、assignment pattern（`'{a, b}`、`'{m: v, default: d}`、
 `T'{...}`。`default` は入れ子の構造体のメンバにも適用）による構築ができます。
@@ -237,7 +237,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・固定長配列の要素としての unpacked 構造体、配列・`real`・既定値を持つメンバ。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・固定長配列の要素としての unpacked 構造体、配列（動的配列・キュー・連想配列を含む）・`real`・既定値を持つメンバ。
 - 順序回路のプロセス：`always_ff` のイベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。
@@ -367,7 +367,8 @@ tagged union と unpacked union は未対応です。
 仮引数への書き込みはすぐに見え、実引数の別の名前とも別名になり、task は待ちの間も参照を保ちます。
 実引数には、変数（`string`、クラスハンドル、キュー、動的配列、連想配列、unpacked 配列を含む）、
 呼び出し時にハンドルを評価するクラスオブジェクトのプロパティ、呼び出し時に添字を評価する
-固定長 unpacked 配列の要素を渡せます。`const` は方向と同様に後続の仮引数に引き継がれます（13.3）。
+固定長 unpacked 配列の要素、unpacked 構造体のメンバを渡せます。[unpacked 構造体](#unpacked-structures)型の
+仮引数は、構造体の変数・メンバ・クラスプロパティの各メンバを参照します（仮想メソッド経由でも同じ）。`const` は方向と同様に後続の仮引数に引き継がれます（13.3）。
 
 規格どおり次を拒否します：static な寿命のサブルーチンの `ref` 仮引数、式・定数・部分選択・ネット、
 または仮引数と等価でない型（6.22.2）の実引数、`const ref` 仮引数への書き込み、`ref` 仮引数への
@@ -376,7 +377,7 @@ tagged union と unpacked union は未対応です。
 （13.4.1。`const ref` は可）。
 
 `ref static`、動的配列・キュー・連想配列の要素（参照がサイズ変更より長く生きる必要がある、13.5.2）、
-クラスプロパティの要素、unpacked 構造体のメンバ、クラスプロパティに束縛した仮引数の一部への書き込み、
+クラスプロパティの要素、クラスプロパティやそのメンバに束縛した仮引数の一部への書き込み、
 配列要素に束縛した仮引数の実行時にしか決まらない位置での選択（展開されるループの位置は決まる）は
 未対応として拒否します。クラスプロパティに束縛した仮引数は `output` / `inout` 引数に渡せ、その呼び出しが
 戻るときに書き戻します。

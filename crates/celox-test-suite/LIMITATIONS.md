@@ -627,7 +627,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_integral_format_string` | execute | icarus | 1 | Icarus 13.0 compiles `$sformatf` with a `bit` vector variable as the format, then `vvp` stops: "$sformatf's first argument must be a string or a register." IEEE 1800-2023 21.3.3 reads the content of an integral format expression as the format; Verilator 5.052 gives the expected output, xezim 0.11.3 prints the format as a value (`sv_integral_format_string` in the xezim review). |
 | `sv_icarus_string_associative_arrays_and_property_queue_methods` | compile | icarus | 2 | Icarus 13.0 rejects associative arrays with `string` and `bit [63:0]` indices and queue methods called on a class property ("Can't find task push_back in class Log"), which IEEE 1800-2023 7.8 and 7.10 define; Verilator 5.052 and xezim 0.11.3 compile the cases. |
 | `sv_verilator_associative_index_cast` | execute | verilator | 1 | Verilator 5.052 evaluates an associative index `x + 32'd1` at 32 bits and stores key 0; IEEE 1800-2023 7.8.4 evaluates it as a cast to the `bit [63:0]` index type (6.24.1), giving `64'h100000000`. xezim 0.11.3 also stores key 0 (`sv_associative_index_cast` in its review). [Evidence](verification/repros/sv_associative_index_cast.json). |
-| `sv_icarus_unpacked_structs` | compile | icarus | 16 | Icarus 13.0 does not support unpacked structures ("sorry: Unpacked structs not supported."), which IEEE 1800-2023 7.2 defines; the standalone source reproduces the diagnostic. Verilator passes all but the nested default pattern, see sv_verilator_nested_struct_default. |
+| `sv_icarus_unpacked_structs` | compile | icarus | 21 | Icarus 13.0 does not support unpacked structures ("sorry: Unpacked structs not supported."), which IEEE 1800-2023 7.2 defines; the standalone source reproduces the diagnostic. Verilator passes all but the nested default pattern, see sv_verilator_nested_struct_default. |
 | `sv_icarus_nested_containers` | compile | icarus | 4 | Icarus 13.0 rejects an associative array whose index type is a type name ("Type names are not valid expressions here."), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays ("Sorry: Dynamic array of type `dynamic array of ...` is not yet supported."), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases. |
 | `sv_verilator_nested_struct_default` | execute | verilator | 1 | Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 ("5 0000 1" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101. |
 
@@ -1266,3 +1266,15 @@ executed mismatches in [the report](verification/sv/xezim/references.json). The
 [its observations](verification/repros/ref_arguments.json) reproduce the same
 values without the suite adapters; the observations are from the installed build,
 not a current-pin validation.
+
+The five `unpacked_structs::reference_*` cases pass `ref` and `const ref` formals
+of unpacked structure type (13.5.2): variables, nested members, class properties
+and their members, through virtual methods, across task suspensions, and with
+handle and string members across heap collections. Celox passes all of them on
+every backend. Verilator 5.052 rejects the two that bind a class property in a
+function that also constructs an object with `%Error-IMPURE` "External variable
+referenced by non-inlined function/task", also for a `ref` class-handle formal;
+the [standalone source](verification/repros/sv_verilator_property_reference_constructor.sv)
+reproduces it. These are executed compile failures. xezim 0.11.3 gives copy
+semantics in the suspended-task case (`sv_ref_copy_semantics`) and the padded
+string members of class properties (`sv_rest-X84`) in the heap case.

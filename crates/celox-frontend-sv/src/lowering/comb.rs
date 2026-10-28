@@ -3446,6 +3446,31 @@ impl<'p, 'a> Comb<'p, 'a> {
                 .cloned()
                 .flatten()
                 .or_else(|| param.default.clone());
+            if param.direction.is_reference() && !param.leaves.is_empty() {
+                // Each member of a formal of unpacked structure type names
+                // the matching member variable of the actual.
+                let targets = match &actual {
+                    Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts
+                        .iter()
+                        .map(|part| match part {
+                            sv::ir::Expr::Ident(actual) => self.m.id(actual),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>(),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    unsupported(format!("ref argument `{}` of `{name}`", param.source_name))
+                })?;
+                for (leaf, target) in param.leaves.iter().zip(targets) {
+                    let id = self
+                        .m
+                        .id(leaf)
+                        .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+                    references.push((leaf.clone(), id, target));
+                }
+                continue;
+            }
             if param.direction.is_reference() {
                 // A reference formal names the actual variable itself
                 // (IEEE 1800-2023 13.5.2); other actuals fall back to Ff.

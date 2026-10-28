@@ -1065,6 +1065,7 @@ impl Renamer<'_> {
                 .map(|param| crate::procedural::SubroutineParamBase {
                     name: self.name(&param.name),
                     default: param.default.map(|default| self.expr(default)),
+                    leaves: param.leaves.iter().map(|leaf| self.name(leaf)).collect(),
                     ..param
                 })
                 .collect(),

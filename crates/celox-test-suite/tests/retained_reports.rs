@@ -479,7 +479,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         (
                             "verilator",
                             "references::ref_array_element_index_is_fixed_at_the_call"
-                            | "references::ref_class_property_names_the_object_of_the_call",
+                            | "references::ref_class_property_names_the_object_of_the_call"
+                            | "unpacked_structs::reference_formal_handles_survive_heap_collections"
+                            | "unpacked_structs::reference_formals",
                         ) => (
                             "compile_error",
                             "compile",

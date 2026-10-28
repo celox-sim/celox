@@ -168,6 +168,61 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-IMPURE: <case>/source_0.sv:18:29: Unsupported: External variable referenced by non-inlined function/task: 'set'\n                                       : ... note: In instance 'celox_suite_tb.dut'\n   18 |     function automatic void set(ref pair_t r, input string text);\n      |                             ^~~\n               <case>/source_0.sv:6:18: ... Location of the external reference: 'text'\n    6 |             this.text = text;\n      |                  ^~~~\n               ... For error description see https://verilator.org/warn/IMPURE?v=5.052\n%Warning-ZERODLY: <case>/testbench.sv:103:25: Value of # delay control statically unknown. Assuming it can be #0.\n                                            : ... If all # delays are non-zero at runtime,\n                                            : ... use '--no-sched-zero-delay' for improved performance.\n                                            : ... If a real #0 is expected at runtime,\n                                            : ... use '--sched-zero-delay' to suppress this warning.\n  103 |         if (t1 > $time) #(t1 - $time);\n      |                         ^\n                  ... For warning description see https://verilator.org/warn/ZERODLY?v=5.052\n                  ... Use \"/* verilator lint_off ZERODLY */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formal_handles_survive_heap_collections",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-IMPURE: <case>/source_0.sv:24:29: Unsupported: External variable referenced by non-inlined function/task: 'forward'\n                                       : ... note: In instance 'celox_suite_tb.dut'\n   24 |     function automatic void forward(ref op_t r);\n      |                             ^~~~~~~\n               <case>/source_0.sv:6:18: ... Location of the external reference: 'n'\n    6 |             this.n = n;\n      |                  ^\n               ... For error description see https://verilator.org/warn/IMPURE?v=5.052\n%Warning-ZERODLY: <case>/testbench.sv:103:25: Value of # delay control statically unknown. Assuming it can be #0.\n                                            : ... If all # delays are non-zero at runtime,\n                                            : ... use '--no-sched-zero-delay' for improved performance.\n                                            : ... If a real #0 is expected at runtime,\n                                            : ... use '--sched-zero-delay' to suppress this warning.\n  103 |         if (t1 > $time) #(t1 - $time);\n      |                         ^\n                  ... For warning description see https://verilator.org/warn/ZERODLY?v=5.052\n                  ... Use \"/* verilator lint_off ZERODLY */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_across_time",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_four_state",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_of_virtual_methods",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "unpacked_structs::results_and_outputs",
