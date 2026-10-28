@@ -1187,8 +1187,8 @@ chapter-6/6.19.5.4--enum_prev.sv	2state	pass
 chapter-6/6.19.5.4--enum_prev.sv	4state	pass
 chapter-6/6.19.5.5--enum_num.sv	2state	pass
 chapter-6/6.19.5.5--enum_num.sv	4state	pass
-chapter-6/6.19.5.6--enum_name.sv	2state	fail
-chapter-6/6.19.5.6--enum_name.sv	4state	fail
+chapter-6/6.19.5.6--enum_name.sv	2state	pass
+chapter-6/6.19.5.6--enum_name.sv	4state	pass
 chapter-6/6.20.2--parameter.sv	2state	pass
 chapter-6/6.20.2--parameter.sv	4state	pass
 chapter-6/6.20.2--parameter_aggregate.sv	2state	pass
@@ -1557,10 +1557,10 @@ chapter-8/8.5--properties_enum.sv	2state	fail
 chapter-8/8.5--properties_enum.sv	4state	fail
 chapter-8/8.6--methods.sv	2state	pass
 chapter-8/8.6--methods.sv	4state	pass
-chapter-8/8.7--constructor.sv	2state	fail
-chapter-8/8.7--constructor.sv	4state	fail
-chapter-8/8.7--constructor_param.sv	2state	fail
-chapter-8/8.7--constructor_param.sv	4state	fail
+chapter-8/8.7--constructor.sv	2state	pass
+chapter-8/8.7--constructor.sv	4state	pass
+chapter-8/8.7--constructor_param.sv	2state	pass
+chapter-8/8.7--constructor_param.sv	4state	pass
 chapter-8/8.7--constructor_super.sv	2state	pass
 chapter-8/8.7--constructor_super.sv	4state	pass
 chapter-8/8.8--typed_constructor.sv	2state	pass
