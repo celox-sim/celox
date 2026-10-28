@@ -1011,3 +1011,44 @@ and [observations](verification/repros/sv_class_type_arguments_xezim.json)
 reproduce it as both Top and Wrapped. Its exact mismatch remains an executed
 failure in [the xezim class report](verification/sv/xezim/class.json).
 No assertions or exclusions are weakened.
+
+### Named enumeration and struct type arguments
+
+`class::named_aggregate_type_arguments` specializes a class with two enums
+and two packed structs of the same structure and a typedef of one enum
+(IEEE 1800-2023 6.18, 6.19, 6.22.1 and 8.25). Each declaration gives its own
+specialization and the typedef shares one, so the static counts and width read
+21124. Verilator 5.052 passes. Icarus 13.0 rejects the generic class
+declaration; its exact compile diagnostic remains an executed failure in
+[the Icarus class report](verification/sv/icarus/class.json).
+
+The pinned xezim 0.11.3 returns 11124: the typedef `alias_e` of `first_e`
+makes a separate specialization, the existing `sv_class-X6` discrepancy in
+[the review](verification/xezim-review.json). The
+[adapter-free source](verification/repros/sv_class_named_aggregate_arguments_xezim.sv)
+and [observations](verification/repros/sv_class_named_aggregate_arguments_xezim.json)
+reproduce it as both Top and Wrapped. Its exact mismatch remains an executed
+failure in [the xezim class report](verification/sv/xezim/class.json).
+No assertions or exclusions are weakened.
+
+### Enumeration typedefs of generate iterations
+
+`class::generate_scope_enum_type_arguments` specializes a module class with an
+enum typedef that each iteration of a loop generate block declares, and with
+an iteration typedef of a module-scope enum. A generate block is a separate
+scope (IEEE 1800-2023 27.4), and a typedef that is not in a package matches
+itself only within the scope of its identifier (6.22.1), so each iteration's
+`e_t` gives its own specialization while the alias gives one shared
+specialization (8.25): the sum is 1212.
+
+Verilator 5.052 and the pinned xezim 0.11.3 both return 2222: they give the
+per-iteration enums one specialization. Icarus 13.0 rejects the generic class
+declaration. The [adapter-free source](verification/repros/sv_class_generate_enum_arguments.sv)
+and [observations](verification/repros/sv_class_generate_enum_arguments.json)
+retain the Top and Wrapped runs of both simulators; the xezim discrepancy is
+`sv_class-X15` in [the review](verification/xezim-review.json). The three
+exact failures remain executed evidence in the
+[Verilator](verification/sv/verilator/class.json),
+[Icarus](verification/sv/icarus/class.json) and
+[xezim](verification/sv/xezim/class.json) class reports.
+No assertions or exclusions are weakened.

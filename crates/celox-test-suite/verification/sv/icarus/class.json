@@ -734,6 +734,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: I give up on this function definition.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Syntax error in typedef clause.\n<case>/source_0.sv:15: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:16: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Invalid module item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid module item.\n<case>/source_0.sv:11: assert: pform.cc:1727: failed assertion lexical_scope == pform_cur_generate\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "class::generate_scope_enum_type_arguments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not support extern methods (\"sorry: External methods are not yet supported\") or string methods called on a class property (\"Can't find task itoa in class Named\") or comparisons of class handles (\"SORRY: Compare class handles not implemented\"), aborts on a failed assertion in dup_expr.cc while compiling objects_referring_to_objects, and crashes with a segmentation fault while compiling implicit_constructors_and_this. IEEE 1800-2023 8.4, 8.7, 8.8 and 8.24 define these constructs. Verilator passes all but the string-method case, see sv_verilator_class_property_string_methods.",
       "expectation": "Simulation",
       "known_issue": {
@@ -865,6 +876,17 @@
       "name": "class::methods_of_handle_array_elements",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:8: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::named_aggregate_type_arguments",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

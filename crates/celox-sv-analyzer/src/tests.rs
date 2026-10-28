@@ -7697,3 +7697,39 @@ fn unresolved_class_alias_type_arguments_still_fail() {
         "{error}"
     );
 }
+
+#[test]
+fn named_aggregate_type_arguments_keep_their_declarations() {
+    let source = "package p;
+        typedef enum {A0, A1} first_e;
+        typedef enum {B0, B1} second_e;
+        typedef first_e alias_e;
+        typedef struct packed { bit [3:0] a; } s1_t;
+        typedef struct packed { bit [3:0] a; } s2_t;
+        class Box #(type T = int); endclass
+        class Holder; typedef enum {C0, C1} inner_e; endclass
+        typedef Box#(first_e) first_box;
+        typedef Box#(alias_e) alias_box;
+        typedef Box#(second_e) second_box;
+        typedef Box#(s1_t) s1_box;
+        typedef Box#(s2_t) s2_box;
+        typedef Box#(Holder::inner_e) inner_box;
+    endpackage
+    module Top; endmodule";
+    analyze_source(source, Path::new("named-aggregate-type-arguments.sv"))
+        .expect("typedefs name enumeration and struct type arguments");
+    for anonymous in ["enum {A, B}", "struct packed { int x; }"] {
+        let source = format!(
+            "package p; class Box #(type T = int); endclass \
+             typedef Box#({anonymous}) anonymous_box; endpackage module Top; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("anonymous-type-argument.sv"))
+            .expect_err("an anonymous aggregate type has no declaration to key on");
+        assert!(
+            error
+                .to_string()
+                .contains("as a class type parameter value"),
+            "{error}"
+        );
+    }
+}
