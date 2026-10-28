@@ -2,7 +2,7 @@
 //! batch step of designs without processes.
 
 mod activation;
-pub use activation::Activation;
+pub use activation::{Activation, ProcessControl, SuspendedProcess};
 mod batch;
 mod compiled;
 mod edges;
@@ -10,6 +10,7 @@ mod host;
 mod nba;
 mod persist;
 mod process;
+mod process_control;
 mod round;
 mod stats;
 mod terminal;

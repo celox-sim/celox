@@ -332,7 +332,8 @@ impl<B: SimBackend> SimulationState<B> {
             if pending(process) || backend.get_as::<u8>(waiting) == 0 {
                 continue;
             }
-            let site = backend.get_as::<u64>(self.model.processes[process].delay) as usize;
+            let site = (backend.get_as::<u64>(self.model.processes[process].delay)
+                & !celox_design::PROCESS_LEVEL_WAIT) as usize;
             let terms = self.model.processes[process]
                 .wait_sites
                 .get(site)

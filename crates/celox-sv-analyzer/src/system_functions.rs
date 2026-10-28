@@ -18,6 +18,8 @@ use crate::AnalyzerError;
 /// A system function the frontend supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SystemFunction {
+    /// Built-in process methods (IEEE 1800-2023 9.7).
+    Process(celox_design::ProcessOp),
     Ln,
     Log10,
     Exp,
@@ -224,12 +226,25 @@ impl SystemFunction {
                 | Self::DistChiSquare
                 | Self::DistT
                 | Self::DistErlang
+                | Self::Process(_)
         )
     }
 
     /// The built-in name (`$` functions or `std::randomize`).
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Process(op) => match op {
+                celox_design::ProcessOp::SelfHandle => "process::self",
+                celox_design::ProcessOp::Status => "process.status",
+                celox_design::ProcessOp::Kill => "process.kill",
+                celox_design::ProcessOp::Await => "process.await",
+                celox_design::ProcessOp::Suspend => "process.suspend",
+                celox_design::ProcessOp::Resume => "process.resume",
+                celox_design::ProcessOp::Srandom => "process.srandom",
+                celox_design::ProcessOp::GetRandstate => "process.get_randstate",
+                celox_design::ProcessOp::SetRandstate => "process.set_randstate",
+                celox_design::ProcessOp::Observe => "process observation",
+            },
             Self::Ln => "$ln",
             Self::Log10 => "$log10",
             Self::Exp => "$exp",
@@ -339,33 +354,34 @@ impl SystemFunction {
     /// Whether each call has an effect, so that copies of one call made by
     /// the analyzer must not run it twice.
     pub fn is_effectful(self) -> bool {
-        matches!(
-            self,
-            Self::Random
-                | Self::DistUniform
-                | Self::DistNormal
-                | Self::DistExponential
-                | Self::DistPoisson
-                | Self::DistChiSquare
-                | Self::DistT
-                | Self::DistErlang
-                | Self::TestPlusargs
-                | Self::ValuePlusargs
-                | Self::Urandom
-                | Self::Fopen
-                | Self::Fread
-                | Self::Ftell
-                | Self::Fseek
-                | Self::Rewind
-                | Self::Fgetc
-                | Self::Ungetc
-                | Self::Feof
-                | Self::Sscanf
-                | Self::Fscanf
-                | Self::UrandomRange
-                | Self::ScopeRandomize
-                | Self::ScopeRandomizeEnum
-        )
+        matches!(self, Self::Process(_))
+            || matches!(
+                self,
+                Self::Random
+                    | Self::DistUniform
+                    | Self::DistNormal
+                    | Self::DistExponential
+                    | Self::DistPoisson
+                    | Self::DistChiSquare
+                    | Self::DistT
+                    | Self::DistErlang
+                    | Self::TestPlusargs
+                    | Self::ValuePlusargs
+                    | Self::Urandom
+                    | Self::Fopen
+                    | Self::Fread
+                    | Self::Ftell
+                    | Self::Fseek
+                    | Self::Rewind
+                    | Self::Fgetc
+                    | Self::Ungetc
+                    | Self::Feof
+                    | Self::Sscanf
+                    | Self::Fscanf
+                    | Self::UrandomRange
+                    | Self::ScopeRandomize
+                    | Self::ScopeRandomizeEnum
+            )
     }
 
     /// Whether a call reads the state of the simulation: it has an effect,
@@ -423,6 +439,8 @@ impl SystemFunction {
     /// literals where it converts them.
     pub fn result_type(self) -> Option<(usize, bool)> {
         match self {
+            Self::Process(celox_design::ProcessOp::Status) => Some((32, true)),
+            Self::Process(_) => Some((32, false)),
             Self::Ln
             | Self::Log10
             | Self::Exp

@@ -296,6 +296,12 @@ pub(in crate::ast) fn bind_value(
                         ));
                     }
                 }
+                if let Some(call) =
+                    super::super::processes::value(tree, id, native, dimensions, false)?
+                {
+                    values.push(call);
+                    continue;
+                }
                 if let Some((value, _)) = array_reductions::bind(id, native, tree, dimensions)? {
                     values.push(value);
                     continue;

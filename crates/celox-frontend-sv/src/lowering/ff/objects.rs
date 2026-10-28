@@ -16,13 +16,35 @@ impl Ff<'_, '_> {
         op: &ObjectOp,
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        let args = args
+        let mut args = args
             .iter()
             .map(|arg| {
                 arg.clone()
                     .ok_or_else(|| unsupported(format!("omitted argument of {op}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if args.iter().any(|arg| self.m.calls(arg)) {
+            for (index, arg) in args.iter_mut().enumerate() {
+                let (width, signed) = if index == 0 {
+                    (32, false)
+                } else {
+                    match op {
+                        ObjectOp::Store(field) => (field.width as usize, field.signed),
+                        ObjectOp::Randomize(_) if index == 1 => (1, false),
+                        ObjectOp::ConstraintModeSet(_)
+                        | ObjectOp::ModeSet(_)
+                        | ObjectOp::ModeSelect(..) => (1, false),
+                        ObjectOp::Seed => (32, false),
+                        _ => (64, false),
+                    }
+                };
+                *arg = self.heap_operand(
+                    arg,
+                    Some((width, signed)),
+                    (index == 0).then_some(celox_design::ValueKind::ObjRef),
+                )?;
+            }
+        }
         let result = match op {
             ObjectOp::Randomize(program) => {
                 let object = self.handle(&args[0])?;

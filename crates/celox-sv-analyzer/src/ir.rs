@@ -816,6 +816,8 @@ pub enum TypeKind {
     String,
     /// IEEE 1800-2023 8.4: a handle of a class object.
     Object,
+    /// A scheduler-owned process reference (9.7), independent of the heap.
+    Process,
     Bit,
     Logic,
     Reg,
@@ -887,6 +889,7 @@ impl From<ast::TypeKind> for TypeKind {
             ast::TypeKind::Shortreal => TypeKind::Shortreal,
             ast::TypeKind::String => TypeKind::String,
             ast::TypeKind::Object => TypeKind::Object,
+            ast::TypeKind::Process => TypeKind::Process,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,
