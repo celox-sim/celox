@@ -49,6 +49,8 @@ pub(super) struct BodyState<'a> {
     /// The locals declared with a static lifetime: their unique names and
     /// types.
     pub statics: Vec<(String, Type)>,
+    /// The statics declared with the `static` keyword.
+    pub explicit_statics: HashSet<String>,
     /// Function static declarations initialized once at time zero.
     pub static_initializers: Vec<Stmt>,
     /// Constant calls get a fresh frame, even for static declarations (13.4.3).
@@ -1133,6 +1135,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 _ => self.automatic,
             };
             if !automatic {
+                if native.lifetime.as_deref() == Some("static") {
+                    self.state.explicit_statics.insert(name.clone());
+                }
                 let r#type = scoped_type(signal.r#type().clone(), &self.dims.const_env);
                 self.state.statics.push((name.clone(), r#type));
             }
@@ -2541,7 +2546,8 @@ pub(super) fn lower_subroutine(
             &tree.state,
             &retained_types,
             builder.state.subroutine_directions,
-            std::iter::once(&mut subroutine.body),
+            std::iter::once((&mut subroutine.body, false)),
+            None,
         )?;
         if retain_result {
             kept.extend(subroutine.return_var.clone());

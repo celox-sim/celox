@@ -503,6 +503,7 @@ fn collect_module_constant_functions(
         subroutine_directions: &subroutine_directions,
         automatic: lifetimes::automatic_by_default(tree),
         statics: Vec::new(),
+        explicit_statics: HashSet::default(),
         static_initializers: Vec::new(),
         constant_evaluation: true,
     };

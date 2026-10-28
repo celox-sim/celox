@@ -31,18 +31,27 @@ enum Entry {
 /// time-zero initializations.
 /// `directions` gives the argument directions of the subroutines a body
 /// may call.
+/// For the bodies of processes, `explicit` gives the statics declared with
+/// the `static` keyword, and each body tells whether its process runs once;
+/// see [`initialized_at_time_zero`].
 pub(super) fn keep_static_locals<'b, T>(
     state: &AnalysisState,
     statics: &HashMap<String, T>,
     directions: &Directions,
-    bodies: impl IntoIterator<Item = &'b mut Vec<Stmt>>,
+    bodies: impl IntoIterator<Item = (&'b mut Vec<Stmt>, bool)>,
+    explicit: Option<&HashSet<String>>,
 ) -> Result<(Vec<String>, Vec<Stmt>), AnalyzerError> {
     let mut kept = Vec::new();
     let mut initializers = Vec::new();
     if statics.is_empty() {
         return Ok((kept, initializers));
     }
-    for body in bodies {
+    let mut bodies = bodies.into_iter().collect::<Vec<_>>();
+    let initialized = match explicit {
+        Some(explicit) => initialized_at_time_zero(state, statics, explicit, &bodies),
+        None => HashSet::default(),
+    };
+    for (body, _) in &mut bodies {
         let mut concurrent = false;
         for stmt in body.iter() {
             stmt.walk(&mut |stmt| concurrent |= matches!(stmt, Stmt::Fork { .. }));
@@ -51,6 +60,7 @@ pub(super) fn keep_static_locals<'b, T>(
             state,
             body,
             statics,
+            &initialized,
             directions,
             &mut kept,
             &mut initializers,
@@ -60,10 +70,74 @@ pub(super) fn keep_static_locals<'b, T>(
     Ok((kept, initializers))
 }
 
+/// The static locals of process `bodies` whose initializer is not constant
+/// but reads no automatic variable, with the static locals they read. The
+/// initializer of a static variable may be any run-time expression, and
+/// runs once before any procedure starts (IEEE 1800-2023 6.8, 6.21); these
+/// locals keep their value so that the time-zero initialization does that.
+///
+/// 6.21 requires the `static` keyword on an initialized static variable of
+/// a procedural block, to show that the initializer runs only once. Without
+/// it, a non-constant initializer is accepted only in a process that runs
+/// once, such as an `initial` procedure, where running it at time zero
+/// rather than on entry cannot repeat; in an `always` procedure it remains
+/// rejected, like one that reads an automatic variable.
+fn initialized_at_time_zero<T>(
+    state: &AnalysisState,
+    statics: &HashMap<String, T>,
+    explicit: &HashSet<String>,
+    bodies: &[(&mut Vec<Stmt>, bool)],
+) -> HashSet<String> {
+    let mut initializers = HashMap::default();
+    let mut automatic = Vec::new();
+    for (body, once) in bodies {
+        for stmt in body.iter() {
+            stmt.walk(&mut |stmt| {
+                if let Stmt::Local { name, init } = stmt {
+                    if statics.contains_key(name) {
+                        let allowed = *once || explicit.contains(name);
+                        initializers.insert(name.as_str(), (init.as_ref(), allowed));
+                    } else {
+                        automatic.push(name.as_str());
+                    }
+                }
+            });
+        }
+    }
+    let runtime = |init: &Expr| {
+        !expr_is_constant(state, init) && !automatic.iter().any(|name| expr_reads(init, name))
+    };
+    let mut pending = initializers
+        .iter()
+        .filter(|(_, (init, allowed))| *allowed && init.is_some_and(runtime))
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>();
+    let mut initialized = HashSet::default();
+    while let Some(name) = pending.pop() {
+        let (init, allowed) = initializers.get(name).copied().unwrap_or_default();
+        if init.is_some_and(|init| !expr_is_constant(state, init) && !(allowed && runtime(init)))
+            || !initialized.insert(name.to_string())
+        {
+            continue;
+        }
+        if let Some(init) = init {
+            pending.extend(
+                initializers
+                    .keys()
+                    .filter(|other| expr_reads(init, other))
+                    .copied(),
+            );
+        }
+    }
+    initialized
+}
+
+#[allow(clippy::too_many_arguments)]
 fn keep_in<T>(
     state: &AnalysisState,
     stmts: &mut Vec<Stmt>,
     statics: &HashMap<String, T>,
+    initialized: &HashSet<String>,
     directions: &Directions,
     kept: &mut Vec<String>,
     initializers: &mut Vec<Stmt>,
@@ -75,7 +149,8 @@ fn keep_in<T>(
         // time slot (IEEE 1800-2023 16.5.1), which the local keeps.
         if let Stmt::Local { name, init } = &stmts[index]
             && statics.contains_key(name)
-            && (concurrent
+            && (initialized.contains(name)
+                || concurrent
                 || sampled_reads(&stmts[index + 1..], name)
                 || entry(
                     state,
@@ -109,6 +184,7 @@ fn keep_in<T>(
                     state,
                     then_body,
                     statics,
+                    initialized,
                     directions,
                     kept,
                     initializers,
@@ -118,6 +194,7 @@ fn keep_in<T>(
                     state,
                     else_body,
                     statics,
+                    initialized,
                     directions,
                     kept,
                     initializers,
@@ -130,6 +207,7 @@ fn keep_in<T>(
                         state,
                         &mut item.body,
                         statics,
+                        initialized,
                         directions,
                         kept,
                         initializers,
@@ -141,6 +219,7 @@ fn keep_in<T>(
                         state,
                         default,
                         statics,
+                        initialized,
                         directions,
                         kept,
                         initializers,
@@ -155,6 +234,7 @@ fn keep_in<T>(
                     state,
                     init,
                     statics,
+                    initialized,
                     directions,
                     kept,
                     initializers,
@@ -164,6 +244,7 @@ fn keep_in<T>(
                     state,
                     step,
                     statics,
+                    initialized,
                     directions,
                     kept,
                     initializers,
@@ -173,6 +254,7 @@ fn keep_in<T>(
                     state,
                     body,
                     statics,
+                    initialized,
                     directions,
                     kept,
                     initializers,
@@ -181,7 +263,16 @@ fn keep_in<T>(
             }
             Stmt::Fork { branches, .. } => {
                 for branch in branches {
-                    keep_in(state, branch, statics, directions, kept, initializers, true)?;
+                    keep_in(
+                        state,
+                        branch,
+                        statics,
+                        initialized,
+                        directions,
+                        kept,
+                        initializers,
+                        true,
+                    )?;
                 }
             }
             _ => {}
