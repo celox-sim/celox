@@ -1,1 +1,6 @@
-Rebase onto master: the GitHub branch update merged #2480, which kept the native backend's clock_aliases module this rollup moves to crate::clock_aliases
+Revision history for #2484:
+
+rev 2 (content) 2026-10-28 21:40 UTC — Rebase onto master: the GitHub branch update merged #2480, which kept the native backend's clock_aliases module this rollup moves to crate::clock_aliases
+rev 1 (initial) 2026-10-28 21:40 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2484,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5a88caef6060a5d441c7c59d63d7a7353fafc175","timestamp_iso":"2026-10-28T21:40:39Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5a88caef6060a5d441c7c59d63d7a7353fafc175","new_sha":"83462546212bb6e7afaf508093ca53cbddb47336","timestamp_iso":"2026-10-28T21:40:39Z","reason":"Rebase onto master: the GitHub branch update merged #2480, which kept the native backend's clock_aliases module this rollup moves to crate::clock_aliases","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5a88caef6060a5d441c7c59d63d7a7353fafc175...83462546212bb6e7afaf508093ca53cbddb47336"}]} -->
