@@ -1,0 +1,6 @@
+Revision history for #2421:
+
+rev 2 (content) 2026-10-28 10:52 UTC — Bind class signatures from a settled discovery of the scope's own declarations instead of the fixed base, and publish only class method entries, per review 4399250380; add class::method_ranges_of_scope_declarations.
+rev 1 (initial) 2026-10-28 10:52 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2421,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5b61e93e1ec27b5e4ab2a2173f1fc39286e687ca","timestamp_iso":"2026-10-28T10:52:09Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5b61e93e1ec27b5e4ab2a2173f1fc39286e687ca","new_sha":"3330429f4f6d81b15a120a1364773f1b8b06f982","timestamp_iso":"2026-10-28T10:52:09Z","reason":"Bind class signatures from a settled discovery of the scope's own declarations instead of the fixed base, and publish only class method entries, per review 4399250380; add class::method_ranges_of_scope_declarations.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5b61e93e1ec27b5e4ab2a2173f1fc39286e687ca...3330429f4f6d81b15a120a1364773f1b8b06f982"}]} -->
