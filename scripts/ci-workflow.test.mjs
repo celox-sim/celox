@@ -372,7 +372,7 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   );
   assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
   for (const text of [warm, job("rust-tests")]) {
-    assert.match(text, /key: vtest-v1/);
+    assert.match(text, /key: vtest-\$\{\{ hashFiles\('scripts\/run-vtest\.mjs'\) \}\}/);
     assert.match(text, /run: node scripts\/run-vtest.mjs --prepare-ci/);
   }
   assert.match(warm, /name: Build the optimized vtest executor to populate dependencies\n        if: steps.cache.outputs.cache-hit != 'true'/);
