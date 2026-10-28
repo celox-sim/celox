@@ -1,0 +1,1 @@
+Six lower changes (#2334 through #2340) merged while the rebased stack was being validated. Synchronize their patch-equivalent commits before the next publication; the previous push unexpectedly recreated them as #2368 through #2373. Preserve the validated source tree and let Mergify reconcile removed members.
