@@ -1,0 +1,1 @@
+Review fixes: assignments to chandles reject calls whose result is a known non-chandle and check both conditional branches; module-scope initializers are checked; static properties (C::h) are recognized; $dimensions of chandle-returning functions and DPI imports is 0.
