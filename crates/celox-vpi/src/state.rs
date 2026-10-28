@@ -57,7 +57,26 @@ impl VpiState for NativeProgramInstance {
     }
 
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
-        self.backend().get_four_state(signal)
+        // Packed scalar reads dominate callback polling. Read their stored
+        // word directly; arrays keep the backend's gather/plane layout.
+        if signal.array_layout.is_none() && signal.width <= 64 {
+            let width_mask = u64::MAX
+                .checked_shr((64 - signal.width) as u32)
+                .unwrap_or(0);
+            let value = u64::from_le(self.backend().get_as::<u64>(signal)) & width_mask;
+            let unknown = if signal.is_4state && self.program_image().four_state() {
+                let mask_signal = SignalRef {
+                    offset: signal.offset + signal.width.div_ceil(8),
+                    ..signal
+                };
+                u64::from_le(self.backend().get_as::<u64>(mask_signal)) & width_mask
+            } else {
+                0
+            };
+            (BigUint::from(value), BigUint::from(unknown))
+        } else {
+            self.backend().get_four_state(signal)
+        }
     }
 
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
@@ -250,6 +269,74 @@ impl Runtime {
                 })
             }
             Runtime::Timed(timed) => timed.drain_runtime_events(),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_reads_match_backend_across_word_boundaries_and_padding() {
+        let widths = [1usize, 3, 8, 9, 31, 32, 33, 63, 64, 65, 129];
+        let ports = widths
+            .iter()
+            .flat_map(|width| {
+                [
+                    format!("input logic [{}:0] p{width}", width - 1),
+                    format!("output logic [{}:0] q{width}", width - 1),
+                ]
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let assignments = widths
+            .iter()
+            .map(|width| format!("assign q{width}=p{width};"))
+            .collect::<String>();
+        let source = format!("module Top({ports}); {assignments} endmodule");
+        for four_state in [false, true] {
+            let simulator = celox::Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("packed_reads.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .opt_level(celox::OptLevel::O1)
+            .build()
+            .unwrap();
+            // Safety: this test executes only an image produced in-process.
+            let mut instance = unsafe {
+                NativeProgramInstance::from_image(simulator.shared_code().program_image().clone())
+            }
+            .unwrap();
+            for width in widths {
+                let signal = instance.signal_ref(&format!("Top.p{width}")).unwrap();
+                let bytes = width.div_ceil(8);
+                let planes = if four_state { 2 } else { 1 };
+                for pattern in [0u8, 0xff, 0x55, 0x80] {
+                    let (memory, size) = instance.backend_mut().memory_as_mut_ptr();
+                    assert!(signal.offset + bytes * planes <= size);
+                    // Safety: write exactly this signal's allocated planes.
+                    // Deliberately leave nonzero padding bits in the last byte;
+                    // the public reads must remove them in both value and mask.
+                    let storage = unsafe {
+                        std::slice::from_raw_parts_mut(memory.add(signal.offset), bytes * planes)
+                    };
+                    for (index, byte) in storage.iter_mut().enumerate() {
+                        *byte = pattern.rotate_left(index as u32);
+                    }
+                    assert_eq!(
+                        VpiState::get_four_state(&instance, signal),
+                        instance.backend().get_four_state(signal),
+                        "width={width}, four_state={four_state}, pattern={pattern:x}"
+                    );
+                }
+                let empty = SignalRef { width: 0, ..signal };
+                assert_eq!(
+                    VpiState::get_four_state(&instance, empty),
+                    instance.backend().get_four_state(empty)
+                );
+            }
         }
     }
 }
