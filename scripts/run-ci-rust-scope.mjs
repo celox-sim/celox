@@ -37,7 +37,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let reportIndex = 0;
   for (const args of cargoCommands(
     process.argv[2], JSON.parse(process.env.BUILDS), process.env.FILTER,
-    process.env.RUST_BACKEND_FILTER || "all()",
+    process.env.CELOX_BACKEND_FILTER || "all()",
   )) {
     if (process.argv[2] === "test"
       && args.some((arg, index) => arg === "celox" && args[index - 1] === "-p")

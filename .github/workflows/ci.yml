@@ -234,7 +234,7 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     env:
-      RUST_BACKEND_FILTER: ${{ needs.changes.outputs.rust_backend_filter || 'all()' }}
+      CELOX_BACKEND_FILTER: ${{ needs.changes.outputs.rust_backend_filter || 'all()' }}
       CELOX_CI_REPORT_DIR: work/ci-reports/rust
       HAS_MERGIFY_TOKEN: ${{ secrets.MERGIFY_TOKEN != '' }}
     steps:
@@ -282,7 +282,7 @@ jobs:
         id: workspace-tests
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
-          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci -E "$RUST_BACKEND_FILTER"
+          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci -E "$CELOX_BACKEND_FILTER"
           --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
@@ -302,7 +302,7 @@ jobs:
           cargo nextest run --locked -p celox --features systemverilog --profile ci
           --test counter --test hierarchy --test native_exec
           --test simulation_limits --test sv_unit_scope --test sv_packages
-          -E "$RUST_BACKEND_FILTER"
+          -E "$CELOX_BACKEND_FILTER"
 
       - name: Collect Rust test reports
         if: success() || failure()
