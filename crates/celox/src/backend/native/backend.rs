@@ -410,6 +410,8 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) native_kernel_offsets: Vec<usize>,
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
+    pub(crate) rtl_accesses: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) persistent_comb_state: std::collections::BTreeSet<AbsoluteAddr>,
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
@@ -585,6 +587,7 @@ impl NativeProgramImage {
     pub(crate) fn runtime_program(&self) -> crate::ir::RuntimeProgram {
         crate::ir::RuntimeProgram {
             design: self.design.clone(),
+            rtl_accesses: self.runtime_schema.rtl_accesses.iter().copied().collect(),
             runtime_schema: RuntimeSchema {
                 runtime_errors: self.runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
@@ -593,9 +596,12 @@ impl NativeProgramImage {
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
-                // The image retains the final classification in comb_writes;
-                // optimization-time classification roots are no longer used.
-                persistent_comb_state: Default::default(),
+                persistent_comb_state: self
+                    .runtime_schema
+                    .persistent_comb_state
+                    .iter()
+                    .copied()
+                    .collect(),
                 declaration_startup: self.runtime_schema.declaration_startup.clone(),
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
@@ -2918,6 +2924,14 @@ fn compile_program_with_outlining_threshold(
                 comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
                 testbench_read_roots: sir.runtime().runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: sir.runtime().runtime_schema.rtl_writes.clone(),
+                rtl_accesses: sir.runtime().rtl_accesses.iter().copied().collect(),
+                persistent_comb_state: sir
+                    .runtime()
+                    .runtime_schema
+                    .persistent_comb_state
+                    .iter()
+                    .copied()
+                    .collect(),
                 comb_writes: sir
                     .runtime()
                     .runtime_schema
