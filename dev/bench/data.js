@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793151431782,
+  "lastUpdate": 1793151614395,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -415669,6 +415669,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-tiered-aarch64/heliodor_suite_linux_boot_end_to_end",
             "unit": "ms",
             "value": 145864.568241
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "626dc7cb1156a247fdd89466d09c4a7bcbc7ebae",
+          "message": "feat(sv): solve conditional class constraints bidirectionally (#2239)",
+          "timestamp": "2026-10-27T08:10:22Z",
+          "url": "https://github.com/celox-sim/celox/commit/626dc7cb1156a247fdd89466d09c4a7bcbc7ebae"
+        },
+        "date": 1793151614395,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_startup",
+            "unit": "ms",
+            "value": 10808.564779
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_execution",
+            "unit": "ms",
+            "value": 162140.390589
+          },
+          {
+            "name": "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 172948.956048
           }
         ]
       }
