@@ -180,24 +180,65 @@ sv_backends! {
     }
 }
 
+sv_backends! {
+    fn class_four_state_properties(sim) { @case "class::four_state_properties"; }
+
+    fn four_state_properties_are_two_state_in_two_state_mode(sim) {
+        @setup {
+            let source = r#"module Top(output longint t, output bit [3:0] l, output bit [3:0] k);
+                class C;
+                    time t;
+                    logic [3:0] l;
+                endclass
+                C c;
+                initial begin
+                    c = new;
+                    t = c.t;
+                    l = c.l;
+                    c.l = 4'b1z0x;
+                    k = c.l;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+            .four_state(false);
+        sim.run_until(0).unwrap();
+        for (name, value) in [("t", 0u8), ("l", 0), ("k", 0b1000)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+}
+
 #[test]
-fn four_state_properties_are_rejected() {
-    let source = r#"
-        module Top;
-            class C;
-                logic [3:0] x;
-            endclass
-            C c;
-            initial c = new;
-        endmodule
-    "#;
-    let Err(error) =
-        Simulator::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build_cranelift()
-    else {
-        panic!("a 4-state class property is unsupported");
-    };
-    let error = error.to_string();
-    assert!(error.contains("4-state class property"), "{error}");
+fn randomizing_four_state_properties_is_rejected() {
+    for (body, want) in [
+        (
+            "class C; rand logic [3:0] x; endclass C c; initial begin c = new; void'(c.randomize()); end",
+            "randomization of a 4-state class property",
+        ),
+        (
+            "class C; rand bit [3:0] x; logic [3:0] y; constraint k { x < y; } endclass C c; initial begin c = new; void'(c.randomize()); end",
+            "4-state class property in a constraint",
+        ),
+        (
+            "class C; logic [3:0] x; rand bit [3:0] y; constraint k { y < 5; } endclass C c; initial begin c = new; void'(c.randomize(x)); end",
+            "randomization of a 4-state class property",
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        for four_state in [false, true] {
+            let Err(error) =
+                Simulator::from_sv_sources(vec![(&source, Path::new("class.sv"))], "Top")
+                    .four_state(four_state)
+                    .build_cranelift()
+            else {
+                panic!("{want} is unsupported");
+            };
+            let error = error.to_string();
+            assert!(error.contains(want), "{error}");
+        }
+    }
 }
 
 #[test]

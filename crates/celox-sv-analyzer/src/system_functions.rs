@@ -805,6 +805,8 @@ pub struct ObjectField {
     pub signed: bool,
     /// What a handle property refers to.
     pub handle: Option<HandleProperty>,
+    /// A 4-state value: its unknown-bit mask follows the value bytes.
+    pub four_state: bool,
 }
 
 /// What a handle property refers to.
@@ -818,6 +820,12 @@ impl ObjectField {
     /// Bytes of the value.
     pub fn bytes(self) -> u32 {
         self.width.div_ceil(8)
+    }
+
+    /// Bytes the property occupies: the value, then the mask of a 4-state
+    /// value.
+    pub fn storage(self) -> u32 {
+        self.bytes() << u32::from(self.four_state)
     }
 }
 

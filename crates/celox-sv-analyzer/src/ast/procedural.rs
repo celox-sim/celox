@@ -2618,6 +2618,7 @@ fn dispatch_body(
             width: 8,
             signed: false,
             handle: None,
+            four_state: false,
         }),
         vec![this.clone()],
     );

@@ -470,7 +470,7 @@ impl Ff<'_, '_> {
     }
 
     // Case equality exposes the planes without changing the SIR or backend ABI.
-    fn container_split(&mut self, reg: RegisterId) -> (RegisterId, RegisterId) {
+    pub(super) fn container_split(&mut self, reg: RegisterId) -> (RegisterId, RegisterId) {
         let width = self.b.register(&reg).width();
         if !self.m.four_state
             || !matches!(self.b.register(&reg), celox_sir::RegisterType::Logic { .. })
@@ -528,7 +528,7 @@ impl Ff<'_, '_> {
         (packed[0], packed[1])
     }
 
-    fn container_join(
+    pub(super) fn container_join(
         &mut self,
         value: RegisterId,
         mask: RegisterId,
