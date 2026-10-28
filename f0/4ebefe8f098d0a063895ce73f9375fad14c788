@@ -1,0 +1,1 @@
+Sync with master (#2390 enum domains, #2407, #2429): handle Callee::Lookup in host-request detection, use enum_domain/packed_enum for %p enum rejection. Address Codex 4403245993/4403246006/4403246691/4403246700: %p classifies conditionals by their operands (containers keep their layout, enums are rejected) and rejects enum-returning functions.
