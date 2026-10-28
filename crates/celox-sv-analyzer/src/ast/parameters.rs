@@ -375,6 +375,12 @@ pub(super) fn parameters_from_native_with_environment(
         && declared_alias
             .as_ref()
             .is_none_or(|alias| alias.members.is_empty() && alias.unpacked_ranges.is_empty());
+    if declared_alias
+        .as_ref()
+        .is_some_and(|alias| alias.unpacked_struct().is_some())
+    {
+        return Err(unsupported("parameter of unpacked structure type"));
+    }
     let parameter_members = declared_alias
         .as_ref()
         .map(|ty| ty.members.clone())

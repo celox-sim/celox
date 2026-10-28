@@ -100,6 +100,7 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         ),
         members: r#type.members.clone(),
         signed_element_depth: r#type.signed_element_depth,
+        unpacked_struct: r#type.unpacked_struct.clone(),
     }
 }
 
@@ -121,6 +122,60 @@ pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -
     r#type
 }
 
+/// Run `epilogue` at each `return` in `body`. A returned value is first
+/// stored in the result variable `result`, so the epilogue sees the effects
+/// of evaluating it.
+fn before_returns(body: &mut Vec<Stmt>, epilogue: &[Stmt], result: Option<&str>) {
+    let mut pending = vec![body];
+    while let Some(stmts) = pending.pop() {
+        let mut index = 0;
+        while index < stmts.len() {
+            if let Stmt::Return(value) = &mut stmts[index] {
+                let mut exit = Vec::new();
+                if let (Some(value), Some(result)) = (value.take(), result) {
+                    exit.push(Stmt::Assign {
+                        lhs: LValue::Ident(result.to_owned()),
+                        rhs: value,
+                        nonblocking: false,
+                    });
+                    stmts[index] = Stmt::Return(Some(Expr::Ident(result.to_owned())));
+                }
+                exit.extend(epilogue.iter().cloned());
+                let count = exit.len();
+                stmts.splice(index..index, exit);
+                index += count + 1;
+                continue;
+            }
+            index += 1;
+        }
+        for stmt in stmts.iter_mut() {
+            match stmt {
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    pending.push(then_body);
+                    pending.push(else_body);
+                }
+                Stmt::Case { items, default, .. } => {
+                    pending.extend(items.iter_mut().map(|item| &mut item.body));
+                    pending.extend(default.as_mut());
+                }
+                Stmt::Loop {
+                    init, step, body, ..
+                } => {
+                    pending.push(init);
+                    pending.push(step);
+                    pending.push(body);
+                }
+                // A `return` in a forked branch ends only that branch.
+                _ => {}
+            }
+        }
+    }
+}
+
 /// The `int` type of a loop variable declared by `foreach`.
 pub(super) fn int_type() -> Type {
     Type {
@@ -139,6 +194,7 @@ pub(super) fn int_type() -> Type {
         signed_element_depth: None,
         class: None,
         nominal: Nominal::default(),
+        unpacked_struct: None,
     }
 }
 
@@ -554,6 +610,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if let Some(stmt) = self.property_assignment(op, nonblocking, left, right)? {
             return Ok(stmt);
         }
+        if let Some(stmt) = self.aggregate_assignment(op, nonblocking, left, right)? {
+            return Ok(stmt);
+        }
         if op != "=" {
             self.reject_tagged_integral_target(left)?;
         }
@@ -622,6 +681,51 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             rhs,
             nonblocking,
         })
+    }
+
+    /// An assignment to a whole variable or member of unpacked structure
+    /// type, which writes each of its leaf variables (IEEE 1800-2023 7.2).
+    fn aggregate_assignment(
+        &self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Result<Option<Stmt>, AnalyzerError> {
+        let Ok(written) = expression_binding::variable_lvalue(
+            left,
+            self.tree.declarations(),
+            self.tree,
+            &self.dims,
+        ) else {
+            return Ok(None);
+        };
+        let LValue::Ident(name) = &written else {
+            return Ok(None);
+        };
+        let Some(mut parts) = unpacked_structs::targets(name, &self.dims) else {
+            return Ok(None);
+        };
+        if op != "=" {
+            return Err(unsupported(format!(
+                "operator `{op}` on an unpacked structure"
+            )));
+        }
+        let mut rhs = expression_binding::expression(
+            right,
+            self.tree.declarations(),
+            &written,
+            self.tree,
+            &self.dims,
+        )?;
+        unpacked_structs::check_assignment(name, right, self.tree, &self.dims)?;
+        parts.iter_mut().for_each(|part| self.rename_lvalue(part));
+        self.rename_expr(&mut rhs);
+        Ok(Some(Stmt::AssignConcat {
+            parts,
+            rhs,
+            nonblocking,
+        }))
     }
 
     /// `str[i] = c`, which replaces one character like `str.putc(i, c)`
@@ -1226,17 +1330,28 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }
                 None => None,
             };
+            let automatic = match native.lifetime.as_deref() {
+                Some("automatic") => true,
+                Some("static") => false,
+                _ => self.automatic,
+            };
+            if signal.r#type().unpacked_struct().is_some() {
+                let explicit = native.lifetime.as_deref() == Some("static");
+                stmts.extend(self.aggregate_local(
+                    &signal,
+                    assignment.value,
+                    init,
+                    automatic,
+                    explicit,
+                )?);
+                continue;
+            }
             let name = self.declare(signal.name(), signal.r#type().clone());
             if signal.is_const {
                 let mut shape = self.dims.get(signal.name()).unwrap().clone();
                 shape.randomizable = false;
                 self.dims.insert(signal.name().to_string(), shape);
             }
-            let automatic = match native.lifetime.as_deref() {
-                Some("automatic") => true,
-                Some("static") => false,
-                _ => self.automatic,
-            };
             if !automatic {
                 if native.lifetime.as_deref() == Some("static") {
                     self.state.explicit_statics.insert(name.clone());
@@ -1247,6 +1362,124 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             stmts.push(Stmt::Local { name, init });
         }
         Ok(stmts)
+    }
+
+    /// A local of unpacked structure type: its leaf variables, then the
+    /// assignment of its initializer.
+    fn aggregate_local(
+        &mut self,
+        signal: &crate::ast::Signal,
+        root: Option<celox_sv_syntax::ExprId>,
+        init: Option<Expr>,
+        automatic: bool,
+        explicit: bool,
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
+        if signal.is_const {
+            return Err(unsupported("const variable of unpacked structure type"));
+        }
+        if let Some(root) = root {
+            let aggregate = signal
+                .r#type()
+                .unpacked_struct()
+                .expect("an unpacked structure local");
+            unpacked_structs::check_value(
+                aggregate,
+                root,
+                self.tree.declarations(),
+                self.tree,
+                &self.dims,
+            )?;
+        }
+        let leaves = self.declare_aggregate(signal.name(), signal.r#type())?;
+        // A static variable is initialized once, not on each entry: each leaf
+        // keeps its part of the initializer, which is hoisted with it.
+        let aggregate = signal
+            .r#type()
+            .unpacked_struct()
+            .expect("an unpacked structure local")
+            .clone();
+        let mut init = init;
+        let mut parts = match init.take() {
+            Some(value)
+                if !automatic && unpacked_structs::leaf_parts(&aggregate, &value).is_some() =>
+            {
+                unpacked_structs::leaf_parts(&aggregate, &value)
+                    .expect("checked by the guard")
+                    .into_iter()
+                    .map(Some)
+                    .collect()
+            }
+            Some(_) if !automatic => {
+                return Err(unsupported(
+                    "initializer of a static variable of unpacked structure type that is not a pattern or variable",
+                ));
+            }
+            other => {
+                init = other;
+                vec![None; leaves.len()]
+            }
+        };
+        let mut stmts = Vec::new();
+        for ((name, r#type), part) in leaves.iter().zip(parts.drain(..)) {
+            if !automatic {
+                // An explicitly static member of a repeating process is
+                // initialized before simulation, like a scalar.
+                if explicit {
+                    self.state.explicit_statics.insert(name.clone());
+                }
+                let r#type = scoped_type(r#type.clone(), &self.dims.const_env);
+                self.state.statics.push((name.clone(), r#type));
+            }
+            stmts.push(Stmt::Local {
+                name: name.clone(),
+                init: part,
+            });
+        }
+        if let Some(rhs) = init {
+            stmts.push(Stmt::AssignConcat {
+                parts: leaves
+                    .into_iter()
+                    .map(|(name, _)| LValue::Ident(name))
+                    .collect(),
+                rhs,
+                nonblocking: false,
+            });
+        }
+        Ok(stmts)
+    }
+
+    /// Declare a variable of unpacked structure type: hide the names of it
+    /// and its members, then declare its leaf variables. Returns their unique
+    /// names and types, first declared first.
+    pub(super) fn declare_aggregate(
+        &mut self,
+        source: &str,
+        r#type: &Type,
+    ) -> Result<Vec<(String, Type)>, AnalyzerError> {
+        if !r#type.unpacked_ranges.is_empty() {
+            return Err(unsupported("array of unpacked structures"));
+        }
+        for (name, ty) in unpacked_structs::aggregates(source, r#type) {
+            let entry = self.take_binding(&name, None, 0);
+            self.dims.insert(name.clone(), dimensions_from_type(&ty));
+            self.scopes
+                .last_mut()
+                .expect("a body always has a scope")
+                .entries
+                .push(entry);
+        }
+        let aggregate = r#type
+            .unpacked_struct()
+            .expect("an unpacked structure type")
+            .clone();
+        Ok(aggregate
+            .leaves()
+            .into_iter()
+            .map(|leaf| {
+                let name = self.declare(&leaf.name(source), leaf.r#type.clone());
+                (name, leaf.r#type)
+            })
+            .collect())
     }
 
     /// Make the parameters of a declaration in the body known as constants.
@@ -2556,7 +2789,8 @@ pub(super) fn lower_subroutine(
         .map(|(_, _, ty, default)| {
             default
                 .map(|root| {
-                    let shape = ty.tagged_identity().map(|_| dimensions_from_type(ty));
+                    let shape = (ty.tagged_identity().is_some() || ty.unpacked_struct().is_some())
+                        .then(|| dimensions_from_type(ty));
                     let mut value = expression_binding::bind_value(
                         root,
                         tree.declarations(),
@@ -2587,8 +2821,12 @@ pub(super) fn lower_subroutine(
         .map(|_| None)
         .chain(defaults)
         .collect::<Vec<_>>();
+    let mut aggregate_formals = Vec::new();
     for ((source, direction, r#type, _), default) in this.into_iter().chain(params).zip(defaults) {
         let name = builder.declare(&source, r#type.clone());
+        if r#type.unpacked_struct().is_some() {
+            aggregate_formals.push((lowered_params.len(), r#type.clone()));
+        }
         formal_types.insert(name.clone(), scoped_type(r#type.clone(), declaration_env));
         lowered_params.push(SubroutineParam {
             name,
@@ -2612,8 +2850,72 @@ pub(super) fn lower_subroutine(
     }
     builder.return_shape = return_type
         .as_ref()
-        .filter(|ty| ty.tagged_identity().is_some())
+        .filter(|ty| ty.tagged_identity().is_some() || ty.unpacked_struct().is_some())
         .map(dimensions_from_type);
+    // An argument of unpacked structure type is passed as its flat value;
+    // the body works on its members (see `unpacked_structs`).
+    let mut aggregate_prologue = Vec::new();
+    let mut aggregate_epilogue = Vec::new();
+    // A result of unpacked structure type assigned through the function's
+    // name is assembled from its members when the body ends without
+    // `return` (IEEE 1800-2023 13.4.1).
+    let mut result_leaves = None;
+    if dispatch.is_none()
+        && let (Some(result), Some(r#type)) = (&return_var, &return_type)
+        && r#type.unpacked_struct().is_some()
+        && !constructor
+    {
+        let leaves = builder
+            .declare_aggregate(&name, r#type)?
+            .into_iter()
+            .map(|(leaf, _)| leaf)
+            .collect::<Vec<_>>();
+        // An automatic result starts each call at its default.
+        if builder.automatic {
+            aggregate_prologue.extend(leaves.iter().map(|leaf| Stmt::Local {
+                name: leaf.clone(),
+                init: None,
+            }));
+        }
+        result_leaves = Some((result.clone(), leaves));
+    }
+    if dispatch.is_none() {
+        for (index, r#type) in &aggregate_formals {
+            let param = &lowered_params[*index];
+            let (name, source, direction) = (
+                param.name.clone(),
+                param.source_name.clone(),
+                param.direction,
+            );
+            let leaves = builder
+                .declare_aggregate(&source, r#type)?
+                .into_iter()
+                .map(|(leaf, _)| leaf)
+                .collect::<Vec<_>>();
+            if direction.is_read() {
+                aggregate_prologue.push(Stmt::AssignConcat {
+                    parts: leaves.iter().cloned().map(LValue::Ident).collect(),
+                    rhs: Expr::Ident(name.clone()),
+                    nonblocking: false,
+                });
+            } else if builder.automatic {
+                // An automatic output starts each call at its default.
+                aggregate_prologue.extend(leaves.iter().map(|leaf| Stmt::Local {
+                    name: leaf.clone(),
+                    init: None,
+                }));
+            }
+            if direction.is_written() {
+                aggregate_epilogue.push(Stmt::Assign {
+                    lhs: LValue::Ident(name),
+                    rhs: Expr::Concat(leaves.into_iter().map(Expr::Ident).collect()),
+                    nonblocking: false,
+                });
+            }
+        }
+    }
+    // The members of formals and of the result have the subroutine's
+    // lifetime, like the formals themselves.
     let parameter_locals_end = builder.state.locals.len();
     let mut items = native.items.clone();
     let mut prologue = Vec::new();
@@ -2649,8 +2951,24 @@ pub(super) fn lower_subroutine(
             &lowered_params,
             return_var.as_deref(),
         )),
-        None => body.extend(builder.native_body(&items, &native.authored_statements)?),
+        None => {
+            body.extend(aggregate_prologue);
+            body.extend(builder.native_body(&items, &native.authored_statements)?);
+        }
     }
+    if !aggregate_epilogue.is_empty() {
+        // Copy the members back on every way out of the body, after the
+        // value of a `return` is taken.
+        before_returns(&mut body, &aggregate_epilogue, return_var.as_deref());
+    }
+    if let Some((result, leaves)) = result_leaves {
+        body.push(Stmt::Assign {
+            lhs: LValue::Ident(result),
+            rhs: Expr::Concat(leaves.into_iter().map(Expr::Ident).collect()),
+            nonblocking: false,
+        });
+    }
+    body.extend(aggregate_epilogue);
     builder.pop_scope();
     if class.is_some() {
         builder.pop_scope();
@@ -3375,10 +3693,24 @@ pub(super) fn initial_processes_from_scope(
                     tree,
                     item_dimensions,
                 )?;
-                let mut stmt = Stmt::Assign {
-                    lhs,
-                    rhs,
-                    nonblocking: false,
+                let LValue::Ident(name) = lhs else {
+                    unreachable!("an initializer target is a variable")
+                };
+                // A variable of unpacked structure type initializes its leaves.
+                let mut stmt = match unpacked_structs::targets(&name, item_dimensions) {
+                    Some(parts) => {
+                        unpacked_structs::check_assignment(&name, native, tree, item_dimensions)?;
+                        Stmt::AssignConcat {
+                            parts,
+                            rhs,
+                            nonblocking: false,
+                        }
+                    }
+                    None => Stmt::Assign {
+                        lhs: LValue::Ident(name),
+                        rhs,
+                        nonblocking: false,
+                    },
                 };
                 // The parameters of the class are its own constants.
                 if scoped.is_some() {

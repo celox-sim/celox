@@ -1167,6 +1167,9 @@ fn field(
     env: &HashMap<String, i128>,
     offset: u32,
 ) -> Converted<ObjectField> {
+    if ty.unpacked_struct().is_some() {
+        return Err(unsupported("class property of unpacked structure type"));
+    }
     let (width, signed, handle) = match ty.kind() {
         _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),

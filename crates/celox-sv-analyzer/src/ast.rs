@@ -185,6 +185,7 @@ mod subroutine_owners;
 pub(crate) mod timescales;
 pub(crate) mod type_parameters;
 mod types;
+mod unpacked_structs;
 pub(crate) mod validation;
 pub(crate) mod warnings;
 
@@ -1183,12 +1184,20 @@ impl Module {
         }
         // A generate block shares its name space with the module's other
         // declarations (IEEE 1800-2023 27.6, 23.9).
+        // The members of a variable of unpacked structure type are named
+        // like declarations of a scope of the variable's name.
+        let aggregates: HashSet<&str> = signals
+            .iter()
+            .filter(|signal| signal.is_aggregate())
+            .map(Signal::name)
+            .collect();
         let scope_heads: HashSet<&str> = signals
             .iter()
             .filter(|signal| signal.hierarchical.is_none())
             .map(Signal::name)
             .chain(instances.iter().map(Instance::name))
             .filter_map(generate_scope_head)
+            .filter(|head| !aggregates.contains(head))
             .collect();
         if let Some(conflict) = ports
             .iter()
@@ -1984,6 +1993,12 @@ impl Signal {
         &self.name
     }
 
+    /// A variable of unpacked structure type, which only names its leaf
+    /// variables.
+    pub(crate) fn is_aggregate(&self) -> bool {
+        self.r#type.unpacked_struct.is_some()
+    }
+
     pub fn r#type(&self) -> &Type {
         &self.r#type
     }
@@ -2248,6 +2263,8 @@ pub struct Type {
     class: Option<Arc<str>>,
     /// The typedef that names an enumeration, struct or union type.
     nominal: Nominal,
+    /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
+    unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
 }
 
 /// The declaration that names an enumeration, struct or union type, which
@@ -2291,6 +2308,7 @@ impl Type {
             class: None,
             container: None,
             nominal: Nominal::default(),
+            unpacked_struct: None,
         }
     }
 
@@ -2307,6 +2325,7 @@ impl Type {
             signed_element_depth: None,
             class: None,
             container: None,
+            unpacked_struct: None,
             nominal: Nominal::default(),
         }
     }
@@ -2315,7 +2334,9 @@ impl Type {
     /// unless an earlier typedef already named it (`typedef A B` names the
     /// type of `A`).
     fn name_declaration(&mut self, name: impl FnOnce() -> String) {
-        if (self.is_enum || !self.members.is_empty()) && self.nominal.0.is_none() {
+        if (self.is_enum || !self.members.is_empty() || self.unpacked_struct.is_some())
+            && self.nominal.0.is_none()
+        {
             self.nominal = Nominal(Some(name().into()));
         }
     }
@@ -2323,6 +2344,11 @@ impl Type {
     /// The typedef that names this enumeration, struct or union type.
     fn declaration_name(&self) -> Option<&str> {
         self.nominal.0.as_deref()
+    }
+
+    /// The members of an unpacked structure type.
+    pub(in crate::ast) fn unpacked_struct(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
+        self.unpacked_struct.as_ref()
     }
 
     /// The class of an object handle type.
@@ -3090,6 +3116,9 @@ struct VariableDimensions {
     members: Vec<packed_structs::PackedMember>,
     /// See [`Type::signed_element_depth`].
     signed_element_depth: Option<usize>,
+    /// A variable of unpacked structure type: the names of its members
+    /// are variables (see [`unpacked_structs`]).
+    unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
 }
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;

@@ -79,6 +79,9 @@ pub(super) fn with_dimensions(
     if matches!(base.kind(), TypeKind::Real | TypeKind::Shortreal) {
         return Err(unsupported("real dynamic container elements"));
     }
+    if base.unpacked_struct().is_some() {
+        return Err(unsupported("dynamic container of unpacked structures"));
+    }
     let shape = casts::expr_type_from_type(&tree.state, &base, &context.const_env)
         .ok_or_else(|| unsupported("dynamic container element type"))?;
     if shape.width == 0 || shape.width > 64 {

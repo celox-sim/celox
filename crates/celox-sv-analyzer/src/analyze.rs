@@ -134,6 +134,8 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
         let signals = module
             .signals()
             .iter()
+            // A variable of unpacked structure type is its leaf variables.
+            .filter(|signal| !signal.is_aggregate())
             .map(|signal| {
                 ir::Signal::new(
                     signal.name().to_string(),

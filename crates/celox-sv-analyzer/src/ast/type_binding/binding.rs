@@ -88,6 +88,7 @@ fn bind_in_mode(
             signed: bool,
             names: Vec<String>,
             ranges: Vec<PackedRange>,
+            packed: bool,
         },
     }
     let mut jobs = vec![Job::Enter(root)];
@@ -281,7 +282,8 @@ fn bind_in_mode(
                         packed,
                         fields,
                     } => {
-                        if !packed && !soft {
+                        // Unpacked unions are not supported (IEEE 1800-2023 7.3).
+                        if !packed && !soft && (*union || *tagged) {
                             return Ok(None);
                         }
                         let mut names = Vec::new();
@@ -325,6 +327,7 @@ fn bind_in_mode(
                             signed: data.signed.unwrap_or(false),
                             names,
                             ranges,
+                            packed: *packed || *soft,
                         });
                         jobs.extend(fields.iter().zip(voids).rev().map(|(field, is_void)| {
                             if is_void {
@@ -383,11 +386,28 @@ fn bind_in_mode(
                 signed,
                 names,
                 ranges,
+                packed,
             } => {
                 let start = values
                     .len()
                     .checked_sub(names.len())
                     .ok_or_else(|| unsupported("aggregate fields"))?;
+                if !packed {
+                    if !ranges.is_empty() {
+                        return Ok(None);
+                    }
+                    let fields = names.into_iter().zip(values.split_off(start)).collect();
+                    let Some(ty) = unpacked_structs::native_type(
+                        &tree.state,
+                        owner,
+                        fields,
+                        &context.const_env,
+                    ) else {
+                        return Ok(None);
+                    };
+                    values.push(ty);
+                    continue;
+                }
                 let fields = names
                     .into_iter()
                     .zip(values.split_off(start))

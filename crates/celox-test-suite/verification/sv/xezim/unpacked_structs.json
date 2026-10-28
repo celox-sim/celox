@@ -1,0 +1,92 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::assignment_patterns at 61:3: expect_output: expected [110, 97, 109, 101, 100, 32, 55, 32, 112, 97, 116, 32, 48, 48, 48, 48, 10, 112, 111, 115, 105, 116, 105, 111, 110, 97, 108, 32, 49, 32, 112, 111, 115, 32, 48, 48, 49, 49, 10, 116, 121, 112, 101, 100, 32, 45, 50, 32, 116, 121, 112, 101, 100, 32, 49, 49, 49, 49, 10, 110, 101, 115, 116, 101, 100, 32, 48, 32, 122, 32, 48, 48, 48, 48, 32, 113, 10, 109, 101, 109, 98, 101, 114, 32, 45, 50, 32, 116, 121, 112, 101, 100, 32, 119, 10, 100, 101, 102, 97, 117, 108, 116, 32, 53, 32, 48, 49, 48, 49, 32, 100, 10], got [110, 97, 109, 101, 100, 32, 55, 32, 112, 97, 116, 32, 48, 48, 48, 48, 10, 112, 111, 115, 105, 116, 105, 111, 110, 97, 108, 32, 49, 32, 112, 111, 115, 32, 48, 48, 49, 49, 10, 116, 121, 112, 101, 100, 32, 45, 50, 32, 116, 121, 112, 101, 100, 32, 49, 49, 49, 49, 10, 110, 101, 115, 116, 101, 100, 32, 48, 32, 122, 32, 48, 48, 48, 48, 32, 113, 10, 109, 101, 109, 98, 101, 114, 32, 48, 32, 32, 119, 10, 100, 101, 102, 97, 117, 108, 116, 32, 53, 32, 48, 49, 48, 49, 32, 100, 10]",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::assignment_patterns",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::four_state_members",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::handle_members_survive_heap_collections at 257:3: expect_output: expected [91, 107, 101, 112, 116, 93, 32, 91, 110, 97, 109, 101, 93, 32, 91, 50, 57, 57, 57, 93, 32, 91, 50, 57, 57, 57, 33, 93, 32, 49, 32, 51, 48, 48, 48, 10], got [91, 107, 101, 112, 116, 93, 32, 91, 110, 97, 109, 101, 93, 32, 91, 32, 93, 32, 91, 50, 57, 57, 57, 33, 93, 32, 49, 32, 51, 48, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::handle_members_survive_heap_collections",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::initializers_results_and_defaults at 147:3: expect_output: expected [103, 32, 49, 32, 103, 10, 109, 97, 107, 101, 32, 50, 32, 109, 32, 51, 32, 110, 10, 116, 119, 105, 99, 101, 32, 51, 32, 51, 10, 100, 101, 102, 97, 117, 108, 116, 32, 49, 32, 52, 10, 115, 116, 97, 116, 105, 99, 32, 48, 32, 53, 10, 115, 116, 97, 116, 105, 99, 32, 49, 32, 53, 10], got [103, 32, 49, 32, 103, 10, 109, 97, 107, 101, 32, 50, 32, 109, 32, 51, 32, 110, 10, 116, 119, 105, 99, 101, 32, 51, 32, 51, 10, 100, 101, 102, 97, 117, 108, 116, 32, 48, 32, 52, 10, 115, 116, 97, 116, 105, 99, 32, 48, 32, 53, 10, 115, 116, 97, 116, 105, 99, 32, 49, 32, 53, 10]",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::initializers_results_and_defaults",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::members_whole_copies_and_equality",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::module_variables at 215:5: assert_eq next_a: expected 0x11, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::module_variables",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::results_and_outputs at 186:3: expect_output: expected [109, 97, 107, 101, 32, 48, 10, 111, 117, 116, 115, 32, 97, 98, 99, 10, 111, 117, 116, 122, 32, 48, 10, 115, 116, 97, 116, 105, 99, 32, 49, 32, 50, 10, 115, 116, 97, 116, 105, 99, 32, 50, 32, 50, 10], got [109, 97, 107, 101, 32, 48, 10, 111, 117, 116, 115, 32, 97, 98, 99, 10, 111, 117, 116, 122, 32, 120, 10, 115, 116, 97, 116, 105, 99, 32, 49, 32, 50, 10, 115, 116, 97, 116, 105, 99, 32, 50, 32, 50, 10]",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::results_and_outputs",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::subroutine_arguments_and_results at 103:3: expect_output: expected [53, 58, 102, 105, 118, 101, 32, 49, 58, 111, 110, 101, 10, 54, 58, 102, 105, 118, 101, 32, 45, 49, 58, 102, 105, 118, 101, 33, 10, 54, 58, 102, 105, 118, 101, 32, 49, 32, 48, 10, 50, 32, 54, 58, 102, 105, 118, 101, 43, 10], got [53, 58, 102, 105, 118, 101, 32, 49, 58, 111, 110, 101, 10, 54, 58, 102, 105, 118, 101, 32, 45, 49, 58, 102, 105, 118, 101, 33, 10, 45, 49, 58, 102, 105, 118, 101, 33, 32, 49, 32, 48, 10, 50, 32, 54, 58, 102, 105, 118, 101, 43, 10]",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::subroutine_arguments_and_results",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
