@@ -27,7 +27,8 @@
     "verilator/system_functions.json",
     "verilator/tagged_unions.json",
     "verilator/timing.json",
-    "verilator/types.json"
+    "verilator/types.json",
+    "verilator/unpacked_structs.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

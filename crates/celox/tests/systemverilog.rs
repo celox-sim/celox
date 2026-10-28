@@ -261,3 +261,5 @@ mod containers;
 
 #[path = "frontends/systemverilog/concurrent_assertions.rs"]
 mod concurrent_assertions;
+#[path = "frontends/systemverilog/unpacked_structs.rs"]
+mod unpacked_structs;

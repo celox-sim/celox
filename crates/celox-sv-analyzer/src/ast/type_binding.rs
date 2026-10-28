@@ -56,7 +56,11 @@ pub(super) fn port_type(
     let Some(id) = port.data_type else {
         return Ok(None);
     };
-    bind(id, tree, &context)
+    let ty = bind(id, tree, &context)?;
+    if ty.as_ref().is_some_and(|ty| ty.unpacked_struct().is_some()) {
+        return Err(unsupported("port of unpacked structure type"));
+    }
+    Ok(ty)
 }
 
 /// Formal/return implicit types use scalar logic rather than an unsized local.

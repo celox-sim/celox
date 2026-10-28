@@ -27,10 +27,10 @@ synthesis and is tested at the design level.
 
 | Area | Supported |
 | --- | --- |
-| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs, hard and soft packed untagged unions, enums (with implicit values) and their methods `first`, `last`, `next`, `prev`, `num` and `name` on any enum-typed expression except an element of a packed array of enums ([#2417](https://github.com/celox-sim/celox/issues/2417)), `typedef`, unpacked arrays used as memories, signed and unsigned |
+| Types | `logic`, `bit`, `reg`, packed vectors, multidimensional packed arrays with ascending or descending ranges and arbitrary constant bounds, packed structs, unpacked structs (see [unpacked structures](#unpacked-structures)), hard and soft packed untagged unions, enums (with implicit values) and their methods `first`, `last`, `next`, `prev`, `num` and `name` on any enum-typed expression except an element of a packed array of enums ([#2417](https://github.com/celox-sim/celox/issues/2417)), `typedef`, unpacked arrays used as memories, signed and unsigned |
 | Expressions | arithmetic including `**`, logic, shift, comparison, reduction, concatenation and replication, `?:`, `inside`, `==?` / `!=?`, casts (`N'(x)`, `signed'(x)`, `T'(x)`), `$signed` / `$unsigned` |
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
-| Patterns | assignment patterns for packed structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
+| Patterns | assignment patterns for packed and unpacked structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Dynamic containers | one-dimensional dynamic arrays, queues (including bounded queues), and associative arrays with integral or string keys; element access, value assignment, equality, `foreach` and built-in container methods. See [dynamic containers](#dynamic-containers) |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values; text formatted by `$sformatf` / `$sformat` / `$swrite`. See [strings](#strings) |
 | Classes | classes declared in a module, a package or the compilation unit: properties of 2-state and 4-state integral types up to 64 bits (4-state properties start as X and keep X/Z bits), `string` and class handle types, plus dynamic arrays, queues and associative arrays, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named constructor arguments; shallow copies (`new h`). See [classes](#classes) |
@@ -325,6 +325,19 @@ Every construct above is covered by tests that compare the result with a
 software model. The shared Veryl conformance suite also runs against the
 SystemVerilog emitted by Veryl.
 
+### Unpacked structures {#unpacked-structures}
+
+Unpacked structures (IEEE 1800-2023 7.2) may have integral, enumeration,
+`string`, class handle, packed structure and nested unpacked structure
+members, each keeping its own 2-state or 4-state type. Variables of such a
+type may be module variables, procedural locals, and subroutine arguments of
+any direction and results. Members are read and written like variables of
+their type; a whole structure is assigned and compared with `==`, `!=`,
+`===` and `!==` against a value of the same type, chosen with `?:`, or built
+from an assignment pattern (`'{a, b}`, `'{m: v, default: d}`, `T'{...}`, with
+`default` applied to the members of nested structures). Other operators,
+selects and casts of a whole structure are rejected.
+
 ## Unsupported constructs {#what-is-not-supported}
 
 Celox reports an `Unsupported` error naming the construct instead of ignoring
@@ -348,7 +361,9 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
-  unpacked structs and `real`.
+  `real`, and unpacked structs as ports, nets, parameters, class properties,
+  array or container elements, or with members that are arrays, `real`, or
+  have default values.
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
   edge signals, and several edges without an asynchronous reset.

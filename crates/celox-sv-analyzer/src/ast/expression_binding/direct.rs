@@ -280,6 +280,24 @@ pub(in crate::ast) fn bind_value(
         match job {
             Job::Enter(id, target, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
+                unpacked_structs::check_operands(id, native, tree, dimensions)?;
+                // An argument, result or other value received as an unpacked
+                // structure is a pattern or a value of its type (6.22.3).
+                if let Some(aggregate) = target
+                    .as_deref()
+                    .filter(|shape| shape.unpacked.is_empty())
+                    .and_then(|shape| shape.unpacked_struct.as_deref())
+                {
+                    unpacked_structs::check_value(aggregate, id, native, tree, dimensions)?;
+                } else if target
+                    .as_deref()
+                    .is_some_and(|shape| shape.unpacked.is_empty() && shape.container.is_none())
+                    && unpacked_structs::native_struct(id, native, tree, dimensions)?.is_some()
+                {
+                    return Err(unsupported(
+                        "unpacked structure value received by a destination that is not of its type",
+                    ));
+                }
                 if let Some(shape) = target.as_deref()
                     && shape
                         .members
@@ -462,6 +480,10 @@ pub(in crate::ast) fn bind_value(
                             && dimensions.get(&name).is_none()
                         {
                             return Err(unsupported(format!("`{name}`")));
+                        }
+                        if let Some(value) = unpacked_structs::whole(&name, dimensions) {
+                            values.push(value);
+                            continue;
                         }
                         if let Some(value) = objects::unqualified_property(tree, dimensions, &name)?
                         {
@@ -1592,6 +1614,9 @@ fn path(
         }
     }
     parts.reverse();
+    if qualified.is_none() {
+        unpacked_structs::collapse(&mut parts, dimensions);
+    }
     if qualified.is_none()
         && let Some(name) =
             interface_binding::unindexed_parameter(&parts, tree, dimensions, authored)
@@ -1720,6 +1745,11 @@ fn selected_value(
         &selected_lvalue(root, native, tree, dimensions, false)?,
         dimensions,
     );
+    if let Expr::Ident(name) = &value
+        && let Some(value) = unpacked_structs::whole(name, dimensions)
+    {
+        return Ok(value);
+    }
     let guards = member_context(root, native, tree, dimensions)?
         .map(|(guards, _)| guards)
         .unwrap_or_default();

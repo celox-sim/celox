@@ -1,0 +1,279 @@
+(group unpacked_structs (category types))
+
+(case members_whole_copies_and_equality
+  (source "unpacked_struct_locals.sv" #"
+module Top(output bit done);
+    typedef struct { int level; string name; bit [3:0] l; bit b; } row_t;
+    typedef struct { row_t r; string tag; } outer_t;
+    initial begin
+        row_t a, b;
+        outer_t o;
+        $display("def %0d [%s] %b %b", a.level, a.name, a.l, a.b);
+        a.level = 3;
+        a.name = "n";
+        a.l = 4'b1011;
+        a.b = 1;
+        b = a;
+        b.name = "m";
+        $display("%0d %s %b %b | %0d %s", a.level, a.name, a.l, a.b, b.level, b.name);
+        $display("eq %0d %0d", a == b, a != b);
+        b.name = "n";
+        $display("eq %0d %0d len=%0d", a == b, a === b, b.name.len());
+        o.r = b;
+        o.tag = "t";
+        o.r.level++;
+        o.r.name = {o.r.name, o.tag};
+        $display("nest %0d %s %s %0d", o.r.level, o.r.name, o.tag, o.r == a);
+        b = o.r;
+        $display("copy %0d %s", b.level, b.name);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "def 0 [] 0000 0\n3 n 1011 1 | 3 m\neq 0 1\neq 1 1 len=1\nnest 4 nt t 0\ncopy 4 nt\n"))
+
+(case assignment_patterns
+  (source "unpacked_struct_patterns.sv" #"
+module Top(output bit done);
+    typedef struct { int level; string name; bit [3:0] l; } row_t;
+    typedef struct { row_t r; string tag; } outer_t;
+    initial begin
+        row_t b;
+        outer_t o;
+        b = '{level: 7, name: "pat", default: 0};
+        $display("named %0d %s %b", b.level, b.name, b.l);
+        b = '{1, "pos", 4'b0011};
+        $display("positional %0d %s %b", b.level, b.name, b.l);
+        b = row_t'{-2, "typed", 4'hf};
+        $display("typed %0d %s %b", b.level, b.name, b.l);
+        o = '{r: '{default: 0, name: "z"}, tag: "q"};
+        $display("nested %0d %s %b %s", o.r.level, o.r.name, o.r.l, o.tag);
+        o = '{r: b, tag: "w"};
+        $display("member %0d %s %s", o.r.level, o.r.name, o.tag);
+        o = '{default: 5, tag: "d"};
+        $display("default %0d %b %s", o.r.level, o.r.l, o.tag);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "named 7 pat 0000\npositional 1 pos 0011\ntyped -2 typed 1111\nnested 0 z 0000 q\nmember -2 typed w\ndefault 5 0101 d\n"))
+
+(case subroutine_arguments_and_results
+  (source "unpacked_struct_subroutines.sv" #"
+module Top(output bit done);
+    typedef struct { int level; string name; } row_t;
+    function automatic string format(row_t r);
+        string s;
+        s.itoa(r.level);
+        return {s, ":", r.name};
+    endfunction
+    function automatic row_t make(int level, string name);
+        row_t r;
+        r.level = level;
+        r.name = name;
+        return r;
+    endfunction
+    function automatic void bump(inout row_t r, output row_t o);
+        r.level++;
+        o = '{level: -1, name: {r.name, "!"}};
+        if (r.level > 0) return;
+        o.level = 99;
+    endfunction
+    task automatic later(row_t r, output row_t q);
+        #2 q = r;
+        q.name = {r.name, "+"};
+    endtask
+    initial begin
+        row_t a, b;
+        a = make(5, "five");
+        $display("%s %s", format(a), format('{1, "one"}));
+        bump(a, b);
+        $display("%s %s", format(a), format(b));
+        b = a.level > 5 ? a : b;
+        $display("%s %0d %0d", format(b), make(2, "x") == make(2, "x"), make(2, "x") == make(2, "y"));
+        later(a, b);
+        $display("%0d %s", $time, format(b));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output "5:five 1:one\n6:five -1:five!\n6:five 1 0\n2 6:five+\n"))
+
+(case initializers_results_and_defaults
+  (source "unpacked_struct_initializers.sv" #"
+module Top(output bit done);
+    typedef struct { int a; string s; } row_t;
+    typedef struct { int a; bit [3:0] b; } int_t;
+    row_t g = '{1, "g"};
+    function automatic row_t make();
+        make = '{2, "m"};
+    endfunction
+    function automatic row_t make_members();
+        make_members.a = 3;
+        make_members.s = "n";
+    endfunction
+    function automatic row_t bump(inout row_t r);
+        r.a++;
+        return r;
+    endfunction
+    function automatic row_t twice(inout row_t r);
+        return bump(r);
+    endfunction
+    function automatic int f(row_t r = '{default: 0, s: "d"});
+        return r.a + r.s.len();
+    endfunction
+    initial begin
+        row_t x, y;
+        $display("g %0d %s", g.a, g.s);
+        x = make();
+        y = make_members();
+        $display("make %0d %s %0d %s", x.a, x.s, y.a, y.s);
+        y = twice(x);
+        $display("twice %0d %0d", x.a, y.a);
+        $display("default %0d %0d", f(), f(x));
+        repeat (2) begin
+            static int_t r = '{0, 5};
+            $display("static %0d %0d", r.a, r.b);
+            r.a++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "g 1 g\nmake 2 m 3 n\ntwice 3 3\ndefault 1 4\nstatic 0 5\nstatic 1 5\n"))
+
+(case results_and_outputs
+  (source "unpacked_struct_results.sv" #"
+module Top(output bit done);
+    typedef struct { int a; } row_t;
+    typedef struct { string s; } str_t;
+    typedef struct { int x, y; } inner_t;
+    typedef struct { inner_t i; } outer_t;
+    function automatic row_t make(bit set);
+        if (set) make.a = 7;
+    endfunction
+    function automatic void outs(output str_t r);
+        r.s = "abc";
+    endfunction
+    function automatic void outz(output row_t r);
+        if (0) r.a = 1;
+    endfunction
+    initial begin
+        row_t r;
+        str_t s;
+        r = make(1);
+        r = make(0);
+        $display("make %0d", r.a);
+        outs(s);
+        $display("outs %s", s.s);
+        r.a = 5;
+        outz(r);
+        $display("outz %0d", r.a);
+        repeat (2) begin
+            static outer_t o = '{'{1, 2}};
+            $display("static %0d %0d", o.i.x, o.i.y);
+            o.i.x++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "make 0\nouts abc\noutz 0\nstatic 1 2\nstatic 2 2\n"))
+
+(case module_variables
+  (source "unpacked_struct_module.sv" #"
+module Top(input bit clk, input bit [7:0] a, input bit [3:0] b,
+           output bit [7:0] next_a, output bit [3:0] next_b,
+           output bit [7:0] stored_a, output bit [3:0] stored_b, output bit same);
+    typedef struct { bit [7:0] a; bit [3:0] b; } pair_t;
+    pair_t p, q, c, r;
+    assign p = '{a: a, b: b};
+    always_comb begin
+        q = p;
+        q.b = p.b + 1;
+    end
+    assign c = '{a: q.a + 1, b: q.b};
+    always_ff @(posedge clk) begin
+        r <= c;
+        r.b <= c.b ^ 4'hf;
+    end
+    assign next_a = c.a;
+    assign next_b = c.b;
+    assign stored_a = r.a;
+    assign stored_b = r.b;
+    assign same = p == q;
+endmodule
+"#)
+  (top Top)
+  (for (x y) (list (0x10 3) (0xfe 15))
+    (modify (set a x) (set b y))
+    (assert_eq next_a (& (+ x 1) 0xff))
+    (assert_eq next_b (& (+ y 1) 15))
+    (assert_eq same 0)
+    (tick clk)
+    (assert_eq stored_a (& (+ x 1) 0xff))
+    (assert_eq stored_b (^ (& (+ y 1) 15) 15))))
+
+(case handle_members_survive_heap_collections
+  (source "unpacked_struct_handles.sv" #"
+module Top(output int n);
+    class Node;
+        string text;
+        function new(string text);
+            this.text = text;
+        endfunction
+        function string get();
+            return text;
+        endfunction
+    endclass
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    logic clk = 0;
+    always #1 clk = ~clk;
+    pair_t kept, last;
+    Node node;
+    string number;
+    initial begin
+        kept.m_type = new("kept");
+        kept.m_type_name = {"na", "me"};
+    end
+    always @(posedge clk) begin
+        number.itoa(n);
+        node = new(number);
+        last = '{m_type: node, m_type_name: {number, "!"}};
+        node = null;
+        n = n + 1;
+    end
+    initial #6000 $display("[%s] [%s] [%s] [%s] %0d %0d", kept.m_type.get(), kept.m_type_name,
+        last.m_type.text, last.m_type_name, kept.m_type != null, n);
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "[kept] [name] [2999] [2999!] 1 3000\n"))
+
+(case four_state_members
+  (four_state)
+  (source "unpacked_struct_four_state.sv" #"
+module Top(output bit done);
+    typedef struct { time t; logic [3:0] l; int i; bit [1:0] b; } access_t;
+    access_t a, b;
+    initial begin
+        $display("def %0d %b %0d %b", a.t, a.l, a.i, a.b);
+        a.l = 4'b1z0x;
+        b = a;
+        $display("copy %b %0d %0d", b.l, a == b, a === b);
+        b = '{t: 5, l: 4'bxx11, i: 'x, b: 2'bx1};
+        $display("pattern %0d %b %0d %b", b.t, b.l, b.i, b.b);
+        b = '{default: 0};
+        $display("default %0d %b %0d %b", b.t, b.l, b.i, b.b);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "def x xxxx 0 00\ncopy 1z0x x 1\npattern 5 xx11 0 01\ndefault 0 0000 0 00\n"))

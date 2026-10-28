@@ -11,7 +11,7 @@ pub(in crate::ast) use tagged::{
 #[cfg(test)]
 mod tests;
 
-pub(super) use layout::{AggregateKind, native_type};
+pub(super) use layout::{AggregateKind, capture_member_type, native_type};
 pub(super) use selects::{select_member, whole_member};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

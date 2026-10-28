@@ -263,6 +263,7 @@ fn native_signature(
                 !ty.members.is_empty()
                     || !ty.unpacked_ranges.is_empty()
                     || ty.packed_ranges.len() > 1
+                    || ty.unpacked_struct.is_some()
             })
             .and_then(|ty| {
                 ty.pattern_target(&const_functions::Environment {

@@ -42,6 +42,10 @@ pub(in crate::ast) fn native_class(
     {
         return Some(super::super::processes::CLASS.to_owned());
     }
+    // A class handle member of an unpacked structure variable.
+    if let Some(name) = unpacked_structs::native_member(ungroup(id, native), native, dimensions) {
+        return dimensions.get(&name)?.class.clone();
+    }
     let expression = native.expression(ungroup(id, native));
     if let ExprKind::Select {
         expression,

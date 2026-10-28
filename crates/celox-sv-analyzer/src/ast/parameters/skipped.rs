@@ -527,6 +527,7 @@ fn pattern_items(
                 signed: false,
                 is_2state: shape.is_2state,
                 signed_element_depth: None,
+                unpacked_struct: None,
             },
         )
     };
