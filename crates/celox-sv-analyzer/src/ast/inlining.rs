@@ -124,7 +124,7 @@ pub(super) fn expr_signedness_with_return_types(
             ..
         } => Some(op.result_type().1),
         Expr::Call {
-            callee: Callee::Checked { signed, .. },
+            callee: Callee::Checked { signed, .. } | Callee::Lookup { signed, .. },
             ..
         } => Some(*signed),
         Expr::Call {

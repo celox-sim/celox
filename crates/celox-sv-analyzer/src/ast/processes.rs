@@ -5,10 +5,25 @@ use celox_sv_syntax::{Declarations, ExprId, ExprKind};
 
 pub(super) const CLASS: &str = "$builtin::process";
 
+/// `enum state { FINISHED, RUNNING, WAITING, SUSPENDED, KILLED }` (9.7).
+const STATES: [&str; 5] = ["FINISHED", "RUNNING", "WAITING", "SUSPENDED", "KILLED"];
+
 pub(super) fn state_type() -> Type {
     let mut ty = procedural::int_type();
     ty.is_enum = true;
-    ty.enum_values = Some((0..5).collect());
+    ty.enum_domain = Some(Arc::new(enums::EnumDomain {
+        members: STATES
+            .into_iter()
+            .zip(0..)
+            .map(|(name, value)| enums::EnumMember {
+                name: name.into(),
+                value,
+            })
+            .collect(),
+        width: 32,
+        signed: true,
+        four_state: false,
+    }));
     ty
 }
 
@@ -66,6 +81,45 @@ pub(super) fn qualified_type(path: &[celox_sv_syntax::TypeSegment]) -> Option<Ty
     }
 }
 
+/// The enumerated type `state` of native expression `id` when it is a
+/// constant of that type or the result of `status()` of a process handle.
+pub(super) fn state(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Option<Arc<enums::EnumDomain>> {
+    let id = expression_binding::ungroup(id, native);
+    let (callee, called) = match &native.expression(id).kind {
+        ExprKind::Call { expression, .. } => (*expression, true),
+        _ => (id, false),
+    };
+    let ExprKind::Member {
+        expression: receiver,
+        separator,
+        name,
+    } = &native.expression(callee).kind
+    else {
+        return None;
+    };
+    let member = instances::normalize_identifier(&name.spelling);
+    let state = match separator.as_str() {
+        "::" => {
+            !called
+                && STATES.contains(&member.as_str())
+                && scope(tree, *receiver, native, dimensions)
+        }
+        "." => {
+            member == "status"
+                && expression_binding::object_native_class(tree, *receiver, native, dimensions)
+                    .as_deref()
+                    == Some(CLASS)
+        }
+        _ => false,
+    };
+    state.then(|| state_type().enum_domain).flatten()
+}
+
 pub(super) fn value(
     tree: &AnalysisContext<'_>,
     root: ExprId,
@@ -96,11 +150,7 @@ pub(super) fn value(
         return Ok(None);
     }
     let method = instances::normalize_identifier(&name.spelling);
-    if static_receiver
-        && let Some(code) = ["FINISHED", "RUNNING", "WAITING", "SUSPENDED", "KILLED"]
-            .iter()
-            .position(|&n| n == method)
-    {
+    if static_receiver && let Some(code) = STATES.iter().position(|&n| n == method) {
         if !args.is_empty() {
             return Err(unsupported("call of process state constant"));
         }
