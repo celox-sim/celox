@@ -1,0 +1,6 @@
+Revision history for #2480:
+
+rev 2 (content) 2026-10-28 19:41 UTC — User requested squashing PR #2485 into #2480. Fold the reviewed image-base lifetime fix into its introducing commit; preserve the final validated source tree and the original PR Change-Id.
+rev 1 (initial) 2026-10-28 19:41 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2480,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"11e6b51e1e386d37eecdf49a49712127a84279e1","timestamp_iso":"2026-10-28T19:41:11Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"11e6b51e1e386d37eecdf49a49712127a84279e1","new_sha":"943ba42ba1e6f1d0a73c7ea793bcb196ea52c58a","timestamp_iso":"2026-10-28T19:41:11Z","reason":"User requested squashing PR #2485 into #2480. Fold the reviewed image-base lifetime fix into its introducing commit; preserve the final validated source tree and the original PR Change-Id.","replay_sha":"d2109094447fcb395d9fd99b7aeeb6413151f6cd","compare_url":"https://github.com/celox-sim/celox/compare/11e6b51e1e386d37eecdf49a49712127a84279e1...d2109094447fcb395d9fd99b7aeeb6413151f6cd"}]} -->
