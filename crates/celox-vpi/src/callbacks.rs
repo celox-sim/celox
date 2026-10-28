@@ -71,15 +71,52 @@ pub struct VpiErrorInfo {
 pub(super) struct Registration {
     data: VpiCbData,
     signal: Option<super::SignalSelection>,
-    _time_storage: Option<Box<VpiTime>>,
-    _value_storage: Option<Box<VpiValue>>,
+    time_storage: Option<Box<VpiTime>>,
+    value_storage: Option<Box<VpiValue>>,
     pub(super) handle: VpiHandle,
     due: Option<u64>,
     snapshot: Option<ValueSnapshot>,
 }
 
+// Keep only a small number of inactive records; active callbacks always own
+// distinct boxes, including callbacks that register their successors while firing.
+const CALLBACK_RECORD_CACHE_LIMIT: usize = 64;
+
+#[allow(
+    clippy::vec_box,
+    reason = "FFI pointers must remain stable when registrations move"
+)]
+struct RecordCache<T> {
+    spare: Vec<Box<T>>,
+}
+
+impl<T> Default for RecordCache<T> {
+    fn default() -> Self {
+        Self { spare: Vec::new() }
+    }
+}
+
+impl<T> RecordCache<T> {
+    fn take(&mut self, value: T) -> Box<T> {
+        if let Some(mut record) = self.spare.pop() {
+            *record = value;
+            record
+        } else {
+            Box::new(value)
+        }
+    }
+
+    fn recycle(&mut self, record: Box<T>) {
+        if self.spare.len() < CALLBACK_RECORD_CACHE_LIMIT {
+            self.spare.push(record);
+        }
+    }
+}
+
 #[derive(Default)]
 pub(super) struct CallbackState {
+    time_records: RecordCache<VpiTime>,
+    value_records: RecordCache<VpiValue>,
     next_id: u64,
     pub(super) callbacks: BTreeMap<u64, Registration>,
     firing: HashMap<u64, bool>,
@@ -96,6 +133,17 @@ pub(super) struct CallbackState {
     rounds_at_time: usize,
     pub(super) detach_on_stop: bool,
     error: Option<String>,
+}
+
+impl CallbackState {
+    fn recycle_records(&mut self, registration: Registration) {
+        if let Some(time) = registration.time_storage {
+            self.time_records.recycle(time);
+        }
+        if let Some(value) = registration.value_storage {
+            self.value_records.recycle(value);
+        }
+    }
 }
 
 pub(super) struct VlogStorage {
@@ -313,6 +361,7 @@ fn fire_with_snapshot_for_host(
         // Safety: callback handles are private allocations and one-shot
         // callbacks are invalid as soon as their callback returns.
         drop(unsafe { Box::from_raw(registration.handle) });
+        borrow_cell_mut(&host.callbacks, |state| state.recycle_records(registration));
     }
     true
 }
@@ -801,7 +850,12 @@ pub(super) fn take_error() -> Option<String> {
 pub(super) fn remove(id: u64, handle: VpiHandle) -> i32 {
     let queued = with_host(|host| {
         borrow_cell_mut(&host.callbacks, |state| {
-            state.callbacks.remove(&id).is_some()
+            if let Some(registration) = state.callbacks.remove(&id) {
+                state.recycle_records(registration);
+                true
+            } else {
+                false
+            }
         })
     });
     if queued {
@@ -857,30 +911,32 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
     }
     // VPI registration copies the selected records. Their original storage is
     // commonly stack-local and need not outlive this call.
-    let mut time_storage = if data.time.is_null() {
+    let time = if data.time.is_null() {
         None
     } else {
-        // Safety: the registration contract makes the pointed record readable
-        // for the duration of this call.
-        Some(Box::new(unsafe { *data.time }))
+        // Safety: the record remains readable through this registration call.
+        Some(unsafe { *data.time })
     };
-    let mut value_storage = if data.value.is_null() {
+    let value = if data.value.is_null() {
         None
     } else {
-        // Safety: copy the active request record while registration storage is live.
+        // Safety: copy the active request before reusing any inactive storage.
         let value = unsafe { &*data.value };
-        Some(Box::new(VpiValue {
+        Some(VpiValue {
             format: value.format,
             value: value.value,
-        }))
+        })
     };
-    data.time = time_storage
-        .as_deref_mut()
-        .map_or(ptr::null_mut(), std::ptr::from_mut);
-    data.value = value_storage
-        .as_deref_mut()
-        .map_or(ptr::null_mut(), std::ptr::from_mut);
     borrow_cell_mut(&host.callbacks, |state| {
+        let mut time_storage = time.map(|record| state.time_records.take(record));
+        let mut value_storage = value.map(|record| state.value_records.take(record));
+        data.time = time_storage
+            .as_deref_mut()
+            .map_or(ptr::null_mut(), std::ptr::from_mut);
+        data.value = value_storage
+            .as_deref_mut()
+            .map_or(ptr::null_mut(), std::ptr::from_mut);
+
         let id = state.next_id;
         state.next_id += 1;
         let handle = new_callback_handle(id);
@@ -894,8 +950,8 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
             Registration {
                 data,
                 signal,
-                _time_storage: time_storage,
-                _value_storage: value_storage,
+                time_storage,
+                value_storage,
                 handle,
                 due,
                 snapshot,

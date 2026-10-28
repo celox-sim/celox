@@ -4821,3 +4821,139 @@ fn callback_samples_preserve_signed_integers_and_four_state_scalars() {
     }
     clear_runtime();
 }
+
+type CallbackRecordSample = (i32, i32, u64, i32, i32);
+
+#[derive(Default)]
+struct CallbackRecordContext {
+    observed: Vec<CallbackRecordSample>,
+    after_register: Vec<CallbackRecordSample>,
+    last_index: i32,
+    registration_failed: bool,
+}
+
+unsafe fn callback_record_sample(data: *mut VpiCbData) -> CallbackRecordSample {
+    // Safety: this callback requests owned time/value records for its full call.
+    unsafe {
+        let time = &*(*data).time;
+        let value = &*(*data).value;
+        let timestamp = if time.type_ == VPI_SCALED_REAL_TIME {
+            time.real as u64
+        } else {
+            (u64::from(time.high) << 32) | u64::from(time.low)
+        };
+        let payload = if value.format == VPI_SCALAR_VAL {
+            value.value.scalar
+        } else {
+            value.value.integer
+        };
+        ((*data).index, time.type_, timestamp, value.format, payload)
+    }
+}
+
+unsafe fn register_callback_record(
+    context: *mut CallbackRecordContext,
+    index: i32,
+    scaled: bool,
+) -> VpiHandle {
+    let mut time = VpiTime {
+        type_: if scaled {
+            VPI_SCALED_REAL_TIME
+        } else {
+            VPI_SIM_TIME
+        },
+        low: u32::from(!scaled),
+        ..VpiTime::default()
+    };
+    let mut value = if scaled {
+        VpiValue {
+            format: VPI_SCALAR_VAL,
+            value: VpiValueData { scalar: index & 3 },
+        }
+    } else {
+        VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData {
+                integer: 0x5a00_0000 + index,
+            },
+        }
+    };
+    let data = VpiCbData {
+        reason: CB_AFTER_DELAY,
+        cb_rtn: Some(observe_callback_record),
+        obj: ptr::null_mut(),
+        time: &mut time,
+        value: &mut value,
+        index,
+        user_data: context.cast(),
+    };
+    // Safety: registration copies both records before this stack frame ends.
+    unsafe { vpi_register_cb(&data) }
+}
+
+unsafe extern "C" fn observe_callback_record(data: *mut VpiCbData) -> i32 {
+    // Safety: the test retains its context and callback-owned request storage.
+    unsafe {
+        let context_ptr = (*data).user_data.cast::<CallbackRecordContext>();
+        let context = &mut *context_ptr;
+        let before = callback_record_sample(data);
+        context.observed.push(before);
+        if (*data).index >= 1000 && (*data).index < context.last_index {
+            let next = register_callback_record(context_ptr, (*data).index + 1, false);
+            context.registration_failed |= next.is_null();
+            // A successor must not reuse a record that is still being delivered.
+            context.after_register.push(callback_record_sample(data));
+        }
+    }
+    0
+}
+
+#[test]
+fn callback_record_storage_is_independent_while_firing_and_reused() {
+    let _serial = lock_vpi();
+    let simulator = Simulator::builder(DESIGN, "Top")
+        .opt_level(celox::OptLevel::O1)
+        .build()
+        .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    let mut context = CallbackRecordContext::default();
+    // Safety: the context stays live until every queued callback has completed.
+    unsafe {
+        let context_ptr = ptr::from_mut(&mut context);
+        let handles = (0..128)
+            .map(|index| register_callback_record(context_ptr, index, true))
+            .collect::<Vec<_>>();
+        assert!(handles.iter().all(|handle| !handle.is_null()));
+        for handle in handles.iter().step_by(2) {
+            assert_eq!(vpi_remove_cb(*handle), 1);
+        }
+        assert!(!run_callbacks_result().unwrap());
+        let expected = (1..128)
+            .step_by(2)
+            .map(|index| (index, VPI_SCALED_REAL_TIME, 0, VPI_SCALAR_VAL, index & 3))
+            .collect::<Vec<_>>();
+        assert_eq!(context.observed, expected);
+        context.observed.clear();
+        context.last_index = 1127;
+        assert!(!register_callback_record(context_ptr, 1000, false).is_null());
+        assert!(!run_callbacks_result().unwrap());
+        assert!(!context.registration_failed);
+        let expected = (1000..=1127)
+            .map(|index| {
+                (
+                    index,
+                    VPI_SIM_TIME,
+                    (index - 999) as u64,
+                    VPI_INT_VAL,
+                    0x5a00_0000 + index,
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(context.observed, expected);
+        assert_eq!(context.after_register, expected[..127]);
+    }
+    clear_runtime();
+}
