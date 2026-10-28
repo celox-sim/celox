@@ -758,6 +758,17 @@
       "category": "Types",
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
       "expectation": "Simulation",
+      "name": "class::foreign_generic_in_a_module_with_interface_instances",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
       "name": "class::foreign_generic_inherited_constants",
       "phase": "compile",
       "status": "compile_error",

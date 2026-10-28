@@ -287,6 +287,7 @@ test("every retained baseline accepts only its existing failures", () => {
             ? [
                 "class::foreign_generic_constructor_lexical_scope",
                 "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+                "class::foreign_generic_in_a_module_with_interface_instances",
                 "class::foreign_generic_inherited_constants",
                 "class::foreign_generic_multiple_user_classes",
                 "class::foreign_generic_nominal_and_nested_types",
