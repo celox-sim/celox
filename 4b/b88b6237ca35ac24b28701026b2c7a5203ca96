@@ -1,0 +1,1 @@
+User requested squashing PR #2485 into #2480. Fold the reviewed image-base lifetime fix into its introducing commit; preserve the final validated source tree and the original PR Change-Id.
