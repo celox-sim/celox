@@ -179,6 +179,15 @@ pub(in crate::ast) fn native_string(
         }
         // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
         ExprKind::Member { .. } if enum_name(tree, id, native, dimensions) => true,
+        // A string member of an unpacked structure variable.
+        ExprKind::Member { .. }
+            if unpacked_structs::native_member(ungroup(id, native), native, dimensions)
+                .is_some() =>
+        {
+            unpacked_structs::native_member(ungroup(id, native), native, dimensions)
+                .and_then(|name| dimensions.get(&name))
+                .is_some_and(|ty| ty.string)
+        }
         // A string property of a class object.
         _ => objects::property(tree, id, native, dimensions)
             .ok()

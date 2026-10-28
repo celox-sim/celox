@@ -136,6 +136,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("packed_structs.vtest"),
     },
     Group {
+        file: "src/sv/cases/unpacked_structs.vtest",
+        text: include_str!("unpacked_structs.vtest"),
+    },
+    Group {
         file: "src/sv/cases/procedural.vtest",
         text: include_str!("procedural.vtest"),
     },

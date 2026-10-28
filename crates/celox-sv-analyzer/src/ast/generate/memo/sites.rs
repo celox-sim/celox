@@ -161,6 +161,7 @@ impl CallSites for Type {
             class: _,
             container: _,
             nominal: _,
+            unpacked_struct: _,
         } = self;
         packed_ranges.call_sites(visit);
         unpacked_ranges.call_sites(visit);
@@ -201,6 +202,7 @@ impl CallSites for VariableDimensions {
             is_2state: _,
             members,
             signed_element_depth: _,
+            unpacked_struct: _,
         } = self;
         packed.call_sites(visit);
         unpacked.call_sites(visit);
