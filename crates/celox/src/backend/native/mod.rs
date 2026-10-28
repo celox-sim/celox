@@ -1,4 +1,5 @@
 pub mod backend;
+mod clock_aliases;
 mod compile_resources;
 mod image_file;
 mod lanes;
