@@ -1,0 +1,9 @@
+Revision history for #2390:
+
+rev 3 (rebase) 2026-10-28 07:36 UTC
+rev 2 (content) 2026-10-28 06:53 UTC — Address Codex review: first/last/num evaluate the receiver once; package-qualified enum constants resolve their enumeration; name() results take string methods; runtime next/prev counts convert to int unsigned with sign extension, as constant counts do.
+rev 1 (initial) 2026-10-28 06:53 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2390,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"ed2b9d6f9d7be43c9233fcd21a71c33a296bc042","timestamp_iso":"2026-10-28T06:53:34Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"ed2b9d6f9d7be43c9233fcd21a71c33a296bc042","new_sha":"cd1394eb72a5a07ca33a6885ad6aff223c68de4b","timestamp_iso":"2026-10-28T06:53:34Z","reason":"Address Codex review: first/last/num evaluate the receiver once; package-qualified enum constants resolve their enumeration; name() results take string methods; runtime next/prev counts convert to int unsigned with sign extension, as constant counts do.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ed2b9d6f9d7be43c9233fcd21a71c33a296bc042...cd1394eb72a5a07ca33a6885ad6aff223c68de4b"},{"number":3,"change_type":"rebase","old_sha":"cd1394eb72a5a07ca33a6885ad6aff223c68de4b","new_sha":"0401272a9eb525ab7070f2516a99c9bdf9a2813d","timestamp_iso":"2026-10-28T07:36:19Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/cd1394eb72a5a07ca33a6885ad6aff223c68de4b...0401272a9eb525ab7070f2516a99c9bdf9a2813d"}]} -->
+
+Address Codex review r4398075429: the next/prev count converts to the 2-state int unsigned, so unknown bits become 0.
