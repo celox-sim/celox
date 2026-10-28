@@ -1,0 +1,1 @@
+Address Codex review on #2402: include omitted-argument defaults in host-request detection; keep runtime format bytes instead of lossy UTF-8 decoding.
