@@ -520,6 +520,58 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Overriding the default variable lifetime is not yet supported",
                         ),
+                        ("verilator", "class::foreign_generic_constructor_lexical_scope") => {
+                            ("compile_error", "compile", "FuncRef without fvar")
+                        }
+                        (
+                            "verilator",
+                            "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x7f, got 0x5f",
+                        ),
+                        ("verilator", "class::foreign_generic_inherited_constants") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x1f, got 0x0",
+                        ),
+                        ("verilator", "class::foreign_generic_nominal_and_nested_types") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: Multiple '::' package/class reference",
+                        ),
+                        ("icarus", "class::foreign_generic_constructor_lexical_scope") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
+                        (
+                            "icarus",
+                            "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+                        ) => ("compile_error", "compile", "source_0.sv:5: syntax error"),
+                        ("icarus", "class::foreign_generic_inherited_constants") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_multiple_user_classes") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_nominal_and_nested_types") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_package_type_static_storage") => {
+                            ("compile_error", "compile", "source_0.sv:10: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_template_of_the_named_package") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_static_handle_identity") => {
+                            ("compile_error", "compile", "source_0.sv:11: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_static_state_across_modules") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_unit_type_constructor") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };
                     assert_eq!(status, expected_status, "{name}");

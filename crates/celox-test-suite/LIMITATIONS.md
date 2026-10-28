@@ -1099,6 +1099,44 @@ Its exact mismatch remains an executed failure in
 [the xezim class report](verification/sv/xezim/class.json).
 No assertions or exclusions are weakened.
 
+### Package-class specializations requested by other scopes
+
+The nine `class::foreign_generic_*` cases exercise package classes specialized
+by modules and compilation-unit classes, including UVM-style factories. IEEE
+1800-2023 8.25 requires matching specializations to share static state; 8.23
+preserves the identity of class type arguments. The cases also check inherited
+class declarations (8.13 and 8.18) and constructor defaults evaluated in the
+subroutine's declaration scope (13.5.3). Static counters are explicitly
+initialized to zero. A separate Celox API test checks equal class spellings in
+distinct per-file compilation units; the portable shared cases use distinct
+class names to accommodate both compilation-unit models allowed by 3.12.1.
+
+| Tool | Passed | Compile errors | Mismatches |
+| --- | ---: | ---: | ---: |
+| Verilator 5.052 | 5 | 2 | 2 |
+| Icarus 13.0 | 0 | 9 | 0 |
+| xezim 0.11.3 | 3 | 0 | 6 |
+
+These 19 exact failures remain executed evidence in the respective
+[Verilator](verification/sv/verilator/class.json),
+[Icarus](verification/sv/icarus/class.json), and
+[xezim](verification/sv/xezim/class.json) class reports. Verilator separates an
+equivalent default specialization, misbinds inherited declarations, rejects a
+nested qualified member type, and encounters an internal error on a constructor
+default function call. Icarus rejects these parameterized-class programs.
+xezim differs on member types, nominal aliases, constructor identity, inherited
+field widths, constructor default scope, and construction through a package
+class type argument. The [xezim review](verification/xezim-review.json) links
+each mismatch to its requirement and observed result.
+
+[Six standalone probes and their observations](verification/repros/sv_foreign_generic.json)
+retain direct output from Celox in both state modes, Verilator, and xezim. The
+xezim build uses the exact pinned source `d491f948` and core `a25655a4` with the
+existing Nix recipe and a regenerated dependency lock in an isolated validation
+package. The repository's Nix package lock references a different core revision and
+does not build. No simulator source, repository lock, assertions, or exclusions
+were changed for these runs.
+
 ### Package constants in class type arguments
 
 `class::package_constant_type_arguments` specializes a class in package

@@ -285,6 +285,16 @@ test("every retained baseline accepts only its existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "class::foreign_generic_constructor_lexical_scope",
+                "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+                "class::foreign_generic_inherited_constants",
+                "class::foreign_generic_multiple_user_classes",
+                "class::foreign_generic_nominal_and_nested_types",
+                "class::foreign_generic_package_type_static_storage",
+                "class::foreign_generic_static_handle_identity",
+                "class::foreign_generic_static_state_across_modules",
+                "class::foreign_generic_template_of_the_named_package",
+                "class::foreign_generic_unit_type_constructor",
                 "class::generate_scope_enum_type_arguments",
                 "class::imported_member_type_dimensions",
                 "class::imported_member_type_inheritance",
@@ -368,6 +378,10 @@ test("every retained baseline accepts only its existing failures", () => {
                 "unions::soft_wide_four_state",
               ]
             : [
+                "class::foreign_generic_constructor_lexical_scope",
+                "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+                "class::foreign_generic_inherited_constants",
+                "class::foreign_generic_nominal_and_nested_types",
                 "class::generate_scope_enum_type_arguments",
                 "fork::compound_event_activations_outlive_parent",
                 "fork_control::process_ancestor_kill_preserves_caller_rng",

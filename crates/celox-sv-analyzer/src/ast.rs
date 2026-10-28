@@ -21,6 +21,10 @@ use crate::source_tree::SourceTree as SyntaxTree;
 #[derive(Default)]
 pub(super) struct AnalysisState {
     pub(crate) const_functions: const_functions::State,
+    foreign: std::rc::Rc<classes::foreign::Registry>,
+    foreign_arguments: RefCell<Vec<(String, classes::specializations::BoundArguments)>>,
+    foreign_names: RefCell<Vec<(String, classes::specializations::BoundArguments, String)>>,
+    foreign_error: RefCell<Option<AnalyzerError>>,
     scope: scope::State,
     interfaces: interface_ast::State,
     dimensions: dimensions::State,
@@ -93,6 +97,7 @@ impl<'a> AnalysisContext<'a> {
             syntax_tree,
             state: std::rc::Rc::new(AnalysisState {
                 next_call_site: packages.call_sites.clone(),
+                foreign: packages.foreign.clone(),
                 ..AnalysisState::default()
             }),
             parameter_overrides: Cow::Owned(HashMap::default()),
@@ -689,6 +694,49 @@ impl Module {
 
     #[allow(clippy::too_many_arguments)]
     fn from_selected_scope(
+        syntax_tree: &AnalysisContext<'_>,
+        override_module_name: &str,
+        parameter_overrides: &HashMap<String, ConstExpr>,
+        interfaces: &InterfaceLookup<'_>,
+        imported: Arc<scope::ScopeSymbols>,
+        export_symbols: bool,
+        header_ports: Option<&port_owners::Selection<'_>>,
+    ) -> Result<Self, AnalyzerError> {
+        let registry = syntax_tree.state.foreign.clone();
+        for _ in 0..1024 {
+            let revision = registry.revision();
+            let mut symbols = (*imported).clone();
+            registry.extend(syntax_tree, &mut symbols);
+            let declarations_only = symbols.declarations_only;
+            let result = Self::from_selected_scope_once(
+                syntax_tree,
+                override_module_name,
+                parameter_overrides,
+                interfaces,
+                Arc::new(symbols),
+                export_symbols || registry.has_templates(),
+                header_ports,
+            );
+            if let Ok(module) = &result
+                && !declarations_only
+                && let Some(symbols) = &module.symbols
+            {
+                registry.finish(syntax_tree, symbols)?;
+            }
+            if registry.revision() == revision {
+                return result;
+            }
+            syntax_tree.state.classes.borrow_mut().clear();
+            syntax_tree.state.class_specializations.borrow_mut().clear();
+            syntax_tree.state.foreign_error.borrow_mut().take();
+            syntax_tree.state.foreign_names.borrow_mut().clear();
+        }
+        Err(unsupported(
+            "foreign class specialization discovery did not converge",
+        ))
+    }
+
+    fn from_selected_scope_once(
         syntax_tree: &AnalysisContext<'_>,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
