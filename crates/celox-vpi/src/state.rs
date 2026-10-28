@@ -10,18 +10,22 @@ use celox::{
 
 // Called only for packed storage of at most128 bits. Keep the common64-bit
 // path in one machine word instead of promoting every scalar operation.
+fn packed_u64(backend: &NativeBackend, signal: SignalRef) -> u64 {
+    let mask = u64::MAX
+        .checked_shr((64 - signal.width) as u32)
+        .unwrap_or(0);
+    let value = match signal.width {
+        0..=8 => u64::from(backend.get_as::<u8>(signal)),
+        9..=16 => u64::from(u16::from_le(backend.get_as::<u16>(signal))),
+        17..=32 => u64::from(u32::from_le(backend.get_as::<u32>(signal))),
+        _ => u64::from_le(backend.get_as::<u64>(signal)),
+    };
+    value & mask
+}
+
 fn packed_word(backend: &NativeBackend, signal: SignalRef) -> BigUint {
     if signal.width <= 64 {
-        let mask = u64::MAX
-            .checked_shr((64 - signal.width) as u32)
-            .unwrap_or(0);
-        let value = match signal.width {
-            0..=8 => u64::from(backend.get_as::<u8>(signal)),
-            9..=16 => u64::from(u16::from_le(backend.get_as::<u16>(signal))),
-            17..=32 => u64::from(u32::from_le(backend.get_as::<u32>(signal))),
-            _ => u64::from_le(backend.get_as::<u64>(signal)),
-        };
-        BigUint::from(value & mask)
+        BigUint::from(packed_u64(backend, signal))
     } else {
         let mask = u128::MAX
             .checked_shr((128 - signal.width) as u32)
@@ -56,6 +60,11 @@ pub(crate) trait VpiState {
     /// The stored value, without settling the design.
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint);
 
+    /// Packed native words, when the runtime can read them without allocating.
+    fn get_word(&self, _signal: SignalRef) -> Option<(u64, u64)> {
+        None
+    }
+
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint);
 
     /// Override a signal until [`Self::release`]; `false` when it cannot be
@@ -76,6 +85,25 @@ impl VpiState for NativeProgramInstance {
 
     fn image(&self) -> &NativeProgramImage {
         self.program_image()
+    }
+
+    fn get_word(&self, signal: SignalRef) -> Option<(u64, u64)> {
+        if signal.array_layout.is_some() || signal.width > 64 {
+            return None;
+        }
+        let value = packed_u64(self.backend(), signal);
+        let mask = if signal.is_4state && self.program_image().four_state() {
+            packed_u64(
+                self.backend(),
+                SignalRef {
+                    offset: signal.offset + signal.width.div_ceil(8),
+                    ..signal
+                },
+            )
+        } else {
+            0
+        };
+        Some((value, mask))
     }
 
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
@@ -362,6 +390,17 @@ mod tests {
                     };
                     for (index, byte) in storage.iter_mut().enumerate() {
                         *byte = pattern.rotate_left(index as u32);
+                    }
+                    let expected = instance.backend().get_four_state(signal);
+                    if width <= 64 {
+                        let (value, mask) = VpiState::get_word(&instance, signal).unwrap();
+                        assert_eq!(
+                            (BigUint::from(value), BigUint::from(mask)),
+                            expected,
+                            "raw word width={width}, four_state={four_state}, pattern={pattern:x}"
+                        );
+                    } else {
+                        assert!(VpiState::get_word(&instance, signal).is_none());
                     }
                     assert_eq!(
                         VpiState::get_four_state(&instance, signal),
