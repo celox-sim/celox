@@ -332,7 +332,7 @@ Unpacked structures (IEEE 1800-2023 7.2) may have integral, enumeration,
 members, each keeping its own 2-state or 4-state type. Variables of such a
 type may be module variables, procedural locals, class properties, queue,
 dynamic and associative array elements (`q[i].m` reads a member), and
-subroutine arguments of any direction and results. Members are read and written like variables of
+subroutine arguments of any direction, including [`ref`](#reference-arguments), and results. Members are read and written like variables of
 their type; a whole structure is assigned and compared with `==`, `!=`,
 `===` and `!==` against a value of the same type, chosen with `?:`, or built
 from an assignment pattern (`'{a, b}`, `'{m: v, default: d}`, `T'{...}`, with
@@ -364,7 +364,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   `real`, and unpacked structs as ports, nets, parameters, static, `rand` or
   `const` class properties, fixed-size array elements, or with members that
-  are arrays, `real`, or have default values.
+  are arrays (also dynamic arrays, queues and associative arrays), `real`, or
+  have default values.
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
   edge signals, and several edges without an asynchronous reset.
@@ -754,8 +755,11 @@ A `ref` or `const ref` formal is the actual itself, not a copy (IEEE 1800-2023
 alias it, and a task keeps the reference while it is suspended. The actual can
 be a variable, including a string, class handle, queue, dynamic or associative
 array, or unpacked array; a property of a class object, whose handle is
-evaluated at the call; or an element of a fixed-size unpacked array, whose
-index is evaluated at the call. A `const` qualifier, like the direction, carries
+evaluated at the call; an element of a fixed-size unpacked array, whose
+index is evaluated at the call; or a member of an unpacked structure. A formal
+of [unpacked structure](#unpacked-structures) type refers to each member of a
+structure variable, member or class property, also through virtual methods.
+A `const` qualifier, like the direction, carries
 over to the following formals (13.3).
 
 These are rejected as the standard requires: `ref` formals of subroutines with
@@ -768,8 +772,8 @@ continuous assignment or an event expression (13.4.1; `const ref` is allowed).
 
 `ref static`, elements of dynamic arrays, queues and associative arrays (whose
 references would have to outlive a resize, 13.5.2), elements of class
-properties, members of unpacked structures, writes to part of a formal bound to
-a class property, and selects of a formal bound to an array element at a
+properties, writes to part of a formal bound to a class property or to a
+member of one, and selects of a formal bound to an array element at a
 position only known at run time (positions of unrolled loops are known) are
 unsupported and rejected. A formal bound to a class property can be passed on
 to an `output` or `inout` argument; it is written back when that call returns.

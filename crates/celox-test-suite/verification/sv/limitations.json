@@ -2997,6 +2997,11 @@
         "unpacked_structs::initializers_results_and_defaults",
         "unpacked_structs::members_whole_copies_and_equality",
         "unpacked_structs::module_variables",
+        "unpacked_structs::reference_formal_handles_survive_heap_collections",
+        "unpacked_structs::reference_formals",
+        "unpacked_structs::reference_formals_across_time",
+        "unpacked_structs::reference_formals_four_state",
+        "unpacked_structs::reference_formals_of_virtual_methods",
         "unpacked_structs::results_and_outputs",
         "unpacked_structs::subroutine_arguments_and_results"
       ]

@@ -156,6 +156,61 @@
     },
     {
       "category": "Types",
+      "detail": "unpacked_structs::reference_formal_handles_survive_heap_collections at 808:3: expect_output: expected [91, 50, 57, 57, 57, 93, 32, 91, 50, 57, 57, 57, 33, 93, 32, 91, 104, 50, 57, 57, 57, 93, 32, 91, 104, 50, 57, 57, 57, 33, 93, 32, 51, 48, 48, 48, 10], got [91, 50, 57, 57, 57, 93, 32, 91, 50, 57, 57, 57, 33, 93, 32, 91, 32, 93, 32, 91, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 32, 104, 50, 57, 57, 57, 33, 93, 32, 51, 48, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formal_handles_survive_heap_collections",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::reference_formals_across_time at 740:3: expect_output: expected [109, 105, 100, 32, 53, 32, 120, 43, 10, 101, 110, 100, 32, 53, 48, 32, 120, 43, 32, 53, 32, 52, 10], got [109, 105, 100, 32, 53, 32, 120, 10, 101, 110, 100, 32, 49, 48, 32, 120, 43, 32, 49, 32, 52, 10]",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_across_time",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_four_state",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_of_virtual_methods",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "unpacked_structs::results_and_outputs at 186:3: expect_output: expected [109, 97, 107, 101, 32, 48, 10, 111, 117, 116, 115, 32, 97, 98, 99, 10, 111, 117, 116, 122, 32, 48, 10, 115, 116, 97, 116, 105, 99, 32, 49, 32, 50, 10, 115, 116, 97, 116, 105, 99, 32, 50, 32, 50, 10], got [109, 97, 107, 101, 32, 48, 10, 111, 117, 116, 115, 32, 97, 98, 99, 10, 111, 117, 116, 122, 32, 120, 10, 115, 116, 97, 116, 105, 99, 32, 49, 32, 50, 10, 115, 116, 97, 116, 105, 99, 32, 50, 32, 50, 10]",
       "expectation": "Simulation",
       "name": "unpacked_structs::results_and_outputs",

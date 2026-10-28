@@ -4687,6 +4687,22 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X90",
       "note": "m[next_index()].push_back(7) calls next_index() three times per statement (i = 6 after two statements, elements lost), and $unpacked_dimensions(grid)/$dimensions(grid) of int grid[][] print 1 2 instead of 2 3."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::reference_formals_across_time",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "A suspended task's ref formal of unpacked structure type neither sees the caller's write (shared.a = 5) nor writes shared until it returns: xezim prints \"mid 5 x\" and \"end 10 x+ 1\" where 13.5.2 gives \"mid 5 x+\" and \"end 50 x+ 5\". Reproduced by verification/repros/sv_xezim_struct_reference_copies.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::reference_formal_handles_survive_heap_collections",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X84",
+      "note": "h.p.m_type_name, the string member of a class property written through a ref formal, prints as a space-padded wide value and h.p.m_type.text prints empty; xezim does the same for a direct write of the property (h.p = '{...}). Reproduced by verification/repros/sv_xezim_unpacked_struct_properties.sv."
     }
   ]
 }

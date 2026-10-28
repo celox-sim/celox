@@ -147,10 +147,17 @@ pub(in crate::ast) fn validate<'a>(
             .iter()
             .filter(|param| param.direction.is_reference())
         {
-            let formal = param.name.as_str();
+            // A formal of unpacked structure type is used through its members.
+            let formals = if param.leaves.is_empty() {
+                std::slice::from_ref(&param.name)
+            } else {
+                param.leaves.as_slice()
+            };
             let mut error = None;
-            for stmt in &subroutine.body {
-                check_formal(stmt, formal, param.direction, directions, &mut error);
+            for formal in formals {
+                for stmt in &subroutine.body {
+                    check_formal(stmt, formal, param.direction, directions, &mut error);
+                }
             }
             if let Some(detail) = error {
                 return Err(invalid(&subroutine.name, &param.source_name, detail));

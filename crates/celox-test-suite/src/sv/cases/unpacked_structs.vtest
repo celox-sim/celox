@@ -578,3 +578,231 @@ endmodule
   (top Top)
   (run_until 6000)
   (expect_output "3 [2997] [2999*] [n2999] 3000\n"))
+
+(case reference_formals
+  (source "unpacked_struct_references.sv" #"
+module Top(output bit done);
+    class Node;
+        string n;
+        function new(string n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef enum { READ, WRITE } kind_e;
+    typedef struct { kind_e kind; bit [63:0] addr; string tag; Node node; int n; } op_t;
+    typedef struct { op_t op; int count; } outer_t;
+    function automatic void fill(ref op_t r, input string tag);
+        r = '{kind: WRITE, addr: 64'h10, tag: tag, node: null, n: 0};
+        r.node = new({tag, "!"});
+        r.n = 7;
+        r.addr++;
+    endfunction
+    function automatic bit same(const ref op_t a, const ref op_t b);
+        return a.kind == b.kind && a.addr == b.addr && a.tag == b.tag;
+    endfunction
+    function automatic int sum(op_t r);
+        return int'(r.addr) + r.n;
+    endfunction
+    function automatic void forward(ref op_t r);
+        op_t copy;
+        fill(r, {r.tag, "f"});
+        r.n = sum(r);
+        copy = r;
+        copy.tag = "copy";
+    endfunction
+    function automatic void bump(ref int i);
+        i++;
+    endfunction
+    function automatic void bump64(ref bit [63:0] i);
+        i++;
+    endfunction
+    function automatic void show(const ref op_t r);
+        $display("%s %0d %s %s %0d", r.kind == WRITE ? "W" : "R", r.addr, r.tag, r.node.n, r.n);
+    endfunction
+    class Holder;
+        op_t p;
+        function void touch();
+            forward(p);
+        endfunction
+    endclass
+    initial begin
+        op_t a, b;
+        outer_t o;
+        Holder h;
+        h = new;
+        fill(a, "a");
+        show(a);
+        b = a;
+        $display("same %0d", same(a, b));
+        b.tag = "b";
+        $display("same %0d", same(a, b));
+        o.op.tag = "o";
+        forward(o.op);
+        bump(o.count);
+        show(o.op);
+        $display("nested %0d %0d", o.op.n, o.count);
+        h.p.tag = "h";
+        h.touch();
+        forward(h.p);
+        bump64(h.p.addr);
+        show(h.p);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "W 17 a a! 7\nsame 1\nsame 0\nW 17 of of! 24\nnested 24 1\nW 18 hff hff! 24\n"))
+
+(case reference_formals_of_virtual_methods
+  (source "unpacked_struct_virtual_references.sv" #"
+module Top(output bit done);
+    typedef enum { UVM_READ, UVM_WRITE } uvm_access_e;
+    typedef enum { UVM_IS_OK, UVM_NOT_OK } uvm_status_e;
+    typedef struct {
+        uvm_access_e kind;
+        bit [63:0] addr;
+        bit [63:0] data;
+        int n_bits;
+        bit [7:0] byte_en;
+        uvm_status_e status;
+    } bus_op_t;
+    class item;
+        bit [31:0] addr, data;
+        bit write;
+    endclass
+    virtual class adapter;
+        pure virtual function item reg2bus(const ref bus_op_t rw);
+        pure virtual function void bus2reg(item bus_item, ref bus_op_t rw);
+    endclass
+    class my_adapter extends adapter;
+        virtual function item reg2bus(const ref bus_op_t rw);
+            item i = new;
+            i.addr = rw.addr;
+            i.data = rw.data;
+            i.write = rw.kind == UVM_WRITE;
+            return i;
+        endfunction
+        virtual function void bus2reg(item bus_item, ref bus_op_t rw);
+            rw.kind = bus_item.write ? UVM_WRITE : UVM_READ;
+            rw.addr = bus_item.addr;
+            rw.data = bus_item.data + 1;
+            rw.n_bits = 32;
+            rw.byte_en = 8'hf;
+            rw.status = UVM_IS_OK;
+        endfunction
+    endclass
+    initial begin
+        adapter a;
+        my_adapter m;
+        bus_op_t op, back;
+        item i;
+        m = new;
+        a = m;
+        op = '{kind: UVM_WRITE, addr: 'h40, data: 'h1234, n_bits: 32, byte_en: 'hf, status: UVM_NOT_OK};
+        i = a.reg2bus(op);
+        $display("reg2bus %h %h %0d", i.addr, i.data, i.write);
+        back.status = UVM_NOT_OK;
+        a.bus2reg(i, back);
+        $display("bus2reg %0d %h %h %0d %h %0d", back.kind, back.addr, back.data, back.n_bits, back.byte_en, back.status);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "reg2bus 00000040 00001234 1\nbus2reg 1 0000000000000040 0000000000001235 32 0f 0\n"))
+
+(case reference_formals_across_time
+  (source "unpacked_struct_timed_references.sv" #"
+module Top(output bit done);
+    typedef struct { int a; string s; } row_t;
+    row_t shared;
+    task automatic watch(ref row_t r, output int seen);
+        #2 seen = r.a;
+        r.s = {r.s, "+"};
+        #2 r.a = r.a * 10;
+    endtask
+    initial begin
+        int seen;
+        shared = '{1, "x"};
+        fork
+            watch(shared, seen);
+            begin
+                #1 shared.a = 5;
+                #2 $display("mid %0d %s", shared.a, shared.s);
+            end
+        join
+        $display("end %0d %s %0d %0d", shared.a, shared.s, seen, $time);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 10) (assert_eq done 1)
+  (expect_output "mid 5 x+\nend 50 x+ 5 4\n"))
+
+(case reference_formals_four_state
+  (four_state)
+  (source "unpacked_struct_four_state_references.sv" #"
+module Top(output bit done);
+    typedef struct { logic [3:0] l; int i; bit [1:0] b; } access_t;
+    class Holder;
+        access_t p;
+    endclass
+    function automatic void mark(ref access_t r);
+        r.l = 4'b1z0x;
+        r = '{l: {r.l[3:1], 1'bx}, i: 'x, b: 2'b1x};
+    endfunction
+    function automatic bit unknown(const ref access_t r);
+        return $isunknown(r.l);
+    endfunction
+    initial begin
+        access_t a;
+        Holder h;
+        h = new;
+        $display("def %b %0d", a.l, unknown(a));
+        mark(a);
+        $display("mark %b %0d %b %0d", a.l, a.i, a.b, unknown(a));
+        mark(h.p);
+        $display("prop %b %0d %b", h.p.l, h.p.i, h.p.b);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "def xxxx 1\nmark 1z0x 0 10 1\nprop 1z0x 0 10\n"))
+
+(case reference_formal_handles_survive_heap_collections
+  (source "unpacked_struct_reference_handles.sv" #"
+module Top(output int n);
+    class Node;
+        string text;
+        function new(string text);
+            this.text = text;
+        endfunction
+    endclass
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    class Holder;
+        pair_t p;
+    endclass
+    logic clk = 0;
+    always #1 clk = ~clk;
+    pair_t last;
+    Holder h = new;
+    string number;
+    function automatic void set(ref pair_t r, input string text);
+        r = '{m_type: null, m_type_name: {text, "!"}};
+        r.m_type = new(text);
+    endfunction
+    initial forever begin
+        @(posedge clk);
+        number.itoa(n);
+        set(last, number);
+        set(h.p, {"h", number});
+        n = n + 1;
+    end
+    initial #6000 $display("[%s] [%s] [%s] [%s] %0d", last.m_type.text, last.m_type_name,
+        h.p.m_type.text, h.p.m_type_name, n);
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "[2999] [2999!] [h2999] [h2999!] 3000\n"))

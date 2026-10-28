@@ -2888,6 +2888,7 @@ pub(super) fn lower_subroutine(
                 },
             ),
             default,
+            leaves: Vec::new(),
         });
     }
     let return_var = return_type
@@ -2927,39 +2928,46 @@ pub(super) fn lower_subroutine(
         }
         result_leaves = Some((result.clone(), leaves));
     }
-    if dispatch.is_none() {
-        for (index, r#type) in &aggregate_formals {
-            let param = &lowered_params[*index];
-            let (name, source, direction) = (
-                param.name.clone(),
-                param.source_name.clone(),
-                param.direction,
-            );
-            let leaves = builder
-                .declare_aggregate(&source, r#type)?
-                .into_iter()
-                .map(|(leaf, _)| leaf)
-                .collect::<Vec<_>>();
-            if direction.is_read() {
-                aggregate_prologue.push(Stmt::AssignConcat {
-                    parts: leaves.iter().cloned().map(LValue::Ident).collect(),
-                    rhs: Expr::Ident(name.clone()),
-                    nonblocking: false,
-                });
-            } else if builder.automatic {
-                // An automatic output starts each call at its default.
-                aggregate_prologue.extend(leaves.iter().map(|leaf| Stmt::Local {
-                    name: leaf.clone(),
-                    init: None,
-                }));
-            }
-            if direction.is_written() {
-                aggregate_epilogue.push(Stmt::Assign {
-                    lhs: LValue::Ident(name),
-                    rhs: Expr::Concat(leaves.into_iter().map(Expr::Ident).collect()),
-                    nonblocking: false,
-                });
-            }
+    for (index, r#type) in &aggregate_formals {
+        let param = &lowered_params[*index];
+        let (name, source, direction) = (
+            param.name.clone(),
+            param.source_name.clone(),
+            param.direction,
+        );
+        // The members of a reference formal are bound to the members of the
+        // actual, also in the body that dispatches a virtual method.
+        if dispatch.is_some() && !direction.is_reference() {
+            continue;
+        }
+        let leaves = builder
+            .declare_aggregate(&source, r#type)?
+            .into_iter()
+            .map(|(leaf, _)| leaf)
+            .collect::<Vec<_>>();
+        lowered_params[*index].leaves = leaves.clone();
+        if direction.is_reference() {
+            continue;
+        }
+        if direction.is_read() {
+            aggregate_prologue.push(Stmt::AssignConcat {
+                parts: leaves.iter().cloned().map(LValue::Ident).collect(),
+                rhs: Expr::Ident(name.clone()),
+                nonblocking: false,
+            });
+        } else if builder.automatic {
+            // An automatic output starts each call at its default.
+            aggregate_prologue.extend(leaves.iter().map(|leaf| Stmt::Local {
+                name: leaf.clone(),
+                init: None,
+            }));
+        }
+        if direction.is_written() {
+            aggregate_epilogue.push(Stmt::Assign {
+                lhs: LValue::Ident(name),
+                rhs: Expr::Concat(leaves.into_iter().map(Expr::Ident).collect()),
+                nonblocking: false,
+            });
         }
     }
     // The members of formals and of the result have the subroutine's
@@ -3189,7 +3197,15 @@ fn dispatch_body(
     let this = Expr::Ident(params[0].name.clone());
     let args = params
         .iter()
-        .map(|param| Some(Expr::Ident(param.name.clone())))
+        .map(|param| {
+            Some(
+                if param.direction.is_reference() && !param.leaves.is_empty() {
+                    Expr::Concat(param.leaves.iter().cloned().map(Expr::Ident).collect())
+                } else {
+                    Expr::Ident(param.name.clone())
+                },
+            )
+        })
         .collect::<Vec<_>>();
     let items = targets
         .iter()
@@ -3619,6 +3635,7 @@ fn lower_class(
                 direction: ParamDirection::Input,
                 r#type: ir_type,
                 default: None,
+                leaves: Vec::new(),
             }],
             return_var: Some(result),
             body,
@@ -3717,6 +3734,7 @@ fn lower_cast(
                 direction: ParamDirection::Inout,
                 r#type: ir_handle.clone(),
                 default: None,
+                leaves: Vec::new(),
             },
             SubroutineParam {
                 name: source.clone(),
@@ -3724,6 +3742,7 @@ fn lower_cast(
                 direction: ParamDirection::Input,
                 r#type: ir_handle,
                 default: None,
+                leaves: Vec::new(),
             },
         ],
         return_var: Some(result.clone()),

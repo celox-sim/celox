@@ -670,6 +670,12 @@ pub struct SubroutineParamBase<E, T> {
     pub direction: ParamDirection,
     pub r#type: T,
     pub default: Option<E>,
+    /// The local names of the members of a formal of unpacked structure
+    /// type, in the order of its flat value; empty for other formals and, in
+    /// the body that dispatches a virtual method, for formals passed by
+    /// value. A reference formal binds each to the matching member of its
+    /// actual.
+    pub leaves: Vec<String>,
 }
 
 impl<E, L, T> SubroutineBase<E, L, T> {
@@ -694,6 +700,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
                     direction: param.direction,
                     r#type: ft(param.r#type),
                     default: param.default.map(&mut *fe),
+                    leaves: param.leaves,
                 })
                 .collect(),
             return_var: self.return_var,
