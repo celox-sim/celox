@@ -4734,3 +4734,90 @@ fn deposits_preserve_formats_at_word_boundaries() {
         }
     }
 }
+
+#[cfg(feature = "systemverilog")]
+unsafe extern "C" fn record_changed_scalar(data: *mut VpiCbData) -> i32 {
+    // Safety: the test requests scalar callback storage, which remains live.
+    CALLBACK_VALUE.store(unsafe { (*(*data).value).value.scalar }, Ordering::SeqCst);
+    0
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn callback_samples_preserve_signed_integers_and_four_state_scalars() {
+    let _serial = lock_vpi();
+    let source = "module Top(input logic signed [3:0] x, output logic signed [3:0] y); assign y=x; endmodule";
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("callback_formats.sv"))],
+        "Top",
+    )
+    .four_state(true)
+    .opt_level(celox::OptLevel::O1)
+    .build()
+    .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    // Safety: all handles and callback records remain live until removal.
+    unsafe {
+        let x = vpi_handle_by_name(c"Top.x".as_ptr(), ptr::null_mut());
+        let y = vpi_handle_by_name(c"Top.y".as_ptr(), ptr::null_mut());
+        let write = |pattern: &str| {
+            let text = std::ffi::CString::new(pattern).unwrap();
+            let value = VpiValue {
+                format: VPI_BIN_STR_VAL,
+                value: VpiValueData {
+                    str_: text.as_ptr().cast_mut(),
+                },
+            };
+            assert_eq!(vpi_put_value(x, &value, ptr::null(), VPI_NO_DELAY), x);
+        };
+        write("0000");
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        let mut data = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(record_changed_value),
+            obj: y,
+            time: ptr::null_mut(),
+            value: &mut value,
+            index: 0,
+            user_data: ptr::null_mut(),
+        };
+        let callback = vpi_register_cb(&data);
+        assert!(!callback.is_null());
+        for (pattern, expected) in [("0111", 7), ("1111", -1), ("1000", -8), ("0000", 0)] {
+            CALLBACK_VALUE.store(i32::MIN, Ordering::SeqCst);
+            write(pattern);
+            assert!(!run_callbacks_result().unwrap());
+            assert_eq!(CALLBACK_VALUE.load(Ordering::SeqCst), expected, "{pattern}");
+        }
+        assert_eq!(vpi_remove_cb(callback), 1);
+        let mut scalar_value = VpiValue {
+            format: VPI_SCALAR_VAL,
+            value: VpiValueData { scalar: VPI_0 },
+        };
+        data.value = &mut scalar_value;
+        data.cb_rtn = Some(record_changed_scalar);
+        let callback = vpi_register_cb(&data);
+        assert!(!callback.is_null());
+        for (pattern, expected) in [
+            ("0001", VPI_1),
+            ("000x", VPI_X),
+            ("000z", VPI_Z),
+            ("0000", VPI_0),
+        ] {
+            CALLBACK_VALUE.store(i32::MIN, Ordering::SeqCst);
+            write(pattern);
+            assert!(!run_callbacks_result().unwrap());
+            assert_eq!(CALLBACK_VALUE.load(Ordering::SeqCst), expected, "{pattern}");
+        }
+        assert_eq!(vpi_remove_cb(callback), 1);
+        vpi_free_object(x);
+        vpi_free_object(y);
+    }
+    clear_runtime();
+}
