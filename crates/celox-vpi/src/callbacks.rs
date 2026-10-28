@@ -168,13 +168,6 @@ impl ValueSnapshot {
             Self::Wide(value, mask) => Self::new(value, mask),
         }
     }
-
-    pub(super) fn into_big(self) -> (celox::BigUint, celox::BigUint) {
-        match self {
-            Self::Word(value, mask) => (value.into(), mask.into()),
-            Self::Wide(value, mask) => (value, mask),
-        }
-    }
 }
 
 fn changed_values(host: &super::VpiHost) -> Vec<(u64, ValueSnapshot)> {
