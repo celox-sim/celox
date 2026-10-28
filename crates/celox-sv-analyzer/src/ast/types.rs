@@ -14,6 +14,7 @@ pub(super) fn type_aliases_from_scope(
         true,
         None,
         true,
+        None,
     )
 }
 pub(super) fn type_aliases_from_scope_with_env(
@@ -27,6 +28,7 @@ pub(super) fn type_aliases_from_scope_with_env(
         true,
         None,
         false,
+        None,
     )
 }
 
@@ -37,7 +39,36 @@ pub(super) fn type_aliases_from_body_with_env(
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
 ) -> Converted<HashMap<String, Type>> {
-    type_aliases_in_scope(syntax_tree, const_env, inherited, false, Some(items), false)
+    type_aliases_in_scope(
+        syntax_tree,
+        const_env,
+        inherited,
+        false,
+        Some(items),
+        false,
+        None,
+    )
+}
+
+/// The typedefs of elaborated generate scope `path`, such as `g[1]`, whose
+/// enumeration, struct and union types are their own in each scope, also
+/// in each iteration of a loop (IEEE 1800-2023 27.4).
+pub(super) fn type_aliases_of_generate_scope(
+    syntax_tree: &AnalysisContext<'_>,
+    items: &[celox_sv_syntax::BodyItemId],
+    const_env: &HashMap<String, i128>,
+    inherited: &HashMap<String, Type>,
+    path: &str,
+) -> Converted<HashMap<String, Type>> {
+    type_aliases_in_scope(
+        syntax_tree,
+        const_env,
+        inherited,
+        false,
+        Some(items),
+        false,
+        Some(path),
+    )
 }
 
 fn type_aliases_in_scope(
@@ -47,6 +78,7 @@ fn type_aliases_in_scope(
     include_header: bool,
     items: Option<&[celox_sv_syntax::BodyItemId]>,
     defer_class_defaults: bool,
+    generate_scope: Option<&str>,
 ) -> Converted<HashMap<String, Type>> {
     let mut aliases = scope::imported(&syntax_tree.state).type_aliases.clone();
     aliases.extend(
@@ -107,8 +139,9 @@ fn type_aliases_in_scope(
                     continue;
                 };
                 let context = PackedDimensions::new(HashMap::default(), const_env, &aliases);
-                let ty =
+                let mut ty =
                     containers::with_dimensions(base, &alias.dimensions, syntax_tree, &context)?;
+                ty.name_declaration(|| declaration_name(syntax_tree, alias, generate_scope));
                 aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
             }
             _ => {}
@@ -144,6 +177,27 @@ fn type_aliases_in_scope(
         }
     }
     Ok(aliases)
+}
+
+/// The name of typedef `alias`, qualified by the module, interface, program
+/// or package that declares it and by its generate scope.
+fn declaration_name(
+    tree: &AnalysisContext<'_>,
+    alias: &celox_sv_syntax::TypeAlias,
+    generate_scope: Option<&str>,
+) -> String {
+    let name = instances::normalize_identifier(&alias.name.spelling);
+    let name = match generate_scope {
+        Some(path) => format!("{path}.{name}"),
+        None => name,
+    };
+    match classes::enclosing_unit(tree.declarations(), alias.tokens) {
+        Some(unit) => format!(
+            "{}::{name}",
+            instances::normalize_identifier(&unit.name.spelling)
+        ),
+        None => format!("{}::{name}", packages::UNIT),
+    }
 }
 
 fn bound_literal(value: i128) -> ConstExpr {

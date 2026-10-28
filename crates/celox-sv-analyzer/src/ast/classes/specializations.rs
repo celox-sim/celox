@@ -640,10 +640,11 @@ fn finish_specialization(
                             &env,
                         )
                     });
-                if let Some(ty) = ty {
-                    let name = instances::normalize_identifier(&alias.name.spelling);
-                    parameters.own_aliases.insert(name.clone(), ty.clone());
-                    aliases.insert(name, ty);
+                if let Some(mut ty) = ty {
+                    let alias = instances::normalize_identifier(&alias.name.spelling);
+                    ty.name_declaration(|| format!("{name}::{alias}"));
+                    parameters.own_aliases.insert(alias.clone(), ty.clone());
+                    aliases.insert(alias, ty);
                 }
             }
         }
@@ -933,16 +934,17 @@ fn finish(
     let Some(ty) = type_parameters::resolve(&tree.state, ty, &context.const_env) else {
         return Ok(None);
     };
-    // Each enumeration declaration is a type of its own, which the bound
-    // type does not tell apart from another of the same base (6.19).
-    if ty.is_enum {
+    // Each enumeration declaration is a type of its own (6.19), and so is
+    // each struct or union declaration (6.22.1): a typedef names it, which
+    // tells it apart from another of the same structure. An anonymous one is
+    // not told apart.
+    let named = ty.declaration_name().is_some();
+    if ty.is_enum && !named {
         return Err(unsupported(
             "enumeration type as a class type parameter value",
         ));
     }
-    // So is each struct or union declaration (6.22.1), whose identity the
-    // bound type does not keep either.
-    if !ty.members.is_empty() {
+    if !ty.members.is_empty() && !named {
         return Err(unsupported(
             "struct or union type as a class type parameter value",
         ));
@@ -1041,6 +1043,9 @@ fn spelling(ty: &Type) -> String {
         let mut hasher = fxhash::FxHasher::default();
         ty.hash(&mut hasher);
         spelled.push_str(&format!("#{:016x}", hasher.finish()));
+    }
+    if let Some(name) = ty.declaration_name() {
+        spelled.push_str(&format!("@{name}"));
     }
     spelled
 }

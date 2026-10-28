@@ -133,6 +133,7 @@ pub(super) fn int_type() -> Type {
         members: Vec::new(),
         signed_element_depth: None,
         class: None,
+        nominal: Nominal::default(),
     }
 }
 
