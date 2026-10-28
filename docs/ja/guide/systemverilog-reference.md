@@ -298,7 +298,15 @@ modport 付きへの代入はできますが、その逆はできません。メ
 
 値は interface インスタンスの番号で、メンバアクセスはその interface のインスタンスから選びます。この処理が
 入るのは virtual interface 型を宣言した設計だけで、その設計は 2 回解析します（2 回目はエラボレーション後の
-インスタンスを使います）。パラメータ付き interface の virtual interface と、virtual interface を通じた
+インスタンスを使います）。イベント制御と `wait` 文は `@(posedge vif.clk)` のように、static 変数が持つ
+virtual interface 経由でメンバを参照できます。その変数もイベント式のオペランドで、変数が変わると式を評価し直し、
+値が変わればイベントになります（9.4.2）。この項目は変数以外の `expr` なので、`iff` 条件は組み合わせ回路が
+落ち着いた後、発生を検出した時点で判定します（[イベント待ち](#timing-semantics)）。この項目に edge で反応する
+`always` はプロセスとして実行し、`always_ff` では拒否します。インスタンスのメンバへの書き込みは、組み合わせ回路が落ち着いた後に変数がそのインスタンスを
+指していればこの項目のイベントになります。そのため、1 回の活性化の中で別のインスタンスのメンバをパルスさせ、その後に変数を
+そのインスタンスへ向ける代入をすると、選ばれた値は変わらないのにイベントになります（9.4.2、[#2549](https://github.com/celox-sim/celox/issues/2549)）。automatic 変数・引数・クラスのプロパティが持つ virtual interface を通じた
+待ちは未対応です。
+パラメータ付き interface の virtual interface と、virtual interface を通じた
 interface の task / function、clocking block、入れ子の interface インスタンスは未対応です。
 
 ### インスタンス配列の要素

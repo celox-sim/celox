@@ -88,6 +88,90 @@ sv_backends! {
     fn rejects_modport_to_full_interface(sim) {
         @case "virtual_interfaces::rejects_modport_to_full_interface";
     }
+
+    fn waits_on_member_edges(sim) {
+        @case "virtual_interfaces::waits_on_member_edges";
+    }
+
+    fn waits_on_member_levels(sim) {
+        @case "virtual_interfaces::waits_on_member_levels";
+    }
+
+    fn waits_with_guards_signed_members_and_automatic_tasks(sim) {
+        @case "virtual_interfaces::waits_with_guards_signed_members_and_automatic_tasks";
+    }
+
+    fn mixed_event_controls(sim) {
+        @case "virtual_interfaces::mixed_event_controls";
+    }
+
+    fn retargets_with_ordinary_events(sim) {
+        @case "virtual_interfaces::retargets_with_ordinary_events";
+    }
+
+    fn member_pulses_within_one_activation(sim) {
+        @case "virtual_interfaces::member_pulses_within_one_activation";
+    }
+
+    fn always_on_member_edges(sim) {
+        @case "virtual_interfaces::always_on_member_edges";
+    }
+}
+
+/// A wait through a handle that a class property, an automatic variable or
+/// an argument holds must follow changes of the handle (IEEE 1800-2023
+/// 9.4.2), which is not implemented; it is rejected rather than sampled.
+#[test]
+fn waits_through_non_static_handles_are_unsupported() {
+    let waits = [
+        "class C; virtual bus_if vif; task run(virtual bus_if b); vif = b; @(posedge vif.clk); endtask endclass",
+        "class C; virtual bus_if vif; task run(virtual bus_if b); vif = b; wait (vif.clk); endtask endclass",
+        "class C; task run(virtual bus_if b); @(posedge b.clk); endtask endclass",
+        "class C; task run(virtual bus_if b); virtual bus_if v; v = b; wait (v.clk); endtask endclass",
+    ];
+    for wait in waits {
+        let source = format!(
+            "interface bus_if(input logic clk); endinterface
+             {wait}
+             module top; logic clk = 0; bus_if bus(clk);
+                 initial begin automatic C c = new; c.run(bus); end
+             endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "top")
+                .build_interpreter()
+        else {
+            panic!("a wait through a non-static handle is unsupported: {wait}");
+        };
+        let error = error.to_string();
+        assert!(
+            error.contains("wait on a member through a virtual interface held by"),
+            "{wait}: {error}"
+        );
+    }
+}
+
+/// An argument of an automatic module task is not a variable of the design
+/// either, so a wait through it is unsupported too.
+#[test]
+fn waits_through_task_arguments_are_unsupported() {
+    let source = "interface bus_if(input logic clk); endinterface
+        module top;
+            logic clk = 0;
+            bus_if bus(clk);
+            task automatic run(virtual bus_if b); @(posedge b.clk); endtask
+            initial run(bus);
+        endmodule";
+    let Err(error) = celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "top")
+        .build_interpreter()
+    else {
+        panic!("a wait through a task argument is unsupported");
+    };
+    let error = error.to_string();
+    assert!(
+        error.contains("wait on a member through a virtual interface held by"),
+        "{error}"
+    );
 }
 
 /// A member access compares the handle with each instance, so a handle
@@ -274,5 +358,51 @@ fn arithmetic_on_handles_is_rejected() {
         };
         let error = error.to_string();
         assert!(error.contains("operator"), "{write}: {error}");
+    }
+}
+
+/// A handle is an operand of the event expression, so retargeting it to
+/// `null` while a process waits on a member through it is an access through
+/// `null` (IEEE 1800-2023 9.4.2, 25.9), not a falling edge of the member.
+#[test]
+fn retargeting_a_waited_handle_to_null_is_an_error() {
+    let source = "`timescale 1ns/1ns
+        interface bus_if(input logic clk); endinterface
+        module Top(output bit woke);
+            logic high = 1;
+            bus_if a(high);
+            virtual bus_if vif;
+            initial begin
+                vif = a;
+                fork
+                    begin @(negedge vif.clk); woke = 1; end
+                    begin #2 vif = null; end
+                join
+            end
+        endmodule";
+    for four_state in [false, true] {
+        let builder = || {
+            celox::Simulation::from_sv_sources(vec![(source, Path::new("vif.sv"))], "Top")
+                .four_state(four_state)
+        };
+        let runs = [
+            builder()
+                .build_native()
+                .map(|mut sim| sim.run_until(5).map(|_| sim.get(sim.signal("woke")))),
+            builder()
+                .build_cranelift()
+                .map(|mut sim| sim.run_until(5).map(|_| sim.get(sim.signal("woke")))),
+            builder()
+                .build_wasm()
+                .map(|mut sim| sim.run_until(5).map(|_| sim.get(sim.signal("woke")))),
+        ];
+        for run in runs {
+            let run = run.expect("the design builds");
+            let Err(error) = run else {
+                panic!("an access through null must stop the run: {run:?}");
+            };
+            let error = error.to_string();
+            assert!(error.contains("null virtual interface accessed"), "{error}");
+        }
     }
 }

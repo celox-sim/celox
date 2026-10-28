@@ -775,7 +775,22 @@ rejected. An access through `null` is an error that ends the simulation.
 A virtual interface value is the number of an interface instance, and a
 member access selects among the instances of its interface. Only designs that
 declare virtual interface types pay for this: they are analyzed twice, the
-second time with the instances of the elaborated design. Virtual interfaces
+second time with the instances of the elaborated design. Event controls
+and `wait` statements may read members through a virtual interface held by a
+static variable, as in `@(posedge vif.clk)`. The variable is an operand of the
+event expression: when it changes, the expression is evaluated again, and a
+change of its value is an event (9.4.2). Such an item is an `expr` other
+than a variable, so its `iff` condition is judged when the occurrence is
+detected, after combinational logic settles ([event waits](#timing-semantics)).
+An edge-sensitive `always` on such an item runs as a process; `always_ff`
+rejects it. A write of the member of an instance is an event of the item
+when the variable denotes that instance after combinational logic settles,
+so a pulse of another instance's member followed by an assignment that
+makes the variable denote that instance, in one activation, is one,
+although the selected value does not change (9.4.2;
+[#2549](https://github.com/celox-sim/celox/issues/2549)). Waiting through a virtual interface
+held by an automatic variable, an argument or a class property is
+unsupported. Virtual interfaces
 of parameterized interfaces, and interface tasks, functions, clocking blocks
 and nested interface instances reached through a virtual interface, are
 unsupported.

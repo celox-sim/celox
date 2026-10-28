@@ -1,0 +1,23 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source": "sv_virtual_interface_always_xezim.sv",
+  "standard": "IEEE 1800-2023 9.2.2, 9.4.2, 25.9",
+  "command": "xezim sv_virtual_interface_always_xezim.sv",
+  "expected_output": "rises=2",
+  "observations": [
+    {
+      "exit_code": 0,
+      "output": "rises=0\nSimulation finished at time 7 ($finish called)\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "build_exit_code": 0,
+      "exit_code": 0,
+      "output": "rises=2\n"
+    }
+  ],
+  "note": "`always @(posedge vif.clk)` waits on the clock of the instance `vif` denotes, which rises at 2 and 6. xezim 0.11.3 warns that it cannot resolve the sensitivity term `posedge clk`, drops the always block and prints rises=0. Verilator 5.052 and Celox print rises=2."
+}

@@ -1,0 +1,16 @@
+{
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "source": "sv_virtual_interface_wait_verilator.sv",
+  "standard": "IEEE 1800-2023 9.4.3, 25.9",
+  "command": "verilator --binary --timing -Wno-fatal sv_virtual_interface_wait_verilator.sv --top-module Top",
+  "expected_output": "module 5",
+  "observations": [
+    {
+      "build_exit_code": 0,
+      "exit_code": 1,
+      "output": "%Error: sv_virtual_interface_wait_verilator.sv:17: Null pointer dereferenced\nAborting...\n"
+    }
+  ],
+  "note": "The wait on watched.ready through a static virtual interface variable, retargeted from a to b at time 3, must complete when b.ready rises at time 5 (9.4.3 re-evaluates the condition when its operands change). Verilator 5.052 builds the design but aborts at the wait. Celox and xezim 0.11.3 print module 5."
+}

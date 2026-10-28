@@ -874,6 +874,14 @@
     "sv_vif-X4": {
       "title": "A write through an element of a multidimensional array of virtual interfaces is lost",
       "standard": "IEEE 1800-2023 25.9"
+    },
+    "sv_vif-X2": {
+      "title": "Retargeting a virtual interface variable does not trigger an event control on its member",
+      "standard": "IEEE 1800-2023 9.4.2"
+    },
+    "sv_vif-X5": {
+      "title": "An edge-sensitive always on a member through a virtual interface is dropped",
+      "standard": "IEEE 1800-2023 9.4.2, 25.9"
     }
   },
   "cases": [
@@ -5027,6 +5035,46 @@
       "classification": "xezim_bug",
       "bug": "sv_vif-X1",
       "note": "A ref formal requires an actual of an equivalent type (13.5.2, 6.22.2), and `bit [31:0]` is not equivalent to a virtual interface (25.9). xezim 0.11.3 elaborates `forge(v)` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::waits_on_member_edges",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X2",
+      "note": "`@(posedge moved.clk)` must fire when `moved` is retargeted from an instance whose clock is 0 to one whose clock is 1, since the variable is an operand of the event expression (9.4.2). xezim 0.11.3 ignores the retarget, so the forked wait never completes and `moved 2` and the final line are missing ([standalone probe](verification/repros/sv_virtual_interface_retarget_xezim.json)); the other lines match. Celox prints the expected output."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::mixed_event_controls",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X29",
+      "note": "xezim 0.11.3 prints the real, out and timing lines but not `pulse 1` and `iff 2`: it does not resume `@(posedge vif.clk or posedge pulse)` on the pulse `pulse = 1; pulse = 0;` of one activation (sv_rest-X29), and it judges the `iff en` of `@(posedge clk iff en ...)` after `en = 0` instead of at the write of `clk` (sv_iff_order). Celox prints all four lines."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::retargets_with_ordinary_events",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X2",
+      "note": "xezim 0.11.3 prints `pulse 2` but not `retarget 3`: retargeting `vif` from instance a, whose clock fell at 2, to b, whose clock is high, changes the selection from 0 to 1, a positive edge (9.4.2), which xezim ignores ([standalone probe](verification/repros/sv_virtual_interface_retarget_xezim.json)). Celox prints both lines."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::always_on_member_edges",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X5",
+      "note": "`always @(posedge vif.clk)` and `always @(negedge vif.clk or posedge vif.clk)` wait on the clock of the instance `vif` denotes (9.4.2, 25.9). xezim 0.11.3 drops both blocks as having unresolvable sensitivity terms and prints 0 0 ([standalone probe](verification/repros/sv_virtual_interface_always_xezim.json)). Verilator 5.052 and Celox print 2 3."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::member_pulses_within_one_activation",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X29",
+      "note": "`a.pulse = 1; a.pulse = 0;` in one activation is a positive edge of the member `vif` selects (9.4.2), but xezim 0.11.3 does not resume the wait on a pulse of one activation (sv_rest-X29); it prints nothing, also for `@(posedge a.pulse)` without the virtual interface. Celox prints pulse 2."
     }
   ]
 }
