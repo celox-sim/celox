@@ -1604,6 +1604,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Process(op)),
                 args,
                 ..
+            } if op.is_mailbox() => self.mailbox_call(*op, args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Process(op)),
+                args,
+                ..
             } => self.process_call(*op, args)?,
             Expr::Call {
                 callee:

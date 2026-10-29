@@ -1018,6 +1018,29 @@ behind it may get keys. A semaphore is a heap object, so collection reclaims
 it once no handle reaches it; like other objects, it keeps a portable state
 file from being saved while a variable holds it.
 
+### Mailboxes {#mailboxes}
+
+`mailbox #(T)` and `std::mailbox #(T)` are the parameterized mailboxes of
+IEEE 1800-2023 15.4. `T` may be an integral type up to 64 bits, two- or
+four-state, a `string`, or a class, `mailbox`, `semaphore`, `process` or
+`event` handle. `new(bound = 0)` creates an unbounded mailbox, or one that
+holds at most `bound` messages. `put` blocks while a bounded mailbox is
+full, `get` and `peek` block while it is empty, and `try_put`, `try_get`
+and `try_peek` return 0 instead of blocking and a positive value when they
+succeed. Messages come out in the order they were put; a message unblocks
+every waiting `peek` and the first waiting `get`, and waiting processes are
+served in arrival order. A waiting process is served when the message or the
+room it waits for arrives, whenever it then runs: the message is its own,
+and it is gone if the process ends before it runs. `get`, `peek`, `try_get`
+and `try_peek` assign the message, as a value of the message type, to a
+variable or a class property. `num` returns the number of messages. A
+message keeps a handle it holds alive. A negative bound is a run-time error.
+`put`, `get` and `peek` are tasks: functions cannot call them. Typeless
+mailboxes (`mailbox` without a type parameter) are not supported. A mailbox
+is a heap object, so collection reclaims it once no handle reaches it; like
+other objects, it keeps a portable state file from being saved while a
+variable holds it.
+
 ### Variable lifetimes
 
 Variable lifetimes follow IEEE 1800-2023 6.21. Outside classes, a variable

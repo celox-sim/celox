@@ -24,6 +24,7 @@
     "xezim/interfaces.json",
     "xezim/latch.json",
     "xezim/literals.json",
+    "xezim/mailboxes.json",
     "xezim/operators.json",
     "xezim/packed_structs.json",
     "xezim/procedural.json",

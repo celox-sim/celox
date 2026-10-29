@@ -1601,6 +1601,13 @@ timed_cases! {
 }
 
 timed_cases! {
+    fn mailboxes_messages_come_out_in_put_order = "mailboxes::messages_come_out_in_put_order";
+    fn mailboxes_get_and_bounded_put_block = "mailboxes::get_and_bounded_put_block";
+    fn mailboxes_try_methods_do_not_block = "mailboxes::try_methods_do_not_block";
+    fn mailboxes_strings_and_class_handles = "mailboxes::strings_and_class_handles";
+}
+
+timed_cases! {
     fn semaphores_one_key_admits_one_process_at_a_time = "semaphores::one_key_admits_one_process_at_a_time";
     fn semaphores_try_get_takes_only_available_keys = "semaphores::try_get_takes_only_available_keys";
     fn semaphores_get_waits_until_enough_keys_are_put = "semaphores::get_waits_until_enough_keys_are_put";

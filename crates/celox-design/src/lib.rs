@@ -623,8 +623,46 @@ pub enum ProcessOp {
     /// `s.try_get(keyCount)`: obtain keys if they are available; 1 if so, 0
     /// otherwise (15.3.4).
     SemaphoreTryGet,
+    /// `new(bound)` of a mailbox whose messages have the container layout
+    /// of the second argument: its handle (15.4.1).
+    MailboxNew,
+    /// `m.num()`: the number of messages (15.4.2).
+    MailboxNum,
+    /// `m.put(message)`: 1 when the message was placed; otherwise 0, and the
+    /// process waits until there may be room and then calls it again (15.4.3).
+    MailboxPut,
+    /// `m.try_put(message)`: 1 when the message was placed, 0 when the
+    /// mailbox is full (15.4.4).
+    MailboxTryPut,
+    /// `m.get(message)`: 1 and the first message, removed; otherwise 0, and
+    /// the process waits until there may be one and then calls it again
+    /// (15.4.5).
+    MailboxGet,
+    /// `m.try_get(message)`: 1 and the first message, removed, or 0 when the
+    /// mailbox is empty (15.4.6).
+    MailboxTryGet,
+    /// `m.peek(message)`: like `get` without removing the message (15.4.7).
+    MailboxPeek,
+    /// `m.try_peek(message)`: like `try_get` without removing the message
+    /// (15.4.8).
+    MailboxTryPeek,
 }
 impl ProcessOp {
+    /// Whether it is an operation on a mailbox.
+    pub fn is_mailbox(self) -> bool {
+        matches!(
+            self,
+            Self::MailboxNew
+                | Self::MailboxNum
+                | Self::MailboxPut
+                | Self::MailboxTryPut
+                | Self::MailboxGet
+                | Self::MailboxTryGet
+                | Self::MailboxPeek
+                | Self::MailboxTryPeek
+        )
+    }
+
     pub fn from_code(code: u32) -> Option<Self> {
         Some(match code {
             0 => Self::SelfHandle,
@@ -646,6 +684,14 @@ impl ProcessOp {
             16 => Self::SemaphorePut,
             17 => Self::SemaphoreGet,
             18 => Self::SemaphoreTryGet,
+            19 => Self::MailboxNew,
+            20 => Self::MailboxNum,
+            21 => Self::MailboxPut,
+            22 => Self::MailboxTryPut,
+            23 => Self::MailboxGet,
+            24 => Self::MailboxTryGet,
+            25 => Self::MailboxPeek,
+            26 => Self::MailboxTryPeek,
             _ => return None,
         })
     }

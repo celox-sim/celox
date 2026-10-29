@@ -120,8 +120,10 @@ fn bind_in_mode(
                         values.push(ty);
                     }
                     DataTypeKind::Named(path) => {
-                        if let Some(ty) = super::super::processes::qualified_type(path) {
-                            values.push(types::enclose_aliased_packed_type(ty, ranges));
+                        if let Some(ty) =
+                            super::super::processes::builtin_type(path, tree, context)?
+                        {
+                            values.push(types::enclose_aliased_packed_type(*ty, ranges));
                             continue;
                         }
                         // A class with a parameter value assignment, or one

@@ -476,6 +476,15 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ),
                         (
                             "icarus",
+                            "mailboxes::get_and_bounded_put_block"
+                            | "mailboxes::messages_come_out_in_put_order"
+                            | "mailboxes::try_methods_do_not_block",
+                        ) => ("compile_error", "compile", "Invalid module instantiation"),
+                        ("icarus", "mailboxes::strings_and_class_handles") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        (
+                            "icarus",
                             "semaphores::get_waits_until_enough_keys_are_put"
                             | "semaphores::try_get_takes_only_available_keys",
                         ) => ("compile_error", "compile", "Invalid module instantiation"),

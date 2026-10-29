@@ -517,26 +517,8 @@ pub(in crate::ast) fn bind_value(
                     );
                     continue;
                 }
-                if let Some(call) =
-                    super::super::processes::value(tree, id, native, dimensions, false)?
-                {
-                    values.push(call);
-                    continue;
-                }
-                if let Some(call) =
-                    super::super::semaphores::value(tree, id, native, dimensions, false)?
-                {
-                    values.push(call);
-                    continue;
-                }
-                // `e.triggered` (IEEE 1800-2023 15.5.3).
-                if let Some(event) = super::super::events::triggered(tree, id, native, dimensions)?
-                {
-                    let event = super::value(event, native, tree, dimensions)?;
-                    values.push(super::super::events::call(
-                        celox_design::ProcessOp::Triggered,
-                        vec![event],
-                    ));
+                if let Some(call) = scheduler_call(tree, id, native, dimensions)? {
+                    values.push(*call);
                     continue;
                 }
                 if let Some((value, _)) = array_reductions::bind(id, native, tree, dimensions)? {
@@ -2641,6 +2623,36 @@ fn check_tagged_copyout(
         }
     }
     Ok(())
+}
+
+/// A value of a call of a method of a built-in class whose objects the
+/// scheduler owns, or `e.triggered`. Boxed and kept out of line, so that the
+/// frame of the recursive binder holds one pointer for all of them.
+#[inline(never)]
+fn scheduler_call(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Box<Expr>>> {
+    if let Some(call) = super::super::processes::value(tree, id, native, dimensions, false)? {
+        return Ok(Some(Box::new(call)));
+    }
+    if let Some(call) = super::super::semaphores::value(tree, id, native, dimensions, false)? {
+        return Ok(Some(Box::new(call)));
+    }
+    if let Some(call) = super::super::mailboxes::value(tree, id, native, dimensions, false)? {
+        return Ok(Some(Box::new(call)));
+    }
+    // `e.triggered` (IEEE 1800-2023 15.5.3).
+    if let Some(event) = super::super::events::triggered(tree, id, native, dimensions)? {
+        let event = super::value(event, native, tree, dimensions)?;
+        return Ok(Some(Box::new(super::super::events::call(
+            celox_design::ProcessOp::Triggered,
+            vec![event],
+        ))));
+    }
+    Ok(None)
 }
 
 #[cfg(test)]

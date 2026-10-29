@@ -62,6 +62,27 @@ pub(super) fn scope(
     }
 }
 
+/// The type of a name of a built-in class the scheduler owns: `std::process`,
+/// `std::semaphore`, `std::process::state` or `mailbox #(T)`. Boxed and kept
+/// out of line, so that the frame of the recursive type binder stays small.
+#[inline(never)]
+pub(super) fn builtin_type(
+    path: &[celox_sv_syntax::TypeSegment],
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+) -> Converted<Option<Box<Type>>> {
+    if let Some(ty) = qualified_type(path) {
+        return Ok(Some(Box::new(ty)));
+    }
+    if path
+        .last()
+        .is_some_and(|part| part.name.spelling == "mailbox")
+    {
+        return super::mailboxes::named_type(path, tree, context);
+    }
+    Ok(None)
+}
+
 pub(super) fn qualified_type(path: &[celox_sv_syntax::TypeSegment]) -> Option<Type> {
     if path.iter().any(|part| part.arguments.is_some()) {
         return None;

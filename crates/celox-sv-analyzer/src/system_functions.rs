@@ -255,6 +255,14 @@ impl SystemFunction {
                 celox_design::ProcessOp::SemaphorePut => "semaphore.put",
                 celox_design::ProcessOp::SemaphoreGet => "semaphore.get",
                 celox_design::ProcessOp::SemaphoreTryGet => "semaphore.try_get",
+                celox_design::ProcessOp::MailboxNew => "mailbox::new",
+                celox_design::ProcessOp::MailboxNum => "mailbox.num",
+                celox_design::ProcessOp::MailboxPut => "mailbox.put",
+                celox_design::ProcessOp::MailboxTryPut => "mailbox.try_put",
+                celox_design::ProcessOp::MailboxGet => "mailbox.get",
+                celox_design::ProcessOp::MailboxTryGet => "mailbox.try_get",
+                celox_design::ProcessOp::MailboxPeek => "mailbox.peek",
+                celox_design::ProcessOp::MailboxTryPeek => "mailbox.try_peek",
             },
             Self::Ln => "$ln",
             Self::Log10 => "$log10",
@@ -449,6 +457,15 @@ impl SystemFunction {
             || (self == Self::ValuePlusargs && position == 1)
             || (self == Self::Fread && position == 0)
             || (matches!(self, Self::Sscanf | Self::Fscanf) && position >= 2)
+            || (matches!(
+                self,
+                Self::Process(
+                    celox_design::ProcessOp::MailboxGet
+                        | celox_design::ProcessOp::MailboxTryGet
+                        | celox_design::ProcessOp::MailboxPeek
+                        | celox_design::ProcessOp::MailboxTryPeek
+                )
+            ) && position == 1)
     }
 
     /// The width and signedness of a call that is lowered as an integral
@@ -459,7 +476,13 @@ impl SystemFunction {
         match self {
             Self::Process(celox_design::ProcessOp::Status) => Some((32, true)),
             Self::Process(celox_design::ProcessOp::Triggered) => Some((1, false)),
-            Self::Process(celox_design::ProcessOp::SemaphoreTryGet) => Some((32, true)),
+            Self::Process(
+                celox_design::ProcessOp::SemaphoreTryGet
+                | celox_design::ProcessOp::MailboxNum
+                | celox_design::ProcessOp::MailboxTryPut
+                | celox_design::ProcessOp::MailboxTryGet
+                | celox_design::ProcessOp::MailboxTryPeek,
+            ) => Some((32, true)),
             Self::Process(_) => Some((32, false)),
             Self::Ln
             | Self::Log10

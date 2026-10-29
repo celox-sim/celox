@@ -980,6 +980,10 @@ pub(in crate::ast) fn constructor(
     if class_name == super::super::semaphores::CLASS {
         return super::super::semaphores::new(tree, arguments, native, dimensions).map(Some);
     }
+    if super::super::mailboxes::is_class(&class_name) {
+        return super::super::mailboxes::new(tree, arguments, native, dimensions, &class_name)
+            .map(Some);
+    }
     if classes::builtin(&class_name) {
         return Err(unsupported("constructing a process or event with new"));
     }
