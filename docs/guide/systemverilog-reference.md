@@ -384,8 +384,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
   without a declared default, and a task used as a value are errors.
-- DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), DPI
-  exports, nets with several drivers (including tri-state buses) and `inout`
+- DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), nets
+  with several drivers (including tri-state buses) and `inout`
   ports of the top module.
 
 ### Interface restrictions {#interface-restrictions}
@@ -1523,8 +1523,14 @@ first release supports this subset:
   `byte`, `shortint`, `int` and `longint`, signed or `unsigned`.
 
 Imports at compilation-unit scope, `output` and `inout` arguments, `context`
-imports, task imports, exports, packed vector arguments (`svBitVecVal` /
+imports, task imports, packed vector arguments (`svBitVecVal` /
 `svLogicVecVal`), `integer`, `real`, `chandle` and `string` are rejected.
+
+`export "DPI-C"` declarations of functions and tasks defined in the same
+module or package are accepted and checked: the subroutine is exported once,
+C names are unique, and it takes no `ref` formals or class handles (35.7). An
+export does not change the subroutine (35.7), and only `context` imports may
+call exported subroutines (35.5.3), so no C code calls them.
 
 ## SystemVerilog emitted by Veryl {#systemverilog-emitted-by-veryl}
 

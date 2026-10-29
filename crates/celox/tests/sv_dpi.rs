@@ -762,14 +762,6 @@ fn rejects_unsupported_imports_and_calls() {
             "DPI-C task import",
         ),
         (
-            r#"module Top(input logic clk, input int a, output int y);
-                function int g(input int x); return x; endfunction
-                export "DPI-C" function g;
-                always_ff @(posedge clk) y <= g(a);
-            endmodule"#,
-            "DPI-C export",
-        ),
-        (
             r#"module Top(input logic clk, input logic [7:0] a, output int y);
                 import "DPI-C" function int f(input bit [7:0] x);
                 always_ff @(posedge clk) y <= f(a);

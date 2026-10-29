@@ -283,4 +283,7 @@ sv_backends! {
     fn initial_while_loops_define_the_state(sim) {
         @case "procedural::initial_while_loops_define_the_state";
     }
+    fn dpi_exports_leave_subroutines_unchanged(sim) {
+        @case "procedural::dpi_exports_leave_subroutines_unchanged";
+    }
 }
