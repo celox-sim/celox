@@ -542,6 +542,21 @@ thread_local! {
     static SYNTAX_TYPE_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_TYPE_SCAN_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static CLASS_SIGNATURE_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Scope discoveries that queries settle.
+    pub(super) static SCOPE_SETTLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Specializations made for the references of class scopes.
+    pub(super) static CLASS_REFERENCE_SPECIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Discover without the settled scopes and repeated references that
+    /// queries share, to compare with the shared results.
+    pub(super) static UNSHARED_DISCOVERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a test asked for [`UNSHARED_DISCOVERY`].
+pub(super) fn unshared_discovery() -> bool {
+    #[cfg(test)]
+    return UNSHARED_DISCOVERY.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
 }
 
 #[cfg(test)]

@@ -1501,6 +1501,10 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
         scopes
     };
     let mut done = HashSet::<(usize, String)>::default();
+    // A class scope's references with the same spelling name the same
+    // specialization: each is made once, in the scope's context built once.
+    let mut spelled = HashSet::<(String, String, String)>::default();
+    let mut contexts = HashMap::<String, PackedDimensions>::default();
     loop {
         let before = tree.state.class_specializations.borrow().len();
         for (index, (scope, name, arguments, tokens)) in references.iter().enumerate() {
@@ -1518,15 +1522,32 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
                 Some(scope) => of(tree, scope),
             };
             for scope in scopes {
-                if !done.insert((index, scope.clone())) {
+                let shared = !crate::ast::dimensions::unshared_discovery();
+                if !done.insert((index, scope.clone()))
+                    || (shared
+                        && !spelled.insert((
+                            scope.clone(),
+                            name.clone(),
+                            argument_spelling(native, arguments),
+                        )))
+                {
                     continue;
                 }
-                let mut context = context.clone();
-                let (env, aliases) =
-                    self::scope(tree, &scope, &context.const_env, &context.type_aliases);
-                context.const_env = env.into();
-                context.type_aliases = aliases.into();
-                let _ = specialize(tree, name, arguments, &context);
+                if !shared {
+                    contexts.remove(&scope);
+                }
+                #[cfg(test)]
+                crate::ast::dimensions::CLASS_REFERENCE_SPECIALIZATIONS
+                    .with(|count| count.set(count.get() + 1));
+                let context = contexts.entry(scope.clone()).or_insert_with(|| {
+                    let mut context = context.clone();
+                    let (env, aliases) =
+                        self::scope(tree, &scope, &context.const_env, &context.type_aliases);
+                    context.const_env = env.into();
+                    context.type_aliases = aliases.into();
+                    context
+                });
+                let _ = specialize(tree, name, arguments, context);
             }
         }
         let after = tree.state.class_specializations.borrow().len();
@@ -1534,6 +1555,24 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             break;
         }
     }
+}
+
+/// The source text of the parameter value assignment `arguments`.
+fn argument_spelling(native: &celox_sv_syntax::Declarations, arguments: &[Argument]) -> String {
+    arguments
+        .iter()
+        .map(|argument| {
+            let name = argument
+                .name
+                .as_ref()
+                .map_or("", |name| name.spelling.as_str());
+            let value = argument.value.map_or_else(String::new, |value| {
+                native.token_text(native.expression(value).tokens)
+            });
+            format!("{name}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 #[cfg(test)]
