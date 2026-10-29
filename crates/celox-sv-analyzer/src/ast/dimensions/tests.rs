@@ -708,3 +708,107 @@ fn discovery_binds_class_signatures_independently_of_queries() {
     };
     assert_eq!(bindings(2), bindings(16));
 }
+
+#[test]
+fn discovery_settles_a_scope_once_for_its_queries() {
+    // The `$bits` queries of one function share its owners: their scope's
+    // declarations are discovered once, however many queries there are.
+    let settles = |queries: usize| {
+        let uses = (0..queries)
+            .map(|i| format!("$bits(v{i})"))
+            .collect::<Vec<_>>()
+            .join(" + ");
+        let locals = (0..queries)
+            .map(|i| format!("bit [{i}:0] v{i};"))
+            .collect::<String>();
+        let source = format!(
+            "package p;
+                class A; function int g(); return 1; endfunction endclass
+                function int f(); {locals} return {uses}; endfunction
+            endpackage
+            module Top; endmodule"
+        );
+        SCOPE_SETTLES.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("scope-settles.sv"))
+            .expect("the package analyzes");
+        SCOPE_SETTLES.with(|count| count.get())
+    };
+    assert_eq!(settles(2), settles(16));
+}
+
+#[test]
+fn class_references_of_one_spelling_specialize_once() {
+    let specializations = |references: usize| {
+        let properties = (0..references)
+            .map(|i| format!("C#(8) a{i}; C#(W) b{i}; C c{i};"))
+            .collect::<String>();
+        let source = format!(
+            "package p;
+                class C #(int N = 4); bit [N-1:0] v; endclass
+                class D #(int W = 2); {properties} endclass
+                class E extends D#(3); endclass
+            endpackage
+            module Top; endmodule"
+        );
+        CLASS_REFERENCE_SPECIALIZATIONS.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("class-references.sv"))
+            .expect("the package analyzes");
+        CLASS_REFERENCE_SPECIALIZATIONS.with(|count| count.get())
+    };
+    assert_eq!(specializations(2), specializations(16));
+}
+
+#[test]
+fn shared_discovery_analyzes_like_unshared_discovery() {
+    // Settled scopes and specializations shared between queries and class
+    // references give the analysis that discovering each again gives.
+    let sources = [
+        "package p;
+            typedef enum { RED, GREEN } color_t;
+            class C #(int N = 4);
+                bit [N-1:0] mask;
+                color_t color;
+                function int width(); return $bits(mask) + $bits(color); endfunction
+            endclass
+            class D #(int W = 2) extends C;
+                C#(W) inner;
+                C#(8) wide;
+                function int total();
+                    inner = new;
+                    return width() + $bits(inner.mask) + W;
+                endfunction
+            endclass
+            function int f(bit [7:0] v); return $bits(v) + $bits(v[3:0]); endfunction
+        endpackage
+        module Top(output int o);
+            import p::*;
+            D#(3) d;
+            C#(8) c;
+            initial begin
+                d = new;
+                c = new;
+                o = d.total() + c.width() + f(8'h1);
+            end
+        endmodule",
+        "module Top(input logic [7:0] a, output logic [7:0] y);
+            class B; int x; function int get(); return x; endfunction endclass
+            class S #(int K = 1) extends B; bit [K:0] s; endclass
+            S#(2) h;
+            localparam int W = $bits(a);
+            always_comb y = a + W[7:0];
+            initial begin h = new; h.x = $bits(h.s); end
+        endmodule",
+    ];
+    for source in sources {
+        let analyze = |unshared: bool| {
+            UNSHARED_DISCOVERY.with(|flag| flag.set(unshared));
+            let ir = crate::analyze_source(source, Path::new("shared-discovery.sv"));
+            UNSHARED_DISCOVERY.with(|flag| flag.set(false));
+            ir.map_err(|error| error.to_string())
+        };
+        let shared = analyze(false);
+        let unshared = analyze(true);
+        assert!(shared.is_ok(), "{shared:?}");
+        assert_eq!(shared, unshared);
+    }
+}
