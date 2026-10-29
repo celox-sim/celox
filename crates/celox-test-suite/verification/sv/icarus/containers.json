@@ -25,6 +25,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:7: error: Type names are not valid expressions here.\n<case>/source_0.sv:7: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:7:               : Expression is: <type>\n<case>/source_0.sv:7:               : Expression type: 10PETypename\n<case>/source_0.sv:7: error: Dimensions must be constant.\n<case>/source_0.sv:7       : This size expression violates the rule: <type>\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Dimensions must be constant.\n<case>/source_0.sv:4       : This size expression violates the rule: <type>\n<case>/source_0.sv:5: sorry: Queues inside classes are not yet supported.\n<case>/source_0.sv:13: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:13: error: The expression ''sd1' cannot be implicitly cast to the target type.\n<case>/source_0.sv:14: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:15: Error: Class/null r-value not allowed in this context.\n<case>/source_0.sv:16: warning: ignoring out of bounds l-value array access m[97].\n<case>/source_0.sv:17: warning: ignoring out of bounds l-value array access m[97].\n<case>/source_0.sv:18: warning: ignoring out of bounds l-value array access m[97].\n<case>/source_0.sv:19: warning: ignoring out of bounds l-value array access m[97].\n<case>/source_0.sv:25: assert: elab_lval.cc:343: failed assertion use_sel == index_component_t::SEL_NONE\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "containers::compound_element_assignments",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects an associative array whose index type is a type name (\"Type names are not valid expressions here.\"), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays (\"Sorry: Dynamic array of type `dynamic array of ...` is not yet supported.\"), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases.",
       "expectation": "Simulation",
       "known_issue": {
