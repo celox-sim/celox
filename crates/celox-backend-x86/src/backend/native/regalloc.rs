@@ -7,6 +7,7 @@
 
 mod analysis;
 pub mod assignment;
+mod baseline;
 mod cfg;
 mod color;
 mod constraints;
@@ -63,8 +64,10 @@ pub(crate) struct RegallocTrace {
 pub(crate) enum RegallocStrategy {
     /// Verified SSA split/color allocator for the optimizing image.
     Optimizing,
-    /// Optimizing allocation for the baseline image, giving each spill a
-    /// unique slot while the frame stays within `spill_budget` bytes.
+    /// Linear allocator for the baseline image. A release build which hits a
+    /// structured baseline failure falls back to the optimizing allocator,
+    /// giving each spill a unique slot while the frame stays within
+    /// `spill_budget` bytes.
     Baseline { spill_budget: usize },
 }
 
@@ -416,20 +419,46 @@ fn run_regalloc_in_place(
     }
     checkpoint()?;
     let alloc_start = timing.then(crate::timing::now);
-    let (mut assignment, mut spill_frame_size) = allocate_optimizing(
-        func,
-        &normalized_cfg,
-        label,
-        trace,
-        timing,
-        verify,
-        match strategy {
-            RegallocStrategy::Optimizing => None,
-            RegallocStrategy::Baseline { spill_budget } => Some(spill_budget),
-        },
-        release_unused_pages,
-        is_cancelled,
-    )?;
+    let mut implementation = "ssa-split-color";
+    let baseline = match strategy {
+        RegallocStrategy::Optimizing => None,
+        RegallocStrategy::Baseline { .. } => {
+            match allocate_baseline(func, &normalized_cfg, label, timing, verify, is_cancelled) {
+                Ok(allocation) => {
+                    implementation = "baseline-local";
+                    if let Some(trace) = trace.as_deref_mut() {
+                        trace.mir_after_scheduling = func.to_string();
+                    }
+                    Some(allocation)
+                }
+                // Tests and debug builds must not hide allocator bugs.
+                Err(error) if verify || is_cancellation(&error) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        "baseline register allocation of {label} failed, using the optimizing allocator: {error}"
+                    );
+                    None
+                }
+            }
+        }
+    };
+    let (mut assignment, mut spill_frame_size) = match baseline {
+        Some(allocation) => allocation,
+        None => allocate_optimizing(
+            func,
+            &normalized_cfg,
+            label,
+            trace,
+            timing,
+            verify,
+            match strategy {
+                RegallocStrategy::Optimizing => None,
+                RegallocStrategy::Baseline { spill_budget } => Some(spill_budget),
+            },
+            release_unused_pages,
+            is_cancelled,
+        )?,
+    };
     let tick_loop = label == "eval_comb_apply_ff" && native_tick_loop;
     let vector_allocation = super::x86_slp::allocate(func, spill_frame_size, tick_loop);
     for (value, location) in vector_allocation.assignments {
@@ -460,7 +489,7 @@ fn run_regalloc_in_place(
     }
     if let Some(start) = alloc_start {
         tracing::debug!(
-            "[regalloc-timing] label={label} implementation=ssa-split-color blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
+            "[regalloc-timing] label={label} implementation={implementation} blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
             func.blocks.len(),
             func.blocks
                 .iter()
@@ -504,6 +533,25 @@ fn run_regalloc_in_place(
         assignment,
         spill_frame_size,
     })
+}
+
+fn allocate_baseline(
+    func: &mut MFunction,
+    cfg: &cfg::NormalizedCfg,
+    label: &str,
+    timing: bool,
+    verify: bool,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<(AssignmentMap, u32), RegallocError> {
+    let allocation = baseline::allocate(func, cfg, label, timing, verify, is_cancelled)?;
+    if let Some(facts) = &allocation.frame_facts {
+        if verify {
+            func.verify_result()
+                .map_err(|error| RegallocError::mir("baseline output verification", error))?;
+        }
+        baseline::verify_frame(func, cfg, facts)?;
+    }
+    Ok((allocation.assignment, allocation.spill_frame_size))
 }
 
 #[allow(clippy::too_many_arguments)]
