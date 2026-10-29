@@ -266,6 +266,18 @@ impl BoundPattern {
                     })
                 })
                 .collect();
+        } else if let Some(aggregate) = &shape.unpacked_struct {
+            keys = aggregate
+                .members()
+                .iter()
+                .map(|member| Key::Member(member.name.clone()))
+                .collect();
+            shapes.extend(
+                aggregate
+                    .members()
+                    .iter()
+                    .map(|member| procedural::dimensions_from_type(&member.r#type)),
+            );
         } else if !shape.members.is_empty() {
             if shape
                 .members
@@ -331,7 +343,7 @@ impl BoundPattern {
             Items::Keyed(items) => {
                 let structure = shape.unpacked.is_empty()
                     && shape.packed.len() <= 1
-                    && !shape.members.is_empty();
+                    && (!shape.members.is_empty() || shape.unpacked_struct.is_some());
                 let items = items
                     .iter()
                     .map(|(key, value)| {
@@ -381,7 +393,7 @@ impl BoundPattern {
         if unpacked {
             parts.reverse();
         }
-        Ok(if parts.len() == 1 {
+        Ok(if parts.len() == 1 && shape.unpacked_struct.is_none() {
             parts.remove(0)
         } else {
             Expr::Concat(parts)

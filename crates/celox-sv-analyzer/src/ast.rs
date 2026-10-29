@@ -2365,6 +2365,26 @@ impl Type {
         self.unpacked_struct.as_ref()
     }
 
+    pub(crate) fn structure_identity(&self) -> Option<&str> {
+        self.unpacked_struct.as_ref().map(|ty| ty.identity())
+    }
+
+    /// Non-storage aggregate paths, including the root, retained for member typing.
+    pub(crate) fn structure_aggregates(&self, base: &str) -> Vec<(String, Self)> {
+        self.unpacked_struct
+            .as_ref()
+            .map_or_else(Vec::new, |_| unpacked_structs::aggregates(base, self))
+    }
+
+    pub(crate) fn structure_leaves(&self) -> Vec<(String, Self)> {
+        self.unpacked_struct.as_ref().map_or_else(Vec::new, |ty| {
+            ty.leaves()
+                .into_iter()
+                .map(|leaf| (leaf.path.join("."), leaf.r#type))
+                .collect()
+        })
+    }
+
     /// The class of an object handle type.
     pub fn class(&self) -> Option<&str> {
         self.class.as_deref()

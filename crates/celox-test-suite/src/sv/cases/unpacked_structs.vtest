@@ -806,3 +806,128 @@ endmodule
   (top Top)
   (run_until 6000)
   (expect_output "[2999] [2999!] [h2999] [h2999!] 3000\n"))
+
+(case module_ports
+  (source "unpacked_struct_ports.sv" #"
+typedef struct { bit [7:0] value; bit [3:0] tag; } payload_t;
+typedef struct { payload_t payload; bit valid; } packet_t;
+module PayloadTransform(input payload_t i, output payload_t o);
+    always_comb begin
+        o = i;
+        o.value = i.value + 1;
+        o.tag = i.tag ^ 4'hf;
+    end
+endmodule
+module Transform(input packet_t i, output packet_t o);
+    PayloadTransform payload(.i(i.payload), .o(o.payload));
+    assign o.valid = i.valid;
+endmodule
+module Relay(input packet_t i, output packet_t o);
+    Transform transform(i, o);
+endmodule
+module Top(input bit [7:0] a, input bit [3:0] b, input bit valid,
+           output bit [7:0] y, output bit [3:0] tag, output bit seen);
+    packet_t i, o;
+    assign i = '{payload: '{value: a, tag: b}, valid: valid};
+    Relay relay(.i, .o);
+    assign y = o.payload.value;
+    assign tag = o.payload.tag;
+    assign seen = o.valid;
+endmodule
+"#)
+  (top Top)
+  (for (x t v) (list (0 0 0) (16 3 1) (255 15 0))
+    (modify (set a x) (set b t) (set valid v))
+    (assert_eq y (& (+ x 1) 255))
+    (assert_eq tag (^ t 15))
+    (assert_eq seen v)))
+
+(case module_port_patterns
+  (source "unpacked_struct_port_patterns.sv" #"
+typedef struct { bit [7:0] value; bit [3:0] tag; } data_t;
+typedef struct { data_t data; bit valid; } row_t;
+module Observe(input row_t i, output bit [7:0] value, output bit [3:0] tag, output bit valid);
+    assign value = i.data.value;
+    assign tag = i.data.tag;
+    assign valid = i.valid;
+endmodule
+module Top(input bit [7:0] a, input bit [3:0] b, input bit v,
+           output bit [7:0] value, output bit [3:0] tag, output bit valid,
+           output bit typed_ok);
+    bit [7:0] typed_value;
+    bit [3:0] typed_tag;
+    bit typed_valid;
+    data_t data;
+    assign data = '{value: a, tag: b};
+    Observe child(.i('{data: '{value: a + 1, tag: b}, valid: v}), .value, .tag, .valid);
+    Observe typed(.i('{valid: v, default: data}), .value(typed_value), .tag(typed_tag), .valid(typed_valid));
+    assign typed_ok = typed_value == a && typed_tag == b && typed_valid == v;
+endmodule
+"#)
+  (top Top)
+  (for (x t v) (list (0 0 0) (16 3 1) (255 15 0))
+    (modify (set a x) (set b t) (set v v))
+    (assert_eq value (& (+ x 1) 255))
+    (assert_eq tag t)
+    (assert_eq valid v)
+    (assert_eq typed_ok 1)))
+
+(case module_port_recursive_defaults
+  (source "unpacked_struct_port_defaults.sv" #"
+typedef struct { bit [7:0] value; bit [3:0] tag; } data_t;
+typedef struct { data_t data; bit valid; } row_t;
+module Observe(input row_t i, output bit [7:0] value, output bit [3:0] tag, output bit valid);
+    assign value = i.data.value;
+    assign tag = i.data.tag;
+    assign valid = i.valid;
+endmodule
+module Top(input bit [7:0] a, input bit [3:0] b,
+           output bit zero_ok, output bit one_ok, output bit override_ok, output bit repeat_ok);
+    bit [7:0] zero_value, one_value, override_value, repeat_value;
+    bit [3:0] zero_tag, one_tag, override_tag, repeat_tag;
+    bit zero_valid, one_valid, override_valid, repeat_valid;
+    Observe zeroes(.i('{default: 0}), .value(zero_value), .tag(zero_tag), .valid(zero_valid));
+    Observe ones(.i('{default: 1}), .value(one_value), .tag(one_tag), .valid(one_valid));
+    Observe overrides(.i('{data: '{tag: b, default: 1}, default: 0}),
+                      .value(override_value), .tag(override_tag), .valid(override_valid));
+    Observe repeated(.i('{default: a}), .value(repeat_value), .tag(repeat_tag), .valid(repeat_valid));
+    assign zero_ok = zero_value == 0 && zero_tag == 0 && zero_valid == 0;
+    assign one_ok = one_value == 1 && one_tag == 1 && one_valid == 1;
+    assign override_ok = override_value == 1 && override_tag == b && override_valid == 0;
+    assign repeat_ok = repeat_value == a && repeat_tag == a[3:0] && repeat_valid == a[0];
+endmodule
+"#)
+  (top Top)
+  (for (x t) (list (0 0) (16 3) (255 15))
+    (modify (set a x) (set b t))
+    (assert_eq zero_ok 1)
+    (assert_eq one_ok 1)
+    (assert_eq override_ok 1)
+    (assert_eq repeat_ok 1)))
+
+(case module_port_four_state_members
+  (source "unpacked_struct_port_states.sv" #"
+typedef struct { logic flag; bit two; logic signed [7:0] value; } row_t;
+module Copy(input row_t i, output row_t o);
+    assign o = i;
+endmodule
+typedef struct { row_t row; bit tag; } nested_t;
+module Defaults(input nested_t i, output bit ok);
+    assign ok = $isunknown(i.row.flag) && i.row.two == 0 && $isunknown(i.row.value) && i.tag == 0;
+endmodule
+module Top(output bit done);
+    row_t i, o;
+    bit defaults_ok;
+    Copy child(.i, .o);
+    Defaults defaults(.i('{default: 'x}), .ok(defaults_ok));
+    initial begin
+        i = '{1'bx, 1'bx, -8'sd3};
+        #1;
+        done = $isunknown(o.flag) && o.two == 0 && o.value < 0 && o.value == -3;
+        i = '{1'bz, 1'b1, 8'sd7};
+        #1;
+        done = done && o.flag === 1'bz && o.two == 1 && o.value == 7 && defaults_ok;
+    end
+endmodule
+"#)
+  (top Top) (four_state) (run_until 3) (assert_eq done 1))

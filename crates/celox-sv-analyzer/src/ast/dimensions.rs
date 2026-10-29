@@ -162,6 +162,19 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
             },
         );
     }
+    for port in ports {
+        if let Some(aggregate) = port.r#type().unpacked_struct() {
+            for (name, ty) in unpacked_structs::aggregates(port.name(), port.r#type()) {
+                dimensions.insert(name, procedural::dimensions_from_type(&ty));
+            }
+            for leaf in aggregate.leaves() {
+                dimensions.insert(
+                    leaf.name(port.name()),
+                    procedural::dimensions_from_type(&leaf.r#type),
+                );
+            }
+        }
+    }
     for signal in signals {
         dimensions.insert(
             signal.name().to_string(),
