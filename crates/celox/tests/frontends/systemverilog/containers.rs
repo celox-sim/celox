@@ -45,6 +45,7 @@ sv_backends! {
     fn declaration_initializers_and_locals(sim) { @case "containers::declaration_initializers_and_locals"; }
     fn compound_element_assignments(sim) { @case "containers::compound_element_assignments"; }
     fn string_indices_from_calls(sim) { @case "containers::string_indices_from_calls"; }
+    fn array_items_in_concatenations(sim) { @case "containers::array_items_in_concatenations"; }
 }
 
 sv_backends! {

@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:26: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "containers::array_items_in_concatenations",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects an associative array whose index type is a type name (\"Type names are not valid expressions here.\"), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays (\"Sorry: Dynamic array of type `dynamic array of ...` is not yet supported.\"), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases.",
       "expectation": "Simulation",
       "known_issue": {
