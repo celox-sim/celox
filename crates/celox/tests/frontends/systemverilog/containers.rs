@@ -43,6 +43,7 @@ sv_backends! {
     fn associative_string_keys(sim) { @case "containers::associative_string_keys"; }
     fn four_state_elements_and_indices(sim) { @case "containers::four_state_elements_and_indices"; }
     fn declaration_initializers_and_locals(sim) { @case "containers::declaration_initializers_and_locals"; }
+    fn string_indices_from_calls(sim) { @case "containers::string_indices_from_calls"; }
 }
 
 sv_backends! {
