@@ -345,7 +345,7 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, enumeration constants declared in a class, enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real`, arrays or wider than 64 bits, bit and part selects and packed structure members of a property (also of a member of a property of unpacked structure type), properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real`, arrays or wider than 64 bits, bit and part selects and packed structure members of a property (also of a member of a property of unpacked structure type), properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   named events and `->`, `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
@@ -605,6 +605,11 @@ different interface classes or specializations must declare its own
 (8.26.6.2, 8.26.6.3). Celox makes the specializations that the types and
 scopes of a module name before it runs, binding an assignment inside a generate
 block once for each of its instances.
+
+The members of an enumeration that a class declares are constants of the
+class: its methods, properties and parameters use them by name, and other
+scopes as `C::NAME` (6.19, 8.23). In a parameterized class each
+specialization has its own values.
 
 Class type parameters are visible in class bodies and their out-of-block
 method definitions. Qualified references such as `TYPE::value` and typedefs
