@@ -371,6 +371,12 @@ fn analyze(
     let project_name = metadata.project.name.clone();
 
     // Per-file: parse + pass1
+    let phase = |name: &str, start: Option<crate::timing::Instant>| {
+        if let Some(start) = start {
+            tracing::debug!("[phase-timing] {name}: {:?}", start.elapsed());
+        }
+    };
+    let parse_start = diagnostics.phase_timing.then(crate::timing::now);
     let mut parsers = Vec::new();
     let mut errors = vec![];
     let mut authored_parsers = Vec::new();
@@ -441,6 +447,8 @@ fn analyze(
             parsers.push(parsed);
         }
     }
+    phase("veryl_parse", parse_start);
+    let pass1_start = diagnostics.phase_timing.then(crate::timing::now);
     for ((_, path), parsed) in sources.iter().zip(authored_parsers) {
         let source_project = source_projects.get(*path).unwrap_or(&project_name);
         errors.append(&mut analyzer.analyze_pass1(source_project, &parsed.veryl));
@@ -451,6 +459,8 @@ fn analyze(
 
     // Global post-pass1
     errors.append(&mut Analyzer::analyze_post_pass1());
+    phase("veryl_analyze_pass1", pass1_start);
+    let pass2_start = diagnostics.phase_timing.then(crate::timing::now);
 
     // Shared context for pass2
     let mut context = Context::default();
@@ -474,6 +484,7 @@ fn analyze(
     }
     errors.append(&mut context.drain_errors());
     errors.append(&mut Analyzer::analyze_post_pass2(&ir));
+    phase("veryl_analyze_pass2", pass2_start);
 
     // Veryl reports combinational loops before Celox can apply its path-level
     // false-loop and true-loop authorizations. When the caller supplied such
