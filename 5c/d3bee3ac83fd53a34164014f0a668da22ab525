@@ -1,0 +1,1 @@
+Address review: build concatenations with a bulk heap CONCAT instead of one copy per element; flatten array items only in concatenations, not assignment patterns; rebase onto master
