@@ -1,0 +1,1 @@
+Address reviews r4410019227/r4410019235: retain intermediate aggregate port types, recursively lower structure defaults and preserve matching structure values; fix integration-test err_expect CI failure. Verified 882 backend tests, external cases and targeted clippy.
