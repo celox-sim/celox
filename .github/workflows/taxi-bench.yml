@@ -1,0 +1,116 @@
+name: Taxi Benchmark
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_BUILD_JOBS: "1"
+  PYTHONDONTWRITEBYTECODE: "1"
+
+concurrency:
+  group: taxi-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - name: Build native cocotb CLI
+        run: cargo build --locked --release -p celox-vpi --features systemverilog --bin celox
+      - uses: actions/upload-artifact@v7
+        with:
+          name: taxi-celox
+          path: target/release/celox
+          if-no-files-found: error
+
+  # Each case pairs both engines on one VM and one logical CPU. Separate
+  # cases may use different hosts; never compare their absolute times.
+  comparison:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        case: [lfsr64, phy64, rx16, rx8, rx32]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: veryl-lang/setup-verilator@v2
+        with:
+          version: "5.052"
+      - uses: actions/download-artifact@v8
+        with:
+          name: taxi-celox
+          path: work/taxi-bin
+      - name: Install pinned Python dependencies
+        run: python -m pip install -r benchmarks/taxi/requirements.txt
+      - name: Record comparison host
+        run: |
+          mkdir -p work/taxi-report
+          {
+            echo "runner_name=$RUNNER_NAME"
+            echo "run_id=$GITHUB_RUN_ID"
+            echo "run_attempt=$GITHUB_RUN_ATTEMPT"
+            echo "boot_id=$(cat /proc/sys/kernel/random/boot_id)"
+            uname -a
+            lscpu
+            free -h
+            verilator --version
+            c++ --version
+            python --version
+            python -m pip freeze
+          } > work/taxi-report/host.txt
+      - name: Prepare pinned Taxi sources
+        run: python scripts/run-taxi-bench.py prepare work/taxi-source
+      - name: Compare complete upstream tests
+        run: |
+          chmod +x work/taxi-bin/celox
+          python scripts/run-taxi-bench.py run '${{ matrix.case }}' work/taxi-source work/taxi-bin/celox work/taxi-report/result
+      - name: Retain raw comparisons and failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: taxi-${{ matrix.case }}
+          path: work/taxi-report
+          retention-days: 30
+          if-no-files-found: error
+
+  publish:
+    needs: comparison
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: taxi-*
+          path: artifacts
+      # Reuse the fast-forward/retry writer; regular and Heliodor benchmarks
+      # may publish concurrently. No forced update of shared gh-pages history.
+      - name: Publish verified Taxi comparisons
+        run: |
+          for case in lfsr64 phy64 rx16 rx8 rx32; do
+            node scripts/publish-taxi-bench.mjs "artifacts/taxi-$case/result/results.json" "artifacts/taxi-$case/host.txt" --validate-only
+          done
+          for case in lfsr64 phy64 rx16 rx8 rx32; do
+            node scripts/publish-taxi-bench.mjs "artifacts/taxi-$case/result/results.json" "artifacts/taxi-$case/host.txt"
+          done
