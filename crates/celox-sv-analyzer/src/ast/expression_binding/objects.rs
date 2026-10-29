@@ -653,7 +653,7 @@ pub(in crate::ast) enum Receiver {
 
 /// The method that native callee expression `id` names: through a handle
 /// (`h.m`), `this.m`, `super.m`, `C::m`, or unqualified inside a method.
-/// Returns the method's subroutine, its number of formals, and the object
+/// Returns the method's subroutine, the names of its formals, and the object
 /// it is called on. A virtual method is called through its dispatcher,
 /// except as `super.m`, which names the base's implementation (IEEE
 /// 1800-2023 8.15, 8.20).
@@ -662,7 +662,7 @@ pub(in crate::ast) fn method(
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Converted<Option<(String, usize, Receiver)>> {
+) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
     let mut through_super = false;
     let (class_name, method_name, receiver) = match &native.expression(ungroup(id, native)).kind {
         ExprKind::Member {
@@ -724,7 +724,7 @@ pub(in crate::ast) fn method(
         }
         return Ok(Some((
             Class::subroutine_name(&class_name, &method_name),
-            1,
+            vec![None],
             receiver,
         )));
     }
@@ -764,7 +764,7 @@ pub(in crate::ast) fn method(
             receiver => receiver,
         }
     };
-    let formals = method.formals.len();
+    let formals = method.formals.clone();
     let subroutine = if method.is_virtual && !through_super && receiver != Receiver::Static {
         Class::dispatcher_name(&method.owner, &method.name)
     } else {

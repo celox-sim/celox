@@ -911,6 +911,64 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 18 31\n44\n"))
 
+(case named_method_arguments
+  (source "class.sv" #"
+module Top(output bit done);
+    class Pair;
+        string name;
+        function new(string name);
+            this.name = name;
+        endfunction
+    endclass
+    class Base;
+        virtual function int m(int a, int b = 5, int c = 7);
+            return a * 100 + b * 10 + c;
+        endfunction
+    endclass
+    class Derived extends Base;
+        static function int sf(int x = 1, int y = 2);
+            return x * 10 + y;
+        endfunction
+        virtual function int m(int a, int b = 6, int c = 8);
+            return 1000 + super.m(.c(c), .a(a));
+        endfunction
+        function int own();
+            return this.m(.b(1), .a(2)) + m(3, .c(4));
+        endfunction
+        task automatic t(input int a, output int o, input int d = 9);
+            #1 o = a + d;
+        endtask
+        function bit pair_matches(Pair match_pair, Pair requested, string requested_name);
+            return match_pair == requested || match_pair.name == requested_name;
+        endfunction
+        function int find(Pair pair, string name);
+            if (pair_matches(.match_pair(pair), .requested(null), .requested_name(name)))
+                return 1;
+            return pair_matches(.requested_name(name), .requested(pair), .match_pair(pair)) ? 2 : 0;
+        endfunction
+    endclass
+    Derived d;
+    Base b;
+    Pair pair;
+    int o;
+    initial begin
+        d = new;
+        pair = new("x");
+        b = d;
+        $display("%0d %0d %0d", d.m(.a(1)), b.m(.c(2), .a(1)), d.m(1, , 3));
+        $display("%0d %0d %0d", Derived::sf(.y(5)), Derived::sf(.x(), .y()), d.own());
+        d.t(.o(o), .a(4));
+        $display("%0d", o);
+        d.t(5, .o(o), .d());
+        $display("%0d", o);
+        $display("%0d %0d", d.find(pair, "x"), d.find(pair, "y"));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output "1158 1152 1153\n15 12 2612\n13\n14\n1 2\n"))
+
 (case typedefs_of_interface_classes
   (source "class.sv" #"
 module Top(output bit done);

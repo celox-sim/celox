@@ -215,6 +215,12 @@ pub enum AnalyzerError {
         argument: String,
         detail: String,
     },
+    /// Actuals that cannot be bound to the formals of a task or function:
+    /// a name it has no formal for, a formal bound twice, too many actuals,
+    /// a positional actual after a named one (IEEE 1800-2023 13.5.4), or
+    /// none for a formal without a default (13.5.3).
+    #[error("arguments of `{subroutine}`: {detail}")]
+    InvalidCallArguments { subroutine: String, detail: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}
