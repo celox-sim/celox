@@ -3405,5 +3405,62 @@
         "virtual_interfaces::waits_with_guards_signed_members_and_automatic_tasks"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_streaming_concatenation",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/streaming-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "streaming::streaming_arrays",
+        "streaming::streaming_combinational",
+        "streaming::streaming_contexts",
+        "streaming::streaming_operand_types",
+        "streaming::streaming_pack_alignment",
+        "streaming::streaming_reorder",
+        "streaming::streaming_unpack"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_with_range",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects a with range on a stream expression (\"Unsupported: with[] stream expression\" at {>>{up with [1 +: 2]}}, {>>{down with [4]}} and {>>{down with [4:2]}}). IEEE 1800-2023 11.4.14.4 (Syntax 11-5) permits a with expression after any one-dimensional unpacked array and in a pack streams only the specified items, here up[1] and up[2], giving 32'h22330000, and the nonexistent-entry value of Table 7-1 (7.4.5) for an index outside byte down [3:0], so down with [4] gives 0 and down with [4:2] gives 32'h00112200; xezim 0.11.3 compiles the case but streams the whole array.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_with_range.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_partial_block_unpack",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 unpacks {<< 3 {x, z}} = 8'b1101_0011 with logic [3:0] x, z into x = 4'b0110 and z = 4'b1011: it applies the re-ordering of the pack, 3-bit blocks sliced from the right with a 2-bit last block, to the source, so packing x and z again gives 8'b0111_0101. IEEE 1800-2023 11.4.14.3 makes the unpack the reverse operation of the pack of 11.4.14.2, giving x = 4'b1110 and z = 4'b0110, which pack back to the source; the two orders differ only when the last block is partial. xezim 0.11.3 gives the same values as Verilator.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_partial_block_unpack.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_unpack"
+      ]
+    }
   }
 ]

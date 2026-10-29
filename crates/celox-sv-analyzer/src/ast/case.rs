@@ -64,6 +64,15 @@ pub(super) fn expr_is_two_state(
             callee: Callee::String(op),
             ..
         } => !matches!(op, crate::system_functions::StringOp::Atoi(_)),
+        // A stream is 2-state when all of its data are (11.4.14).
+        Expr::Call {
+            callee: Callee::Stream(_),
+            args,
+            ..
+        } => args.iter().all(|arg| {
+            arg.as_ref()
+                .is_some_and(|arg| expr_is_two_state(state, arg, packed_dimensions))
+        }),
         // Properties are 2-state.
         Expr::Call {
             callee: Callee::Checked { .. },

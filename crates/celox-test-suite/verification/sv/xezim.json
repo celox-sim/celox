@@ -33,6 +33,7 @@
     "xezim/references.json",
     "xezim/review_regressions.json",
     "xezim/scan.json",
+    "xezim/streaming.json",
     "xezim/string.json",
     "xezim/string_format.json",
     "xezim/synthesizable.json",

@@ -244,6 +244,10 @@ pub enum AnalyzerError {
     /// A DPI export declaration that IEEE 1800-2023 35.7 forbids.
     #[error("DPI-C export of `{name}`: {detail}")]
     InvalidDpiExport { name: String, detail: String },
+    /// A streaming concatenation that IEEE 1800-2023 11.4.14 forbids, such
+    /// as one wider than its fixed-size target.
+    #[error("streaming concatenation: {0} (IEEE 1800-2023 11.4.14)")]
+    InvalidStream(String),
 }
 
 impl miette::Diagnostic for AnalyzerError {}

@@ -1253,6 +1253,149 @@ pub enum Callee {
     /// A class object operation, see [`ObjectOp`].
     /// Boxed to keep call expressions small.
     Object(Box<ObjectOp>),
+    /// A streaming concatenation of fixed-size data, see [`Stream`].
+    Stream(Box<Stream>),
+}
+
+/// A streaming concatenation of fixed-size data (IEEE 1800-2023 11.4.14),
+/// as a permutation of the bits of its arguments. Each argument is
+/// evaluated once.
+///
+/// A pack concatenates the arguments into the stream, re-orders it, and
+/// aligns it to the left of the result, filling the rest with zeros
+/// (11.4.14.1-2). An unpack (11.4.14.3) has one argument, the source, whose
+/// most significant bits it puts back in the order that packing them would
+/// undo. Either way the result is laid out as `targets`, first target in
+/// the most significant bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Stream {
+    /// The arguments, first streamed first.
+    pub args: Vec<StreamArg>,
+    /// The block size of `<<`, which reverses the order of the blocks
+    /// sliced from the right (11.4.14.2); `None` for `>>`, which keeps the
+    /// order.
+    pub slice: Option<usize>,
+    pub unpack: bool,
+    /// The variables that receive the result, first in the most significant
+    /// bits. Their `bits` are unused.
+    pub targets: Vec<StreamArg>,
+}
+
+/// An argument or target of a [`Stream`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct StreamArg {
+    /// The width the argument is evaluated at, or the target's width.
+    pub width: usize,
+    /// The bits `(lsb, width)` of the argument that the stream holds, or all
+    /// of them.
+    pub bits: Option<(usize, usize)>,
+    /// For a fixed-size unpacked array, the width of its elements: the value
+    /// is in the array's layout, the first element in the least significant
+    /// bits, and the stream holds the first element first.
+    pub element: Option<usize>,
+}
+
+impl StreamArg {
+    /// A packed value of `width` bits.
+    pub fn packed(width: usize) -> Self {
+        Self {
+            width,
+            bits: None,
+            element: None,
+        }
+    }
+
+    /// The bits the stream holds.
+    pub fn stream_width(&self) -> usize {
+        self.bits.map_or(self.width, |(_, width)| width)
+    }
+
+    /// The ranges `(lsb, width)` of a `size`-bit part of this value that
+    /// reverse the order of its elements, most significant first; the
+    /// whole part when it is not an array.
+    pub fn elements(&self, size: usize) -> Vec<(usize, usize)> {
+        match self.element {
+            Some(element) if element < size => (0..size / element)
+                .map(|index| (index * element, element))
+                .collect(),
+            _ => vec![(0, size)],
+        }
+    }
+}
+
+impl Stream {
+    /// The width of the result.
+    pub fn width(&self) -> usize {
+        self.targets.iter().map(|target| target.width).sum()
+    }
+
+    /// The width of the stream.
+    pub fn stream_width(&self) -> usize {
+        if self.unpack {
+            self.width()
+        } else {
+            self.args.iter().map(StreamArg::stream_width).sum()
+        }
+    }
+
+    /// The bit ranges `(lsb, width)` of the stream that the re-ordered
+    /// stream holds, most significant first, for a stream of `width` bits.
+    pub fn blocks(&self, width: usize) -> Vec<(usize, usize)> {
+        match self.slice {
+            Some(size) if size < width => (0..width.div_ceil(size))
+                .map(|block| {
+                    let lsb = block * size;
+                    (lsb, size.min(width - lsb))
+                })
+                .collect(),
+            _ => vec![(0, width)],
+        }
+    }
+
+    /// The result for constant arguments, when it fits a constant.
+    pub fn evaluate(&self, args: &[i128]) -> Option<i128> {
+        let (width, stream_width) = (self.width(), self.stream_width());
+        if width >= 128
+            || stream_width > width
+            || self.args.iter().any(|arg| arg.width >= 128)
+            || args.len() != self.args.len()
+        {
+            return None;
+        }
+        let bits = |value: u128, lsb: usize, width: usize| (value >> lsb) & ((1u128 << width) - 1);
+        let reorder = |value: u128, ranges: Vec<(usize, usize)>| {
+            ranges
+                .into_iter()
+                .fold(0, |out, (lsb, size)| (out << size) | bits(value, lsb, size))
+        };
+        let mut stream = 0u128;
+        for (&value, arg) in args.iter().zip(&self.args) {
+            let (lsb, size) = arg.bits.unwrap_or((0, arg.width));
+            let value = bits(value as u128, lsb, size);
+            stream = (stream << size) | reorder(value, arg.elements(size));
+        }
+        let ordered = if self.unpack {
+            let stream = stream >> self.args[0].width.checked_sub(stream_width)?;
+            // The re-ordered stream holds the blocks most significant first.
+            let mut lsb = stream_width;
+            let mut result = 0u128;
+            for (block, size) in self.blocks(stream_width) {
+                lsb -= size;
+                result |= bits(stream, lsb, size) << block;
+            }
+            result
+        } else {
+            reorder(stream, self.blocks(stream_width)) << (width - stream_width)
+        };
+        let mut result = 0u128;
+        let mut lsb = width;
+        for target in &self.targets {
+            lsb -= target.width;
+            let value = bits(ordered, lsb, target.width);
+            result = (result << target.width) | reorder(value, target.elements(target.width));
+        }
+        Some(result as i128)
+    }
 }
 
 impl Callee {
@@ -1263,6 +1406,7 @@ impl Callee {
             Self::System(_)
             | Self::String(_)
             | Self::Object(_)
+            | Self::Stream(_)
             | Self::Checked { .. }
             | Self::Lookup { .. } => None,
         }
@@ -1274,6 +1418,7 @@ impl Callee {
             Self::Subroutine(_)
             | Self::String(_)
             | Self::Object(_)
+            | Self::Stream(_)
             | Self::Checked { .. }
             | Self::Lookup { .. } => None,
             Self::System(function) => Some(*function),
@@ -1289,6 +1434,7 @@ impl Callee {
             }
             Self::String(op) => Some(op.result_type()),
             Self::Object(op) => Some(op.result_type()),
+            Self::Stream(stream) => Some((stream.width(), false)),
             _ => self.system()?.result_type(),
         }
     }
@@ -1296,7 +1442,7 @@ impl Callee {
     /// Rename a user subroutine with `rename`.
     pub fn map_subroutine(self, rename: impl FnOnce(String) -> String) -> Self {
         match self {
-            Self::Checked { .. } | Self::Lookup { .. } => self,
+            Self::Checked { .. } | Self::Lookup { .. } | Self::Stream(_) => self,
             Self::Subroutine(name) => Self::Subroutine(rename(name)),
             Self::System(function) => Self::System(function),
             Self::String(op) => Self::String(op),
@@ -1308,7 +1454,7 @@ impl Callee {
     /// the analyzer must not run it twice: user subroutines may have side
     /// effects, as do the random number functions.
     pub fn is_effectful(&self) -> bool {
-        !matches!(self, Self::Lookup { .. })
+        !matches!(self, Self::Lookup { .. } | Self::Stream(_))
             && self.system().is_none_or(SystemFunction::is_effectful)
     }
 }
@@ -1322,6 +1468,7 @@ impl fmt::Display for Callee {
             Self::System(function) => f.write_str(function.name()),
             Self::String(op) => op.fmt(f),
             Self::Object(op) => op.fmt(f),
+            Self::Stream(_) => f.write_str("streaming concatenation"),
         }
     }
 }

@@ -647,6 +647,9 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_increment_in_conditional_operand` | compile | verilator | 2 | Verilator 5.052 rejects `++` and `--` in an arm of `?:` and in the right operand of `->` ("Unsupported: Pre/post increment/decrement operator within a logical expression"). IEEE 1800-2023 11.4.2 allows them in any expression; Icarus 13.0 and xezim 0.11.3 compile both cases. [Standalone probe](verification/repros/sv_increment_decrement_conditional_operands.json). |
 | `sv_icarus_increment_operands` | compile | icarus | 2 | Icarus 13.0 rejects `++` used as a value of a vector narrower than `int`, an array element or a packed structure member ("sorry: ++ operation is not yet supported on vector slice."), lacks queues and associative arrays in classes, and aborts on `++` of a class property in an expression. IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable. The [pre-exclusion diagnostics](verification/sv/limitations/increment-decrement-icarus.json) retain a reduced source. |
 | `sv_icarus_implication_short_circuit` | execute | icarus | 1 | Icarus 13.0 evaluates the right operand of `->` when the left one is false, so `(i == 0) -> (j++ > 0)` increments `j`; IEEE 1800-2023 11.4.7 skips it. xezim 0.11.3 shares the error. [Standalone probe](verification/repros/sv_increment_decrement_conditional_operands.json). |
+| `sv_icarus_streaming_concatenation` | compile | icarus | 7 | Icarus 13.0 does not support streaming concatenation: it reports "sorry: Streaming concatenation not supported." for `{>>{...}}` and `{<<{...}}`, also as an assignment target, and rejects a stream with a slice size or a `with` range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases. The [pre-exclusion diagnostics](verification/sv/limitations/streaming-icarus.json) retain a reduced source. |
+| `sv_verilator_streaming_with_range` | compile | verilator | 1 | Verilator 5.052 rejects `{>>{up with [1 +: 2]}}` and `{>>{down with [4:2]}}` ("Unsupported: with[] stream expression"). IEEE 1800-2023 11.4.14.4 (Syntax 11-5) permits a `with` range after a one-dimensional unpacked array and packs only the specified items, giving `32'h22330000`, and the nonexistent-entry value of Table 7-1 for an index outside `byte down [3:0]`, giving `32'h00112200`; xezim 0.11.3 compiles the case but packs the whole array. [Standalone probe](verification/repros/sv_streaming_with_range.json). |
+| `sv_verilator_streaming_partial_block_unpack` | execute | verilator | 1 | Verilator 5.052 unpacks `{<< 3 {x, z}} = 8'b1101_0011` (`logic [3:0] x, z`) into x = `4'b0110`, z = `4'b1011` by applying the pack's re-ordering to the source, so packing x and z again gives `8'b0111_0101`. IEEE 1800-2023 11.4.14.3 makes the unpack the reverse of the pack of 11.4.14.2, giving x = `4'b1110`, z = `4'b0110`, which pack back to the source; the orders differ only when the last block is partial. xezim 0.11.3 gives Verilator's values. [Standalone probe](verification/repros/sv_streaming_partial_block_unpack.json). |
 
 The `string_format` cases compare `$sformatf`, `$sformat` and `$swrite` with
 `$display` / `$write` of the same format and arguments. The [Icarus observations](verification/sv/limitations/string-format-icarus.json)
@@ -673,6 +676,17 @@ of `->` when the left one is false and runs the side effects of a `repeat`
 count twice (`sv_implication_short_circuit` and
 `sv_repeat_count_evaluated_twice` in the xezim review, see the
 [repeat probe](verification/repros/sv_increment_decrement_repeat_count.json)).
+
+The `streaming` cases pack and unpack streaming concatenations (IEEE 1800-2023
+11.4.14). Icarus 13.0 does not support them; Verilator 5.052 passes the other
+cases. xezim 0.11.3 packs a whole fixed-size array despite a `with` range,
+unpacks an unpacked array source from its right index, shares Verilator's
+partial-block unpack and leaves an unpacked subarray target such as `sub[0]`
+unwritten (`sv_streaming_with_range`, `sv_streaming_unpack_order` and
+`sv_streaming_subarray_target` in the xezim review, see the
+[array order](verification/repros/sv_streaming_unpack_array_order_xezim.json)
+and [subarray](verification/repros/sv_streaming_subarray_target_xezim.json)
+probes).
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable

@@ -147,6 +147,8 @@ mod realtime;
 mod review_regressions;
 #[path = "frontends/systemverilog/scan.rs"]
 mod scan;
+#[path = "frontends/systemverilog/streaming.rs"]
+mod streaming;
 #[path = "frontends/systemverilog/string.rs"]
 mod string;
 #[path = "frontends/systemverilog/string_format.rs"]

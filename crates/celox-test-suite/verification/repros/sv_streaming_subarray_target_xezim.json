@@ -1,0 +1,29 @@
+{
+  "case": "streaming::streaming_operand_types",
+  "source": "src/sv/cases/streaming.vtest",
+  "standard": "IEEE 1800-2023 11.4.14: the stream assigned to a target of bit-stream type is left-aligned and cast to the type of the target; 6.24.3: the cast fills an unpacked array in element order from its left index, so sub[0] = {>>{16'h1122}} with bit [7:0] sub [0:1][0:1] gives sub[0][0] = 8'h11 and sub[0][1] = 8'h22.",
+  "method": "The shared case runs unchanged in verify-sv-xezim; the reduced source below runs without the adapter.",
+  "reduced_source": "module Top;\n    bit [7:0] sub [0:1][0:1];\n    initial begin\n        sub[0] = {>>{16'h1122}};\n        $display(\"sub[0][0]=%h sub[0][1]=%h\", sub[0][0], sub[0][1]);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "sub[0][0]=11 sub[0][1]=22\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:4: sorry: Streaming concatenation not supported.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "sub[0][0]=00 sub[0][1]=00\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "sub[0][0]=11 sub[0][1]=22\n"
+    }
+  ]
+}

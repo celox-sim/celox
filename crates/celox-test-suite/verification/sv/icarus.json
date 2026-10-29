@@ -24,6 +24,7 @@
     "icarus/references.json",
     "icarus/review_regressions.json",
     "icarus/scan.json",
+    "icarus/streaming.json",
     "icarus/string.json",
     "icarus/string_format.json",
     "icarus/synthesizable.json",
