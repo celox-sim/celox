@@ -1,0 +1,1 @@
+Use the timing module's Instant so builds without the timing feature (wasm) compile
