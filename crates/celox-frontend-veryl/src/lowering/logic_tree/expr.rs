@@ -3918,7 +3918,9 @@ pub(super) fn is_signed(module: &Module, expr: NodeId, arena: &SLTNodeArena<VarI
             | UnaryOp::Xor
             | UnaryOp::PopCount
             | UnaryOp::CountLeadingZeros
-            | UnaryOp::CountTrailingZeros,
+            | UnaryOp::CountTrailingZeros
+            | UnaryOp::ToPlanes
+            | UnaryOp::FromPlanes,
             _,
         ) => false,
         SLTNode::Unary(

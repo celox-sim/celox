@@ -153,7 +153,9 @@ pub fn emit_wide_unary(
     common_logical_width: usize,
 ) -> Vec<Value> {
     match op {
-        UnaryOp::Float { .. } => unreachable!("float operations are lowered separately"),
+        UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+            unreachable!("float and plane operations are lowered separately")
+        }
         UnaryOp::Minus => emit_wide_negate(builder, r_chunks, num_chunks),
         UnaryOp::Ident | UnaryOp::ToTwoState => emit_wide_ident(builder, r_chunks, num_chunks),
         UnaryOp::BitNot => emit_wide_bitnot(builder, r_chunks, num_chunks),

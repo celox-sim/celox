@@ -2801,6 +2801,10 @@ pub(super) fn lower_instruction(
                 );
                 return;
             }
+            if matches!(op, UnaryOp::ToPlanes | UnaryOp::FromPlanes) {
+                lower_planes(ctx, block, *dst, op, *src);
+                return;
+            }
             let d_width = ctx.sir_width(dst);
             let src_width = ctx.sir_width(src);
             debug_assert!(src_width > 64 || !ctx.wide_regs.contains_key(src));
@@ -2821,8 +2825,8 @@ pub(super) fn lower_instruction(
             let src_vreg = ctx.reg_map.get(*src);
 
             match op {
-                UnaryOp::Float { .. } => {
-                    unreachable!("float operations are lowered before integer operations")
+                UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+                    unreachable!("float and plane operations are lowered before integer operations")
                 }
                 UnaryOp::Ident | UnaryOp::ToTwoState => {
                     ctx.emit_mov(block, dst_vreg, src_vreg);

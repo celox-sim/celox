@@ -50,7 +50,7 @@ use runtime_events::{
     load_runtime_event_ptr_and_comb_capture_enabled, lower_runtime_event_write,
 };
 use wide::{ShiftDir, lower_wide_binary, lower_wide_runtime_shift_chunks, wide_reduce_or};
-use wide_unary::{lower_wide_extract, lower_wide_unary};
+use wide_unary::{lower_planes, lower_wide_extract, lower_wide_unary};
 
 use super::mir::*;
 use super::sparse_write_state::{
