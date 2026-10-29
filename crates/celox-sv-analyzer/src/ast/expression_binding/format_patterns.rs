@@ -104,8 +104,13 @@ pub(in crate::ast) fn pattern(
         } = value
     {
         // A string literal is integral unless the other operand is a string
-        // (5.9, 6.16).
+        // (5.9, 6.16), and an enum operand is integral unless the other
+        // operand has the same enumerated type (11.4.11).
+        let enum_valued = enums::domain(tree, id, native, dimensions)?.is_some();
         let operand = |id, value| {
+            if !enum_valued && enums::domain(tree, id, native, dimensions)?.is_some() {
+                return Ok(Pattern::Integral);
+            }
             Ok(match pattern(tree, id, value, native, dimensions)? {
                 Pattern::String
                     if matches!(&native.expression(ungroup(id, native)).kind,
@@ -154,6 +159,7 @@ pub(in crate::ast) fn pattern(
             return Err(unsupported("%p of a container of real values"));
         }
         if !element.members.is_empty()
+            || element.unpacked_struct.is_some()
             || element.container.is_some()
             || !element.unpacked_ranges.is_empty()
         {
@@ -210,6 +216,7 @@ pub(in crate::ast) fn pattern(
                 return Ok(Pattern::Handle(None));
             }
             if !element.members.is_empty()
+                || element.unpacked_struct.is_some()
                 || element.container.is_some()
                 || !element.unpacked_ranges.is_empty()
             {
@@ -227,7 +234,7 @@ pub(in crate::ast) fn pattern(
                     if shape.enum_domain.is_some() || shape.packed_enum {
                         return Err(unsupported("%p of an enum value"));
                     }
-                    if !shape.members.is_empty() {
+                    if !shape.members.is_empty() || shape.unpacked_struct.is_some() {
                         return Err(unsupported("%p of a structure or unpacked array"));
                     }
                 }
@@ -237,7 +244,9 @@ pub(in crate::ast) fn pattern(
     }
     // A cast to, or a call of a function that returns, a structure or an
     // unpacked array.
-    let aggregate = |ty: &Type| !ty.members.is_empty() || !ty.unpacked_ranges.is_empty();
+    let aggregate = |ty: &Type| {
+        !ty.members.is_empty() || ty.unpacked_struct.is_some() || !ty.unpacked_ranges.is_empty()
+    };
     let aggregate_value = match expression {
         ExprKind::Cast { target, .. } => {
             enums::cast_type(tree, *target, native, dimensions)?.is_some_and(|ty| aggregate(&ty))
@@ -246,7 +255,11 @@ pub(in crate::ast) fn pattern(
             .is_some_and(|name| returns_aggregate(&name, dimensions, aggregate)),
         _ => false,
     };
-    if aggregate_value {
+    // A value of unpacked structure type: a variable, member or property.
+    if aggregate_value
+        || unpacked_structs::native_struct(id, native, tree, dimensions)?.is_some()
+        || objects::aggregate_property(tree, id, native, dimensions)?.is_some()
+    {
         return Err(unsupported("%p of a structure or unpacked array"));
     }
     let checked = |is_enum: bool, aggregate: bool| {
@@ -263,14 +276,18 @@ pub(in crate::ast) fn pattern(
     {
         return checked(
             shape.enum_domain.is_some() || shape.packed_enum,
-            !shape.members.is_empty() || !shape.unpacked.is_empty(),
+            !shape.members.is_empty()
+                || shape.unpacked_struct.is_some()
+                || !shape.unpacked.is_empty(),
         );
     }
     if let Some((property, _)) = objects::property(tree, id, native, dimensions)? {
         let ty = &property.r#type;
         return checked(
             ty.is_enum || ty.enum_domain.is_some() || ty.packed_enum,
-            !ty.members.is_empty() || !ty.unpacked_ranges.is_empty(),
+            !ty.members.is_empty()
+                || ty.unpacked_struct.is_some()
+                || !ty.unpacked_ranges.is_empty(),
         );
     }
     Ok(Pattern::Integral)
