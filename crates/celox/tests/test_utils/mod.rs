@@ -205,6 +205,7 @@ macro_rules! all_backends {
                     $($setup)*
                     let mut $sim = { $builder }
                         .allow_always_ff_function_effects(true)
+                        .x86_baseline(test_utils::suite::native_baseline())
                         .build_native()
                         .unwrap();
                     $($body)*
@@ -227,6 +228,7 @@ macro_rules! all_backends {
                         .allow_always_ff_function_effects(true)
                         .threads(4)
                         .parallel_partition(celox::ParallelPartition::Always)
+                        .x86_baseline(test_utils::suite::native_baseline())
                         .build_native()
                         .unwrap();
                     $($body)*
