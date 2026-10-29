@@ -1713,6 +1713,16 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         tracing::debug!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
     runtime_errors.extend(schedule.runtime_errors);
+    let eval_comb_stateful = schedule.stateful_targets.as_ref().map(|targets| {
+        targets
+            .iter()
+            .map(|target| RegionedAbsoluteAddr {
+                region: STABLE_REGION,
+                instance_id: target.id.instance_id,
+                var_id: target.id.var_id,
+            })
+            .collect::<Vec<_>>()
+    });
     let stable_unit = |eu: ExecutionUnit<AbsoluteAddr>| ExecutionUnit {
         entry_block_id: eu.entry_block_id,
         blocks: eu
@@ -2188,6 +2198,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         eval_apply_ffs,
         eval_comb_apply_ffs,
         merge_comb_apply,
+        eval_comb_stateful,
         eval_only_ffs,
         apply_ffs,
         eval_comb,
@@ -2767,6 +2778,7 @@ fn declare_scheduler_slots(
         finish: declare("finish".into(), FLAG),
         cont: declare("cont".into(), FLAG),
         dirty: declare("dirty".into(), FLAG),
+        defer_limit_settle: declare("defer_limit_settle".into(), FLAG),
         count: declare("count".into(), TIME),
         current: declare("current".into(), TIME),
         levels: declare("levels".into(), TIME),

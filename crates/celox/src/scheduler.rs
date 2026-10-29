@@ -30,7 +30,10 @@
 //! and every design or kernel this module does not qualify, runs in the
 //! reference loop.
 
+mod slice;
 mod testbench;
+
+use slice::CombSlicer;
 
 use celox_design::{
     CounterKind, DomainKind, ProcessStatus, RuntimeEventKind, SCHEDULER_CLOCKS,
@@ -83,6 +86,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
         return;
     };
     let kernels = program.runtime.runtime_schema.processes.len();
+    let mut lazy = false;
     let (fallback, unit, events, clocks, kernel_events) =
         match Plan::new(program, &schema.slots, wiring_clocks) {
             Err(reason) => (
@@ -93,6 +97,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
                 vec![Vec::new(); kernels],
             ),
             Ok(plan) => {
+                lazy = plan.lazy.is_some();
                 let fallback = plan.fallback.clone();
                 // Without kernels, slots of host clocks alone.
                 let unit = (plan.kernels.iter().any(Option::is_some) || !plan.clocks.is_empty())
@@ -139,7 +144,7 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
         scheduler.unit = Some(program.sir.processes.len());
         program.sir.processes.push(unit);
     }
-    testbench::attach(program);
+    testbench::attach(program, lazy);
 }
 
 /// An event the scheduler records edges of.
@@ -241,6 +246,12 @@ struct Lazy {
     /// returns for an overflow in the middle of a later slot returns the last
     /// settle's state.
     latest: u64,
+    /// The part of the settle that keeps state from one settle to the next,
+    /// with what it reads: it runs wherever the reference settles, so its
+    /// state sees every activation the reference's does. Rerunning it on
+    /// unchanged inputs changes nothing, so the deferred settle may run it
+    /// again. Empty when the settle is a function of its inputs.
+    eager: Vec<Unit>,
 }
 
 /// How a domain evaluates while a settle is pending.
@@ -665,91 +676,112 @@ impl Plan {
         // its inputs that cannot fail: when it would end the run, it must do
         // so in its own slot; when it reads what an earlier settle left (a
         // latch, a guarded process's snapshots of its inputs, feedback), the
-        // settles in between are activations of their own.
+        // settles in between are activations of their own. The comb
+        // scheduler knows this from its bit-level dependencies; its loads
+        // alone can only bound it, since a load may cover bits the settle
+        // has not stored yet and then discard them.
         let comb_stores: HashSet<AbsoluteAddr> = sir.eval_comb.iter().flat_map(stores).collect();
-        let lazy = settle_reads
+        let eager = settle_reads
             .as_ref()
-            .filter(|_| {
-                !sir.eval_comb.iter().any(fails)
-                    && !retains_state(&sir.eval_comb, &storage, &comb_stores)
-            })
-            .map(|_| {
-                // The waits never watch what combinational logic writes, so
-                // they see the same with a settle pending.
-                debug_assert!(
-                    kernels
-                        .iter()
-                        .flatten()
-                        .filter_map(|kernel| kernel.wait.as_ref())
-                        .all(|wait| !comb_stores.contains(&storage(wait.signal))),
-                    "a compiled wait watches a combinational output"
-                );
-                let reads =
-                    |unit: &Unit| loads(unit).any(|source| comb_stores.contains(&storage(source)));
-                let ends = |unit: &Unit| fails(unit) || emits_finish(unit, &finish_sites);
-                let observes = |unit: &Unit| reads(unit) || ends(unit);
-                let mut longest = 0;
-                for (index, kernel) in kernels.iter().enumerate() {
-                    if kernel.as_ref().is_some_and(|kernel| kernel.wait.is_none()) {
-                        let bound =
-                            delay_bound(&sir.processes[index], schema.processes[index].delay);
-                        longest = longest.max(bound);
+            .filter(|_| !sir.eval_comb.iter().any(fails))
+            .and_then(|_| {
+                let stateful = sir.eval_comb_stateful.as_ref();
+                let eager = stateful.and_then(|stateful| {
+                    if stateful.is_empty() {
+                        return Some(Vec::new());
                     }
-                }
-                let domains = events
-                    .iter()
-                    .map(|event| {
-                        if event.eval_apply.iter().any(ends) {
-                            return DomainSettle::Settled;
-                        }
-                        if !event.eval_apply.iter().any(reads) {
-                            return DomainSettle::Pending;
-                        }
-                        let fused = &sir.eval_comb_apply_ffs;
-                        let aliased = fused.keys().any(|key| {
-                            *key != event.signal && topology.canonical(*key) == event.signal
-                        });
-                        match fused.get(&event.signal) {
-                            Some(units) if !aliased => DomainSettle::Fused(units.clone()),
-                            _ => DomainSettle::Settled,
-                        }
-                    })
-                    .collect();
-                let several = events.iter().any(|event| {
-                    event
-                        .eval_only
-                        .iter()
-                        .chain(&event.apply)
-                        .flatten()
-                        .any(observes)
+                    let slicer = CombSlicer::new(&sir.eval_comb, shared.clone());
+                    let targets = stateful.iter().map(|target| target.absolute_addr());
+                    // Optimization may have moved a target's storage.
+                    if !targets.clone().all(|target| slicer.stores(target)) {
+                        return None;
+                    }
+                    let eager = slicer.slice(targets);
+                    // A part nearly the size of the settle saves nothing.
+                    let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
+                    (size(&eager) * 2 < size(&sir.eval_comb)).then_some(eager)
                 });
-                Lazy {
-                    // A kernel's `$finish` is its status.
-                    kernels: kernels
-                        .iter()
-                        .enumerate()
-                        .map(|(index, kernel)| {
-                            let unit = &sir.processes[index];
-                            kernel.is_some()
-                                && (observes(unit)
-                                    || !statuses_only(
-                                        unit,
-                                        schema.processes[index].status,
-                                        &[
-                                            ProcessStatus::Delay,
-                                            ProcessStatus::InactiveDelay,
-                                            ProcessStatus::Wait,
-                                            ProcessStatus::Nba,
-                                            ProcessStatus::Done,
-                                        ],
-                                    ))
-                        })
-                        .collect(),
-                    domains,
-                    several,
-                    latest: u64::MAX - longest,
-                }
+                eager.or_else(|| {
+                    (!retains_state(&sir.eval_comb, &storage, &comb_stores)).then(Vec::new)
+                })
             });
+        let lazy = eager.map(|eager| {
+            // The waits never watch what combinational logic writes, so
+            // they see the same with a settle pending.
+            debug_assert!(
+                kernels
+                    .iter()
+                    .flatten()
+                    .filter_map(|kernel| kernel.wait.as_ref())
+                    .all(|wait| !comb_stores.contains(&storage(wait.signal))),
+                "a compiled wait watches a combinational output"
+            );
+            let reads =
+                |unit: &Unit| loads(unit).any(|source| comb_stores.contains(&storage(source)));
+            let ends = |unit: &Unit| fails(unit) || emits_finish(unit, &finish_sites);
+            let observes = |unit: &Unit| reads(unit) || ends(unit);
+            let mut longest = 0;
+            for (index, kernel) in kernels.iter().enumerate() {
+                if kernel.as_ref().is_some_and(|kernel| kernel.wait.is_none()) {
+                    let bound = delay_bound(&sir.processes[index], schema.processes[index].delay);
+                    longest = longest.max(bound);
+                }
+            }
+            let domains = events
+                .iter()
+                .map(|event| {
+                    if event.eval_apply.iter().any(ends) {
+                        return DomainSettle::Settled;
+                    }
+                    if !event.eval_apply.iter().any(reads) {
+                        return DomainSettle::Pending;
+                    }
+                    let fused = &sir.eval_comb_apply_ffs;
+                    let aliased = fused.keys().any(|key| {
+                        *key != event.signal && topology.canonical(*key) == event.signal
+                    });
+                    match fused.get(&event.signal) {
+                        Some(units) if !aliased => DomainSettle::Fused(units.clone()),
+                        _ => DomainSettle::Settled,
+                    }
+                })
+                .collect();
+            let several = events.iter().any(|event| {
+                event
+                    .eval_only
+                    .iter()
+                    .chain(&event.apply)
+                    .flatten()
+                    .any(observes)
+            });
+            Lazy {
+                // A kernel's `$finish` is its status.
+                kernels: kernels
+                    .iter()
+                    .enumerate()
+                    .map(|(index, kernel)| {
+                        let unit = &sir.processes[index];
+                        kernel.is_some()
+                            && (observes(unit)
+                                || !statuses_only(
+                                    unit,
+                                    schema.processes[index].status,
+                                    &[
+                                        ProcessStatus::Delay,
+                                        ProcessStatus::InactiveDelay,
+                                        ProcessStatus::Wait,
+                                        ProcessStatus::Nba,
+                                        ProcessStatus::Done,
+                                    ],
+                                ))
+                    })
+                    .collect(),
+                domains,
+                several,
+                latest: u64::MAX - longest,
+                eager,
+            }
+        });
         let mut plan = Self {
             events,
             kernels,
@@ -975,6 +1007,8 @@ impl Plan {
             shared: program.shared_storage(),
             comb,
             continuations: Vec::new(),
+            eager: None,
+            eager_continuations: Vec::new(),
         };
         let waits: Vec<(usize, &Wait)> = self
             .kernels
@@ -1053,7 +1087,8 @@ impl Plan {
         let stop = g.binary(1, after, BinaryOp::Or, none);
         let run = g.b.new_block();
         let limit_exit = g.exit_block(SchedulerExit::Limit);
-        // The host reads the run's results settled.
+        // The host reads the run's results settled, unless the caller
+        // observes them itself (`defer_limit_settle`).
         let stopped = match &self.lazy {
             Some(_) => g.b.new_block(),
             None => limit_exit,
@@ -1065,6 +1100,16 @@ impl Plan {
         });
         if self.lazy.is_some() {
             g.b.switch_to_block(stopped);
+            let deferred = g.load(slots.defer_limit_settle, SCHEDULER_FLAG_WIDTH);
+            let zero = g.constant(0, SCHEDULER_FLAG_WIDTH);
+            let deferred = g.binary(1, deferred, BinaryOp::Ne, zero);
+            let settle = g.b.new_block();
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: deferred,
+                true_block: (limit_exit, Vec::new()),
+                false_block: (settle, Vec::new()),
+            });
+            g.b.switch_to_block(settle);
             g.settle_then(limit_exit);
         }
 
@@ -1402,9 +1447,7 @@ impl Plan {
             .as_ref()
             .is_some_and(|lazy| waits.iter().any(|&(index, _)| lazy.kernels[index]));
         match &self.lazy {
-            Some(_) => {
-                g.b.seal_block(SIRTerminator::Jump(settled, Vec::new()));
-            }
+            Some(lazy) => g.eager_then(&lazy.eager, settled),
             None => g.settle_then(settled),
         }
 
@@ -1450,9 +1493,9 @@ impl Plan {
 
             // Without a domain, published nonblocking values settle once more.
             g.b.switch_to_block(untriggered);
-            if self.lazy.is_some() {
+            if let Some(lazy) = &self.lazy {
                 g.publish(&staged);
-                g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
+                g.eager_then(&lazy.eager, slot_end);
             } else if staged.is_empty() {
                 g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
             } else {
@@ -1593,9 +1636,7 @@ impl Plan {
             g.b.switch_to_block(evaluated);
             g.publish(&staged);
             match &self.lazy {
-                Some(_) => {
-                    g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
-                }
+                Some(lazy) => g.eager_then(&lazy.eager, slot_end),
                 None => g.settle_then(slot_end),
             }
         }
@@ -1686,6 +1727,9 @@ impl Plan {
         }
         g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
         g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
+        if let Some(lazy) = &self.lazy {
+            g.emit_eager(&lazy.eager, finish_exit, internal_exit);
+        }
         g.finish()
     }
 }
@@ -1880,6 +1924,11 @@ struct Generator<'a> {
     /// Where the shared settle continues, by case: case `i + 1` continues
     /// at `continuations[i]`.
     continuations: Vec<celox_sir::BlockId>,
+    /// The shared stateful part of a deferred settle, emitted by
+    /// [`Self::emit_eager`] once a caller uses it.
+    eager: Option<celox_sir::BlockId>,
+    /// Where it continues, as [`Self::continuations`].
+    eager_continuations: Vec<celox_sir::BlockId>,
 }
 
 impl Generator<'_> {
@@ -2172,6 +2221,76 @@ impl Generator<'_> {
             self.store(self.slots.exit, SCHEDULER_FLAG_WIDTH, code);
             self.b.seal_block(SIRTerminator::Return);
         }
+    }
+
+    /// Run the stateful part of a deferred settle (`Lazy::eager`) where the
+    /// reference settles, then continue at `target`, as
+    /// [`Self::settle_then`]: one copy serves every caller.
+    fn eager_then(&mut self, eager: &[Unit], target: celox_sir::BlockId) {
+        if eager.is_empty() {
+            self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
+            return;
+        }
+        let case = match self
+            .eager_continuations
+            .iter()
+            .position(|&block| block == target)
+        {
+            Some(index) => index,
+            None => {
+                self.eager_continuations.push(target);
+                self.eager_continuations.len() - 1
+            }
+        };
+        let value = self.constant(case as u64 + 1, SCHEDULER_FLAG_WIDTH);
+        self.store(self.slots.cont, SCHEDULER_FLAG_WIDTH, value);
+        let block = *self.eager.get_or_insert_with(|| self.b.new_block());
+        self.b.seal_block(SIRTerminator::Jump(block, Vec::new()));
+    }
+
+    /// Emit the shared stateful part of the settle, when a caller uses it:
+    /// skipped when the settle's inputs did not change since the last one.
+    fn emit_eager(
+        &mut self,
+        eager: &[Unit],
+        finish_exit: celox_sir::BlockId,
+        internal_exit: celox_sir::BlockId,
+    ) {
+        let Some(block) = self.eager else {
+            return;
+        };
+        self.b.switch_to_block(block);
+        let dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
+        let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+        let changed = self.binary(1, dirty, BinaryOp::Ne, zero);
+        let run = self.b.new_block();
+        let done = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: changed,
+            true_block: (run, Vec::new()),
+            false_block: (done, Vec::new()),
+        });
+        self.b.switch_to_block(run);
+        for unit in eager {
+            self.inline(unit, finish_exit);
+        }
+        self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+        self.b.switch_to_block(done);
+        let continuation = self.load(self.slots.cont, SCHEDULER_FLAG_WIDTH);
+        let cases = self
+            .eager_continuations
+            .iter()
+            .enumerate()
+            .map(|(index, &target)| SIRSwitchCase {
+                value: (index as u8 + 1).into(),
+                target,
+            })
+            .collect();
+        self.b.seal_block(SIRTerminator::Switch {
+            selector: continuation,
+            cases,
+            default: internal_exit,
+        });
     }
 
     /// Run the shared settle, then continue at `target`. The registers
@@ -2648,6 +2767,30 @@ pub(crate) fn count_test_settles(
     program.sir.eval_comb = original;
     program.sir.processes[schema.unit.unwrap()] = generated;
     fused
+}
+
+/// Whether the compiled scheduler of `program` defers its settles, and
+/// whether its loads alone would have allowed that.
+#[cfg(test)]
+pub(crate) fn defers_settles_for_test(program: &LaidOutProgram) -> (bool, bool) {
+    let schema = program.runtime.runtime_schema.scheduler.clone().unwrap();
+    let plan = Plan::new(program, &schema.slots, true).unwrap();
+    let shared = program.shared_storage();
+    let storage = |address: AbsoluteAddr| shared.get(&address).copied().unwrap_or(address);
+    let stores: HashSet<AbsoluteAddr> = program
+        .sir
+        .eval_comb
+        .iter()
+        .flat_map(instructions)
+        .filter_map(|inst| {
+            inst.memory_write()
+                .map(|write| storage(write.addr.absolute_addr()))
+        })
+        .collect();
+    (
+        plan.lazy.is_some(),
+        !retains_state(&program.sir.eval_comb, &storage, &stores),
+    )
 }
 
 #[cfg(test)]

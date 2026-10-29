@@ -1,4 +1,5 @@
 //! Veryl statements lowered with the same resumable SIR builder as SV.
+use crate::HashSet;
 use crate::ir::{AbsoluteAddr as Addr, RuntimeProgram, SirProgram};
 use celox_design::{
     BinaryOp, ProcessKind, ProcessSlots, RegionedVarAddrBase, STABLE_REGION, UnaryOp,
@@ -24,6 +25,8 @@ struct Lower<'a> {
     site: usize,
     external_observers: bool,
     settled: bool,
+    /// The DUT storage the settles of the current segment computed.
+    settled_reads: HashSet<Addr>,
 }
 impl Lower<'_> {
     fn slot(&mut self, width: usize, string: bool) -> Addr {
@@ -211,7 +214,7 @@ impl Lower<'_> {
         reg
     }
     fn request(&mut self, request: KernelRequest<Addr>) -> Result<(), String> {
-        self.settled = matches!(request, KernelRequest::Settle);
+        self.settled = matches!(request, KernelRequest::Settle { .. });
         let index = self.requests.len();
         self.requests.push(request);
         self.kernel
@@ -261,24 +264,44 @@ impl Lower<'_> {
     fn writes_observable(&self, address: Addr) -> bool {
         self.external_observers || self.runtime.rtl_accesses.contains(&address)
     }
-    fn observes(&self, expr: &Expr) -> bool {
-        self.external_observers
-            || expr.ops().iter().any(|op| match op {
+    /// The DUT storage `expr` loads.
+    fn dut_reads(&self, expr: &Expr) -> HashSet<Addr> {
+        expr.ops()
+            .iter()
+            .filter_map(|op| match op {
                 ExprOpcode::LoadU64 { location, .. }
                 | ExprOpcode::LoadWide { location, .. }
                 | ExprOpcode::LoadIndexed { location, .. }
                 | ExprOpcode::LoadBitSelect { location, .. }
-                | ExprOpcode::LoadString { location, .. } => {
-                    self.runtime.rtl_accesses.contains(&location.address)
-                }
-                _ => false,
+                | ExprOpcode::LoadString { location, .. } => self
+                    .runtime
+                    .rtl_accesses
+                    .contains(&location.address)
+                    .then_some(location.address),
+                _ => None,
             })
+            .collect()
     }
     fn settled_expression(&mut self, expr: &Expr) -> Result<lowering::Value, String> {
         // Reads within one straight-line segment see the same settled DUT.
         // A write, host service or control-flow boundary invalidates this fact.
-        if self.observes(expr) && (!self.settled || self.external_observers) {
-            self.request(KernelRequest::Settle)?;
+        // External observers see every settle, so theirs settle everything.
+        let reads = self.dut_reads(expr);
+        if self.external_observers {
+            self.request(KernelRequest::Settle { reads: Vec::new() })?;
+        } else if !reads.is_empty() {
+            if !self.settled {
+                self.settled_reads.clear();
+            }
+            let mut missing: Vec<Addr> = reads
+                .into_iter()
+                .filter(|address| !self.settled_reads.contains(address))
+                .collect();
+            if !missing.is_empty() {
+                missing.sort_unstable();
+                self.settled_reads.extend(missing.iter().copied());
+                self.request(KernelRequest::Settle { reads: missing })?;
+            }
         }
         self.expression(expr)
     }
@@ -651,6 +674,7 @@ pub(crate) fn lower(
             site: 0,
             external_observers,
             settled: false,
+            settled_reads: HashSet::default(),
         };
         lower.block(body, None)?;
         let entry = sir.processes.len();
