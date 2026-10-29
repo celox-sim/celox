@@ -834,6 +834,15 @@ fn validate_scope(
         if !selected(data.tokens) {
             continue;
         }
+        // A structure of a class may name the typedefs of the class and its
+        // bases, which only the class scope resolves; the class binds it.
+        if native
+            .classes
+            .iter()
+            .any(|class| contains(class.tokens, data.tokens))
+        {
+            continue;
+        }
         if matches!(data.kind, DataTypeKind::Struct { .. })
             && type_binding::bind(id, syntax_tree, indexed_dimensions)?.is_none()
         {
