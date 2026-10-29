@@ -124,6 +124,9 @@ impl Heap {
             op @ crate::containers::NEW..=crate::containers::RSORT => {
                 self.container_call(op, parameter, a, b, c)
             }
+            op @ crate::streams::NEW..=crate::streams::TRUNCATE => {
+                self.stream_call(op, parameter, a, b, c)
+            }
             crate::containers::PATTERN => {
                 let bytes = self.container_pattern(a as Handle, parameter);
                 self.new_buffer(bytes)

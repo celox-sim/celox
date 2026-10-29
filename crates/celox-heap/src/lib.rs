@@ -20,6 +20,7 @@ pub mod containers;
 mod objects;
 pub mod ops;
 pub mod randomization;
+pub mod streams;
 
 pub use objects::{Fault, NULL};
 
@@ -76,6 +77,11 @@ pub struct Heap {
     /// Mutable strings under construction, see [`ops`].
     buffers: Vec<Option<Vec<u8>>>,
     free_buffers: Vec<u64>,
+    /// Bit streams under construction, see [`streams`].
+    #[serde(default)]
+    streams: Vec<Option<streams::Stream>>,
+    #[serde(default)]
+    free_streams: Vec<u64>,
     objects: HashMap<Handle, objects::Object>,
     /// The handle the next object gets.
     next_object: Handle,
@@ -111,6 +117,8 @@ impl Heap {
             next: EMPTY_STRING + 1,
             buffers: Vec::new(),
             free_buffers: Vec::new(),
+            streams: Vec::new(),
+            free_streams: Vec::new(),
             objects: HashMap::default(),
             next_object: NULL + 1,
             containers: HashMap::default(),
@@ -168,6 +176,8 @@ impl Heap {
             && self.next == other.next
             && self.buffers == other.buffers
             && self.free_buffers == other.free_buffers
+            && self.streams == other.streams
+            && self.free_streams == other.free_streams
             && self.pinned == other.pinned
             && self.objects == other.objects
             && self.next_object == other.next_object
@@ -250,6 +260,8 @@ impl Heap {
         // No buffer outlives the kernel that built it.
         self.buffers.clear();
         self.free_buffers.clear();
+        self.streams.clear();
+        self.free_streams.clear();
         self.created = 0;
         self.live_after_collection = self.len() + self.objects.len() + self.containers.len();
     }

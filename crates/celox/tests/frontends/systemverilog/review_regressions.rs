@@ -5398,6 +5398,35 @@ fn writes_reversed_unpacked_array_lvalue_ranges() {
 }
 
 #[test]
+fn streams_fill_targets_selected_at_run_time() {
+    // IEEE 1800-2023 11.4.14: a stream fills the selected type, wherever
+    // the selection is.
+    let source = r#"
+        module Top(input logic [1:0] k, output logic [7:0] y, output logic [7:0] w);
+            logic [7:0] el [0:3];
+            always_comb begin
+                foreach (el[i]) el[i] = '0;
+                el[k] = {<<{8'h12}};
+                y = el[2];
+                w = '0;
+                w[k * 2 +: 4] = {<<{4'b0001}};
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("selected_streams.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let (k, y, w) = (sim.signal("k"), sim.signal("y"), sim.signal("w"));
+    sim.modify(|io| io.set(k, 2u8)).unwrap();
+    assert_eq!(sim.get(y), 0x48u8.into());
+    assert_eq!(sim.get(w), 0x80u8.into());
+    sim.modify(|io| io.set(k, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    assert_eq!(sim.get(w), 0x20u8.into());
+}
+
+#[test]
 fn reads_bit_selects_of_scalar_array_elements() {
     let source = r#"
         module Top(

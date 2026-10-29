@@ -45,7 +45,7 @@ impl LocalSink {
     /// Declare local `source` of the locator call at `site`. The name joins
     /// the local counter of the body when it started, which tells the bodies
     /// of a scope apart, and the site.
-    fn declare(
+    pub(super) fn declare(
         &self,
         site: &str,
         source: &str,

@@ -1,0 +1,29 @@
+{
+  "case": "streaming::streaming_dynamic_pack",
+  "source": "src/sv/cases/streaming.vtest",
+  "standard": "IEEE 1800-2023 11.4.14 and 6.24.3: a streaming concatenation cast to a bit-stream queue type, bit_q_t'({<< {p}}), is a queue of all the stream's bits, here 16.",
+  "method": "The shared case runs unchanged in verify-sv-xezim, where the testbench instantiates Top. The reduced source below runs without the adapter; xezim 0.11.3 gives the expected values when the same code is in the top-level module or the typedef is in the compilation unit, and fails only in an instantiated module.",
+  "reduced_source": "module Inner;\n    typedef bit bit_q_t[$];\n    byte unsigned p[$], back[$];\n    bit b[$];\n    initial begin\n        p = '{8'hc7, 8'h3f};\n        b = {<< 8 {bit_q_t'({<< {p}})}};\n        $display(\"size=%0d b[0..3]=%b%b%b%b b[15]=%b\", b.size(), b[0], b[1], b[2], b[3], b[15]);\n        back = {<< 8 {bit_q_t'({<< {b}})}};\n        $display(\"back size=%0d eq=%0d\", back.size(), back == p);\n    end\nendmodule\nmodule Top;\n    Inner inner();\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "size=16 b[0..3]=1110 b[15]=0\nback size=2 eq=1\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:7: syntax error\nrepro.sv:7: error: Malformed statement\nrepro.sv:9: syntax error\nrepro.sv:9: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "size=1 b[0..3]=1000 b[15]=0\nback size=1 eq=0\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "size=16 b[0..3]=1110 b[15]=0\nback size=2 eq=1\n"
+    }
+  ]
+}

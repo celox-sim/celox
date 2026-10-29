@@ -70,12 +70,22 @@ pub const fn parameter(
 }
 
 #[derive(Clone, Copy)]
-struct Layout(u64);
+pub(crate) struct Layout(pub(crate) u64);
 impl Layout {
+    pub(crate) fn width(self) -> u32 {
+        (self.0 & 127) as u32
+    }
+    pub(crate) fn two_state(self) -> bool {
+        self.0 & 128 != 0
+    }
+    /// Whether the elements are string handles.
+    pub(crate) fn string_elements(self) -> bool {
+        (self.0 >> 8) & 3 == 1
+    }
     fn bits(self) -> u64 {
         u64::MAX >> (64 - (self.0 & 127))
     }
-    fn default(self) -> Element {
+    pub(crate) fn default(self) -> Element {
         Element {
             value: if self.0 & 128 == 0 { self.bits() } else { 0 },
             mask: if self.0 & 128 == 0 { self.bits() } else { 0 },
@@ -84,7 +94,7 @@ impl Layout {
     fn kind(self) -> u64 {
         (self.0 >> 10) & 3
     }
-    fn capacity(self) -> usize {
+    pub(crate) fn capacity(self) -> usize {
         let n = ((self.0 >> 12) & 0xffff_ffff) as usize;
         if n == 0 { usize::MAX } else { n }
     }
@@ -140,29 +150,29 @@ fn decimal(value: u64, mask: u64, width: u32, signed: bool) -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-struct Element {
-    value: u64,
-    mask: u64,
+pub(crate) struct Element {
+    pub(crate) value: u64,
+    pub(crate) mask: u64,
 }
 #[derive(
     Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
-enum Key {
+pub(crate) enum Key {
     Integer(u64),
     String(Arc<[u8]>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-enum Contents {
+pub(crate) enum Contents {
     Sequence(VecDeque<Element>),
     Associative(BTreeMap<Key, Element>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Container {
     layout: u64,
-    contents: Contents,
+    pub(crate) contents: Contents,
 }
 impl Container {
-    fn empty(layout: Layout) -> Self {
+    pub(crate) fn empty(layout: Layout) -> Self {
         Self {
             layout: layout.0,
             contents: if layout.kind() == 2 {
@@ -194,7 +204,7 @@ impl Container {
 }
 
 impl Heap {
-    fn publish_container(&mut self, container: Container, complete: bool) -> Handle {
+    pub(crate) fn publish_container(&mut self, container: Container, complete: bool) -> Handle {
         if container.len() == 0 {
             return 0;
         }
