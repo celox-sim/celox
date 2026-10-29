@@ -23,7 +23,10 @@ pub(super) fn ordinary_variable(
 }
 
 /// Whether `data_type` names a class declared in the source.
-fn names_class(data_type: celox_sv_syntax::TypeId, native: &celox_sv_syntax::Declarations) -> bool {
+pub(super) fn names_class(
+    data_type: celox_sv_syntax::TypeId,
+    native: &celox_sv_syntax::Declarations,
+) -> bool {
     let celox_sv_syntax::DataTypeKind::Named(segments) = &native.data_type(data_type).kind else {
         return false;
     };

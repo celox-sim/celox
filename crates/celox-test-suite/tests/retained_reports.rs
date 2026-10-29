@@ -250,6 +250,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "the design did not finish after run_to_finish",
                         ),
+                        ("icarus", "procedural::dpi_exports_leave_subroutines_unchanged") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
                         ("icarus", "fork_control::process_self_kill_finishes_program") => {
                             ("compile_error", "compile", "source_0.sv:10: syntax error")
                         }

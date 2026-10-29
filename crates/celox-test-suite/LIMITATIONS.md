@@ -1351,6 +1351,16 @@ the [typedef](verification/repros/sv_xezim_container_typedef_output.sv) and
 [element](verification/repros/sv_xezim_container_element_input.sv) sources
 reproduce them, and they remain executed mismatches in
 [the report](verification/sv/xezim/container_formals.json).
+
+### DPI-C exports
+
+`procedural::dpi_exports_leave_subroutines_unchanged` exports a package
+function, a module function under a C name and a module task, and calls them
+from SystemVerilog; an export does not change a subroutine (IEEE 1800-2023
+35.7), so the sum is 110. Verilator 5.052 and the pinned xezim 0.11.3 pass.
+Icarus 13.0 does not parse the `export "DPI-C"` declaration; its exact compile
+diagnostic remains an executed failure in
+[the Icarus procedural report](verification/sv/icarus/procedural.json).
 No assertions or exclusions are weakened.
 
 ### Members of call results
