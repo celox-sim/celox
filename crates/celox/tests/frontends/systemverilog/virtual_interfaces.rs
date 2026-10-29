@@ -116,6 +116,18 @@ sv_backends! {
     fn always_on_member_edges(sim) {
         @case "virtual_interfaces::always_on_member_edges";
     }
+
+    fn type_parameter_values(sim) {
+        @case "virtual_interfaces::type_parameter_values";
+    }
+
+    fn package_generic_member_reads(sim) {
+        @case "virtual_interfaces::package_generic_member_reads";
+    }
+
+    fn package_configuration_database(sim) {
+        @case "virtual_interfaces::package_configuration_database";
+    }
 }
 
 /// A wait through a handle that a class property, an automatic variable or

@@ -764,7 +764,8 @@ parameters; recursive specializations and nesting beyond 64 levels are rejected.
 
 A virtual interface (IEEE 1800-2023 25.9) may be a variable, a class
 property, a subroutine argument or result, or an element of an array or a
-container. It holds `null`, an interface instance (also an element of an
+container, and a type is a class type parameter value, as in
+`uvm_config_db#(virtual bus_if)`. It holds `null`, an interface instance (also an element of an
 array of instances), the instance connected to an interface port, or another
 virtual interface of the same interface; one without a modport may be
 assigned to one with a modport, not the reverse. Members are read and written

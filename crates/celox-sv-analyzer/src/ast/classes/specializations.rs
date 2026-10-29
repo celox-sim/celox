@@ -1241,6 +1241,14 @@ fn value_argument(
 /// A spelling of type `ty` that tells it apart from other types, for the
 /// name of a specialization.
 fn spelling(ty: &Type) -> String {
+    // A virtual interface type is its interface and modport (IEEE 1800-2023
+    // 25.9), not the number that holds its value.
+    if let Some(interface) = ty.virtual_interface()
+        && ty.unpacked_ranges().is_empty()
+        && ty.container.is_none()
+    {
+        return interface.spelling();
+    }
     let mut spelled = if let Some(container) = &ty.container {
         format!(
             "container({:?},{},{})",
