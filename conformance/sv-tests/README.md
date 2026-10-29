@@ -251,6 +251,14 @@ work directories. Reports and expectations are sorted regardless of completion
 order. A runner infrastructure error cancels pending work and cannot update
 expectations.
 
+`--shard INDEX/COUNT` runs and compares only one of COUNT disjoint shards
+(1-based). Tests are dealt round-robin from their sorted names, so that
+neighbouring tests, such as the UVM testbenches, spread over the shards; a test
+that `expected.tsv` lists but the corpus lost belongs to one shard, which
+reports it missing. With `--update`, a shard replaces only its own rows. CI
+builds the driver once and runs three shards (`sv-tests conformance (N/3)`),
+each with 4 jobs, and retains one report per shard.
+
 Both state modes run by default. Use `--state-mode 2state` or
 `--state-mode 4state` to run and compare only one; `--state-mode both` explicitly
 selects the default. After reviewing changed verdicts, add `--update` to rewrite
