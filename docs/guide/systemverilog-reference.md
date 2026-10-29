@@ -95,8 +95,9 @@ while the task is suspended. Functions, `always_comb`, `always_latch` and
 Automatic task arguments and locals have separate storage for each activation
 and survive suspension. Module-local static task arguments remain shared. Inputs and inouts
 are copied in at entry; outputs and inouts are copied back when the task returns
-(IEEE 1800-2023 13.3–13.3.2). Timed tasks with static local declarations remain
-unsupported; use automatic locals. Package and `$unit` timed tasks with static
+(IEEE 1800-2023 13.3–13.3.2). Static task locals are shared by every call,
+also by calls that overlap while one is suspended (see Variable lifetimes).
+Package and `$unit` timed tasks with static
 arguments, and `wait` conditions reading static task arguments, are rejected
 until shared argument storage and its change notifications are supported.
 Event expressions have the same restrictions
@@ -345,7 +346,7 @@ Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real` or arrays, bit and part selects and packed structure members of a property (also of a member of a property of unpacked structure type), properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real` or arrays, bit and part selects and packed structure members of a property (also of a member of a property of unpacked structure type), properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Recursive calls remain unsupported.
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
@@ -1067,6 +1068,15 @@ stateful function require `Simulation` or a native testbench to execute the
 initialization process. Constant function calls use
 fresh values and do not affect runtime storage (13.4.3).
 
+Static task locals, and the explicit `static` locals of automatic tasks and
+class methods, keep their values between calls in the same way (13.3.1). They
+are one variable for every call, also for calls that overlap in time because
+one is suspended at a delay or a wait: nonblocking assignments, event controls
+and `wait` conditions on such a local, and the forked children of the task,
+all use that variable. A module task has one per module instance, a package
+task one for the design, and a class method one per specialization. Locals of
+a task that cannot suspend whose value on entry is never read stay temporaries.
+
 A static local of a process may have a run-time initializer. It runs once,
 in declaration order, before any procedure starts (IEEE 1800-2023 6.8), and
 may read module variables and other static locals but no automatic variable.
@@ -1080,8 +1090,8 @@ run-time initializer in a procedure that runs once, such as `initial`. In an
 because its author likely meant it to run on every entry; declare the local
 `static` or `automatic` to state which.
 
-Task locals that keep their values and nonconstant initializers of static
-function locals remain unsupported; declare those locals `automatic`. Package
+Nonconstant initializers of static function and task locals remain unsupported;
+declare those locals `automatic`. Package
 function state is a
 package variable, which the processes of every instance may write.
 An interface whose default lifetime (`interface automatic`) differs from that of the

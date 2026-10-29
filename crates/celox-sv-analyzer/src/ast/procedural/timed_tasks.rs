@@ -97,15 +97,9 @@ pub(in crate::ast) fn classify<'a>(
                 ));
             }
         }
-        // Retaining static subroutine locals is an existing frontend limit.
-        // Do not reinitialize them at each invocation when calls can overlap.
-        let mut static_local = false;
         let mut automatic_nba = false;
         for statement in subroutine.body.iter().chain(&subroutine.sensitivity_body) {
             statement.walk(&mut |statement| match statement {
-                Stmt::Local { name, .. } => {
-                    static_local |= !subroutine.automatic_locals.contains(name);
-                }
                 Stmt::Assign {
                     lhs,
                     nonblocking: true,
@@ -150,11 +144,6 @@ pub(in crate::ast) fn classify<'a>(
         {
             return Err(unsupported(
                 "static arguments in a package or compilation-unit timed task (declare the task automatic)",
-            ));
-        }
-        if is_timed && static_local {
-            return Err(unsupported(
-                "static local in a timed task (declare it automatic)",
             ));
         }
     }

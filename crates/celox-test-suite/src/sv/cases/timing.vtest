@@ -1199,6 +1199,159 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
   (run_until 3) (assert_eq a 0) (assert_eq b 20)
   (run_until 5) (assert_eq a 20) (assert_eq b 20))
 
+; The locals of a static task are one variable that every call shares, also
+; calls that overlap in time; an initializer runs once, before time zero
+; (IEEE 1800-2023 6.21, 13.3.1).
+(case timed_task_static_locals_are_shared
+  (source "static_task_locals.sv" #"
+    module Top(output int a, b, c);
+      task count(output int result);
+        static int calls = 0;
+        int seen;
+        calls++;
+        seen = calls;
+        #2;
+        result = seen;
+      endtask
+      initial begin a = 0; count(a); end
+      initial begin b = 0; #1; count(b); end
+      initial begin c = 0; #5; count(c); end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 4) (assert_eq a 2) (assert_eq b 2) (assert_eq c 0)
+  (run_until 8) (assert_eq c 3))
+
+; A variable an automatic task declares `static` is shared the same way: in
+; a module, in a package (one for the design), and in a class method (one
+; per specialization; the methods of a class are automatic, 8.6).
+(case timed_task_declared_static_locals_are_shared
+  (source "declared_static_task_locals.sv" #"
+    package tick_pkg;
+      task automatic tick(output int r);
+        static int n = 0;
+        #1;
+        n++;
+        r = n;
+      endtask
+    endpackage
+    module Sub(output int shared);
+      initial begin shared = 0; tick_pkg::tick(shared); end
+    endmodule
+    module Top(output int d, e, sum, c1, c2, c10);
+      class Counter #(int STEP = 1);
+        static task bump(output int r);
+          static int n = 0;
+          #1;
+          n += STEP;
+          r = n;
+        endtask
+      endclass
+      task automatic tally(output int result);
+        static int total = 100;
+        int mine;
+        total++;
+        mine = total;
+        #2;
+        result = mine;
+      endtask
+      int shared1, shared2;
+      Sub u1(shared1);
+      Sub u2(shared2);
+      assign sum = shared1 + shared2;
+      initial begin d = 0; tally(d); end
+      initial begin e = 0; #1; tally(e); end
+      initial begin c1 = 0; Counter#(1)::bump(c1); Counter#(1)::bump(c1); end
+      initial begin c2 = 0; #3; Counter#(1)::bump(c2); end
+      initial begin c10 = 0; Counter#(10)::bump(c10); end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 5) (assert_eq d 101) (assert_eq e 102) (assert_eq sum 3)
+  (assert_eq c1 2) (assert_eq c2 3) (assert_eq c10 10))
+
+; The task of UVM's `uvm_wait_for_nba_region`: a nonblocking assignment to a
+; static local, and a wait for its change, from overlapping calls.
+(case timed_task_static_locals_take_nonblocking_updates_and_waits
+  (source "static_task_nba.sv" #"
+    module Top(output int x, y, z, w, wakes);
+      int a = 0, b = 0;
+      task wait_for_nba_region;
+        static int nba;
+        static int next_nba;
+        next_nba++;
+        nba <= next_nba;
+        @(nba);
+      endtask
+      task gate(input bit open);
+        static bit opened = 0;
+        if (open) opened = 1;
+        else wait (opened);
+      endtask
+      initial begin wakes = 0; x = 0; a <= 5; wait_for_nba_region(); x = a; wakes++; end
+      initial begin y = 0; b <= 7; wait_for_nba_region(); y = b; wakes++; end
+      initial begin z = 0; #3; a <= 9; wait_for_nba_region(); z = a; wakes++; end
+      initial begin w = 0; gate(0); w = $time; end
+      initial begin #4; gate(1); end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1) (assert_eq x 5) (assert_eq y 7) (assert_eq wakes 2) (assert_eq w 0)
+  (run_until 6) (assert_eq z 9) (assert_eq wakes 3) (assert_eq w 4))
+
+; Each instance of a module has its own static task locals, and a package
+; task one set for the design.
+(case timed_task_static_locals_follow_their_scope
+  (source "static_task_scopes.sv" #"
+    package tick_pkg;
+      int last = 0;
+      task tick;
+        static int n = 0;
+        #1;
+        n++;
+        last = n;
+      endtask
+    endpackage
+    module Sub(output int own);
+      import tick_pkg::*;
+      task local_tick(output int r);
+        static int n = 0;
+        #1;
+        n++;
+        r = n;
+      endtask
+      initial begin own = 0; local_tick(own); #1; local_tick(own); end
+      initial tick();
+    endmodule
+    module Top(output int own1, own2, ticks);
+      Sub u1(own1);
+      Sub u2(own2);
+      assign ticks = tick_pkg::last;
+    endmodule
+  "#)
+  (top Top)
+  (run_until 5) (assert_eq own1 2) (assert_eq own2 2) (assert_eq ticks 2))
+
+; Forked children of a task read and write the static locals it shares.
+(case timed_task_static_locals_in_forked_children
+  (source "static_task_fork.sv" #"
+    module Top(output int a, b);
+      task accumulate(output int r);
+        static int total = 0;
+        fork
+          #1 total += 1;
+          #2 total += 10;
+        join
+        r = total;
+      endtask
+      initial begin a = 0; accumulate(a); end
+      initial begin b = 0; #5; accumulate(b); end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 3) (assert_eq a 11) (assert_eq b 0)
+  (run_until 8) (assert_eq b 22))
+
 (case timed_task_in_edge_always_rearms_after_return
   (source "edge_tasks.sv" #"
     module Top(output int count);

@@ -906,6 +906,10 @@
     "sv_streaming_nonblocking_target": {
       "title": "A nonblocking assignment to a streaming concatenation target never writes the target variables",
       "standard": "IEEE 1800-2023 10.4.2, 11.4.14.3"
+    },
+    "sv_static_task_implicit_local": {
+      "title": "A local declared without a lifetime in a static task gets a copy per call instead of being shared by all calls",
+      "standard": "IEEE 1800-2023 6.21, 13.3.1"
     }
   },
   "cases": [
@@ -5155,6 +5159,14 @@
       "classification": "xezim_bug",
       "bug": "sv_streaming_nonblocking_target",
       "note": "After a = 8'h01 and a rising clk edge, always_ff @(posedge clk) {<< 4 {hi, lo}} <= a leaves hi and lo at X in xezim 0.11.3, so the two-state run reads hi with unknown bits; the blocking {<< 4 {x, z}} = ... unpacks correctly. 10.4.2 permits a streaming concatenation as the nonblocking target and 11.4.14.3 unpacks into it, giving hi = 4'h1 and lo = 4'h0, as Verilator 5.052 does. See verification/repros/sv_streaming_nonblocking_target_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::timed_task_static_locals_are_shared",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_static_task_implicit_local",
+      "note": "In the static task count, `int seen;` is static (6.21) and shared by all calls (13.3.1), so the call from time 0 reads at 2 ns the value 2 that the overlapping call at 1 ns wrote, giving a = 2 as Verilator 5.052, Icarus 13.0 and Celox do. xezim 0.11.3 keeps a copy per call and gives a = 1, while the same local declared `static` is shared. See verification/repros/sv_static_task_implicit_local_xezim.json."
     }
   ]
 }

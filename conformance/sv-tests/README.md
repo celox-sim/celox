@@ -71,6 +71,11 @@ and `9.7--process_cls_suspend_resume` now pass. CI reports only these four
 fail-to-pass transitions per mode; the same sources also pass the local
 simulation driver in both modes. No failure expectation is broadened.
 
+Static task locals that keep their value update two expectations: both state
+modes of `13.3.1--task-static` now pass. Its `int a = 0;` in a static task is
+initialized once and shared by the four calls, which print 1, 2, 3 and 4 in
+the local simulation driver; the full run reports no other change.
+
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
 rules from tool exit codes or `should_fail` metadata. A negative test may pass

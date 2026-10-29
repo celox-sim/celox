@@ -1,0 +1,28 @@
+{
+  "case": "timing::timed_task_static_locals_are_shared",
+  "source": "src/sv/cases/timing.vtest",
+  "standard": "IEEE 1800-2023 6.21: the variables declared in a static task are static, so every call of the task, including calls that overlap in time, reads and writes one variable; 13.3.1: the items of a static task are shared by all its uses. In count, `int seen;` therefore holds the value the call at 1 ns writes when the call from time 0 reads it at 2 ns, giving a = 2.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary --timing, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode). count2 declares the same local with an explicit `static` and is the control.",
+  "reduced_source": "`timescale 1ns/1ns\nmodule Top;\n  int a, b, a2;\n  task count(output int result);\n    static int calls = 0;\n    int seen;\n    calls++;\n    seen = calls;\n    #2;\n    result = seen;\n  endtask\n  task count2(output int result);\n    static int calls = 0;\n    static int seen;\n    calls++;\n    seen = calls;\n    #2;\n    result = seen;\n  endtask\n  initial begin count(a); count2(a2); end\n  initial begin #1; count(b); end\n  initial begin #1; count2(b); end\n  initial begin #10 $display(\"a=%0d b=%0d a2=%0d\", a, b, a2); end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "a=2 b=2 a2=2\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stdout": "a=2 b=2 a2=2\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "a=1 b=2 a2=2\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "a=2 b=2 a2=2\n"
+    }
+  ]
+}

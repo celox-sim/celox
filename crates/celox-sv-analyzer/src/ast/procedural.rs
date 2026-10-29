@@ -3441,25 +3441,34 @@ pub(super) fn lower_subroutine(
             );
         }
     }
+    // The statics of a task that may suspend are shared by activations
+    // that overlap in time (IEEE 1800-2023 6.21, 13.3.1): another call may
+    // write one between the declaration and a read, so each keeps its value.
+    let mut suspends = false;
     if subroutine.is_task {
-        lifetimes::check_subroutine_statics(
-            &tree.state,
-            &subroutine,
-            &builder.dims.const_env,
-            builder.state.locals,
-            &statics,
-            builder.state.subroutine_directions,
-        )?;
-        if !builder.automatic {
-            lifetimes::check_static_result(
-                &tree.state,
-                &builder.dims.const_env,
-                builder.state.locals,
-                &subroutine,
-                builder.state.subroutine_directions,
-            )?;
+        for stmt in &subroutine.body {
+            // Blocking scheduler operations, such as `semaphore.get()`, are
+            // evaluated calls.
+            stmt.walk(&mut |stmt| {
+                suspends |= events::blocks(stmt)
+                    || matches!(
+                        stmt,
+                        Stmt::Delay { .. }
+                            | Stmt::WaitEvent(_)
+                            | Stmt::WaitImplicit(_)
+                            | Stmt::Wait(_)
+                            | Stmt::AssertionRegion { .. }
+                            | Stmt::WaitFork
+                            | Stmt::Fork { .. }
+                            | Stmt::Call { .. }
+                    );
+            });
         }
-    } else if !builder.state.constant_evaluation {
+    }
+    if suspends {
+        lifetimes::check_constant_initializers(&tree.state, &subroutine.body, &statics)?;
+    }
+    if !builder.state.constant_evaluation {
         let retain_result = !builder.automatic
             && lifetimes::check_static_result(
                 &tree.state,
@@ -3473,15 +3482,16 @@ pub(super) fn lower_subroutine(
         let retained_types = static_types
             .iter()
             .filter(|(name, _)| {
-                lifetimes::check_subroutine_statics(
-                    &tree.state,
-                    &subroutine,
-                    &builder.dims.const_env,
-                    builder.state.locals,
-                    &std::iter::once((*name).clone()).collect(),
-                    builder.state.subroutine_directions,
-                )
-                .is_err()
+                suspends
+                    || lifetimes::check_subroutine_statics(
+                        &tree.state,
+                        &subroutine,
+                        &builder.dims.const_env,
+                        builder.state.locals,
+                        &std::iter::once((*name).clone()).collect(),
+                        builder.state.subroutine_directions,
+                    )
+                    .is_err()
             })
             .map(|(name, ty)| (name.clone(), ty.clone()))
             .collect::<HashMap<_, _>>();
@@ -3491,6 +3501,7 @@ pub(super) fn lower_subroutine(
             builder.state.subroutine_directions,
             std::iter::once((&mut subroutine.body, false)),
             None,
+            suspends,
         )?;
         if retain_result {
             kept.extend(subroutine.return_var.clone());
