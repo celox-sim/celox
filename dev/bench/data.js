@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793287398882,
+  "lastUpdate": 1793291895768,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -420872,6 +420872,42 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-native-aarch64/heliodor_suite_smp_linux_boot_8hart_execution",
             "unit": "ms",
             "value": 15255846.81674
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "a037246f79080d37487d12de591e90e9e3923711",
+          "message": "perf(vpi): reuse inactive callback request records (#2410)",
+          "timestamp": "2026-10-28T08:31:10Z",
+          "url": "https://github.com/celox-sim/celox/commit/a037246f79080d37487d12de591e90e9e3923711"
+        },
+        "date": 1793291895768,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_8hart_startup",
+            "unit": "ms",
+            "value": 312897.749232
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_8hart_execution",
+            "unit": "ms",
+            "value": 4420367.082298
+          },
+          {
+            "name": "heliodor-celox-tiered-aarch64/heliodor_suite_smp_linux_boot_8hart_end_to_end",
+            "unit": "ms",
+            "value": 4733489.8294
           }
         ]
       }
