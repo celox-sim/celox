@@ -45,6 +45,7 @@ sv_backends! {
     fn class_class_scoped_parameters_and_types(sim) { @case "class::class_scoped_parameters_and_types"; }
     fn class_specializations_of_interface_classes(sim) { @case "class::specializations_of_interface_classes"; }
     fn class_named_constructor_arguments(sim) { @case "class::named_constructor_arguments"; }
+    fn class_named_method_arguments(sim) { @case "class::named_method_arguments"; }
     fn class_typedefs_of_interface_classes(sim) { @case "class::typedefs_of_interface_classes"; }
     fn class_specializations_in_generate_blocks(sim) { @case "class::specializations_in_generate_blocks"; }
     fn class_specializations_keep_their_parameter_scopes(sim) { @case "class::specializations_keep_their_parameter_scopes"; }
@@ -90,6 +91,85 @@ sv_backends! {
         sim.run_until(0).unwrap();
         assert_eq!(sim.get(sim.signal("x")), 2u32.into());
         assert_eq!(sim.get(sim.signal("y")), 1u32.into());
+    }
+
+    fn named_method_arguments_are_evaluated_in_written_order(sim) {
+        @setup {
+            let source = r#"module Top(output int x, output int y);
+                class Point;
+                    int x;
+                    int y;
+                    function void set(int x = 0, int y = 0);
+                        this.x = x;
+                        this.y = y;
+                    endfunction
+                endclass
+                int count;
+                function int next();
+                    count++;
+                    return count;
+                endfunction
+                Point point;
+                initial begin
+                    point = new;
+                    point.set(.y(next()), .x(next()));
+                    x = point.x;
+                    y = point.y;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("order.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("x")), 2u32.into());
+        assert_eq!(sim.get(sim.signal("y")), 1u32.into());
+    }
+
+    // The shape of uvm_factory's `m_matches_type_pair` calls: an
+    // out-of-block method bound by name, with a `null` actual. Out of the
+    // shared cases because Icarus does not support out-of-block methods and
+    // xezim evaluates them wrongly in an instantiated module.
+    fn named_arguments_of_out_of_block_methods(sim) {
+        @setup {
+            let source = r#"module Top(output int hits);
+                class Pair;
+                    string name;
+                    function new(string name);
+                        this.name = name;
+                    endfunction
+                endclass
+                class Factory;
+                    extern protected function bit matches_type_pair(Pair match_type_pair,
+                        Pair requested_type, string requested_type_name);
+                    function int find(Pair pair, string name);
+                        int found = 0;
+                        if (matches_type_pair(.match_type_pair(pair),
+                                              .requested_type(null),
+                                              .requested_type_name(name)))
+                            found += 1;
+                        if (matches_type_pair(.requested_type_name("other"),
+                                              .requested_type(pair),
+                                              .match_type_pair(pair)))
+                            found += 10;
+                        return found;
+                    endfunction
+                endclass
+                function bit Factory::matches_type_pair(Pair match_type_pair,
+                    Pair requested_type, string requested_type_name);
+                    return match_type_pair == requested_type
+                        || match_type_pair.name == requested_type_name;
+                endfunction
+                Factory factory;
+                Pair pair;
+                initial begin
+                    factory = new;
+                    pair = new("x");
+                    hits = factory.find(pair, "x") * 100 + factory.find(pair, "y");
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("factory.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("hits")), 1110u32.into());
     }
 
     fn null_dereferences_are_runtime_errors(sim) {
@@ -454,7 +534,7 @@ fn misused_parameterized_classes_are_rejected() {
         (
             "class Point; function new(int x = 0); endfunction endclass Point p;
              initial p = new(.x(), .x(1));",
-            ["constructor argument passed twice", ""],
+            ["formal `x` is bound twice", "13.5.4"],
         ),
         (
             "Box #(.N(), .N(2)) twice;",
@@ -504,6 +584,48 @@ fn misused_parameterized_classes_are_rejected() {
         };
         let error = error.to_string();
         assert!(want.iter().all(|want| error.contains(want)), "{error}");
+    }
+}
+
+/// Calls whose actuals cannot be bound to the formals are compile errors
+/// (IEEE 1800-2023 13.5.3, 13.5.4), for methods as for other subroutines.
+#[test]
+fn unbindable_call_arguments_are_rejected() {
+    for (call, want) in [
+        ("c.f(.a(1), .a(2))", "formal `a` is bound twice"),
+        ("c.f(1, .a(2))", "formal `a` is bound twice"),
+        ("c.f(.q(1))", "no formal named `q`"),
+        ("c.f(.b(1), 3)", "a positional actual after a named one"),
+        ("c.f(1, 2, 3)", "3 actuals for 2 formals"),
+        ("c.f(.b(1))", "formal `a` has no default"),
+        ("c.f(, 1)", "formal `a` has no default"),
+        ("c.f(.a(), .b(1))", "formal `a` has no default"),
+        ("C::s(.z(1))", "no formal named `z`"),
+        ("f(.a(1), .a(2))", "formal `a` is bound twice"),
+        ("f(.z(1))", "no formal named `z`"),
+        ("f(.b(1), 2)", "a positional actual after a named one"),
+        ("f(.b(1))", "formal `a` has no default"),
+        ("f(1, 2, 3)", "3 actuals for 2 formals"),
+    ] {
+        let source = format!(
+            "module Top;
+                class C;
+                    function int f(int a, int b = 2); return a + b; endfunction
+                    static function int s(int a = 1); return a; endfunction
+                endclass
+                function automatic int f(int a, int b = 2); return a + b; endfunction
+                C c = new;
+                initial $display(\"%0d\", {call});
+            endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("call.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("`{call}` is accepted");
+        };
+        let error = error.to_string();
+        assert!(error.contains(want), "{call}: {error}");
     }
 }
 

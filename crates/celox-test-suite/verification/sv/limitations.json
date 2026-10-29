@@ -1921,7 +1921,8 @@
       "icarus": [
         "class::static_properties_and_methods",
         "class::classes_of_the_compilation_unit",
-        "class::package_classes_by_their_qualified_names"
+        "class::package_classes_by_their_qualified_names",
+        "class::named_method_arguments"
       ]
     }
   },

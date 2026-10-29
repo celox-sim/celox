@@ -710,7 +710,9 @@ fn rejects_dropped_unrepresentable_function_call_actuals() {
         "#,
     );
     assert!(
-        error.contains("combinational expression") || error.contains("function call"),
+        error.contains("combinational expression")
+            || error.contains("function call")
+            || error.contains("2 actuals for 1 formals"),
         "unexpected error: {error}"
     );
 }

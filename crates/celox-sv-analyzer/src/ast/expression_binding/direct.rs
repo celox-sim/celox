@@ -114,6 +114,42 @@ pub(in crate::ast) fn arguments(
     } else {
         args
     };
+    let (positional, named) = split_arguments(name, args)?;
+    let signatures = expressions::call_signatures(name, dimensions);
+    let (values, order) =
+        expressions::bind_normalized_call_arguments(name, positional, named, &signatures)?;
+    expressions::check_query_omissions(name, &values, dimensions)?;
+    Ok((values, order))
+}
+
+/// The actuals `args` of a call of `name` pass to each of `formals`, by
+/// position or by name, and the order they are evaluated in, see
+/// [`expressions::bind_to_formals`].
+pub(in crate::ast) fn formal_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+    formals: &[Option<String>],
+) -> Converted<(Vec<Option<ExprId>>, Vec<usize>)> {
+    // `f()` lists one empty actual, which a subroutine without formals
+    // does not take.
+    let args = match args {
+        [arg] if formals.is_empty() && arg.name.is_none() && arg.value.is_none() => &[],
+        args => args,
+    };
+    let (positional, named) = split_arguments(name, args)?;
+    let formals = formals
+        .iter()
+        .map(|formal| formal.as_deref().unwrap_or_default())
+        .collect::<Vec<_>>();
+    expressions::bind_to_formals(name, positional, named, &formals)
+}
+
+/// The positional actuals, which come first, and the named ones with their
+/// normalized names (IEEE 1800-2023 13.5.4).
+fn split_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+) -> Converted<(Vec<Option<ExprId>>, Vec<(String, Option<ExprId>)>)> {
     let mut positional = Vec::new();
     let mut named = Vec::new();
     for arg in args {
@@ -122,14 +158,13 @@ pub(in crate::ast) fn arguments(
         } else if named.is_empty() {
             positional.push(arg.value);
         } else {
-            return Err(unsupported("positional argument after named argument"));
+            return Err(AnalyzerError::InvalidCallArguments {
+                subroutine: name.to_string(),
+                detail: "a positional actual after a named one (IEEE 1800-2023 13.5.4)".into(),
+            });
         }
     }
-    let signatures = expressions::call_signatures(name, dimensions);
-    let (values, order) =
-        expressions::bind_normalized_call_arguments(name, positional, named, &signatures)?;
-    expressions::check_query_omissions(name, &values, dimensions)?;
-    Ok((values, order))
+    Ok((positional, named))
 }
 
 pub(in crate::ast) fn cast_target_native(
@@ -248,14 +283,21 @@ enum Finish {
     },
     /// A read of property `property` of the object handle child.
     ObjectLoad(Box<crate::ast::classes::Property>),
-    /// A call of method subroutine `name` with `formals` formals; the first
-    /// child is the object handle when `receiver` is one.
-    MethodCall {
-        name: String,
-        formals: usize,
-        receiver: objects::Receiver,
-        selection: Option<Expr>,
-    },
+    MethodCall(Box<MethodCall>),
+}
+
+/// A call of method subroutine `name` with `formals` formals; the first
+/// child is the object handle when `receiver` is one, then come the given
+/// actuals in the order of the formals.
+struct MethodCall {
+    name: String,
+    /// Whether each formal has an actual.
+    given: Vec<bool>,
+    /// The formals in the order their actuals are evaluated.
+    order: Vec<usize>,
+    formals: usize,
+    receiver: objects::Receiver,
+    selection: Option<Expr>,
 }
 
 enum Job {
@@ -568,13 +610,19 @@ pub(in crate::ast) fn bind_value(
                                 objects::random_selection(tree, dimensions, &name, args, native)
                             })
                             .transpose()?;
-                        if selection.is_none()
-                            && (args.len() > formals
-                                || (name.ends_with("::srandom") && args.len() != 1)
-                                || args.iter().any(|arg| arg.name.is_some()))
+                        if name.ends_with("::srandom")
+                            && (args.len() != 1 || args[0].name.is_some())
                         {
                             return Err(unsupported(format!("arguments of method `{name}`")));
                         }
+                        let (actuals, order) = match selection {
+                            Some(_) => (Vec::new(), Vec::new()),
+                            None => formal_arguments(
+                                name.strip_suffix("$virtual").unwrap_or(&name),
+                                args,
+                                &formals,
+                            )?,
+                        };
                         let mut children = Vec::new();
                         if let objects::Receiver::Handle(handle) = receiver {
                             children.push((handle, None));
@@ -583,14 +631,8 @@ pub(in crate::ast) fn bind_value(
                         // that is not static, receive assignment patterns.
                         let first = usize::from(receiver != objects::Receiver::Static);
                         let shapes = dimensions.subroutine_param_shapes.get(&name);
-                        for (position, arg) in
-                            args.iter().filter(|_| selection.is_none()).enumerate()
-                        {
-                            let Some(value) = arg.value else {
-                                return Err(unsupported(format!(
-                                    "omitted argument of method `{name}`"
-                                )));
-                            };
+                        for (position, value) in actuals.iter().enumerate() {
+                            let Some(value) = *value else { continue };
                             references::check_actual(
                                 &name,
                                 first + position,
@@ -607,12 +649,14 @@ pub(in crate::ast) fn bind_value(
                             children.push((value, shape));
                         }
                         (
-                            Finish::MethodCall {
+                            Finish::MethodCall(Box::new(MethodCall {
                                 name,
-                                formals,
+                                given: actuals.iter().map(Option::is_some).collect(),
+                                order,
+                                formals: formals.len(),
                                 receiver,
                                 selection,
-                            },
+                            })),
                             children,
                         )
                     }
@@ -1272,25 +1316,47 @@ pub(in crate::ast) fn bind_value(
                         let handle = operands.pop().ok_or_else(disagreement)?;
                         objects::load(&property, handle)
                     }
-                    Finish::MethodCall {
-                        name,
-                        formals,
-                        receiver,
-                        selection,
-                    } => {
+                    Finish::MethodCall(call) => {
+                        let MethodCall {
+                            name,
+                            given,
+                            order,
+                            formals,
+                            receiver,
+                            selection,
+                        } = *call;
                         let mut args: Vec<Option<Expr>> = Vec::with_capacity(formals + 1);
-                        if receiver == objects::Receiver::This {
-                            args.push(Some(objects::this()));
+                        let mut operands = operands.into_iter();
+                        if receiver != objects::Receiver::Static {
+                            args.push(Some(match receiver {
+                                objects::Receiver::This => objects::this(),
+                                _ => operands.next().ok_or_else(disagreement)?,
+                            }));
                         }
-                        let handles = usize::from(receiver != objects::Receiver::Static);
-                        args.extend(operands.into_iter().map(Some));
+                        let handles = args.len();
+                        for given in given {
+                            args.push(if given {
+                                Some(operands.next().ok_or_else(disagreement)?)
+                            } else {
+                                None
+                            });
+                        }
                         args.extend(selection.map(Some));
-                        // Omitted trailing arguments take their defaults.
+                        // Omitted arguments take their defaults (13.5.3).
                         args.resize(formals + handles, None);
+                        // The receiver is evaluated before the actuals.
+                        let arg_order = if order.iter().enumerate().all(|(at, index)| at == *index)
+                        {
+                            Vec::new()
+                        } else {
+                            (0..handles)
+                                .chain(order.into_iter().map(|index| index + handles))
+                                .collect()
+                        };
                         Expr::Call {
                             callee: Callee::Subroutine(name),
                             args,
-                            arg_order: Vec::new(),
+                            arg_order,
                         }
                     }
                     Finish::Cast(target) => {

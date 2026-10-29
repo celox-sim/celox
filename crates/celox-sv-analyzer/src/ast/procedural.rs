@@ -1055,7 +1055,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     return Err(unsupported("srandom requires a seed argument"));
                 }
                 args.resize(
-                    formals + usize::from(receiver != expression_binding::ObjectReceiver::Static),
+                    formals.len()
+                        + usize::from(receiver != expression_binding::ObjectReceiver::Static),
                     None,
                 );
                 Expr::Call {
