@@ -121,7 +121,8 @@ impl Heap {
     pub fn call(&mut self, code: u64, a: u64, b: u64, c: u64) -> u64 {
         let parameter = code >> 8;
         match code & 0xff {
-            op @ crate::containers::NEW..=crate::containers::RSORT => {
+            op
+            @ (crate::containers::NEW..=crate::containers::RSORT | crate::containers::CONCAT) => {
                 self.container_call(op, parameter, a, b, c)
             }
             op @ crate::streams::NEW..=crate::streams::TRUNCATE => {

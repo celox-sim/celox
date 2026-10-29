@@ -1,7 +1,9 @@
 //! Binding of dynamically sized unpacked value containers (clause 7).
 use super::*;
 use celox_sv_syntax::{Dimension, DimensionKind, ExprId, ExprKind};
-use system_functions::{ContainerKind, ContainerLayout, ContainerOp, HandleProperty};
+use system_functions::{
+    ContainerConcat, ContainerKind, ContainerLayout, ContainerOp, HandleProperty,
+};
 
 pub(super) fn with_dimensions(
     base: Type,
@@ -276,10 +278,39 @@ pub(super) fn assignment(
         if matches!(target.layout.kind, ContainerKind::Associative { .. }) {
             return Err(unsupported("associative array assignment pattern"));
         }
-        let values = items
-            .into_iter()
-            .map(|id| element_value(id, tree, dims, target))
-            .collect::<Converted<Vec<_>>>()?;
+        // An item of a concatenation that is itself an array contributes its
+        // elements (IEEE 1800-2023 10.10); an associative array has no order
+        // to concatenate. An assignment pattern item is one element (10.9).
+        let concatenation = matches!(native.expression(root).kind, ExprKind::Concatenation(_));
+        let mut parts = Vec::with_capacity(items.len());
+        let mut values = Vec::with_capacity(items.len());
+        for id in items {
+            match native_type(id, native, tree, dims)? {
+                Some(item) if concatenation && target.element.container.is_none() => {
+                    if matches!(item.layout.kind, ContainerKind::Associative { .. }) {
+                        return Err(unsupported(
+                            "associative array in an unpacked array concatenation",
+                        ));
+                    }
+                    check_compatible(id, native, tree, dims, target)?;
+                    parts.push(Some(item.layout));
+                    values.push(expression_binding::value(id, native, tree, dims)?);
+                }
+                _ => {
+                    parts.push(None);
+                    values.push(element_value(id, tree, dims, target)?);
+                }
+            }
+        }
+        if parts.iter().any(Option::is_some) {
+            return Ok(classes::object_call(
+                ObjectOp::Concat(Box::new(ContainerConcat {
+                    result: target.layout,
+                    parts,
+                })),
+                values,
+            ));
+        }
         return Ok(call(ContainerOp::Literal, target.layout, values));
     }
     check_compatible(root, native, tree, dims, target)?;
@@ -1012,6 +1043,14 @@ mod tests {
             (
                 "module Top; string a[$]; initial begin a.push_back(\"x\"); a[0] += \"y\"; end endmodule",
                 "on a dynamic element that is not a number",
+            ),
+            (
+                "module Top; int m[int], q[$]; initial q = {m}; endmodule",
+                "associative array in an unpacked array concatenation",
+            ),
+            (
+                "module Top; int a[$], q[$]; initial q = '{a}; endmodule",
+                "container used as an element",
             ),
             (
                 "module Top; int a[][2]; endmodule",
