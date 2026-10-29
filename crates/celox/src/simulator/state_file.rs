@@ -1038,6 +1038,8 @@ impl<B: SimBackend> Simulator<B> {
                 event_time: 0,
                 semaphores: Default::default(),
                 semaphore_limit: 0,
+                mailboxes: Default::default(),
+                mailbox_limit: 0,
             },
         ))
     }

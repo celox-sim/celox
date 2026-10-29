@@ -17,6 +17,7 @@
     "icarus/indexed_select.json",
     "icarus/interfaces.json",
     "icarus/literals.json",
+    "icarus/mailboxes.json",
     "icarus/operators.json",
     "icarus/packed_structs.json",
     "icarus/procedural.json",

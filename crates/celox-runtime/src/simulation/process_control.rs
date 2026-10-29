@@ -161,6 +161,19 @@ impl<B: SimBackend> SimulationState<B> {
         ) {
             return self.semaphore_request(executor, current, op, request);
         }
+        if matches!(
+            op,
+            ProcessOp::MailboxNew
+                | ProcessOp::MailboxNum
+                | ProcessOp::MailboxPut
+                | ProcessOp::MailboxTryPut
+                | ProcessOp::MailboxGet
+                | ProcessOp::MailboxTryGet
+                | ProcessOp::MailboxPeek
+                | ProcessOp::MailboxTryPeek
+        ) {
+            return self.mailbox_request(executor, current, op, request);
+        }
         let count = match op {
             ProcessOp::SelfHandle | ProcessOp::Observe => 0,
             ProcessOp::Srandom | ProcessOp::SetRandstate => 2,
@@ -330,7 +343,12 @@ impl<B: SimBackend> SimulationState<B> {
                             && self.process_state.activations[target]
                                 .control
                                 .semaphore
-                                .is_none())
+                                .is_none()
+                            && (self.process_state.activations[target]
+                                .control
+                                .mailbox
+                                .is_none()
+                                || self.mailbox_served(target)))
                     {
                         self.wake_controlled(target);
                     }
@@ -394,7 +412,15 @@ impl<B: SimBackend> SimulationState<B> {
             | ProcessOp::SemaphoreNew
             | ProcessOp::SemaphorePut
             | ProcessOp::SemaphoreGet
-            | ProcessOp::SemaphoreTryGet => unreachable!(),
+            | ProcessOp::SemaphoreTryGet
+            | ProcessOp::MailboxNew
+            | ProcessOp::MailboxNum
+            | ProcessOp::MailboxPut
+            | ProcessOp::MailboxTryPut
+            | ProcessOp::MailboxGet
+            | ProcessOp::MailboxTryGet
+            | ProcessOp::MailboxPeek
+            | ProcessOp::MailboxTryPeek => unreachable!(),
         }
         if let Some(result) = request.results.first() {
             executor.backend_mut().set(result.id, value);
@@ -681,6 +707,34 @@ impl<B: SimBackend> SimulationState<B> {
         state.semaphore_limit = (2 * state.semaphores.len()).max(64);
     }
 
+    /// Forget the mailboxes the heap collected that no process waits for,
+    /// once there are twice as many as the last time this looked.
+    fn forget_collected_mailboxes(&mut self, heap: &celox_heap::Heap) {
+        let state = &mut self.process_state;
+        if state.mailboxes.len() < state.mailbox_limit {
+            return;
+        }
+        state
+            .mailboxes
+            .retain(|&handle, mailbox| heap.contains_object(handle) || !mailbox.is_idle());
+        state.mailbox_limit = (2 * state.mailboxes.len()).max(64);
+    }
+
+    /// Stop process `process`, which ended while it waited for a mailbox,
+    /// from waiting: its turn passes to the next process.
+    pub(super) fn cancel_mailbox_wait(&mut self, process: usize) {
+        let Some(handle) = self.process_state.activations[process]
+            .control
+            .mailbox
+            .take()
+        else {
+            return;
+        };
+        if let Some(mailbox) = self.process_state.mailboxes.get_mut(&handle) {
+            mailbox.forget(process);
+        }
+    }
+
     /// Stop process `process`, which ended without its keys, from waiting
     /// for a semaphore: the processes behind it may get keys now.
     pub(super) fn cancel_semaphore_wait(&mut self, process: usize) {
@@ -727,8 +781,332 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
     }
+
+    /// Operations on mailboxes (IEEE 1800-2023 15.4). A mailbox is a heap
+    /// object whose handle fields hold its queue of messages and the
+    /// messages it handed over or holds back (see [`MailboxQueue`]). A
+    /// blocking operation that cannot complete returns 0 and parks the
+    /// process; the operation that serves it does its work and wakes it, and
+    /// its call again collects the result.
+    fn mailbox_request<E: SimulationExecutor<Backend = B>>(
+        &mut self,
+        executor: &mut E,
+        current: usize,
+        op: ProcessOp,
+        request: &HostRequestSite<SignalRef>,
+    ) -> Result<bool, Halt> {
+        let (count, results) = match op {
+            ProcessOp::MailboxNew | ProcessOp::MailboxPut | ProcessOp::MailboxTryPut => (2, 1),
+            ProcessOp::MailboxNum => (1, 1),
+            _ => (1, 2),
+        };
+        if request.args.len() != count || request.results.len() != results {
+            return Err(SimulatorErrorCode::InternalError.into());
+        }
+        let backend = executor.backend();
+        let handle: u32 = backend.get_as(request.args[0].id);
+        if op == ProcessOp::MailboxNew {
+            let bound = handle as i32;
+            if bound < 0 {
+                return Err(error("mailbox with a negative bound"));
+            }
+            let layout: u64 = backend.get_as(request.args[1].id);
+            let heap = executor.backend_mut().heap_mut();
+            self.forget_collected_mailboxes(heap);
+            let mailbox = heap.new_object(SCHEDULER_CLASS, 3 * celox_heap::HANDLE_BYTES);
+            for queue in [
+                MailboxQueue::Messages,
+                MailboxQueue::Handed,
+                MailboxQueue::Held,
+            ] {
+                heap.declare_handle(
+                    mailbox,
+                    queue.offset() as u32,
+                    celox_heap::HandleKind::Object,
+                );
+            }
+            self.process_state.mailboxes.insert(
+                mailbox,
+                crate::timing::Mailbox {
+                    bound: bound as u32,
+                    layout,
+                    ..Default::default()
+                },
+            );
+            executor.backend_mut().set(request.results[0].id, mailbox);
+            return Ok(true);
+        }
+        let Some(mailbox) = self.process_state.mailboxes.get_mut(&handle) else {
+            return Err(error(if handle == 0 {
+                "method called on a null mailbox handle"
+            } else {
+                "invalid mailbox handle"
+            }));
+        };
+        let (bound, layout) = (mailbox.bound, mailbox.layout);
+        let message = if matches!(op, ProcessOp::MailboxPut | ProcessOp::MailboxTryPut) {
+            let (value, mask) = executor.backend().get_four_state(request.args[1].id);
+            let word =
+                |value: num_bigint::BigUint| value.to_u64_digits().first().copied().unwrap_or(0);
+            Some((word(value), word(mask)))
+        } else {
+            None
+        };
+        let mut queues = MailboxQueues {
+            heap: executor.backend_mut().heap_mut(),
+            handle,
+            layout,
+        };
+        queues.drop_ended(self.process_state.mailboxes.get_mut(&handle).unwrap());
+        let mut status = 0u32;
+        let mut received = (0u64, 0u64);
+        let mut blocked = false;
+        let mailbox = self.process_state.mailboxes.get_mut(&handle).unwrap();
+        match op {
+            ProcessOp::MailboxNum => status = queues.len(MailboxQueue::Messages) as u32,
+            ProcessOp::MailboxPut | ProcessOp::MailboxTryPut => {
+                if let Some(index) = mailbox.delivered.iter().position(|&p| p == current) {
+                    // A `get` made room and moved the message in.
+                    mailbox.delivered.swap_remove(index);
+                    status = 1;
+                } else if bound == 0 || queues.len(MailboxQueue::Messages) < u64::from(bound) {
+                    queues.push(MailboxQueue::Messages, message.unwrap());
+                    status = 1;
+                    self.serve_mailbox(&mut queues);
+                } else if op == ProcessOp::MailboxPut {
+                    mailbox.forget(current);
+                    mailbox.putters.push_back(current);
+                    queues.push(MailboxQueue::Held, message.unwrap());
+                    blocked = true;
+                }
+            }
+            _ => {
+                let get = matches!(op, ProcessOp::MailboxGet | ProcessOp::MailboxTryGet);
+                if let Some(index) = mailbox.handed.iter().position(|&p| p == current) {
+                    // A `put` handed the message over.
+                    mailbox.handed.remove(index);
+                    received = queues.take(MailboxQueue::Handed, index as u64);
+                    status = 1;
+                } else if queues.len(MailboxQueue::Messages) > 0 {
+                    status = 1;
+                    if get {
+                        received = queues.take(MailboxQueue::Messages, 0);
+                        self.serve_mailbox(&mut queues);
+                    } else {
+                        received = queues.read(MailboxQueue::Messages, 0);
+                    }
+                } else if matches!(op, ProcessOp::MailboxGet | ProcessOp::MailboxPeek) {
+                    mailbox.forget(current);
+                    if get {
+                        mailbox.getters.push_back(current);
+                    } else {
+                        mailbox.peekers.push(current);
+                    }
+                    blocked = true;
+                }
+            }
+        }
+        // A process waits for one mailbox at a time, and until it collects
+        // what a served operation left for it.
+        self.process_state.activations[current].control.mailbox = blocked.then_some(handle);
+        let backend = executor.backend_mut();
+        backend.set(request.results[0].id, status);
+        if let Some(result) = request.results.get(1) {
+            backend.set_four_state(result.id, received.0.into(), received.1.into());
+        }
+        Ok(!blocked
+            && self.process_state.activations[current].live
+            && self.process_state.activations[current]
+                .control
+                .suspended
+                .is_none())
+    }
+
+    /// Serve the processes waiting for mailbox `queues.handle`, in arrival
+    /// order, while it has room and messages: the first process in `put`
+    /// moves its message in (15.4.3), every process in `peek` gets a copy of
+    /// the first message (15.4.7), and the first process in `get` takes it
+    /// (15.4.5). Each served process is woken to collect the result.
+    fn serve_mailbox(&mut self, queues: &mut MailboxQueues<'_>) {
+        let handle = queues.handle;
+        loop {
+            let mailbox = self.process_state.mailboxes.get_mut(&handle).unwrap();
+            let room =
+                mailbox.bound == 0 || queues.len(MailboxQueue::Messages) < u64::from(mailbox.bound);
+            if room && let Some(putter) = mailbox.putters.pop_front() {
+                let message = queues.take(MailboxQueue::Held, 0);
+                if self.mailbox_waiter(handle, putter) {
+                    queues.push(MailboxQueue::Messages, message);
+                    let mailbox = self.process_state.mailboxes.get_mut(&handle).unwrap();
+                    mailbox.delivered.push(putter);
+                    self.wake_controlled(putter);
+                }
+                continue;
+            }
+            if queues.len(MailboxQueue::Messages) == 0 {
+                return;
+            }
+            let mailbox = self.process_state.mailboxes.get_mut(&handle).unwrap();
+            let peekers = std::mem::take(&mut mailbox.peekers);
+            if !peekers.is_empty() {
+                let first = queues.read(MailboxQueue::Messages, 0);
+                for peeker in peekers {
+                    if self.mailbox_waiter(handle, peeker) {
+                        queues.push(MailboxQueue::Handed, first);
+                        let mailbox = self.process_state.mailboxes.get_mut(&handle).unwrap();
+                        mailbox.handed.push(peeker);
+                        self.wake_controlled(peeker);
+                    }
+                }
+            }
+            let getter = loop {
+                let mailbox = self.process_state.mailboxes.get_mut(&handle).unwrap();
+                match mailbox.getters.pop_front() {
+                    Some(getter) if self.mailbox_waiter(handle, getter) => break Some(getter),
+                    Some(_) => {}
+                    None => break None,
+                }
+            };
+            let Some(getter) = getter else {
+                return;
+            };
+            let message = queues.take(MailboxQueue::Messages, 0);
+            queues.push(MailboxQueue::Handed, message);
+            let mailbox = self.process_state.mailboxes.get_mut(&handle).unwrap();
+            mailbox.handed.push(getter);
+            self.wake_controlled(getter);
+        }
+    }
+
+    /// Whether the mailbox that `process` waits for served it, so that it
+    /// only has to collect the result.
+    fn mailbox_served(&self, process: usize) -> bool {
+        self.process_state.activations[process]
+            .control
+            .mailbox
+            .and_then(|handle| self.process_state.mailboxes.get(&handle))
+            .is_some_and(|mailbox| {
+                mailbox.handed.contains(&process) || mailbox.delivered.contains(&process)
+            })
+    }
+
+    /// Whether `process` still waits for mailbox `handle`.
+    fn mailbox_waiter(&self, handle: u32, process: usize) -> bool {
+        self.process_state
+            .activations
+            .get(process)
+            .is_some_and(|activation| activation.live && activation.control.mailbox == Some(handle))
+    }
 }
 
-/// The class of the heap objects the scheduler owns, such as semaphores: no
-/// class identifier, which hashes names to nonzero values, is all ones.
+/// The heap queues of a mailbox object, one per handle field.
+#[derive(Clone, Copy)]
+enum MailboxQueue {
+    /// Its messages, in put order.
+    Messages,
+    /// The messages taken or copied for the processes of
+    /// [`crate::timing::Mailbox::handed`], in the same order.
+    Handed,
+    /// The messages of the processes of [`crate::timing::Mailbox::putters`],
+    /// in the same order.
+    Held,
+}
+
+impl MailboxQueue {
+    fn offset(self) -> usize {
+        self as usize * celox_heap::HANDLE_BYTES
+    }
+}
+
+/// The queues of the heap object of mailbox `handle`.
+struct MailboxQueues<'a> {
+    heap: &'a mut celox_heap::Heap,
+    handle: u32,
+    layout: u64,
+}
+
+impl MailboxQueues<'_> {
+    fn call(&mut self, op: u64, queue: u64, index: u64) -> u64 {
+        self.heap
+            .call(celox_heap::ops::encode(op, self.layout), queue, index, 0)
+    }
+
+    fn queue(&mut self, queue: MailboxQueue) -> u64 {
+        self.heap
+            .load(self.handle, queue.offset(), celox_heap::HANDLE_BYTES)
+    }
+
+    fn len(&mut self, queue: MailboxQueue) -> u64 {
+        let handle = self.queue(queue);
+        self.call(celox_heap::containers::LEN, handle, 0)
+    }
+
+    fn read(&mut self, queue: MailboxQueue, index: u64) -> (u64, u64) {
+        use celox_heap::containers::{GET, GET_MASK};
+        let handle = self.queue(queue);
+        (
+            self.call(GET, handle, index),
+            self.call(GET_MASK, handle, index),
+        )
+    }
+
+    fn push(&mut self, queue: MailboxQueue, (value, mask): (u64, u64)) {
+        use celox_heap::containers::{INSERT, SET_MASK};
+        let handle = self.queue(queue);
+        let len = self.call(celox_heap::containers::LEN, handle, 0);
+        let inserted = self.heap.call(
+            celox_heap::ops::encode(INSERT, self.layout),
+            handle,
+            len,
+            value,
+        );
+        let handle = self.heap.call(
+            celox_heap::ops::encode(SET_MASK, self.layout),
+            inserted,
+            len,
+            mask,
+        );
+        self.heap.store(
+            self.handle,
+            queue.offset(),
+            celox_heap::HANDLE_BYTES,
+            handle,
+        );
+    }
+
+    fn take(&mut self, queue: MailboxQueue, index: u64) -> (u64, u64) {
+        let message = self.read(queue, index);
+        let handle = self.queue(queue);
+        let handle = self.call(celox_heap::containers::DELETE, handle, index);
+        self.heap.store(
+            self.handle,
+            queue.offset(),
+            celox_heap::HANDLE_BYTES,
+            handle,
+        );
+        message
+    }
+
+    /// Drop the entries of `mailbox` and their messages for processes that
+    /// ended (see [`crate::timing::Mailbox::forget`]).
+    fn drop_ended(&mut self, mailbox: &mut crate::timing::Mailbox) {
+        use crate::timing::ENDED;
+        for index in (0..mailbox.handed.len()).rev() {
+            if mailbox.handed[index] == ENDED {
+                mailbox.handed.remove(index);
+                self.take(MailboxQueue::Handed, index as u64);
+            }
+        }
+        for index in (0..mailbox.putters.len()).rev() {
+            if mailbox.putters[index] == ENDED {
+                mailbox.putters.remove(index);
+                self.take(MailboxQueue::Held, index as u64);
+            }
+        }
+    }
+}
+
+/// The class of the heap objects the scheduler owns, semaphores and
+/// mailboxes: no class identifier, which hashes names to nonzero values, is
+/// all ones.
 const SCHEDULER_CLASS: u32 = u32::MAX;

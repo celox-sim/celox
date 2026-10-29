@@ -644,13 +644,13 @@ pub(super) fn base_arguments<'a>(
 }
 
 /// Whether class `name` is a built-in class whose objects the scheduler owns:
-/// `process` (IEEE 1800-2023 9.7), `semaphore` (15.3) or the type of named
-/// events (15.5).
+/// `process` (IEEE 1800-2023 9.7), `semaphore` (15.3), `mailbox` (15.4) or
+/// the type of named events (15.5).
 pub(super) fn builtin(name: &str) -> bool {
     matches!(
         name,
         super::processes::CLASS | super::events::CLASS | super::semaphores::CLASS
-    )
+    ) || super::mailboxes::is_class(name)
 }
 
 /// The handle type of class `name`, if it is a class.

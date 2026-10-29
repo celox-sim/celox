@@ -37,7 +37,7 @@ pub(super) fn names_class(
         _ => return false,
     };
     let name = normalize_identifier(&segment.name.spelling);
-    if name == "semaphore" {
+    if matches!(name.as_str(), "semaphore" | "mailbox") {
         return true;
     }
     if segments.len() > 1 {

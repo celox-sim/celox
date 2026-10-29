@@ -277,6 +277,9 @@ mod events;
 #[path = "frontends/systemverilog/semaphores.rs"]
 mod semaphores;
 
+#[path = "frontends/systemverilog/mailboxes.rs"]
+mod mailboxes;
+
 #[path = "frontends/systemverilog/containers.rs"]
 mod containers;
 

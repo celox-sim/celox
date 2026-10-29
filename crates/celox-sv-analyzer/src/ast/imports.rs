@@ -125,7 +125,7 @@ impl ScopeImports {
                 if package == "std"
                     && matches!(
                         normalize_identifier(&name.spelling).as_str(),
-                        "randomize" | "process" | "semaphore"
+                        "randomize" | "process" | "semaphore" | "mailbox"
                     )
                 {
                     continue;
@@ -164,7 +164,7 @@ impl ScopeImports {
                 && let [package, name] = path.as_slice()
                 // `C::T` names a type of class `C` (IEEE 1800-2023 8.23).
                 && !(package.name.spelling == "std"
-                    && matches!(name.name.spelling.as_str(), "process" | "semaphore"))
+                    && matches!(name.name.spelling.as_str(), "process" | "semaphore" | "mailbox"))
                 && !visible_class(tree, &normalize_identifier(&package.name.spelling))
                 && !aliases.iter().any(|(start, end, name)| {
                     (*start..*end).contains(&ty.tokens.start)

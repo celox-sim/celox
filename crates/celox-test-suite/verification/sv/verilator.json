@@ -17,6 +17,7 @@
     "verilator/interfaces.json",
     "verilator/latch.json",
     "verilator/literals.json",
+    "verilator/mailboxes.json",
     "verilator/operators.json",
     "verilator/packed_structs.json",
     "verilator/procedural.json",

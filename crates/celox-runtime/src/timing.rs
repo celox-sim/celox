@@ -473,6 +473,69 @@ pub struct ProcessState {
     /// those the heap collected.
     #[serde(default)]
     pub semaphore_limit: usize,
+    /// The mailboxes, by the handle of the heap object holding their
+    /// messages (IEEE 1800-2023 15.4).
+    #[serde(default)]
+    pub mailboxes: std::collections::BTreeMap<u32, Mailbox>,
+    /// The number of mailboxes at which the next new one first forgets
+    /// those the heap collected.
+    #[serde(default)]
+    pub mailbox_limit: usize,
+}
+
+/// A mailbox: its bound and the processes waiting for it (IEEE 1800-2023
+/// 15.4). Its messages are a queue in the heap, held by the mailbox's heap
+/// object so that the collector keeps the handles in them alive; so are the
+/// messages of [`Mailbox::handed`] and [`Mailbox::putters`]. A waiting entry
+/// is stale once the process no longer waits for this mailbox in
+/// [`crate::simulation::ProcessControl::mailbox`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Mailbox {
+    /// The most messages it holds, or 0 if it is unbounded (15.4.1).
+    pub bound: u32,
+    /// The heap container parameter of its message queue.
+    pub layout: u64,
+    /// Processes in `get`, in arrival order (15.4.5).
+    pub getters: std::collections::VecDeque<usize>,
+    /// Processes in `peek`.
+    pub peekers: Vec<usize>,
+    /// Processes in `put` on a full mailbox, in arrival order (15.4.3), with
+    /// their messages in the same order in the heap.
+    pub putters: std::collections::VecDeque<usize>,
+    /// Woken processes in `get` or `peek` whose messages wait in the heap, in
+    /// the same order, for them to collect.
+    #[serde(default)]
+    pub handed: Vec<usize>,
+    /// Woken processes in `put` whose messages entered the mailbox.
+    #[serde(default)]
+    pub delivered: Vec<usize>,
+}
+
+/// The entry of [`Mailbox::handed`] or [`Mailbox::putters`] of a process
+/// that ended, whose message the next operation on the mailbox drops.
+pub(crate) const ENDED: usize = usize::MAX;
+
+impl Mailbox {
+    /// Forget process `process`, which ended or waits anew.
+    pub(crate) fn forget(&mut self, process: usize) {
+        self.getters.retain(|&waiter| waiter != process);
+        self.peekers.retain(|&waiter| waiter != process);
+        self.delivered.retain(|&waiter| waiter != process);
+        for waiter in self.putters.iter_mut().chain(self.handed.iter_mut()) {
+            if *waiter == process {
+                *waiter = ENDED;
+            }
+        }
+    }
+
+    /// Whether no process waits for it or has something to collect.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.getters.is_empty()
+            && self.peekers.is_empty()
+            && self.putters.is_empty()
+            && self.handed.is_empty()
+            && self.delivered.is_empty()
+    }
 }
 
 /// A semaphore: its keys and the processes waiting for them (IEEE 1800-2023

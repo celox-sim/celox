@@ -289,10 +289,10 @@ chapter-14/14.3--default-clocking-block.sv	2state	pass
 chapter-14/14.3--default-clocking-block.sv	4state	pass
 chapter-14/14.3--global-clocking-block.sv	2state	pass
 chapter-14/14.3--global-clocking-block.sv	4state	pass
-chapter-15/15.4--mailbox-blocking.sv	2state	fail
-chapter-15/15.4--mailbox-blocking.sv	4state	fail
-chapter-15/15.4--mailbox-non-blocking.sv	2state	fail
-chapter-15/15.4--mailbox-non-blocking.sv	4state	fail
+chapter-15/15.4--mailbox-blocking.sv	2state	pass
+chapter-15/15.4--mailbox-blocking.sv	4state	pass
+chapter-15/15.4--mailbox-non-blocking.sv	2state	pass
+chapter-15/15.4--mailbox-non-blocking.sv	4state	pass
 chapter-15/15.5.1--named-event-trigger-blocking.sv	2state	pass
 chapter-15/15.5.1--named-event-trigger-blocking.sv	4state	pass
 chapter-15/15.5.1--named-event-trigger-non-blocking.sv	2state	pass
