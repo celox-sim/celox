@@ -57,9 +57,18 @@ pub(in crate::ast) struct Registry {
     generics: RefCell<HashMap<String, String>>,
     specializations: RefCell<HashMap<String, Rc<specializations::Specialization>>>,
     declarations: RefCell<HashMap<String, Rc<DeclarationScope>>>,
+    /// The design's virtual interfaces, which a specialization's scope may
+    /// name as type arguments (IEEE 1800-2023 25.9).
+    virtual_interfaces: RefCell<Option<Arc<crate::ast::virtual_interfaces::VirtualInterfaces>>>,
 }
 
 impl Registry {
+    pub fn set_virtual_interfaces(
+        &self,
+        declarations: Option<Arc<crate::ast::virtual_interfaces::VirtualInterfaces>>,
+    ) {
+        *self.virtual_interfaces.borrow_mut() = declarations;
+    }
     pub fn revision(&self) -> u64 {
         self.revision.get()
     }
@@ -294,6 +303,7 @@ impl Registry {
         let requests = self.requests.borrow()[name].clone();
         let state = Rc::new(AnalysisState {
             foreign: self.clone(),
+            virtual_interfaces: self.virtual_interfaces.borrow().clone(),
             next_call_site: owner.calls.clone(),
             foreign_arguments: RefCell::new(
                 requests
@@ -346,6 +356,19 @@ impl Registry {
             });
         } else {
             imports.declarations_only = true;
+        }
+        // Like every scope, a specialization may reach the interface
+        // instances through virtual interfaces (IEEE 1800-2023 25.9).
+        if let Some(declarations) = crate::ast::virtual_interfaces::declarations(&state) {
+            for signal in crate::ast::virtual_interfaces::member_signals(declarations) {
+                if !imports
+                    .state_signals
+                    .iter()
+                    .any(|known| known.name == signal.name)
+                {
+                    imports.state_signals.push(signal);
+                }
+            }
         }
         let self_qualified = imports::ScopeImports::from_scope(&context)?
             .qualified

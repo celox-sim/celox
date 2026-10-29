@@ -839,3 +839,119 @@ endmodule
 "#)
   (top Top) (run_until 6)
   (expect_output "pulse 2\nretarget 3\n"))
+(case type_parameter_values
+  ; A virtual interface type is a class type parameter value, told apart
+  ; from the number that holds it, as with `uvm_config_db#(virtual bus_if)`.
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+module Top;
+    class Db #(type T = int);
+        static T values[string];
+        static function void set(string name, T value);
+            values[name] = value;
+        endfunction
+        static function bit get(string name, output T value);
+            if (!values.exists(name)) return 0;
+            value = values[name];
+            return 1;
+        endfunction
+    endclass
+    class Monitor;
+        virtual bus_if vif;
+        function void connect();
+            virtual bus_if found;
+            if (Db#(virtual bus_if)::get("bus", found)) vif = found;
+        endfunction
+    endclass
+    logic clk = 0;
+    bus_if bus(clk);
+    initial begin
+        automatic Monitor m = new;
+        automatic bit [31:0] number;
+        bus.data = 8'h99;
+        Db#(virtual bus_if)::set("bus", bus);
+        Db#(bit [31:0])::set("bus", 7);
+        void'(Db#(bit [31:0])::get("bus", number));
+        m.connect();
+        $display("%0d %h %0d", number, m.vif.data, Db#(virtual bus_if)::values.size());
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "7 99 1\n"))
+
+(case package_generic_member_reads
+  ; A package class specialized from a module with a virtual interface type
+  ; argument reads a member through an argument of that type (IEEE
+  ; 1800-2023 25.9, 8.25).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+package p;
+    class reader #(type T = int);
+        static function logic [7:0] read(T v);
+            return v.data;
+        endfunction
+    endclass
+endpackage
+module Top;
+    import p::*;
+    logic clk = 0;
+    bus_if bus(clk);
+    initial begin
+        bus.data = 8'h5d;
+        #1 $display("%h", reader#(virtual bus_if)::read(bus));
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (expect_output "5d\n"))
+
+(case package_configuration_database
+  ; A module stores virtual interfaces in the static array of a package
+  ; class specialized with a virtual interface type, as
+  ; `uvm_config_db#(virtual bus_if)` does, and another process gets one back
+  ; and writes through it; a specialization with another type argument keeps
+  ; its own storage (IEEE 1800-2023 25.9, 8.25, 8.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+package cfg_pkg;
+    class config_db #(type T = int);
+        static T values[string];
+        static function void set(string name, T value);
+            values[name] = value;
+        endfunction
+        static function bit get(string name, output T value);
+            if (!values.exists(name)) return 0;
+            value = values[name];
+            return 1;
+        endfunction
+    endclass
+endpackage
+module Top;
+    import cfg_pkg::*;
+    logic clk = 0;
+    bus_if bus(clk);
+    bus_if other(clk);
+    virtual bus_if found;
+    int number;
+    initial begin
+        config_db#(virtual bus_if)::set("bus", bus);
+        config_db#(virtual bus_if)::set("other", other);
+        config_db#(int)::set("bus", 7);
+    end
+    initial begin
+        #1 bus.data = 8'h3c;
+        if (config_db#(virtual bus_if)::get("bus", found)) found.data += 1;
+        void'(config_db#(int)::get("bus", number));
+        $display("%h %0d %0d", bus.data, number, config_db#(virtual bus_if)::values.size());
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (expect_output "3d 7 2\n"))
