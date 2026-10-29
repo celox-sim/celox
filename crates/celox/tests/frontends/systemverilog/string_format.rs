@@ -46,6 +46,34 @@ sv_backends! {
             celox::RuntimeEvent::Display { message: b"66".to_vec() },
         ]);
     }
+    // An enum operand leaves a conditional integral unless the other operand
+    // has the same enumerated type (11.4.11).
+    fn pattern_format_mixed_enum_conditional(sim) {
+        @setup {
+            let source = r#"
+                module Top;
+                    typedef enum {A, B} e_t;
+                    bit f;
+                    string s;
+                    initial begin
+                        f = 1;
+                        $display("%p", f ? B : 0);
+                        s = $sformatf("%p", f ? B : 7);
+                        $display("%s", s);
+                        f = 0;
+                        $display("%p", f ? B : 7);
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("pattern_enum.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"1".to_vec() },
+            celox::RuntimeEvent::Display { message: b"1".to_vec() },
+            celox::RuntimeEvent::Display { message: b"7".to_vec() },
+        ]);
+    }
     // External testbenches wrap the design, so the hierarchical name `%m`
     // prints differs between simulators; Celox prints the same for both.
     fn sformatf_scope_matches_display(sim) {
@@ -171,6 +199,10 @@ fn pattern_format_rejects_unsupported_types() {
             "class C; endclass int v[C];",
             "%p of an associative array with class handle keys",
         ),
+        (
+            "typedef struct { int n; string s; } r_t; r_t v[$];",
+            "%p of a container of aggregate elements",
+        ),
     ] {
         check_rejected(declarations, "v", expected);
     }
@@ -182,6 +214,26 @@ fn pattern_format_rejects_unsupported_types() {
         ),
         ("int m[2][3];", "m[1]"),
         ("int a[4];", "a[1:2]"),
+        ("typedef struct { int n; string s; } r_t; r_t v;", "v"),
+        ("typedef struct { int n; string s; } r_t; r_t q[$];", "q[0]"),
+        (
+            "typedef struct { int n; } r_t; class C; r_t p; endclass C c;",
+            "c.p",
+        ),
+        (
+            "typedef struct { int n; } i_t; typedef struct { i_t i; int m; } r_t; r_t v;",
+            "v.i",
+        ),
+        (
+            "typedef struct { int n; } i_t; typedef struct { i_t i; int m; } r_t; \
+             class C; r_t p; endclass C c;",
+            "c.p.i",
+        ),
+        (
+            "typedef struct { int n; } r_t; \
+             function automatic r_t make(); r_t r; r.n = 1; return r; endfunction",
+            "make()",
+        ),
         (
             "typedef struct packed { bit [3:0] a; } s_t; \
              function automatic s_t make(); return s_t'(4'h3); endfunction",
