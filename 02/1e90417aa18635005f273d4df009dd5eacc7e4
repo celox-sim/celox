@@ -1,0 +1,6 @@
+Revision history for #2578:
+
+rev 2 (content) 2026-10-29 16:49 UTC — Address review: build concatenations with a bulk heap CONCAT instead of one copy per element; flatten array items only in concatenations, not assignment patterns; rebase onto master
+rev 1 (initial) 2026-10-29 16:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2578,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"0930de3612126032646fc575032a2c9961a3e0fc","timestamp_iso":"2026-10-29T16:49:45Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"0930de3612126032646fc575032a2c9961a3e0fc","new_sha":"aa9e604fa9b43ea920ecc14e1d364bcb0e1e95e1","timestamp_iso":"2026-10-29T16:49:45Z","reason":"Address review: build concatenations with a bulk heap CONCAT instead of one copy per element; flatten array items only in concatenations, not assignment patterns; rebase onto master","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/0930de3612126032646fc575032a2c9961a3e0fc...aa9e604fa9b43ea920ecc14e1d364bcb0e1e95e1"}]} -->
