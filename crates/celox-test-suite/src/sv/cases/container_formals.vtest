@@ -1,0 +1,315 @@
+(group container_formals (category functions))
+
+; IEEE 1800-2023 13.5.1: a dynamic array, queue or associative array formal
+; that is not a reference holds a copy. An input is copied in when the call
+; is made, so the callee's changes stay its own; an output starts at its
+; default and is copied to the actual when the subroutine returns; an inout
+; does both. The copies follow container assignment (7.6, 7.9.9, 7.10).
+
+(case input_container_changes_are_not_seen_by_the_caller
+ (source "input_container_changes_are_not_seen_by_the_caller.sv" #"module Top(output int local_size, output int first, output int size, output int keys);
+ function automatic int grow(int q[$], int m[string]);
+  q.push_back(4);
+  q[0] = 99;
+  m["z"] = 1;
+  m.delete("a");
+  return q.size() * 10 + m.size();
+ endfunction
+ int q[$];
+ int m[string];
+ initial begin
+  q = '{1, 2, 3};
+  m["a"] = 5;
+  m["b"] = 6;
+  local_size = grow(q, m);
+  first = q[0];
+  size = q.size();
+  keys = m.size() * 10 + m.exists("a");
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq local_size 42)
+ (assert_eq first 1)
+ (assert_eq size 3)
+ (assert_eq keys 21))
+
+(case input_container_from_container_values
+ (source "input_container_from_container_values.sv" #"module Top(output int literal, output int converted, output int defaulted);
+ function automatic int sum(int q[$]);
+  int total = q.size() * 1000;
+  foreach (q[i]) total += q[i];
+  return total;
+ endfunction
+ function automatic int count(int q[$] = '{5, 6});
+  return q.size();
+ endfunction
+ int d[];
+ initial begin
+  d = '{7, 8};
+  literal = sum('{1, 2, 3});
+  converted = sum(d);
+  defaulted = count() * 10 + count('{1});
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq literal 3006)
+ (assert_eq converted 2015)
+ (assert_eq defaulted 21))
+
+(case input_container_from_an_empty_concatenation
+ (source "input_container_from_an_empty_concatenation.sv" #"module Top(output int empty);
+ function automatic int size(int q[$]);
+  q.push_back(1);
+  return q.size();
+ endfunction
+ initial empty = size({}) * 10 + size({});
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq empty 11))
+
+(case output_container_starts_empty_and_is_copied_back
+ (source "output_container_starts_empty_and_is_copied_back.sv" #"module Top(output int first, output int second, output int seen, output int last);
+ function automatic int names(output string q[$], input int n);
+  int start = q.size();
+  for (int i = 0; i < n; i++) q.push_back(i == 0 ? "a" : "b");
+  return start;
+ endfunction
+ string s[$];
+ initial begin
+  s = '{"x", "y", "z", "w"};
+  seen = names(s, 2) * 100;
+  first = s.size();
+  seen += names(s, 3);
+  second = s.size();
+  last = s[2] == "b";
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq first 2)
+ (assert_eq second 3)
+ (assert_eq seen 0)
+ (assert_eq last 1))
+
+(case inout_container_is_copied_in_and_back
+ (source "inout_container_is_copied_in_and_back.sv" #"module Top(output int size, output int total, output int keys);
+ function automatic void extend(inout int q[$], inout int m[int]);
+  q.push_front(q.size());
+  m[q.size()] = q[0];
+ endfunction
+ int q[$];
+ int m[int];
+ initial begin
+  q = '{5, 6};
+  extend(q, m);
+  extend(q, m);
+  size = q.size();
+  total = 0;
+  foreach (q[i]) total = total * 10 + q[i];
+  keys = 0;
+  foreach (m[k]) keys = keys * 100 + k * 10 + m[k];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq size 4)
+ (assert_eq total 3256)
+ (assert_eq keys 3243))
+
+(case task_copies_containers_back_when_it_returns
+ (source "task_copies_containers_back_when_it_returns.sv" #"module Top(output int during, output int after, output int local_size, output int caller);
+ int q[$];
+ int r[$];
+ task automatic work(inout int values[$], output int fresh[$], input int seed[$]);
+  values.push_back(1);
+  fresh.push_back(2);
+  seed.push_back(3);
+  #2;
+  local_size = seed.size();
+ endtask
+ initial begin
+  q = '{9};
+  r = '{8, 8};
+  fork
+   work(q, r, q);
+   begin #1 during = q.size() * 10 + r.size(); end
+  join
+  after = q.size() * 10 + r.size();
+  caller = q[1] * 10 + r[0];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 5)
+ (assert_eq during 12)
+ (assert_eq after 21)
+ (assert_eq local_size 2)
+ (assert_eq caller 12))
+
+(case container_formals_of_class_handles_copy_the_container
+ (source "container_formals_of_class_handles_copy_the_container.sv" #"module Top(output int count, output int value, output int same);
+ class Item;
+  int value;
+  function new(int v); value = v; endfunction
+ endclass
+ function automatic void bump(Item items[$]);
+  Item extra = new(0);
+  foreach (items[i]) items[i].value += 10;
+  items.push_back(extra);
+  items[0] = null;
+ endfunction
+ function automatic void collect(output Item items[$], input Item from[$]);
+  items = from;
+  items.push_back(from[0]);
+ endfunction
+ Item q[$];
+ Item c[$];
+ Item first;
+ Item second;
+ initial begin
+  first = new(1);
+  second = new(2);
+  q.push_back(first);
+  q.push_back(second);
+  bump(q);
+  collect(c, q);
+  count = q.size() * 10 + c.size();
+  value = q[0].value * 100 + q[1].value;
+  same = (c[2] == q[0]) + (c[0] == q[0]);
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq count 23)
+ (assert_eq value 1112)
+ (assert_eq same 2))
+
+(case container_formals_of_class_methods
+ (source "container_formals_of_class_methods.sv" #"module Top(output int base_count, output int derived_count, output int names, output int stored);
+ typedef string names_t[$];
+ class Base;
+  int kept[$];
+  virtual function int count(int q[$]);
+   q.push_back(0);
+   return q.size();
+  endfunction
+  function void list(output names_t out);
+   out.push_back("base");
+  endfunction
+  function void keep(int q[$]);
+   kept = q;
+   q.delete();
+  endfunction
+ endclass
+ class Derived extends Base;
+  virtual function int count(int q[$]);
+   q.delete();
+   return 100 + q.size();
+  endfunction
+ endclass
+ Base b;
+ Derived d;
+ Base as_base;
+ int q[$];
+ names_t n;
+ initial begin
+  b = new;
+  d = new;
+  as_base = d;
+  q = '{1, 2};
+  base_count = b.count(q) * 10 + q.size();
+  derived_count = as_base.count(q) * 10 + q.size();
+  b.list(n);
+  d.list(n);
+  names = n.size();
+  b.keep(q);
+  stored = b.kept.size() * 10 + q.size();
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq base_count 32)
+ (assert_eq derived_count 1002)
+ (assert_eq names 1)
+ (assert_eq stored 22))
+
+(case static_subroutine_container_formals
+ (source "static_subroutine_container_formals.sv" #"module Top(output int first, output int second, output int caller);
+ function static int count(int q[$]);
+  q.push_back(1);
+  return q.size();
+ endfunction
+ function static void fill(output int q[$], input int n);
+  q = {};
+  repeat (n) q.push_back(n);
+ endfunction
+ int q[$];
+ initial begin
+  q = '{4};
+  first = count(q);
+  second = count(q);
+  fill(q, 3);
+  caller = q.size() * 10 + q[0];
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq first 2)
+ (assert_eq second 2)
+ (assert_eq caller 33))
+
+(case container_formals_forwarded_and_read_from_properties
+ (source "container_formals_forwarded_and_read_from_properties.sv" #"module Top(output int listed, output int forwarded, output int copied, output int read);
+ class Store;
+  int values[$];
+ endclass
+ function automatic void list(output string q[$], input int n);
+  repeat (n) q.push_back("n");
+ endfunction
+ function automatic void grow(inout int q[$]);
+  q.push_back(q.size());
+ endfunction
+ function automatic void relay(output string q[$], inout int v[$]);
+  list(q, 2);
+  grow(v);
+ endfunction
+ function automatic void through(ref int v[$], output int copy[$]);
+  grow(v);
+  copy = v;
+ endfunction
+ function automatic int total(int q[$]);
+  int sum = q.size() * 100;
+  q.push_back(1000);
+  foreach (q[i]) sum += q[i];
+  return sum;
+ endfunction
+ Store s;
+ string n[$];
+ int v[$];
+ int q[$];
+ int c[$];
+ int m[string][$];
+ initial begin
+  s = new;
+  n = '{"old"};
+  list(n, 3);
+  listed = n.size();
+  relay(n, v);
+  relay(n, v);
+  forwarded = n.size() * 10 + v.size();
+  q = '{4};
+  through(q, c);
+  copied = q.size() * 10 + c.size();
+  s.values = '{1, 2};
+  m["a"] = '{5};
+  read = total(s.values) * 10000 + total(m["a"]) * 10 + s.values.size() + m["a"].size();
+ end
+endmodule"#)
+ (top Top)
+ (run_until 1)
+ (assert_eq listed 3)
+ (assert_eq forwarded 22)
+ (assert_eq copied 22)
+ (assert_eq read 12041053))

@@ -1257,8 +1257,8 @@ chapter-6/6.9.2--vector_vectored_inv.sv	2state	pass
 chapter-6/6.9.2--vector_vectored_inv.sv	4state	pass
 chapter-7/arrays/associative/alloc.sv	2state	pass
 chapter-7/arrays/associative/alloc.sv	4state	pass
-chapter-7/arrays/associative/arguments.sv	2state	fail
-chapter-7/arrays/associative/arguments.sv	4state	fail
+chapter-7/arrays/associative/arguments.sv	2state	pass
+chapter-7/arrays/associative/arguments.sv	4state	pass
 chapter-7/arrays/associative/assignment.sv	2state	pass
 chapter-7/arrays/associative/assignment.sv	4state	pass
 chapter-7/arrays/associative/class.sv	2state	pass

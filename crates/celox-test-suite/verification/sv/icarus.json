@@ -4,6 +4,7 @@
     "icarus/always_comb.json",
     "icarus/class.json",
     "icarus/concurrent_assertions.json",
+    "icarus/container_formals.json",
     "icarus/containers.json",
     "icarus/fork.json",
     "icarus/fork_control.json",

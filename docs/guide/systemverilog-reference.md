@@ -472,6 +472,20 @@ elements: `m[a][b] = v` updates the inner container of `m[a]`, which reads as
 empty when absent, and methods apply to an element (`m[a].exists(b)`).
 `foreach` iterates one dimension at a time.
 
+A dynamic array, queue or associative array formal of any direction holds a
+copy unless it is a [reference](#reference-arguments) (IEEE 1800-2023 13.5.1).
+An `input` receives a container value as an assignment does: a compatible
+container (a dynamic array for a queue formal and the reverse), an assignment
+pattern, `{}` or `new[n]`, also as a default; changes in the body stay its own.
+An `output` starts empty and an `inout` from a copy of the actual; both are
+copied to the actual when the subroutine returns, also after a task waits.
+Formals may be declared with a typedef of a container type and may be in
+class methods, virtual ones included. The actual of an `output` or `inout`
+container formal must be a container variable of a compatible type, whose queue
+bound, if any, is the formal's. Function results of container type, class
+properties and container elements as `output` or `inout` actuals, and actuals
+whose element types differ remain unsupported.
+
 The empty parentheses on zero-argument container methods are optional:
 `a.size`, `q.pop_front`, `map.num` and `map.delete` have the same behavior as
 their parenthesized forms. A bare `delete` clears the container. Queue pop
@@ -534,7 +548,7 @@ require a one-dimensional array variable or dynamic-container class property;
 Multidimensional containers, elements wider than 64 bits, real elements,
 wildcard or class keys, slices, array locator methods, keyed patterns,
 container operands within concatenations, compound or nonblocking element
-assignments, container ports / subroutine parameters and
+assignments, container ports and
 const containers remain unsupported. A `new[]` initializer currently requires
 another compatible dynamic array or queue; fixed-size arrays are unsupported.
 Static local initializers retain the existing constant-initializer restriction.

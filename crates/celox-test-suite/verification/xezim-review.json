@@ -814,6 +814,14 @@
     "sv_pattern_handles_and_literals": {
       "title": "%p prints null class handles in a queue as 0 and a string literal as a number",
       "standard": "IEEE 1800-2023 21.2.1.6"
+    },
+    "sv_container_typedef_output": {
+      "title": "an output formal of a container typedef declared in an instantiated module is not copied back",
+      "standard": "IEEE 1800-2023 13.5.1"
+    },
+    "sv_container_element_input": {
+      "title": "an element of an associative array of queues passed to an input queue formal is a one-element queue and truncates the element",
+      "standard": "IEEE 1800-2023 13.5.1"
     }
   },
   "cases": [
@@ -4727,6 +4735,22 @@
       "classification": "xezim_bug",
       "bug": "sv_pattern_handles_and_literals",
       "note": "xezim 0.11.3 prints '{0, 0} for a queue of two null class handles 7104884 for the string literal \"lit\", and the packed bytes of a string-valued conditional (7566450 for \"str\"); 21.2.1.6 prints a null handle as null and a string literal in quotes. It also prints the bit [7:0] elements of an associative array as 'h41 and 'h0, where unformatted $display prints decimal. See verification/sv/limitations/pattern-format.json."
+    },
+    {
+      "suite": "sv",
+      "name": "container_formals::container_formals_of_class_methods",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_typedef_output",
+      "note": "b.list(n) and d.list(n) with `output names_t out`, names_t a typedef of string[$] in the instantiated suite module, leave n empty (names = 0, expected 1). Reproduced by verification/repros/sv_xezim_container_typedef_output.sv, which prints \"method 0 function 0\" under -s top and \"method 1 function 1\" with Top as the root or with `output string out[$]` formals."
+    },
+    {
+      "suite": "sv",
+      "name": "container_formals::container_formals_forwarded_and_read_from_properties",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_element_input",
+      "note": "total(m[\"a\"]) with m[\"a\"] = '{5} returns 105 instead of 1105: the input formal starts as one element 0 and its push_back is lost, and the call truncates m[\"a\"] (read = 0xb7944d, expected 0xb7bb5d). Reproduced by verification/repros/sv_xezim_container_element_input.sv."
     }
   ]
 }

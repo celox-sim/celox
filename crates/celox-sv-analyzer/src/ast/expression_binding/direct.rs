@@ -314,6 +314,49 @@ enum Job {
     Finish(Finish, usize, Option<Rc<PackedDimensions>>),
 }
 
+/// Whether the call copies actual `position` of `name` into its formal and
+/// never back: an input, not a reference (IEEE 1800-2023 13.5.1).
+fn copied_in(dimensions: &PackedDimensions, name: &str, position: usize) -> bool {
+    dimensions
+        .subroutine_directions
+        .get(name)
+        .and_then(|directions| directions.get(position))
+        .is_some_and(|direction| *direction == crate::procedural::ParamDirection::Input)
+}
+
+/// Check the actual of an output or inout container formal, which the call
+/// copies back as a handle.
+fn check_written_container(
+    name: &str,
+    position: usize,
+    actual: ExprId,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    use crate::procedural::ParamDirection;
+    let direction = dimensions
+        .subroutine_directions
+        .get(name)
+        .and_then(|directions| directions.get(position))
+        .copied();
+    if let Some(direction @ (ParamDirection::Output | ParamDirection::Inout)) = direction
+        && let Some(container) = dimensions
+            .subroutine_param_shapes
+            .get(name)
+            .and_then(|shapes| shapes.get(position))
+            .and_then(|shape| shape.container.as_deref())
+    {
+        containers::check_written_actual(
+            actual,
+            tree,
+            dimensions,
+            container,
+            direction == ParamDirection::Inout,
+        )?;
+    }
+    Ok(())
+}
+
 pub(in crate::ast) fn bind_value(
     root: ExprId,
     native: &Declarations,
@@ -372,6 +415,23 @@ pub(in crate::ast) fn bind_value(
                             "assignment to a tagged union requires the same union type or a tagged expression",
                         ));
                     }
+                }
+                // A container formal passed by value receives a copy of a
+                // container value, as an assignment does (13.5.1, 7.6).
+                if let Some(container) = target
+                    .as_deref()
+                    .filter(|shape| shape.unpacked.is_empty())
+                    .and_then(|shape| shape.container.as_deref())
+                {
+                    if containers::dynamic_array_new(id, native).is_some() {
+                        return Err(AnalyzerError::Parse(
+                            "`new[]` is not an argument; it only initializes or is assigned \
+                             to a dynamic array (IEEE 1800-2023 7.5.1)"
+                                .into(),
+                        ));
+                    }
+                    values.push(containers::assignment(id, tree, dimensions, container)?);
+                    continue;
                 }
                 let enum_method = match &native.expression(id).kind {
                     ExprKind::Call {
@@ -646,9 +706,20 @@ pub(in crate::ast) fn bind_value(
                                 tree,
                                 dimensions,
                             )?;
+                            check_written_container(
+                                &name,
+                                first + position,
+                                value,
+                                tree,
+                                dimensions,
+                            )?;
                             let shape = shapes
                                 .and_then(|shapes| shapes.get(first + position))
-                                .filter(|shape| shape.unpacked_struct.is_some())
+                                .filter(|shape| {
+                                    shape.unpacked_struct.is_some()
+                                        || shape.container.is_some()
+                                            && copied_in(dimensions, &name, first + position)
+                                })
                                 .cloned()
                                 .map(Rc::new);
                             children.push((value, shape));
@@ -916,6 +987,9 @@ pub(in crate::ast) fn bind_value(
                                     references::check_actual(
                                         &name, position, *id, native, tree, dimensions,
                                     )?;
+                                    check_written_container(
+                                        &name, position, *id, tree, dimensions,
+                                    )?;
                                 }
                                 if let Some(id) = id
                                     && let Some(shape) = dimensions
@@ -952,6 +1026,10 @@ pub(in crate::ast) fn bind_value(
                                                 .subroutine_param_shapes
                                                 .get(&name)
                                                 .and_then(|shapes| shapes.get(position))
+                                                .filter(|shape| {
+                                                    shape.container.is_none()
+                                                        || copied_in(dimensions, &name, position)
+                                                })
                                                 .cloned()
                                                 .map(Rc::new),
                                         )
