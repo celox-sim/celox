@@ -985,7 +985,10 @@ assignment and comparison work as for class handles:
 - `@e`, `@(e)` and `@(e1 or e2)` wait for a trigger; `e` may be any
   expression of type `event`, such as `obj.e` or `m[key].e`.
 - `e.triggered` is 1 from a trigger until time advances, and
-  `wait (e.triggered)` returns at once in that time step (15.5.3).
+  `wait (e.triggered)` returns at once in that time step (15.5.3). When `e`
+  is a variable of the design, the wait also checks again after `e` is
+  assigned another event; on a local, an argument or a class property it waits
+  for the event `e` named when it started.
 - `e1 = e2` merges the events: later triggers and waits through either
   variable use one object. A process already waiting for `e1` waits for the
   old object (15.5.5.1). After `e = null`, `-> e` does nothing and

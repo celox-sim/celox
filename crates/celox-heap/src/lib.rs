@@ -79,6 +79,9 @@ pub struct Heap {
     objects: HashMap<Handle, objects::Object>,
     /// The handle the next object gets.
     next_object: Handle,
+    /// Whether a named event got a handle, which variables hold as a value.
+    #[serde(default)]
+    events: bool,
     containers: HashMap<Handle, Arc<containers::Container>>,
     container_lookup: HashMap<Arc<containers::Container>, Handle>,
     /// Structure records by their contents, see [`ops::OBJECT_FINISH_RECORD`].
@@ -113,6 +116,7 @@ impl Heap {
             free_buffers: Vec::new(),
             objects: HashMap::default(),
             next_object: NULL + 1,
+            events: false,
             containers: HashMap::default(),
             container_lookup: HashMap::default(),
             record_lookup: HashMap::default(),
@@ -171,6 +175,7 @@ impl Heap {
             && self.pinned == other.pinned
             && self.objects == other.objects
             && self.next_object == other.next_object
+            && self.events == other.events
             && self.containers == other.containers
     }
 

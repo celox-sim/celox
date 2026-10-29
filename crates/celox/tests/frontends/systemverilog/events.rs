@@ -323,6 +323,25 @@ endmodule
         assert_eq!(sim.get(r), BigUint::from(10u8));
         assert_eq!(sim.get(q), BigUint::from(1u8));
     }
+
+    /// 9.4.3: `wait (e.triggered)` checks its condition again when `e`
+    /// names another event, here one triggered in the same time step.
+    fn events_triggered_wait_follows_its_variable(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+module Top(output int q);
+    event a, b, e;
+    initial e = a;
+    initial begin #0 wait (e.triggered); q = 1; end
+    initial begin #1 -> b; e = b; end
+endmodule
+"#;
+        }
+        @build simulation(source).four_state(true);
+        sim.run_until(2).unwrap();
+        let q = sim.signal("q");
+        assert_eq!(sim.get(q), BigUint::from(1u8));
+    }
 }
 
 /// Forms of named events that Celox does not implement are rejected.
@@ -399,6 +418,49 @@ endmodule
         sim.save_state(),
         Err(celox::StateError::Objects(_))
     ));
+    sim.run_until(3).unwrap();
+    assert_eq!(sim.get(sim.signal("q")), BigUint::from(1u8));
+    sim.save_state().unwrap();
+}
+
+/// A state file keeps the events it saves apart from those a loaded
+/// simulation creates later.
+#[test]
+fn state_files_keep_loaded_events_distinct() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int q);
+    event saved;
+    task automatic make(); event e; saved = e; endtask
+    // Without the saved heap state, `e` would get the handle of `saved`.
+    task automatic fire(); event e; -> e; endtask
+    initial begin
+        #1 make();
+        #2 fork begin @saved; q = q + 1; end join_none
+        #1 fire();
+    end
+endmodule
+"#;
+    let mut sim = simulation(source).build().unwrap();
+    sim.run_until(2).unwrap();
+    let file = sim.save_state().unwrap();
+    let mut loaded = simulation(source).build().unwrap();
+    loaded.load_state(&file).unwrap();
+    loaded.run_until(10).unwrap();
+    assert_eq!(loaded.get(loaded.signal("q")), BigUint::from(0u8));
+}
+
+/// A completed `wait (e.triggered)` leaves nothing that keeps a later save
+/// from succeeding.
+#[test]
+fn state_files_save_after_a_completed_triggered_wait() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int q);
+    event e;
+    initial begin wait (e.triggered); q = 1; #10; q = 2; end
+    initial #1 -> e;
+endmodule
+"#;
+    let mut sim = simulation(source).build().unwrap();
     sim.run_until(3).unwrap();
     assert_eq!(sim.get(sim.signal("q")), BigUint::from(1u8));
     sim.save_state().unwrap();

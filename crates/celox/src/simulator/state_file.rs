@@ -259,6 +259,7 @@ impl StateSchema {
             objects,
             schedule: None,
             strings,
+            next_object: heap.event_watermark().map(u64::from),
         })
     }
 
@@ -318,6 +319,12 @@ impl StateSchema {
         }
         if !mismatch.is_empty() {
             return Err(mismatch);
+        }
+        // Later named events must not get the handles of loaded ones.
+        if let Some(next) = file.next_object {
+            backend.heap_mut().reserve_objects(
+                celox_heap::Handle::try_from(next).unwrap_or(celox_heap::Handle::MAX),
+            );
         }
         for (named, object) in seeds.into_iter().chain(writes) {
             let signal = named.signal;
@@ -557,10 +564,12 @@ impl<B: SimBackend> Simulator<B> {
                 .events
                 .values()
                 .any(|event| event.triggered == Some(parts.time))
-            || state
-                .activations
-                .iter()
-                .any(|activation| activation.live && !activation.control.events.is_empty())
+            || state.activations.iter().any(|activation| {
+                let control = &activation.control;
+                activation.live
+                    && (!control.events.is_empty()
+                        || (control.level_wait && !control.observed_events.is_empty()))
+            })
         {
             return Err(StateError::Objects("named events".into()));
         }
