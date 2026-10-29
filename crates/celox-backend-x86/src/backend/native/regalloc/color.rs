@@ -612,7 +612,7 @@ fn add_preference(preferences: &mut HashMap<VReg, Vec<VReg>>, left: VReg, right:
 /// x86 two-address affinity for a definition whose operand dies at the same
 /// instruction.  These are preferences only: `choose_color` still requires
 /// the color to satisfy every interference, fixed-register, and clobber rule.
-fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
+pub(super) fn definition_preferences(inst: &MInst) -> [Option<VReg>; 2] {
     match inst {
         MInst::Mov { src, .. }
         | MInst::Mov32 { src, .. }
