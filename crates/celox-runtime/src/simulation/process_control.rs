@@ -161,10 +161,9 @@ impl<B: SimBackend> SimulationState<B> {
             return Err(SimulatorErrorCode::InternalError.into());
         }
         if op == ProcessOp::Observe {
-            self.process_state.activations[current]
-                .control
-                .observes
-                .clear();
+            let control = &mut self.process_state.activations[current].control;
+            control.observes.clear();
+            control.observed_events.clear();
             return Ok(true);
         }
         let final_identity = self.finalizing.and_then(|_| self.final_process_identity());
@@ -435,6 +434,20 @@ impl<B: SimBackend> SimulationState<B> {
             }
             ProcessOp::Triggered => {
                 value = u32::from(triggered(&self.process_state, handles[0]));
+                // A level-wait predicate checks it again at the next trigger.
+                let control = &mut self.process_state.activations[current].control;
+                if request.operation & 0x100 != 0
+                    && handles[0] != 0
+                    && !control.observed_events.contains(&handles[0])
+                {
+                    control.observed_events.push(handles[0]);
+                    self.process_state
+                        .events
+                        .entry(handles[0])
+                        .or_default()
+                        .waiters
+                        .push(current);
+                }
                 false
             }
             ProcessOp::WaitTriggered if triggered(&self.process_state, handles[0]) => false,
@@ -482,7 +495,10 @@ impl<B: SimBackend> SimulationState<B> {
         state.events.retain(|&handle, event| {
             event.waiters.retain(|&process| {
                 activations.get(process).is_some_and(|activation| {
-                    activation.live && activation.control.events.contains(&handle)
+                    activation.live
+                        && (activation.control.events.contains(&handle)
+                            || (activation.control.level_wait
+                                && activation.control.observed_events.contains(&handle)))
                 })
             });
             !event.waiters.is_empty() || event.triggered == Some(now)
@@ -504,13 +520,25 @@ impl<B: SimBackend> SimulationState<B> {
             let Some(activation) = self.process_state.activations.get_mut(process) else {
                 continue;
             };
-            if !activation.live || !activation.control.events.contains(&handle) {
+            if !activation.live {
                 continue;
             }
             // A suspended process misses the trigger: once resumed, it still
             // waits for a later one, as for a signal event (9.7).
-            if activation.control.suspended.is_some() {
+            let blocked = activation.control.events.contains(&handle);
+            let observed = activation.control.level_wait
+                && activation.control.observed_events.contains(&handle);
+            if (blocked || observed) && activation.control.suspended.is_some() {
                 suspended.push(process);
+                continue;
+            }
+            if observed {
+                // The predicate observes the event again when it reruns.
+                activation.control.observed_events.clear();
+                self.wake_controlled(process);
+                continue;
+            }
+            if !blocked {
                 continue;
             }
             // A process waiting for several events stops waiting for all.

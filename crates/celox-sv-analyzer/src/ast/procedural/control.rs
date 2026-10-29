@@ -348,10 +348,21 @@ impl BodyBuilder<'_, '_, '_> {
                             &self.dims,
                         )? {
                             let event = self.native_value(event)?;
-                            output.push(Stmt::Eval(events::call(
-                                celox_design::ProcessOp::WaitTriggered,
-                                vec![event],
-                            )));
+                            // A level wait also checks the condition again when
+                            // a variable of the design names another event.
+                            // Locals and class properties cannot wake a wait, so
+                            // a wait on them keeps the event it started with.
+                            if self.watched_handle(&event) {
+                                output.extend(self.wait_statements(events::call(
+                                    celox_design::ProcessOp::Triggered,
+                                    vec![event],
+                                ))?);
+                            } else {
+                                output.push(Stmt::Eval(events::call(
+                                    celox_design::ProcessOp::WaitTriggered,
+                                    vec![event],
+                                )));
+                            }
                         } else {
                             let condition = self.native_value(*condition)?;
                             if events::reads_triggered(&condition) {

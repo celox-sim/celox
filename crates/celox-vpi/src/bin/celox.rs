@@ -1428,6 +1428,7 @@ mod tests {
             ],
             schedule: None,
             strings: Vec::new(),
+            next_object: None,
         }
     }
 
