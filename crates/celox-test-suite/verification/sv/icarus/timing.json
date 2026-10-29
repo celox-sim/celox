@@ -1608,6 +1608,29 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus 13.0 rejects an explicit static local in an automatic task (\"Overriding the default variable lifetime is not yet supported.\"), a class declared in a module, and the package-scoped call tick_pkg::tick(b), with syntax errors. IEEE 1800-2023 6.21 and 13.3.1 permit the declaration and share it between all calls, 8.6 makes class methods automatic, and 26.3 permits the package-scoped reference. Verilator 5.052, xezim 0.11.3 and Celox run the adapter-free source with the expected sums.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_static_task_declared_locals_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_explicit_static_task_local",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects an explicit static local in an automatic task (\"Overriding the default variable lifetime is not yet supported.\"), a class declared in a module, and the package-scoped call tick_pkg::tick(b), with syntax errors. IEEE 1800-2023 6.21 and 13.3.1 permit the declaration and share it between all calls, 8.6 makes class methods automatic, and 26.3 permits the package-scoped reference. Verilator 5.052, xezim 0.11.3 and Celox run the adapter-free source with the expected sums.",
+        "upstream": []
+      },
+      "name": "timing::timed_task_declared_static_locals_are_shared",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::timed_task_four_state_storage_survives_suspension",

@@ -6097,18 +6097,23 @@ fn timed_task_calls_require_a_suspendable_context() {
 }
 
 #[test]
-fn timed_tasks_reject_static_locals_instead_of_reinitializing_them() {
+fn timed_tasks_keep_static_locals_as_module_variables() {
+    // Overlapping calls share the locals (IEEE 1800-2023 6.21, 13.3.1), so
+    // no declaration reinitializes them on entry.
     for declaration in [
         "task t; int saved = 1; #1; saved = 2; endtask",
         "task automatic t; static int saved = 1; #1; saved = 2; endtask",
     ] {
         let source = format!("module Top; {declaration} initial t(); endmodule");
-        let error = analyze_source(&source, Path::new("timed_static.sv"))
-            .expect_err("static local storage across timed calls is not lowered yet");
-        assert!(
-            error.to_string().contains("static local in a timed task"),
-            "{error}"
-        );
+        let ir = analyze_source(&source, Path::new("timed_static.sv")).unwrap();
+        let module = &ir.modules()[0];
+        let task = &module.subroutines()[0];
+        assert_eq!(task.persistent_locals.len(), 1, "{declaration}");
+        let mut declared = false;
+        for stmt in &task.body {
+            stmt.walk(&mut |stmt| declared |= matches!(stmt, ir::Stmt::Local { .. }));
+        }
+        assert!(!declared, "{declaration}");
     }
 }
 

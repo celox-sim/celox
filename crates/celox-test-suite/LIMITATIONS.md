@@ -386,6 +386,16 @@ record these differences. Icarus also rejects explicit static locals in automati
 functions and output function arguments. Only the affected tool/case pairs are
 excluded; their original assertions remain available through `--include-ignored`.
 
+Static task locals are shared by every call, also calls that overlap in time
+(IEEE 1800-2023 6.21, 13.3.1). Icarus 13.0 rejects the explicit static locals
+of automatic tasks, as it does in functions, together with the class and the
+package-scoped call of the same case (`sv_icarus_explicit_static_task_local`, see
+the [observations](verification/repros/sv_static_task_declared_locals_icarus.json)).
+xezim 0.11.3 gives each call its own copy of an implicitly static local of a
+static task while an explicit `static` one is shared
+(`sv_static_task_implicit_local` in the xezim review, see the
+[probe](verification/repros/sv_static_task_implicit_local_xezim.json)).
+
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
 seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
