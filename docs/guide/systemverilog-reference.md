@@ -348,7 +348,13 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real`, arrays or wider than 64 bits, bit and part selects and packed structure members of a property (also of a member of a property of unpacked structure type), properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
 - Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
-  named events and `->`, `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
+  `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
+- Named events beyond those [listed](#named-events): arrays of events, event ports,
+  event members of unpacked structures, functions returning an event, triggers
+  in `always_comb` / `always_latch`, `->>` with a
+  delay or event control, event controls that list an event with signal changes or
+  edges (`@(e or posedge clk)`), `triggered` in a `wait` condition with other
+  operands or read by a function that the condition calls, and `wait_order`.
 - Timing controls in processes: impure function calls in event expressions,
   `wait` or event expressions reading a static task argument, and `wait`
   conditions or event expressions reading a class property (directly, through
@@ -964,6 +970,34 @@ unsupported, including when the inference option is enabled.
   condition as the writes left it.
   A plain `always @(posedge clk iff en)` runs as a process; `always_ff`
   rejects `iff` ([#452](https://github.com/celox-sim/celox/issues/452)).
+
+### Named events {#named-events}
+
+An `event` is a handle of a synchronization object (IEEE 1800-2023 15.5).
+Each declaration of an event without an initializer creates one: module and
+local variables, static class properties, and the event properties of each
+object. Events may be task and function arguments and class properties, and
+assignment and comparison work as for class handles:
+
+- `-> e` unblocks the processes already waiting for `e`, and only those
+  (15.5.1, 15.5.2). `->> e` triggers it in the NBA region, after the
+  nonblocking assignments issued before it.
+- `@e`, `@(e)` and `@(e1 or e2)` wait for a trigger; `e` may be any
+  expression of type `event`, such as `obj.e` or `m[key].e`.
+- `e.triggered` is 1 from a trigger until time advances, and
+  `wait (e.triggered)` returns at once in that time step (15.5.3).
+- `e1 = e2` merges the events: later triggers and waits through either
+  variable use one object. A process already waiting for `e1` waits for the
+  old object (15.5.5.1). After `e = null`, `-> e` does nothing and
+  `e.triggered` is 0; a wait for a null event blocks forever (15.5.5.2).
+- Events compare with `==`, `!=`, `===`, `!==` and `null`, and an event is
+  true when it is not null (15.5.5.3).
+
+A wildcard `always` or an `always_ff` that triggers an event, also through a
+function, runs as a process. Event waits and triggers use the scheduler only in
+the processes that use them; other processes are compiled as before. Named events are not saved in
+state files: saving is refused while a process waits for an event or a trigger
+of the current time step is still visible to `triggered`.
 
 ### Variable lifetimes
 

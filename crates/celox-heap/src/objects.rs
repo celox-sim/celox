@@ -109,6 +109,15 @@ impl Heap {
         }
     }
 
+    /// A new named event: a handle no object or container ever gets.
+    pub fn new_event(&mut self) -> Handle {
+        let handle = self.next_object;
+        self.next_object = handle
+            .checked_add(1)
+            .expect("the heap created more objects than handles can name");
+        handle
+    }
+
     /// A new object of `class` with `size` zeroed bytes.
     pub fn new_object(&mut self, class: u32, size: usize) -> Handle {
         let handle = self.next_object;

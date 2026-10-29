@@ -95,19 +95,20 @@ pub(super) fn effects<'a>(
     };
     for statement in body {
         statement.walk_without_detached_children(&mut |statement| {
-            invalid |= matches!(
-                statement,
-                Stmt::Delay { .. }
-                    | Stmt::WaitEvent(_)
-                    | Stmt::WaitImplicit(_)
-                    | Stmt::Wait(_)
-                    | Stmt::AssertionRegion { .. }
-                    | Stmt::WaitFork
-                    | Stmt::Fork {
-                        join: celox_design::ForkJoin::All | celox_design::ForkJoin::Any,
-                        ..
-                    }
-            );
+            invalid |= events::blocks(statement)
+                || matches!(
+                    statement,
+                    Stmt::Delay { .. }
+                        | Stmt::WaitEvent(_)
+                        | Stmt::WaitImplicit(_)
+                        | Stmt::Wait(_)
+                        | Stmt::AssertionRegion { .. }
+                        | Stmt::WaitFork
+                        | Stmt::Fork {
+                            join: celox_design::ForkJoin::All | celox_design::ForkJoin::Any,
+                            ..
+                        }
+                );
             schedules_events |= matches!(
                 statement,
                 Stmt::Fork {

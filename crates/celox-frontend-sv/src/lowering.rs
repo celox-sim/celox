@@ -7628,6 +7628,7 @@ fn signal_type_from_sv(
                 | sv::ir::TypeKind::String
                 | sv::ir::TypeKind::Object
                 | sv::ir::TypeKind::Process
+                | sv::ir::TypeKind::Event
         );
     let packed_ranges = typ
         .packed_ranges()
@@ -7653,9 +7654,10 @@ fn signal_type_from_sv(
         sv::ir::TypeKind::Logic | sv::ir::TypeKind::Reg | sv::ir::TypeKind::Implicit => {
             PortTypeKind::Logic
         }
-        sv::ir::TypeKind::String | sv::ir::TypeKind::Object | sv::ir::TypeKind::Process => {
-            PortTypeKind::Other
-        }
+        sv::ir::TypeKind::String
+        | sv::ir::TypeKind::Object
+        | sv::ir::TypeKind::Process
+        | sv::ir::TypeKind::Event => PortTypeKind::Other,
     };
     let value_kind = match typ.kind() {
         sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,

@@ -1301,11 +1301,31 @@ impl Parser<'_> {
                                 self.statement_node(header, StatementKind::ProceduralAssign(id))?,
                             );
                         }
-                        "disable" | "->" | "->>" | "force" | "release" | "deassign" | "##" => {
+                        "->" | "->>" => {
+                            // event_trigger (IEEE 1800-2023 A.6.5)
+                            self.at += 1;
+                            let nonblocking = word == "->>";
+                            let control = if nonblocking && matches!(self.peek(), "#" | "@" | "@*")
+                            {
+                                Some(self.typed_timing_control()?)
+                            } else {
+                                None
+                            };
+                            let target = self.expression(0)?;
+                            self.expect(";")?;
+                            values.push(self.statement_node(
+                                header,
+                                StatementKind::EventTrigger {
+                                    nonblocking,
+                                    control,
+                                    target,
+                                },
+                            )?);
+                        }
+                        "disable" | "force" | "release" | "deassign" | "##" => {
                             let tokens = self.semicolon_range()?;
                             let kind = match word.as_str() {
                                 "disable" => StatementKind::Disable(tokens),
-                                "->" | "->>" => StatementKind::EventTrigger(tokens),
                                 "##" => StatementKind::Unconverted {
                                     category: "clocking drive".into(),
                                     tokens,

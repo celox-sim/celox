@@ -76,6 +76,7 @@ impl<B: SimBackend> SimulationState<B> {
             || !pending.ready.is_empty()
             || !pending.inactive.is_empty()
             || !pending.nba_queue.is_empty()
+            || !pending.nba_events.is_empty()
             // A derived clock changes with the slots of its sources, which
             // the scheduler does not tell apart.
             || self.observed_events & scheduler.derived_events != 0

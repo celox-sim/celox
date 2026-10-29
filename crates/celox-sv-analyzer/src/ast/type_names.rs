@@ -397,10 +397,12 @@ fn element_name(
     env: &HashMap<String, i128>,
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
-    if let Some(class) = r#type.class() {
+    // An event is a handle of a built-in class that has no class name.
+    if let Some(class) = r#type.class().filter(|_| r#type.kind != TypeKind::Event) {
         return class_name(class, tree, env);
     }
     match r#type.kind {
+        TypeKind::Event => return Ok("event".to_owned()),
         TypeKind::Real => return Ok("real".to_owned()),
         TypeKind::Shortreal => return Ok("shortreal".to_owned()),
         TypeKind::String => return Ok("string".to_owned()),

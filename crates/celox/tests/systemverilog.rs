@@ -265,6 +265,9 @@ mod virtual_interfaces;
 #[path = "frontends/systemverilog/container_formals.rs"]
 mod container_formals;
 
+#[path = "frontends/systemverilog/events.rs"]
+mod events;
+
 #[path = "frontends/systemverilog/containers.rs"]
 mod containers;
 

@@ -5,6 +5,7 @@
     "verilator/class.json",
     "verilator/concurrent_assertions.json",
     "verilator/container_formals.json",
+    "verilator/events.json",
     "verilator/fork.json",
     "verilator/fork_control.json",
     "verilator/fork_deferred.json",

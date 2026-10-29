@@ -49,6 +49,9 @@ pub(super) fn ports_from_scope(
         if ty.container.is_some() {
             return Err(unsupported("dynamic container port"));
         }
+        if ty.kind() == TypeKind::Event {
+            return Err(unsupported("event port"));
+        }
         let default = native
             .default
             .map(|value| {
