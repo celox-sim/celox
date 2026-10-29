@@ -341,6 +341,37 @@ sv_backends! {
         let value = sim.signal("value");
         assert_eq!(sim.get(value), BigUint::from(1231u16));
     }
+    fn structure_members_of_class_typedefs(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                class Base;
+                    typedef enum { NEVER, STARTED, FINISHED } rs_e;
+                endclass
+                class C extends Base;
+                    typedef bit [3:0] nibble_t;
+                    typedef struct { rs_e state; nibble_t n; bit ret_val; } st_t;
+                    st_t m[string];
+                    function int f();
+                        st_t s;
+                        s.state = rs_e'(2);
+                        s.n = 4'h9;
+                        s.ret_val = 1;
+                        m["a"] = s;
+                        return m["a"].state * 100 + m["a"].n * 10 + m["a"].ret_val;
+                    endfunction
+                endclass
+                initial begin
+                    C c;
+                    c = new;
+                    value = c.f();
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(291u16));
+    }
     fn structure_defaults_descend_to_members_of_their_type(sim) {
         @setup {
             let source = r#"module Top(output int value);
