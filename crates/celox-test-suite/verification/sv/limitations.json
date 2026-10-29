@@ -2100,7 +2100,8 @@
         "class::parameter_defaults_bind_where_the_class_is_declared",
         "class::specialization_keys_follow_the_bound_parameters",
         "class::derived_classes_keep_their_declaration_scopes",
-        "property_selects::property_selects_of_parameterized_classes"
+        "property_selects::property_selects_of_parameterized_classes",
+        "wide_container_elements::wide_elements_of_parameterized_classes"
       ]
     }
   },
@@ -3133,6 +3134,40 @@
     }
   },
   {
+    "id": "sv_verilator_queue_argument_extension",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 zero-extends a signed value passed to push_back or insert of a queue whose elements are wider than the value: push_back of an int of -1 into a bit [199:0] or bit [47:0] queue stores 'hffff_ffff zero-extended instead of all ones. IEEE 1800-2023 7.10.2 and 13.5.1 copy the item argument as by assignment, which extends a signed value by its sign (10.7); Verilator sign-extends the same value assigned to an element or a variable, and the standalone source reproduces the difference. xezim 0.11.3 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_verilator_queue_argument_extension.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "wide_container_elements::wide_elements_extend_by_the_value_signedness"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_container_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 returns 0 for $dimensions of a queue or a dynamic array. IEEE 1800-2023 20.7 counts the unpacked dimension of the container and the packed dimensions of its element type, so int q[$] and logic [7:0] d[] both have 2; the standalone source reproduces the 0. Verilator 5.052 and xezim 0.11.3 return 2.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_icarus_container_dimensions.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "wide_container_elements::wide_elements_extend_by_the_value_signedness"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_empty_concatenation_argument",
     "category": "simulator_compile_limitation",
     "phase": "compile",
@@ -3197,7 +3232,9 @@
     ],
     "cases": {
       "icarus": [
-        "string_format::pattern_format_keys_and_handles"
+        "string_format::pattern_format_keys_and_handles",
+        "wide_container_elements::wide_elements_default_to_x",
+        "wide_container_elements::wide_elements_keep_every_bit"
       ]
     }
   },
