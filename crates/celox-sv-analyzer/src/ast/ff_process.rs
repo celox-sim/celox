@@ -69,7 +69,9 @@ fn ff_process_from_procedure(
     if always_kind(procedure, syntax_tree.declarations())? != AlwaysKind::Ff {
         return Ok(None);
     }
-    let Some((events, body)) = ff_event_control_and_body(procedure.body, syntax_tree)? else {
+    let Some((events, body)) =
+        ff_event_control_and_body(procedure.body, syntax_tree, packed_dimensions)?
+    else {
         if procedure.kind == celox_sv_syntax::ProcedureKind::AlwaysFf {
             return Err(unsupported("always_ff event expression"));
         }
@@ -107,17 +109,20 @@ fn ff_process_from_procedure(
 pub(super) fn always_falls_back_to_process(
     procedure: &celox_sv_syntax::Procedure,
     tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
 ) -> Result<bool, AnalyzerError> {
     Ok(procedure.kind == celox_sv_syntax::ProcedureKind::Always
         && always_kind(procedure, tree.declarations())? == AlwaysKind::Ff
-        && ff_event_control_and_body(procedure.body, tree)?.is_none())
+        && ff_event_control_and_body(procedure.body, tree, dimensions)?.is_none())
 }
 
 /// The events of a flip-flop shaped event control and the body it controls,
-/// or `None` when an event is not an edge of a variable.
+/// or `None` when an event is not an edge of a variable, such as a member
+/// read through a virtual interface.
 fn ff_event_control_and_body(
     root: celox_sv_syntax::StatementId,
     tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
 ) -> Result<Option<(Vec<FfEvent>, celox_sv_syntax::StatementId)>, AnalyzerError> {
     use celox_sv_syntax::{EventControl, StatementKind, TimingControlKind, TimingEdge};
     let native = tree.declarations();
@@ -138,6 +143,9 @@ fn ff_event_control_and_body(
             TimingEdge::Neg => FfEdge::Neg,
             _ => return Ok(None),
         };
+        if virtual_interfaces::native_member(tree, item.expression, native, dimensions).is_some() {
+            return Ok(None);
+        }
         let expression =
             expression_binding::value(item.expression, native, tree, &PackedDimensions::default())?;
         let Some(signal) = expr_ident_name(&expression) else {

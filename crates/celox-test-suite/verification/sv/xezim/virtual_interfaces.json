@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Hierarchy",
+      "detail": "virtual_interfaces::always_on_member_edges at 805:3: expect_output: expected [50, 32, 51, 10], got [48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::always_on_member_edges",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
       "detail": "virtual_interfaces::class_call_arguments_and_package_results at 403:3: expect_output: expected [49, 50, 32, 50, 50, 32, 49, 32, 49, 10], got [49, 50, 32, 50, 50, 32, 49, 32, 48, 10]",
       "expectation": "Simulation",
       "name": "virtual_interfaces::class_call_arguments_and_package_results",
@@ -16,6 +27,28 @@
       "detail": "virtual_interfaces::function_results at 158:3: expect_output: expected [54, 54, 32, 49, 32, 48, 10], got [54, 54, 32, 48, 32, 48, 10]",
       "expectation": "Simulation",
       "name": "virtual_interfaces::function_results",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "virtual_interfaces::member_pulses_within_one_activation at 784:3: expect_output: expected [112, 117, 108, 115, 101, 32, 50, 10], got []",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::member_pulses_within_one_activation",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "virtual_interfaces::mixed_event_controls at 755:3: expect_output: expected [112, 117, 108, 115, 101, 32, 49, 10, 105, 102, 102, 32, 50, 10, 114, 101, 97, 108, 32, 51, 10, 111, 117, 116, 32, 53, 32, 97, 97, 10], got [114, 101, 97, 108, 32, 51, 10, 111, 117, 116, 32, 53, 32, 97, 97, 10]",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::mixed_event_controls",
       "phase": "execute",
       "status": "mismatch",
       "stronger_than_sv": false,
@@ -128,6 +161,28 @@
       "name": "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
       "phase": "execute",
       "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "virtual_interfaces::retargets_with_ordinary_events at 841:3: expect_output: expected [112, 117, 108, 115, 101, 32, 50, 10, 114, 101, 116, 97, 114, 103, 101, 116, 32, 51, 10], got [112, 117, 108, 115, 101, 32, 50, 10]",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::retargets_with_ordinary_events",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "virtual_interfaces::waits_on_member_edges at 642:3: expect_output: expected [109, 111, 118, 101, 100, 32, 50, 10, 97, 32, 51, 32, 48, 48, 10, 98, 32, 49, 50, 32, 48, 48, 10, 49, 49, 32, 50, 50, 10], got [97, 32, 51, 32, 48, 48, 10, 98, 32, 49, 50, 32, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::waits_on_member_edges",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
