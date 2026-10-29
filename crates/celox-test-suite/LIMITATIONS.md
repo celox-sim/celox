@@ -1454,3 +1454,15 @@ a variable of an `initial` block and rejects the indexed assignment that
 follows; its exact compile diagnostic remains an executed failure in
 [the Icarus containers report](verification/sv/icarus/containers.json).
 No assertions or exclusions are weakened.
+
+### Array items in concatenations
+
+`containers::array_items_in_concatenations` assigns unpacked array
+concatenations whose items are queues, mixed with elements, to a queue of
+class handles in a method, a dynamic array, an `int` queue and a string queue,
+as UVM's factory does with `{m_type_overrides, m_inst_overrides}` (IEEE
+1800-2023 10.10); the sum is 14394313. Verilator 5.052 and the pinned xezim
+0.11.3 pass. Icarus 13.0 does not support `automatic` on a variable of an
+`initial` block; its exact compile diagnostic remains an executed failure in
+[the Icarus containers report](verification/sv/icarus/containers.json).
+No assertions or exclusions are weakened.

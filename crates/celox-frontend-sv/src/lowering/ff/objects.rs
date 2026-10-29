@@ -99,6 +99,7 @@ impl Ff<'_, '_> {
             }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::Locator(_) => unreachable!("handled by locator"),
+            ObjectOp::Concat(_) => unreachable!("handled by container_concat"),
             // Each declaration of an event creates a synchronization object
             // (IEEE 1800-2023 15.5).
             ObjectOp::NewEvent => self.heap_call(ops::EVENT_NEW, &[]),
@@ -285,6 +286,7 @@ impl Ff<'_, '_> {
         let kind = match op {
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::Locator(_) => unreachable!("handled by locator"),
+            ObjectOp::Concat(_) => unreachable!("handled by container_concat"),
             ObjectOp::Stream(_) => unreachable!("handled by stream_call"),
             ObjectOp::New { .. } | ObjectOp::Copy | ObjectOp::Box(_) => {
                 Some(celox_design::ValueKind::ObjRef)

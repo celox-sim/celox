@@ -1433,12 +1433,12 @@ chapter-7/queues/pop_front_assign.sv	2state	fail
 chapter-7/queues/pop_front_assign.sv	4state	fail
 chapter-7/queues/push_back.sv	2state	pass
 chapter-7/queues/push_back.sv	4state	pass
-chapter-7/queues/push_back_assign.sv	2state	fail
-chapter-7/queues/push_back_assign.sv	4state	fail
+chapter-7/queues/push_back_assign.sv	2state	pass
+chapter-7/queues/push_back_assign.sv	4state	pass
 chapter-7/queues/push_front.sv	2state	pass
 chapter-7/queues/push_front.sv	4state	pass
-chapter-7/queues/push_front_assign.sv	2state	fail
-chapter-7/queues/push_front_assign.sv	4state	fail
+chapter-7/queues/push_front_assign.sv	2state	pass
+chapter-7/queues/push_front_assign.sv	4state	pass
 chapter-7/queues/size.sv	2state	pass
 chapter-7/queues/size.sv	4state	pass
 chapter-7/queues/slice.sv	2state	fail

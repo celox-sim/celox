@@ -572,6 +572,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.",
                         ),
+                        ("icarus", "containers::array_items_in_concatenations") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:26: sorry: Overriding the default variable lifetime is not yet supported.",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

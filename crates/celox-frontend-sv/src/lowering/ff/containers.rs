@@ -57,7 +57,7 @@ impl Ff<'_, '_> {
             .get(1)
             .and_then(|key| self.m.comparison_width(key, key));
         if op.reduction().is_none() && args.iter().any(|arg| self.m.calls(arg)) {
-            let value_receiver = matches!(op, New | Literal | Convert | Equal | CaseEqual);
+            let value_receiver = matches!(op, New | Literal | Convert | Concat | Equal | CaseEqual);
             if !value_receiver {
                 // Preserve the receiver's location, not an old immutable copy
                 // of its contents: arguments may mutate this same container.
@@ -133,7 +133,7 @@ impl Ff<'_, '_> {
         }
         // Evaluate the owning object once, before argument side effects. Read
         // its current container after the arguments, so a nested pop is kept.
-        let property = if !matches!(op, New | Literal | Convert | Equal | CaseEqual)
+        let property = if !matches!(op, New | Literal | Convert | Concat | Equal | CaseEqual)
             && let sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Object(object),
                 args,
@@ -153,7 +153,7 @@ impl Ff<'_, '_> {
         let element_result = matches!(op, Get | PopFront | PopBack);
         let four_state = (element_result || op == Equal) && !layout.two_state && self.m.four_state;
         let (temp, name) = self.m.temp("container", width, signed, four_state);
-        if matches!(op, New | Literal | Convert)
+        if matches!(op, New | Literal | Convert | Concat)
             || element_result && layout.handle == Some(HandleProperty::Object)
         {
             self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
@@ -187,6 +187,11 @@ impl Ff<'_, '_> {
             }
             Convert if matches!(layout.kind, ContainerKind::Associative { .. }) => {
                 self.handle(&args[0])?
+            }
+            Concat => {
+                let first = self.handle(&args[0])?;
+                let second = self.handle(&args[1])?;
+                self.heap_call(code(heap::CONCAT), &[first, second])
             }
             Convert => {
                 let source = self.handle(&args[0])?;
