@@ -979,6 +979,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 14; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Malformed statement\n<case>/source_1.sv:5: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:8: syntax error\n<case>/source_1.sv:8: error: Malformed statement\n<case>/source_1.sv:10: syntax error\n<case>/source_1.sv:11: error: Malformed statement\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::members_of_call_results",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Syntax error in continuous assignment\n",
       "expectation": "Simulation",
       "name": "class::method_ranges_of_scope_declarations",

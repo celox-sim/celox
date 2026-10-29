@@ -42,6 +42,16 @@ pub(in crate::ast) fn native_class(
     {
         return Some(super::super::processes::CLASS.to_owned());
     }
+    // The result of a function or method that returns a class handle, whose
+    // members the call may select (IEEE 1800-2023 8.4).
+    if let ExprKind::Call { expression, .. } = &native.expression(id).kind {
+        let name = match method(tree, *expression, native, dimensions) {
+            Ok(Some((name, ..))) => name,
+            Ok(None) => super::direct::callable_name(&tree.state, *expression, native)?,
+            Err(_) => return None,
+        };
+        return dimensions.function_return_types.get(&name)?.class.clone();
+    }
     // A class handle member of an unpacked structure variable.
     if let Some(name) = unpacked_structs::native_member(ungroup(id, native), native, dimensions) {
         return dimensions.get(&name)?.class.clone();

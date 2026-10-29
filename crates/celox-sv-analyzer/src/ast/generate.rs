@@ -2090,6 +2090,7 @@ mod tests {
             string: false,
             pattern_type: None,
             enum_domain: None,
+            class: None,
         };
         let inner = FunctionReturnMetadata {
             arguments: None,
@@ -2101,6 +2102,7 @@ mod tests {
             string: false,
             pattern_type: None,
             enum_domain: None,
+            class: None,
         };
         let dimensions = PackedDimensions {
             function_return_types: [

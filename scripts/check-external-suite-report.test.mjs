@@ -301,6 +301,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::generate_scope_enum_type_arguments",
                 "class::imported_member_type_dimensions",
                 "class::imported_member_type_inheritance",
+                "class::members_of_call_results",
                 "class::method_ranges_of_scope_declarations",
                 "class::named_aggregate_type_arguments",
                 "class::package_constant_class_defaults",
