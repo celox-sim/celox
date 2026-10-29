@@ -5493,14 +5493,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "streaming concatenation",
-            r#"
-            module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);
-                always_ff @(posedge clk) q <= {<<{a}};
-            endmodule
-        "#,
-        ),
-        (
             "concurrent assertion",
             r#"
             module Top(input logic clk, valid);
@@ -5589,33 +5581,12 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "streaming concatenation",
             r#"
-            module Top(input logic [7:0] a, output logic [7:0] y);
-                assign y = {<<{a}};
-            endmodule
-        "#,
-        ),
-        (
-            "streaming concatenation",
-            r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
                     if ({<<{value}}) return 1'b1;
                     else return 1'b0;
                 endfunction
                 assign y = choose(a);
-            endmodule
-        "#,
-        ),
-        (
-            "streaming concatenation",
-            r#"
-            module Top(input logic [3:0] a, output logic [3:0] y);
-                function automatic logic [3:0] square(input logic [3:0] value);
-                    logic [3:0] tmp;
-                    tmp = {<<{value}};
-                    return tmp;
-                endfunction
-                assign y = square(a);
             endmodule
         "#,
         ),
@@ -5790,14 +5761,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 parameter FLAG = (~P == 0)
             ) (output logic y);
                 assign y = FLAG;
-            endmodule
-        "#,
-        ),
-        (
-            "streaming concatenation",
-            r#"
-            module Top(input logic [3:0] a, b, output logic [7:0] y);
-                always_comb y = {<<{a}};
             endmodule
         "#,
         ),

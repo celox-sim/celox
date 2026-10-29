@@ -239,6 +239,13 @@ pub(crate) fn eval_const_expr_in_env(
                     constants,
                 )
             }
+            Callee::Stream(stream) => {
+                let values = args
+                    .iter()
+                    .map(|arg| eval_const_expr_in_env(arg, constants))
+                    .collect::<Option<Vec<_>>>()?;
+                stream.evaluate(&values)
+            }
             Callee::Lookup { width, signed } => {
                 let (selector, rest) = args.split_first()?;
                 let (default, pairs) = rest.split_last()?;

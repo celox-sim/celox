@@ -25,6 +25,7 @@
     "verilator/references.json",
     "verilator/review_regressions.json",
     "verilator/scan.json",
+    "verilator/streaming.json",
     "verilator/string.json",
     "verilator/string_format.json",
     "verilator/synthesizable.json",

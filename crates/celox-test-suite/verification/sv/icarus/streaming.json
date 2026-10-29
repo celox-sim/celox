@@ -1,0 +1,165 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/streaming-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_streaming_concatenation",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "streaming::streaming_arrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/streaming-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_streaming_concatenation",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "streaming::streaming_combinational",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/streaming-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_streaming_concatenation",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "streaming::streaming_contexts",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/streaming-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_streaming_concatenation",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "streaming::streaming_operand_types",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/streaming-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_streaming_concatenation",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "streaming::streaming_pack_alignment",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/streaming-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_streaming_concatenation",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "streaming::streaming_reorder",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/streaming-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_streaming_concatenation",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+        "upstream": []
+      },
+      "name": "streaming::streaming_unpack",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "streaming::streaming_arrays at 118:27: assert_eq flags: expected 0xff, got 0x1f",
+      "expectation": "Simulation",
+      "name": "streaming::streaming_arrays",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "streaming::streaming_operand_types at 181:27: assert_eq flags: expected 0x3, got 0x1",
+      "expectation": "Simulation",
+      "name": "streaming::streaming_operand_types",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "streaming::streaming_unpack at 84:27: assert_eq flags: expected 0x3f, got 0x1b",
+      "expectation": "Simulation",
+      "name": "streaming::streaming_unpack",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

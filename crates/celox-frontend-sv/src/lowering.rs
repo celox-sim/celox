@@ -1477,7 +1477,8 @@ fn kernel_written_names(
             sv::ir::Callee::String(_)
             | sv::ir::Callee::Object(_)
             | sv::ir::Callee::Checked { .. }
-            | sv::ir::Callee::Lookup { .. } => continue,
+            | sv::ir::Callee::Lookup { .. }
+            | sv::ir::Callee::Stream(_) => continue,
             sv::ir::Callee::Subroutine(name) => name,
         };
         let Some(subroutine) = subroutines
@@ -1682,7 +1683,8 @@ impl DriverScan<'_> {
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
                 | sv::ir::Callee::Checked { .. }
-                | sv::ir::Callee::Lookup { .. } => continue,
+                | sv::ir::Callee::Lookup { .. }
+                | sv::ir::Callee::Stream(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self
@@ -5049,6 +5051,126 @@ pub(crate) fn attach_instance_glue(
     Ok(())
 }
 
+/// A [`sv::ir::Callee::Stream`] call as slices and concatenations of its
+/// arguments, each lowered once. `lower` lowers an operand with a context
+/// width and signedness.
+fn lower_stream<A: std::hash::Hash + Eq + Clone>(
+    args: &[Option<sv::ir::Expr>],
+    stream: &sv::ir::Stream,
+    arena: &mut SLTNodeArena<A>,
+    lower: &mut dyn FnMut(
+        &sv::ir::Expr,
+        &mut SLTNodeArena<A>,
+        Option<usize>,
+        Option<bool>,
+    ) -> Option<NodeId>,
+) -> Option<NodeId> {
+    fn slice<A: std::hash::Hash + Eq + Clone>(
+        arena: &mut SLTNodeArena<A>,
+        expr: NodeId,
+        (lsb, width): (usize, usize),
+    ) -> Option<NodeId> {
+        if lsb == 0 && width == celox_slt::get_width(expr, arena) {
+            return Some(expr);
+        }
+        arena
+            .alloc(SLTNode::Slice {
+                expr,
+                access: BitAccess::new(lsb, lsb + width - 1),
+            })
+            .ok()
+    }
+    // The ranges of `expr`, the first in the most significant bits.
+    fn gather<A: std::hash::Hash + Eq + Clone>(
+        arena: &mut SLTNodeArena<A>,
+        expr: NodeId,
+        ranges: Vec<(usize, usize)>,
+    ) -> Option<NodeId> {
+        if let [range] = ranges.as_slice() {
+            return slice(arena, expr, *range);
+        }
+        let parts = ranges
+            .into_iter()
+            .map(|range| Some((slice(arena, expr, range)?, range.1)))
+            .collect::<Option<Vec<_>>>()?;
+        arena.alloc(SLTNode::Concat(parts)).ok()
+    }
+    let mut parts = Vec::with_capacity(args.len());
+    for (arg, layout) in args.iter().zip(&stream.args) {
+        // An operand is evaluated in its own self-determined type (11.4.14.1).
+        let node = lower(arg.as_ref()?, arena, None, None)?;
+        let node = coerce_node_width(arena, node, Some(layout.width), false).ok()?;
+        let bits = layout.bits.unwrap_or((0, layout.width));
+        let node = slice(arena, node, bits)?;
+        parts.push((gather(arena, node, layout.elements(bits.1))?, bits.1));
+    }
+    let generic = match parts.as_slice() {
+        [(node, _)] => *node,
+        _ => arena.alloc(SLTNode::Concat(parts)).ok()?,
+    };
+    let (width, stream_width) = (stream.width(), stream.stream_width());
+    let ordered = if stream.unpack {
+        let source = stream.args.first()?.width;
+        let packed = slice(
+            arena,
+            generic,
+            (source.checked_sub(stream_width)?, stream_width),
+        )?;
+        // The packed stream holds the blocks most significant first: put
+        // each back at its place in the stream.
+        let mut lsb = stream_width;
+        let mut blocks = stream
+            .blocks(stream_width)
+            .into_iter()
+            .map(|(block, size)| {
+                lsb -= size;
+                (block, (lsb, size))
+            })
+            .collect::<Vec<_>>();
+        blocks.sort_by_key(|block| std::cmp::Reverse(block.0));
+        gather(
+            arena,
+            packed,
+            blocks.into_iter().map(|(_, range)| range).collect(),
+        )?
+    } else {
+        let ordered = gather(arena, generic, stream.blocks(stream_width))?;
+        if width > stream_width {
+            let fill = width - stream_width;
+            let zeros = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::default(),
+                    BigUint::default(),
+                    fill,
+                    false,
+                ))
+                .ok()?;
+            arena
+                .alloc(SLTNode::Concat(vec![
+                    (ordered, stream_width),
+                    (zeros, fill),
+                ]))
+                .ok()?
+        } else {
+            ordered
+        }
+    };
+    if stream.targets.iter().all(|target| target.element.is_none()) {
+        return Some(ordered);
+    }
+    let mut lsb = width;
+    let mut parts = Vec::with_capacity(stream.targets.len());
+    for target in &stream.targets {
+        lsb -= target.width;
+        let part = slice(arena, ordered, (lsb, target.width))?;
+        parts.push((
+            gather(arena, part, target.elements(target.width))?,
+            target.width,
+        ));
+    }
+    arena.alloc(SLTNode::Concat(parts)).ok()
+}
+
 /// A [`sv::ir::Callee::Lookup`] call as nested multiplexers of case
 /// equalities. The selector is lowered once and its node shared by every
 /// comparison, so nested lookups lower in linear time. `lower` lowers an
@@ -7418,6 +7540,42 @@ fn lower_glue_parent_expr(
             source_ids.dedup();
             Some((node, sources, source_ids))
         }
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Stream(stream),
+            args,
+            ..
+        } => {
+            let mut sources = HashSet::default();
+            let mut source_ids = Vec::new();
+            let node = lower_stream(
+                args,
+                stream,
+                arena,
+                &mut |expr, arena, context_width, context_signed| {
+                    let (node, expr_sources, expr_source_ids) = lower_glue_parent_expr(
+                        expr,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        context_width,
+                        context_signed,
+                    )?;
+                    sources.extend(expr_sources);
+                    source_ids.extend(expr_source_ids);
+                    Some(node)
+                },
+            )?;
+            source_ids.sort();
+            source_ids.dedup();
+            Some((
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
+                    .ok()?,
+                sources,
+                source_ids,
+            ))
+        }
         sv::ir::Expr::Inside { expr, items } => lower_glue_parent_expr(
             &inside_as_comparisons(expr, items),
             variables,
@@ -8851,6 +9009,37 @@ fn lower_expr_with_context(
                 },
             )?;
             Some((node, sources))
+        }
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Stream(stream),
+            args,
+            ..
+        } => {
+            let mut sources = HashSet::default();
+            let node = lower_stream(
+                args,
+                stream,
+                arena,
+                &mut |expr, arena, context_width, context_signed| {
+                    let (node, expr_sources) = lower_expr_with_context(
+                        expr,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        context_width,
+                        context_signed,
+                    )?;
+                    sources.extend(expr_sources);
+                    Some(node)
+                },
+            )?;
+            Some((
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
+                    .ok()?,
+                sources,
+            ))
         }
         sv::ir::Expr::Inside { expr, items } => lower_expr_with_context(
             &inside_as_comparisons(expr, items),
@@ -11075,7 +11264,8 @@ mod tests {
                         sv::ir::Callee::String(_)
                         | sv::ir::Callee::Object(_)
                         | sv::ir::Callee::Checked { .. }
-                        | sv::ir::Callee::Lookup { .. } => continue,
+                        | sv::ir::Callee::Lookup { .. }
+                        | sv::ir::Callee::Stream(_) => continue,
                         sv::ir::Callee::Subroutine(name) => name,
                     };
                     let Some(subroutine) = self

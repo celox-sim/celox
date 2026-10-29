@@ -1,0 +1,181 @@
+(group streaming (category operators))
+
+(case streaming_reorder
+  (source "streaming.sv" #"
+module Top(output bit [7:0] flags);
+    int j = {"A", "B", "C", "D"};
+    logic [7:0] r8;
+    logic [5:0] r6;
+    logic [3:0] r4;
+    int r;
+    initial begin
+        r = {>>{j}};
+        flags[0] = r == 32'h41424344;
+        r = {<< byte {j}};
+        flags[1] = r == 32'h44434241;
+        r = {<< 16 {j}};
+        flags[2] = r == 32'h43444142;
+        r8 = {<< {8'b0011_0101}};
+        flags[3] = r8 == 8'b1010_1100;
+        r6 = {<< 4 {6'b11_0101}};
+        flags[4] = r6 == 6'b0101_11;
+        r6 = {>> 4 {6'b11_0101}};
+        flags[5] = r6 == 6'b1101_01;
+        r4 = {<< 2 {{<< {4'b1101}}}};
+        flags[6] = r4 == 4'b1110;
+        r = {<< 3 {j}};
+        flags[7] = r == 32'h82990221;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case streaming_pack_alignment
+  (source "streaming.sv" #"
+module Top(output bit [5:0] flags);
+    int a = 1, b = 2, c = 3;
+    bit [95:0] y;
+    bit [99:0] d;
+    bit [127:0] w;
+    logic [15:0] h;
+    initial begin
+        y = {>>{a, b, c}};
+        flags[0] = y == {32'd1, 32'd2, 32'd3};
+        d = {>>{a, b, c}};
+        flags[1] = d == {32'd1, 32'd2, 32'd3, 4'b0};
+        w = {<< 32 {a, b, c}};
+        flags[2] = w == 128'h00000003_00000002_00000001_00000000;
+        h[11:0] = {<< 4 {12'habc}};
+        flags[3] = h[11:0] == 12'hcba;
+        h = 16'hffff;
+        h[15:8] = {<<{4'b0011}};
+        flags[4] = h == 16'hc0ff;
+        flags[5] = 16'({<< 8 {16'h1234}}) == 16'h3412;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 63))
+
+(case streaming_unpack
+  (source "streaming.sv" #"
+module Top(output bit [5:0] flags);
+    int a, b, c;
+    logic [10:0] up [3:0];
+    logic [11:1] p1, p2, p3, p4;
+    logic [3:0] x, z;
+    logic [7:0] q;
+    initial begin
+        {>>{a, b, c}} = 96'b1;
+        flags[0] = a == 0 && b == 0 && c == 1;
+        {>>{a, b, c}} = 100'b11111;
+        flags[1] = a == 0 && b == 0 && c == 1;
+        up[3] = 11'd3; up[2] = 11'd2; up[1] = 11'd1; up[0] = 11'd0;
+        {>>{p1, p2, p3, p4}} = up;
+        flags[2] = p1 == 3 && p2 == 2 && p3 == 1 && p4 == 0;
+        {<< 4 {x, z}} = 8'h12;
+        flags[3] = x == 4'h2 && z == 4'h1;
+        {<< {q}} = 8'b1100_0001;
+        flags[4] = q == 8'b1000_0011;
+        {<< 3 {x, z}} = 8'b1101_0011;
+        flags[5] = 8'({<< 3 {x, z}}) == 8'b1101_0011;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 63))
+
+(case streaming_arrays
+  (source "streaming.sv" #"
+module Top(output bit [7:0] flags);
+    byte up [0:3];
+    byte down [3:0];
+    bit [31:0] v;
+    byte got [0:3];
+    logic [3:0] m [0:1][0:2];
+    bit [23:0] mv;
+    initial begin
+        up = '{8'h11, 8'h22, 8'h33, 8'h44};
+        down = '{8'h11, 8'h22, 8'h33, 8'h44};
+        v = {>>{up}};
+        flags[0] = v == 32'h11223344;
+        v = {>>{down}};
+        flags[1] = v == 32'h11223344;
+        v = {<< byte {up}};
+        flags[2] = v == 32'h44332211;
+        got = {<< byte {32'h01020304}};
+        flags[3] = got[0] == 8'h04 && got[1] == 8'h03 && got[2] == 8'h02 && got[3] == 8'h01;
+        m = '{'{4'h1, 4'h2, 4'h3}, '{4'h4, 4'h5, 4'h6}};
+        mv = {>>{m}};
+        flags[4] = mv == 24'h123456;
+        v = {>>{up with [1 +: 2]}};
+        flags[5] = v == 32'h22330000;
+        v = {>>{down with [4]}};
+        flags[6] = v == 0;
+        v = {>>{down with [4:2]}};
+        flags[7] = v == 32'h00112200;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 255))
+
+(case streaming_combinational
+  (source "streaming.sv" #"
+module Top(input logic [1:0] a, input logic [1:0] b, input logic [1:0] c,
+           output logic [5:0] d, output logic [7:0] r);
+    assign d = {<<2 {a, b, c}};
+    always_comb r = {<< {a, b, c, 2'b01}};
+endmodule
+"#)
+  (top Top)
+  (modify (set a 1) (set b 2) (set c 3))
+  (assert_eq d 57)
+  (assert_eq r 182))
+
+(case streaming_contexts
+  (source "streaming.sv" #"
+module Top(input logic clk, input logic [7:0] a, output logic [7:0] q, output bit [5:0] flags);
+    function automatic logic [7:0] reversed(input logic [7:0] value);
+        logic [7:0] tmp;
+        tmp = {<<{value}};
+        return tmp;
+    endfunction
+    function automatic logic [15:0] swapped(input logic [15:0] value);
+        return {<< 8 {value}};
+    endfunction
+    function automatic logic [7:0] same(input logic [7:0] value);
+        return value;
+    endfunction
+    always_ff @(posedge clk) q <= {<<{a}};
+    initial begin
+        bit [95:0] d = {<< 32 {32'd1, 32'd2, 32'd3}};
+        logic [7:0] local_value = {<< 4 {8'h5a}};
+        flags[0] = reversed(8'b0000_0001) == 8'b1000_0000;
+        flags[1] = swapped(16'h1234) == 16'h3412;
+        flags[2] = d == {32'd3, 32'd2, 32'd1};
+        flags[3] = local_value == 8'ha5;
+        flags[4] = same({<< 4 {8'h12}}) == 8'h21;
+        flags[5] = 1'b1;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 0)
+  (assert_eq flags 63)
+  (modify (set a 1) (set clk 1))
+  (run_until 1)
+  (assert_eq q 128))
+
+(case streaming_operand_types
+  (source "streaming.sv" #"
+module Top(output bit [1:0] flags);
+    int a = -2;
+    int y;
+    bit [7:0] sub [0:1][0:1];
+    initial begin
+        y = {>>{a >>> 1}};
+        flags[0] = y == 32'hffffffff;
+        sub[0] = {>>{16'h1122}};
+        flags[1] = sub[0][0] == 8'h11 && sub[0][1] == 8'h22;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 3))

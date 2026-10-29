@@ -936,7 +936,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
                 | sv::ir::Callee::Checked { .. }
-                | sv::ir::Callee::Lookup { .. } => continue,
+                | sv::ir::Callee::Lookup { .. }
+                | sv::ir::Callee::Stream(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -7938,7 +7939,9 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                     continue;
                 }
                 // A string operation or lookup is a value of its operands.
-                sv::ir::Callee::String(_) | sv::ir::Callee::Lookup { .. } => continue,
+                sv::ir::Callee::String(_)
+                | sv::ir::Callee::Lookup { .. }
+                | sv::ir::Callee::Stream(_) => continue,
                 // Container contents are immutable: reading an element is a
                 // value of the container handle and index, unlike a class
                 // property that can change without its handle changing.

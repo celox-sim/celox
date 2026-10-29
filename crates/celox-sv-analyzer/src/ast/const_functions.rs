@@ -640,6 +640,7 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
                 | Callee::String(_)
                 | Callee::Object(_)
                 | Callee::Checked { .. }
+                | Callee::Stream(_)
                 | Callee::Lookup { .. } => {}
                 Callee::Subroutine(callee) => calls.push(callee.as_str()),
             }

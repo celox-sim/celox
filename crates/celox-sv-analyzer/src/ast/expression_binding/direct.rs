@@ -314,6 +314,9 @@ enum Job {
         Option<Rc<PackedDimensions>>,
     ),
     Finish(Finish, usize, Option<Rc<PackedDimensions>>),
+    /// A streaming concatenation operand of a bit-stream cast, which keeps
+    /// the width of its stream (IEEE 1800-2023 11.4.14).
+    Stream(ExprId, Option<Rc<PackedDimensions>>),
 }
 
 /// Whether the call copies actual `position` of `name` into its formal and
@@ -700,6 +703,23 @@ pub(in crate::ast) fn bind_value(
                         let mut children = vec![(*count, None)];
                         children.extend(expressions.iter().map(|id| (*id, None)));
                         (Finish::Repeat, children)
+                    }
+                    ExprKind::Cast { target, expression }
+                        if streams::is_stream(*expression, native) =>
+                    {
+                        jobs.push(Job::Finish(
+                            Finish::Cast(cast_target_native(
+                                *target,
+                                *expression,
+                                native,
+                                tree,
+                                dimensions,
+                            )?),
+                            1,
+                            scope.clone(),
+                        ));
+                        jobs.push(Job::Stream(*expression, scope.clone()));
+                        continue;
                     }
                     ExprKind::Cast { target, expression } => (
                         Finish::Cast(cast_target_native(
@@ -1317,8 +1337,17 @@ pub(in crate::ast) fn bind_value(
                             .collect();
                         (Finish::Tagged(plan), children)
                     }
+                    // A stream is the source of an assignment to a target of
+                    // the shape the context gives (IEEE 1800-2023 11.4.14).
                     ExprKind::Streaming { .. } => {
-                        return Err(unsupported("streaming concatenation"));
+                        let Some(shape) = target.as_deref() else {
+                            return Err(AnalyzerError::InvalidStream(
+                                "a streaming concatenation operand shall first be cast to a bit-stream type".into(),
+                            ));
+                        };
+                        let receiver = streams::receiver(shape, &tree.state, dimensions)?;
+                        values.push(streams::pack(id, Some(receiver), native, tree, dimensions)?);
+                        continue;
                     }
                     ExprKind::Concatenation(_) => {
                         return Err(unsupported("empty unpacked array concatenation"));
@@ -1349,6 +1378,10 @@ pub(in crate::ast) fn bind_value(
                         .rev()
                         .map(|(id, shape)| Job::Enter(id, shape, scope.clone())),
                 );
+            }
+            Job::Stream(id, scope) => {
+                let dimensions = scope.as_deref().unwrap_or(dimensions);
+                values.push(streams::pack(id, None, native, tree, dimensions)?);
             }
             Job::Finish(finish, count, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
