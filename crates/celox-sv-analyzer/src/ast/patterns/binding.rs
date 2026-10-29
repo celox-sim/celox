@@ -436,7 +436,9 @@ pub(in crate::ast) fn bind_native(
                 {
                     // A default that is not a structure of the member's type
                     // applies to each of its members (IEEE 1800-2023 10.9.2).
-                    if default && unpacked_structs::native_struct(id, native, tree, dims)?.is_none()
+                    if default
+                        && !unpacked_structs::native_struct(id, native, tree, dims)?
+                            .is_some_and(|value| value.same_type(&aggregate))
                     {
                         let members = aggregate.members();
                         jobs.push(Job::Finish {
