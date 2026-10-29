@@ -12,6 +12,7 @@
     "icarus/fork_deferred.json",
     "icarus/generate.json",
     "icarus/hierarchy.json",
+    "icarus/increment_decrement.json",
     "icarus/indexed_select.json",
     "icarus/interfaces.json",
     "icarus/literals.json",

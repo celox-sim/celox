@@ -49,10 +49,10 @@ chapter-11/11.3.6--assign_in_expr.sv	2state	fail
 chapter-11/11.3.6--assign_in_expr.sv	4state	fail
 chapter-11/11.3.6--assign_in_expr_inv.sv	2state	pass
 chapter-11/11.3.6--assign_in_expr_inv.sv	4state	pass
-chapter-11/11.3.6--assign_in_expression-sim.sv	2state	fail
-chapter-11/11.3.6--assign_in_expression-sim.sv	4state	fail
-chapter-11/11.3.6--assign_in_expression.sv	2state	fail
-chapter-11/11.3.6--assign_in_expression.sv	4state	fail
+chapter-11/11.3.6--assign_in_expression-sim.sv	2state	pass
+chapter-11/11.3.6--assign_in_expression-sim.sv	4state	pass
+chapter-11/11.3.6--assign_in_expression.sv	2state	pass
+chapter-11/11.3.6--assign_in_expression.sv	4state	pass
 chapter-11/11.3.6--assignment_in_expression-sim.sv	2state	fail
 chapter-11/11.3.6--assignment_in_expression-sim.sv	4state	fail
 chapter-11/11.3.6--assignment_in_expression.sv	2state	fail

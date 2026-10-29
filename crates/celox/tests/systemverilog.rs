@@ -123,6 +123,8 @@ mod generate;
 mod hierarchical_references;
 #[path = "frontends/systemverilog/hierarchy.rs"]
 mod hierarchy;
+#[path = "frontends/systemverilog/increment_decrement.rs"]
+mod increment_decrement;
 #[path = "frontends/systemverilog/indexed_select.rs"]
 mod indexed_select;
 #[path = "frontends/systemverilog/interfaces.rs"]
