@@ -1,0 +1,1 @@
+Kept the recursive class-specialization path within the default 2 MiB test stack (bind_in_mode checks the bound type in place; the inside check is out of line); frame sizes measured against master.
