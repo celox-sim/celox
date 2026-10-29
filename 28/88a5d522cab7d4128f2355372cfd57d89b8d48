@@ -1,0 +1,6 @@
+Revision history for #2525:
+
+rev 2 (content) 2026-10-29 08:04 UTC — Address review: bind exported subroutine formal and result types in the export's scope instead of matching class names globally
+rev 1 (initial) 2026-10-29 08:04 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2525,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"a9c276c74044c34ea4b255b8718b1dbaa75d7d4d","timestamp_iso":"2026-10-29T08:04:11Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"a9c276c74044c34ea4b255b8718b1dbaa75d7d4d","new_sha":"397ad3011235423acb4fade13898a58e281d9b8d","timestamp_iso":"2026-10-29T08:04:11Z","reason":"Address review: bind exported subroutine formal and result types in the export's scope instead of matching class names globally","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a9c276c74044c34ea4b255b8718b1dbaa75d7d4d...397ad3011235423acb4fade13898a58e281d9b8d"}]} -->
