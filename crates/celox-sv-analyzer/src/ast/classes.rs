@@ -1252,9 +1252,6 @@ pub(super) fn field(
         TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
             let shape = casts::expr_type_from_type(state, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;
-            if shape.width > 64 {
-                return Err(unsupported("class property wider than 64 bits"));
-            }
             (shape.width, shape.signed, None)
         }
         TypeKind::Real | TypeKind::Shortreal => {
