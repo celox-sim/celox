@@ -819,8 +819,11 @@ dependencies = [
 name = "celox-testbench"
 version = "0.12.0"
 dependencies = [
+ "celox-backend-x86",
  "celox-design",
  "celox-heap",
+ "celox-sir",
+ "celox-state-layout",
  "num-bigint",
  "num-traits",
  "serde",

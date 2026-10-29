@@ -22,6 +22,14 @@ impl<B: SimBackend> SimulationState<B> {
         self.record_all_levels(backend);
     }
 
+    /// Restore samples saved by a generated scheduler before it ran a slot.
+    /// This preserves pending asynchronous edges when execution returns to the queue.
+    pub fn restore_event_baselines(&mut self, levels: impl IntoIterator<Item = (usize, u8)>) {
+        for (event, level) in levels {
+            self.record_level(event, level);
+        }
+    }
+
     /// Whether an event signal changed outside the queue since its last sample.
     /// Callers must settle pending combinational writes before treating `false`
     /// as permission to bypass the queue's transition detection.

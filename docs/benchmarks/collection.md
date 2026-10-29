@@ -63,8 +63,9 @@ Resets, stimulus and assertions are included in execution time. Every measured
 process must complete the entire fixed workload and print its completion marker.
 Each simulator runs three fresh processes sequentially on the same host. The
 primary comparison is **Celox tiered versus Veryl simulator tiered**, with the
-same DUT and TB bytes. Celox starts in its interpreter and promotes to native
-code (O2); Veryl starts in Cranelift with asynchronous C compilation enabled.
+same DUT and TB bytes. Celox lowers both DUT and TB to the shared SIR pipeline,
+starts execution in its interpreter and promotes to native code (O2). Veryl
+starts in Cranelift with asynchronous C compilation enabled.
 Completing before promotion is valid; dispatch/promotion statistics are retained.
 Both use one simulation thread; compiler parallelism follows each implementation's
 defaults within the same host CPU allocation.
@@ -72,8 +73,9 @@ defaults within the same host CPU allocation.
 The dashboard's **total** is the median process wall time, from launching the
 runner through its exit, including startup and shutdown. CLI binary builds and
 source preparation happen before measurement. The internal compilation/startup
-and execution intervals are supplementary: background compilation overlaps
-execution, so those intervals do not represent isolated compiler cost or warmed
+and execution intervals remain in diagnostic logs and are not published as
+comparison charts: background compilation overlaps execution, so those intervals
+do not represent isolated compiler cost or warmed
 throughput. Every process gets a new empty Veryl AOT cache; Celox's build cache
 and waveform output are disabled. This `cold-tiered-process-v1` contract starts
 new charts, separate from the old native-only internal-timing series.

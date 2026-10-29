@@ -1,5 +1,4 @@
 pub mod backend;
-mod clock_aliases;
 mod code_bytes;
 mod compile_resources;
 #[cfg(target_os = "linux")]

@@ -45,17 +45,27 @@ test("publishes each successful backend without requiring comparison partners", 
       for (const [runner, platform, count] of [
         ["celox", `native-${arch}`, arch === "x86_64" ? 3 : 2],
         ["veryl-cc-sync", `veryl-cc-${arch}`, 2],
-        ["celox-tiered", arch === "x86_64" ? "celox-tiered" : "celox-tiered-aarch64", 3],
-        ["veryl-cc-tiered", `veryl-tiered-${arch}`, 3],
+        ["celox-tiered", arch === "x86_64" ? "celox-tiered" : "celox-tiered-aarch64", 1],
+        ["veryl-cc-tiered", `veryl-tiered-${arch}`, 1],
         ["celox-parallel", `native-parallel-${arch}`, 2],
       ]) {
         const result = convert(row(runner), arch);
         assert.equal(result.length, count);
-        assert.equal(
-          result.find((x) => x.name === `heliodor-${platform}/heliodor_suite_linux_boot_execution`)
-            .value,
-          2,
-        );
+        if (runner.endsWith("-tiered")) {
+          assert.equal(result[0].name, `heliodor-${platform}/heliodor_suite_linux_boot_end_to_end`);
+          assert.equal(result[0].value, 4);
+        } else {
+          assert.equal(
+            result.find((x) => x.name === `heliodor-${platform}/heliodor_suite_linux_boot_execution`)
+              .value,
+            2,
+          );
+          assert.equal(
+            result.find((x) => x.name === `heliodor-${platform}/heliodor_suite_linux_boot_compilation`)
+              .value,
+            1,
+          );
+        }
         assert.deepEqual(convert(row(runner, { success: false }), arch), []);
       }
     }

@@ -284,39 +284,6 @@ fn bind_statement<B: SimBackend>(
                 .into_iter()
                 .map(|statement| bind_statement(backend, statement))
                 .collect::<Option<Vec<_>>>()?;
-            // A constant loop that only waits does not need a host wakeup at
-            // each iteration. clock_gen keeps running while this process
-            // sleeps; the induction variable is scoped to the empty body.
-            if !inclusive
-                && !reverse
-                && step == 1
-                && step_op.is_none()
-                && let (Some(0), Some(iterations)) = (constant_bound(&start), constant_bound(&end))
-                && let [
-                    GenericTestbenchStatement::ClockNext {
-                        clock_event,
-                        count,
-                        period,
-                    },
-                ] = body.as_slice()
-                && let Some(count) = match count {
-                    GenericClockCount::Static(n) => Some(*n),
-                    GenericClockCount::Dynamic(expr) => expr.constant_u64(),
-                }
-                && count != 0
-                && iterations != 0
-                && loop_var.as_ref().is_none_or(|(_, width, signed)| {
-                    let bits = width.saturating_sub(usize::from(*signed));
-                    bits >= 64 || iterations < (1u64 << bits)
-                })
-                && let Some(count) = iterations.checked_mul(count)
-            {
-                return Some(GenericTestbenchStatement::ClockNext {
-                    clock_event: *clock_event,
-                    count: GenericClockCount::Static(count),
-                    period: *period,
-                });
-            }
             Some(GenericTestbenchStatement::For {
                 loop_var: loop_var.map(|(signal, width, signed)| {
                     (backend.resolve_signal(&signal.address), width, signed)
@@ -405,25 +372,6 @@ fn bind_statement<B: SimBackend>(
     }
 }
 
-fn constant_bound(bound: &ExecutableLoopBound) -> Option<u64> {
-    match bound {
-        GenericLoopBound::Static(value) => u64::try_from(*value).ok(),
-        GenericLoopBound::Dynamic {
-            expr,
-            width,
-            signed,
-        } if *width <= 64 => {
-            let value = expr.constant_u64()?;
-            if *signed && (*width == 0 || value >> (*width - 1) != 0) {
-                None
-            } else {
-                Some(value)
-            }
-        }
-        _ => None,
-    }
-}
-
 pub fn bind_testbench_program<B: SimBackend>(
     backend: &B,
     program: TestbenchProgram<AbsoluteAddr>,
@@ -443,6 +391,37 @@ pub fn bind_testbench_program<B: SimBackend>(
     hardware.sort_unstable_by_key(|range| (range.start, range.end));
     hardware.dedup();
     let backend = &Binding { backend, hardware };
+    let kernels = program
+        .kernels()
+        .iter()
+        .map(|kernel| celox_testbench::TestbenchKernel {
+            entry: kernel.entry,
+            resume: backend.resolve_signal(&kernel.resume),
+            status: backend.resolve_signal(&kernel.status),
+            request: backend.resolve_signal(&kernel.request),
+            requests: kernel
+                .requests
+                .iter()
+                .map(|request| match request {
+                    celox_testbench::KernelRequest::Statement(site) => {
+                        celox_testbench::KernelRequest::Statement(*site)
+                    }
+                    celox_testbench::KernelRequest::Settle => {
+                        celox_testbench::KernelRequest::Settle
+                    }
+                    celox_testbench::KernelRequest::Written { address, width } => {
+                        celox_testbench::KernelRequest::Written {
+                            address: backend.resolve_signal(address),
+                            width: *width,
+                        }
+                    }
+                    celox_testbench::KernelRequest::Error(message) => {
+                        celox_testbench::KernelRequest::Error(message.clone())
+                    }
+                })
+                .collect(),
+        })
+        .collect();
     let lengths = program.process_lengths().to_vec();
     if lengths
         .iter()
@@ -497,6 +476,10 @@ pub fn bind_testbench_program<B: SimBackend>(
         .into_iter()
         .map(|component| bind_component(backend, component, rtl_writes))
         .collect::<Option<Vec<_>>>()?;
+    let scheduler = program
+        .scheduler()
+        .cloned()
+        .map(|s| s.map(|a| backend.resolve_signal(&a)));
     let statements = program
         .into_statements()
         .into_iter()
@@ -509,6 +492,8 @@ pub fn bind_testbench_program<B: SimBackend>(
         .collect();
     Some(
         ExecutableTestbench::from_processes(processes, random_seed)
+            .with_kernels(kernels)
+            .with_scheduler(scheduler)
             .with_clocks(clocks)
             .with_private_signals(private_signals)
             .with_component_runtime(
