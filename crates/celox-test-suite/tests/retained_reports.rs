@@ -562,6 +562,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::members_of_call_results") => {
                             ("compile_error", "compile", "source_0.sv:17: syntax error")
                         }
+                        ("icarus", "containers::string_indices_from_calls") => (
+                            "compile_error",
+                            "compile",
+                            "source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
