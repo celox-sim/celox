@@ -121,6 +121,13 @@ impl Heap {
             op @ crate::containers::NEW..=crate::containers::RSORT => {
                 self.container_call(op, parameter, a, b, c)
             }
+            crate::containers::PATTERN => {
+                let bytes = self.container_pattern(a as Handle, parameter);
+                self.new_buffer(bytes)
+            }
+            crate::containers::HANDLE_PATTERN => {
+                self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
+            }
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {

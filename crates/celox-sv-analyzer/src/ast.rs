@@ -2877,6 +2877,8 @@ struct Function {
     return_real: bool,
     /// Whether the function returns a `string`.
     return_string: bool,
+    /// Whether the function returns a class handle.
+    return_handle: bool,
     name: String,
     params: Vec<FunctionParam>,
     /// The function's value as one expression of its arguments, or `None`

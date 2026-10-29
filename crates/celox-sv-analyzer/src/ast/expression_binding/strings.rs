@@ -114,7 +114,9 @@ pub(in crate::ast) fn operands(
 ) -> Vec<Expr> {
     let strings = match op {
         // A format keeps its type: the frontend reads a literal one as text.
-        StringOp::FromBits | StringOp::Itoa(_) | StringOp::Format { .. } => 0,
+        StringOp::FromBits | StringOp::Itoa(_) | StringOp::Format { .. } | StringOp::Pattern(_) => {
+            0
+        }
         StringOp::Concat => usize::MAX,
         StringOp::Compare | StringOp::ICompare => 2,
         _ => 1,

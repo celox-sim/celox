@@ -17,6 +17,35 @@ sv_backends! {
     fn sformatf_with_reference_argument(sim) { @case "string_format::sformatf_with_reference_argument"; }
     fn swrite_matches_write(sim) { @case "string_format::swrite_matches_write"; }
     fn display_later_formats(sim) { @case "string_format::display_later_formats"; }
+    fn pattern_format(sim) { @case "string_format::pattern_format"; }
+    fn pattern_format_keys_and_handles(sim) { @case "string_format::pattern_format_keys_and_handles"; }
+    // A string literal operand leaves a conditional integral (5.9): `%p`
+    // prints it unformatted, not in quotes.
+    fn pattern_format_conditional_string_literal(sim) {
+        @setup {
+            let source = r#"
+                module Top;
+                    bit f;
+                    string s;
+                    initial begin
+                        f = 1;
+                        $display("%p", f ? "A" : 8'h42);
+                        s = $sformatf("%p", f ? "A" : 8'h42);
+                        $display("%s", s);
+                        f = 0;
+                        $display("%p", f ? "A" : 8'h42);
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("pattern_literal.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"65".to_vec() },
+            celox::RuntimeEvent::Display { message: b"65".to_vec() },
+            celox::RuntimeEvent::Display { message: b"66".to_vec() },
+        ]);
+    }
     // External testbenches wrap the design, so the hierarchical name `%m`
     // prints differs between simulators; Celox prints the same for both.
     fn sformatf_scope_matches_display(sim) {
@@ -122,4 +151,74 @@ fn later_formats_keep_default_conversions_of_locals() {
         "{:?}",
         String::from_utf8_lossy(&messages[0])
     );
+}
+
+/// `%p` of a type whose pattern Celox does not print yet is rejected, not
+/// printed as a plain integral value (IEEE 1800-2023 21.2.1.6).
+#[test]
+fn pattern_format_rejects_unsupported_types() {
+    for (declarations, expected) in [
+        ("typedef enum {A, B} e_t; e_t v;", "%p of an enum value"),
+        (
+            "typedef struct packed { bit [3:0] a; } s_t; s_t v;",
+            "%p of a structure or unpacked array",
+        ),
+        (
+            "typedef enum {A, B} e_t; e_t v[$];",
+            "%p of a container of enum values",
+        ),
+        (
+            "class C; endclass int v[C];",
+            "%p of an associative array with class handle keys",
+        ),
+    ] {
+        check_rejected(declarations, "v", expected);
+    }
+    for (declarations, value) in [
+        ("typedef struct packed { bit [3:0] a; } s_t;", "s_t'(4'h3)"),
+        (
+            "typedef struct packed { bit [3:0] a; } s_t; s_t q[2];",
+            "q[0]",
+        ),
+        ("int m[2][3];", "m[1]"),
+        ("int a[4];", "a[1:2]"),
+        (
+            "typedef struct packed { bit [3:0] a; } s_t; \
+             function automatic s_t make(); return s_t'(4'h3); endfunction",
+            "make()",
+        ),
+    ] {
+        check_rejected(declarations, value, "%p of a structure or unpacked array");
+    }
+    for (declarations, value) in [
+        ("typedef enum {A, B} e_t; e_t q[$];", "q[0]"),
+        ("typedef enum {A, B} e_t; e_t q[$];", "q.pop_front()"),
+        ("typedef enum {A, B} e_t; e_t a[2];", "a[1]"),
+        ("typedef enum {A, B} e_t; e_t a, b; bit f;", "f ? a : b"),
+        ("typedef enum {A, B} e_t;", "A"),
+        ("typedef enum {A, B} e_t;", "e_t'(1)"),
+        ("typedef enum {A, B} e_t; e_t v;", "v.next()"),
+        (
+            "typedef enum {A, B} e_t; function automatic e_t pick(); return B; endfunction",
+            "pick()",
+        ),
+    ] {
+        check_rejected(declarations, value, "%p of an enum value");
+    }
+}
+
+/// Building `%p` of `value` fails with `expected`.
+fn check_rejected(declarations: &str, value: &str, expected: &str) {
+    let source = format!(
+        "module Top; {declarations} string s; \
+         initial begin $display(\"%p\", {value}); s = $sformatf(\"%p\", {value}); end endmodule"
+    );
+    let Err(error) =
+        Simulator::from_sv_sources(vec![(source.as_str(), Path::new("pattern.sv"))], "Top")
+            .build_cranelift()
+    else {
+        panic!("{declarations}: %p of {value} is unsupported");
+    };
+    let error = error.to_string();
+    assert!(error.contains(expected), "{declarations} {value}: {error}");
 }

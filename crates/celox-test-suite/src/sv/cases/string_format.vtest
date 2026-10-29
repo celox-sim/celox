@@ -401,3 +401,90 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "hello!\n[               65000]\n[               65000]\n"))
+
+; 21.2.1.6: `%p` prints an integral value as unformatted, a string in quotes
+; and a queue or dynamic array as an assignment pattern. `$sformatf` and
+; `$sformat` return the same text.
+(case pattern_format
+  (source "pattern_format.sv" #"
+module Top(output bit done);
+    int q[$];
+    byte signed d[];
+    string names[$];
+    int i;
+    string s, t;
+    initial begin
+        q = {1, 2, 3};
+        d = new[2];
+        d[0] = -1;
+        d[1] = 5;
+        names = {"p", "q"};
+        i = -7;
+        t = "str";
+        $display("%p|%p|%p|%p|%p|%0p", q, d, names, i, t, q);
+        $display("q=", "%p", q, " t=%p", t);
+        begin
+            string local_text;
+            local_text = "loc";
+            $display("%p", local_text);
+        end
+        s = $sformatf("%p|%p|%p|%p|%p|%0p", q, d, names, i, t, q);
+        $display("%s", s);
+        q.delete();
+        $sformat(s, "[%p]", q);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "'{1, 2, 3}|'{-1, 5}|'{\"p\", \"q\"}|-7|\"str\"|'{1, 2, 3}\nq='{1, 2, 3} t=\"str\"\n\"loc\"\n'{1, 2, 3}|'{-1, 5}|'{\"p\", \"q\"}|-7|\"str\"|'{1, 2, 3}\n['{}]\n"))
+
+; 21.2.1.6: an associative array prints its index labels in index order, a
+; class handle prints null when it is null, also from a conditional or a
+; function, a conditional of containers prints the selected one, and a string
+; literal, conditional or function result prints in quotes.
+(case pattern_format_keys_and_handles
+  (source "pattern_keys_handles.sv" #"
+class Item;
+    int id;
+endclass
+
+module Top(output bit done);
+    function automatic string name(int n);
+        return $sformatf("n%0d", n);
+    endfunction
+    function automatic Item pick();
+        return null;
+    endfunction
+    int a[string];
+    bit [7:0] m[int];
+    Item item, items[$];
+    string s, t;
+    int i;
+    int q[$], r[$];
+    initial begin
+        q = {1, 2};
+        r = {9};
+        a["x"] = 10;
+        a["a"] = 20;
+        m[-2] = 8'h41;
+        m[7] = 8'h0;
+        items.push_back(null);
+        items.push_back(item);
+        $display("%p|%p|%p|%p|%p", a, m, items, item, "lit");
+        s = $sformatf("%p|%p|%p|%p|%p", a, m, items, item, "lit");
+        $display("%s", s);
+        t = "str";
+        i = 1;
+        $display("%p %p", i < 0 ? s : t, name(2));
+        $display("%p %p %p", items[1], items.pop_front(), items.pop_back());
+        $display("%p %p", i > 0 ? item : null, pick());
+        $display("%p %p", i > 0 ? q : r, i < 0 ? q : r);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "'{\"a\":20, \"x\":10}|'{-2:65, 7:0}|'{null, null}|null|\"lit\"\n'{\"a\":20, \"x\":10}|'{-2:65, 7:0}|'{null, null}|null|\"lit\"\n\"str\" \"n2\"\nnull null null\nnull null\n'{1, 2} '{9}\n"))
+
