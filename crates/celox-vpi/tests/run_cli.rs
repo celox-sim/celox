@@ -373,6 +373,47 @@ fn veryl_backends_share_cli_execution_and_opt_in_reports() {
     assert!(output.stdout.is_empty(), "{output:?}");
 }
 
+#[test]
+fn tiered_report_records_when_each_tier_ran() {
+    let source = "module Counter (clk: input clock, q: output bit<32>) { always_ff { q += 1; } }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var q: bit<32>;
+            inst counter: Counter (clk, q);
+            initial { clk.next(40); $assert(q == 40); $finish(); }
+        }";
+    let output = run(
+        &[("top.veryl", source)],
+        &["--report", "--backend", "tiered"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let report = String::from_utf8(output.stdout).unwrap();
+    let line = report
+        .lines()
+        .find(|line| line.starts_with("CELOX_TIERED_TIMELINE "))
+        .unwrap_or_else(|| panic!("no timeline: {report}"));
+    let field = |name: &str| {
+        line.split(' ')
+            .find_map(|part| part.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("no {name}: {line}"))
+    };
+    // Compilation may finish after this short run; the record stays complete.
+    let finish: u64 = field("finish_tick").parse().unwrap();
+    assert!(finish >= 40, "{line}");
+    for stage in field("compiles")
+        .split(',')
+        .filter(|stage| *stage != "none")
+    {
+        let parts: Vec<_> = stage.split(':').collect();
+        assert_eq!(parts.len(), 3, "{line}");
+        parts[1].parse::<u128>().unwrap();
+        assert!(matches!(parts[2], "completed" | "failed"), "{line}");
+    }
+    if let Ok(promoted) = field("promoted_tick").parse::<u64>() {
+        assert!(promoted <= finish, "{line}");
+    }
+}
+
 #[cfg(not(any(
     all(target_arch = "x86_64", feature = "arm64-codegen"),
     all(target_arch = "aarch64", feature = "x86_64-codegen")
