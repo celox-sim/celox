@@ -2450,6 +2450,29 @@ mod host {
             self
         }
 
+        /// Compile native code with the baseline pipeline that tiered
+        /// execution uses for its first native image: lighter MIR
+        /// optimization and the linear register allocator.
+        #[cfg(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        ))]
+        pub fn x86_baseline(mut self, enable: bool) -> Self {
+            self.options.x86_options.baseline = enable;
+            self
+        }
+
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            feature = "arm64-codegen",
+            target_arch = "aarch64"
+        )))]
+        pub fn x86_baseline(self, enable: bool) -> Self {
+            let _ = enable;
+            self
+        }
+
         /// Set fine-grained Cranelift backend options.
         pub fn cranelift_options(mut self, options: crate::backend::CraneliftOptions) -> Self {
             self.options.cranelift_options = options;
