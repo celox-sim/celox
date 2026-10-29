@@ -1,0 +1,1 @@
+Review fix: a $ index read through a receiver with a side effect is rejected instead of sharing structurally equal receivers, which merged explicit repeated calls.
