@@ -11,4 +11,7 @@ sv_backends! {
     fn wide_random_properties_fill_every_word(sim) {
         @case "wide_class_properties::wide_random_properties_fill_every_word";
     }
+    fn properties_extend_by_the_value_signedness(sim) {
+        @case "wide_class_properties::properties_extend_by_the_value_signedness";
+    }
 }

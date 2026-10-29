@@ -136,3 +136,29 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 1\n"))
+
+(case properties_extend_by_the_value_signedness
+  (source "property_extension.sv" #"
+module Top(output bit done);
+    class C;
+        bit [199:0] b;
+        logic signed [129:0] l;
+        logic signed [47:0] ns;
+        logic [47:0] nu;
+    endclass
+    C c;
+    byte minus_one = -1;
+    int unsigned all_ones = 32'hffff_ffff;
+    initial begin
+        c = new;
+        c.b = minus_one;
+        c.l = all_ones;
+        c.ns = all_ones;
+        c.nu = minus_one;
+        $display("%0d %0d %0d %h", &c.b, c.l, c.ns, c.nu);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 4294967295 4294967295 ffffffffffff\n"))
