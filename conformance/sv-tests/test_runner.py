@@ -196,6 +196,35 @@ sys.exit(code)
         self.assertEqual(runner.main(args), 1)
 
 
+    def test_shards_partition_the_tests_and_their_expectations(self):
+        names = [f"case{index}.sv" for index in range(5)]
+        for name in names:
+            (self.tests / name).write_text("/*\n:tags: fixture\n:description: fixture\n*/")
+        expected = self.root / "expected.tsv"
+        # A test the corpus lost is reported missing by exactly one shard.
+        runner.write_expected(expected, {
+            **{(name, mode): "pass" for name in names for mode in runner.MODES},
+            ("lost.sv", "2state"): "pass",
+        })
+        args = [str(self.root), "--driver", str(self.driver), "--out-dir", str(self.out),
+                "--expected", str(expected), "--jobs", "2"]
+        members = [runner.shard_members(names + ["lost.sv"], (index, 2)) for index in (1, 2)]
+        self.assertFalse(members[0] & members[1])
+        self.assertEqual(members[0] | members[1], set(names) | {"lost.sv"})
+        verdicts = [runner.main(args + ["--shard", f"{index}/2"]) for index in (1, 2)]
+        self.assertEqual(sorted(verdicts), [0, 1])
+        self.assertEqual(verdicts[0 if "lost.sv" in members[0] else 1], 1)
+        # An update replaces only the rows of its shard.
+        runner.write_expected(expected, {(name, mode): "fail" for name in names for mode in runner.MODES})
+        self.assertEqual(runner.main(args + ["--shard", "1/2", "--update"]), 0)
+        self.assertEqual(runner.read_expected(expected), {
+            (name, mode): "pass" if name in members[0] else "fail"
+            for name in names for mode in runner.MODES
+        })
+        for value in ("0/2", "3/2", "1/0", "1", "a/b"):
+            with self.assertRaises(runner.argparse.ArgumentTypeError):
+                runner.shard(value)
+
     def test_parallel_collection_is_deterministic_and_isolated(self):
         self.case(":type: simulation\n", "// OUTPUT: :assert: True")
         for name, mode, body in [
