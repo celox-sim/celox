@@ -185,6 +185,27 @@ def positive_int(value):
     return number
 
 
+def shard(value):
+    """`INDEX/COUNT`, selecting the INDEXth of COUNT disjoint shards (1-based)."""
+    index, separator, count = value.partition("/")
+    try:
+        index, count = int(index), int(count)
+    except ValueError:
+        index = count = 0
+    if not separator or count < 1 or not 1 <= index <= count:
+        raise argparse.ArgumentTypeError("must be INDEX/COUNT with 1 <= INDEX <= COUNT")
+    return index, count
+
+
+def shard_members(tests, selection):
+    """The tests of one shard, dealt round-robin from the sorted names so that
+    neighbouring tests, which tend to cost alike, spread over the shards."""
+    if selection is None:
+        return set(tests)
+    index, count = selection
+    return set(sorted(tests)[index - 1::count])
+
+
 class CollectionError(ValueError):
     def __init__(self, rows, errors):
         super().__init__("official runner infrastructure failure; collection is incomplete")
@@ -230,6 +251,8 @@ def main(argv=None):
     parser.add_argument("--expected", type=Path)
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--shard", type=shard,
+                        help="INDEX/COUNT: run and compare only that shard of the tests and expectations")
     options = parser.parse_args(argv)
     if options.update and not options.expected:
         parser.error("--update requires --expected")
@@ -252,6 +275,11 @@ def main(argv=None):
                        for p in (root / "tests").rglob("*") if p.is_file() and p.suffix.lower() == ".sv")
         if not tests:
             raise ValueError("sv-tests checkout contains no .sv tests")
+        # Expected tests that the corpus lost belong to a shard too, so that
+        # exactly one shard reports them missing.
+        members = shard_members(set(tests) | {test for test, _ in expected}, options.shard)
+        tests = [test for test in tests if test in members]
+        expected = {key: value for key, value in expected.items() if key[0] in members}
         requested = len(tests) * len(modes)
         stage = "collection"
         rows = collect_cases(root, driver, out_dir, tests, modes, options.jobs)
@@ -265,7 +293,9 @@ def main(argv=None):
                       f"({counts['pass_percent']}%), {counts['skipped']} skipped, "
                       f"{counts['tags_passed']}/{counts['tags_tested']} tags passed", file=sys.stderr)
         if options.update:
-            expected = {key: value for key, value in expected.items() if key[1] not in modes}
+            retained = read_expected(options.expected) if options.expected.exists() else {}
+            expected = {key: value for key, value in retained.items()
+                        if key[1] not in modes or key[0] not in members}
             expected.update(results)
             write_expected(options.expected, expected)
             return 0
