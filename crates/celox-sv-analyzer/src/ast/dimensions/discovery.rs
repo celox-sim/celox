@@ -434,6 +434,9 @@ fn return_metadata(
         enum_domain: ty
             .filter(|ty| ty.unpacked_ranges.is_empty())
             .and_then(|ty| ty.enum_domain.clone()),
+        class: ty
+            .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
+            .and_then(|ty| ty.class().map(str::to_owned)),
         pattern_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()
@@ -782,6 +785,7 @@ fn settle(
                             string: false,
                             pattern_type: None,
                             enum_domain: None,
+                            class: None,
                         },
                     );
                     publish(&tree.state.dimensions, key, context);

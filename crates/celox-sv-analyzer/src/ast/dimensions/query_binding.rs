@@ -1017,6 +1017,7 @@ mod tests {
                 string: false,
                 pattern_type: None,
                 enum_domain: None,
+                class: None,
             },
         );
         for declaration in &tree.declarations().data_declarations {

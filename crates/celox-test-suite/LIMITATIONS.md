@@ -1352,3 +1352,15 @@ the [typedef](verification/repros/sv_xezim_container_typedef_output.sv) and
 reproduce them, and they remain executed mismatches in
 [the report](verification/sv/xezim/container_formals.json).
 No assertions or exclusions are weakened.
+
+### Members of call results
+
+`class::members_of_call_results` selects methods and properties of class
+handles that calls return: of a package function, of a static method, and of
+an unqualified virtual method inside a class, also chained
+(`report_object().report_object().n`), as UVM's `uvm_report_begin` macro
+does with its default `uvm_get_report_object()` (IEEE 1800-2023 8.4); the sum
+is 55522. Verilator 5.052 and the pinned xezim 0.11.3 pass. Icarus 13.0 does
+not parse a method call on a call result; its exact compile diagnostic remains
+an executed failure in [the Icarus class report](verification/sv/icarus/class.json).
+No assertions or exclusions are weakened.
