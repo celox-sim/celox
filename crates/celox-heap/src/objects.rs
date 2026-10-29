@@ -59,6 +59,9 @@ pub enum Fault {
     NullDereference,
     /// The first randomization subset does not implement virtual dispatch.
     RandomizationClassMismatch,
+    /// A streaming concatenation whose sizes do not fit (IEEE 1800-2023
+    /// 11.4.14), such as a stream wider than its fixed-size target.
+    Stream(String),
 }
 
 impl std::fmt::Display for Fault {
@@ -72,6 +75,7 @@ impl std::fmt::Display for Fault {
                 f.write_str("dynamic container allocation limit exceeded")
             }
             Self::NullDereference => f.write_str("null object handle dereferenced"),
+            Self::Stream(reason) => write!(f, "streaming concatenation: {reason}"),
             Self::RandomizationClassMismatch => {
                 f.write_str("class randomization through a base handle is unsupported")
             }

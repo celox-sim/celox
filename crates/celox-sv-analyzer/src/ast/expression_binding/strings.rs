@@ -43,6 +43,13 @@ pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -
             matches!(**op, crate::system_functions::ObjectOp::Load(field)
             if field.handle == Some(crate::system_functions::HandleProperty::String))
                 || matches!(**op, ObjectOp::Container { op: ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack, layout } if layout.handle == Some(crate::system_functions::HandleProperty::String))
+                || matches!(
+                    **op,
+                    ObjectOp::Stream(
+                        crate::system_functions::StreamOp::ToString
+                            | crate::system_functions::StreamOp::TakeString { .. }
+                    )
+                )
         }
         Expr::Mux {
             then_expr,

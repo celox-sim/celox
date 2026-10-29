@@ -34,7 +34,10 @@ pub(super) use objects::{
     static_property as object_static_property,
     static_property_declaration as object_static_property_declaration, this as object_this,
 };
-pub(super) use streams::{is_stream, unpack as stream_unpack};
+pub(super) use streams::{
+    Unpack as StreamUnpack, free as stream_free, is_stream, take as stream_take,
+    unpack as stream_unpack,
+};
 pub(super) use strings::{
     call as string_call, method as string_method, native_string, string_value,
     to_string as string_operand,
@@ -60,19 +63,26 @@ pub(super) fn expression(
         LValue::Ident(name) => dimensions.get(name),
         _ => None,
     };
+    // A stream fills its target (IEEE 1800-2023 11.4.14): a variable of its
+    // shape, or a selection aligned to the left.
+    if streams::is_stream(root, native) {
+        let receiver = match shape {
+            Some(shape) => streams::receiver(shape, &tree.state, dimensions)?,
+            None => streams::selection_receiver(
+                lhs,
+                lvalue_expr_type(&tree.state, lhs, dimensions)
+                    .map(|ty| ty.width)
+                    .ok_or_else(|| {
+                        unsupported("streaming concatenation into a selection of unknown width")
+                    })?,
+                &tree.state,
+                dimensions,
+            ),
+        };
+        return streams::pack(root, Some(receiver), native, tree, dimensions);
+    }
     if let Some(target) = shape.and_then(|shape| shape.container.as_deref()) {
         return containers::assignment(root, tree, dimensions, target);
-    }
-    // A stream is aligned to the left of a selected target (IEEE 1800-2023
-    // 11.4.14); a whole variable is the target shape `bind_value` receives.
-    if shape.is_none() && streams::is_stream(root, native) {
-        let width = lvalue_expr_type(&tree.state, lhs, dimensions)
-            .map(|ty| ty.width)
-            .ok_or_else(|| {
-                unsupported("streaming concatenation into a selection of unknown width")
-            })?;
-        let receiver = streams::selection_receiver(lhs, width, &tree.state, dimensions);
-        return streams::pack(root, Some(receiver), native, tree, dimensions);
     }
     // `new` creates an object of the class of the variable or of the
     // element of an array of handles (IEEE 1800-2023 8.7).

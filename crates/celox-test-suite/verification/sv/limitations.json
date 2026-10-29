@@ -3422,6 +3422,10 @@
         "streaming::streaming_arrays",
         "streaming::streaming_combinational",
         "streaming::streaming_contexts",
+        "streaming::streaming_dynamic_alignment",
+        "streaming::streaming_dynamic_pack",
+        "streaming::streaming_dynamic_unpack",
+        "streaming::streaming_dynamic_with",
         "streaming::streaming_operand_types",
         "streaming::streaming_pack_alignment",
         "streaming::streaming_reorder",
@@ -3434,15 +3438,17 @@
     "category": "simulator_unsupported",
     "phase": "compile",
     "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
-    "reason": "Verilator 5.052 rejects a with range on a stream expression (\"Unsupported: with[] stream expression\" at {>>{up with [1 +: 2]}}, {>>{down with [4]}} and {>>{down with [4:2]}}). IEEE 1800-2023 11.4.14.4 (Syntax 11-5) permits a with expression after any one-dimensional unpacked array and in a pack streams only the specified items, here up[1] and up[2], giving 32'h22330000, and the nonexistent-entry value of Table 7-1 (7.4.5) for an index outside byte down [3:0], so down with [4] gives 0 and down with [4:2] gives 32'h00112200; xezim 0.11.3 compiles the case but streams the whole array.",
+    "reason": "Verilator 5.052 rejects a with range on a stream expression (\"Unsupported: with[] stream expression\" at {>>{up with [1 +: 2]}}, {>>{down with [4]}} and {>>{down with [4:2]}}, and at the dynamic array ranges i_data with [1 +: 3] in a pack and o_data with [0 +: o_len] in an unpack). IEEE 1800-2023 11.4.14.4 (Syntax 11-5) permits a with expression after any one-dimensional unpacked array and in a pack streams only the specified items, here up[1] and up[2], giving 32'h22330000, and the nonexistent-entry value of Table 7-1 (7.4.5) for an index outside byte down [3:0], so down with [4] gives 0 and down with [4:2] gives 32'h00112200; an unpack resizes a dynamic array to the range, which may read o_len unpacked before it. xezim 0.11.3 compiles the cases but ignores the ranges.",
     "upstream": [],
     "evidence": [
       "verification/repros/sv_streaming_with_range.json",
+      "verification/repros/sv_streaming_dynamic_with.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
       "verilator": [
-        "streaming::streaming_arrays"
+        "streaming::streaming_arrays",
+        "streaming::streaming_dynamic_with"
       ]
     }
   },
@@ -3460,6 +3466,57 @@
     "cases": {
       "verilator": [
         "streaming::streaming_unpack"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_dynamic_target",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 generates C++ that g++ rejects for d = {<< byte {32'h11223344}} with byte d[]: it assigns the packed constant to the dynamic array (\"no match for 'operator=' (operand types are 'VlQueue<unsigned char>' and 'unsigned int')\"). IEEE 1800-2023 11.4.14 resizes a dynamically sized target to hold the stream, giving four elements 8'h44, 8'h33, 8'h22, 8'h11. Standalone probes also show Verilator right-aligning the stream of a queue in a wider fixed-size target, where 11.4.14 fills with zero bits on the right. xezim 0.11.3 compiles the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_dynamic_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_dynamic_pack"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_empty_queue_operand",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 generates C++ that g++ rejects for i = {>>{q, 16'h1234}} with an empty byte q[$] (\"invalid cast from type 'VlQueue<unsigned char>' to type 'IData'\"), and sizes the stream from the fixed operand alone (WIDTHEXPAND, 16 bits). IEEE 1800-2023 11.4.14.1 streams every element of a queue operand, none of an empty one, and 11.4.14 left-aligns the stream in the wider target, giving 32'h12340000. xezim 0.11.3 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_dynamic_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_dynamic_alignment"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_dynamic_unpack",
+    "category": "simulator_internal_error",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 stops with \"Internal Error: ... ../V3Expand.cpp:574: Width mismatch\" at {<< 8 {o_header, o_len, o_data, o_crc}} = pkt, an unpack into a target list holding byte o_data[], and generates a VL_STREAML_RII call with a queue argument, which g++ rejects, for {>> {o_data}} = {<< byte {o_data}}. IEEE 1800-2023 11.4.14.4 and 6.24.3 make the unpack greedy: o_data takes the bytes left after the fixed-size items.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_dynamic_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_dynamic_unpack"
       ]
     }
   }

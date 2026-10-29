@@ -680,27 +680,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             return Ok(stmt);
         }
-        if let Some((mut parts, mut rhs)) = expression_binding::stream_unpack(
-            left,
-            right,
-            self.tree.declarations(),
-            self.tree,
-            &self.dims,
-        )? {
-            if op != "=" {
-                return Err(unsupported(
-                    "compound assignment to a streaming concatenation",
-                ));
+        if let Some(mut stmts) = self.stream_assignment(op, nonblocking, left, right)? {
+            if let [stmt] = stmts.as_mut_slice() {
+                return Ok(std::mem::replace(stmt, Stmt::Break));
             }
-            for part in &mut parts {
-                self.rename_lvalue(part);
-            }
-            self.rename_expr(&mut rhs);
-            return Ok(Stmt::AssignConcat {
-                parts,
-                rhs,
-                nonblocking,
-            });
+            return Err(unsupported(
+                "streaming concatenation of dynamically sized data in this assignment",
+            ));
         }
         if let Some(parts) = self.concat_lvalue(left)? {
             if op != "=" {
@@ -794,6 +780,20 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             && let Some((_, ty)) = &member_context
         {
             let shape = procedural::dimensions_from_type(ty);
+            expression_binding::bind_value(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                &self.dims,
+                Some(&shape),
+            )?
+        } else if op == "="
+            && matches!(written, LValue::Select { .. })
+            && expression_binding::is_stream(right, self.tree.declarations())
+            && let Some(shape) = dimensions::operand_shape(left, self.tree, &self.dims)?
+        {
+            // A stream fills the selected type, whose position may be known
+            // only at run time (IEEE 1800-2023 11.4.14).
             expression_binding::bind_value(
                 right,
                 self.tree.declarations(),
@@ -1458,6 +1458,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     ));
                 }
                 let mut stmts = self.effects(&[*left, *right])?;
+                if let Some(assignment) = self.stream_assignment(
+                    if *nonblocking { "=" } else { operator },
+                    *nonblocking,
+                    *left,
+                    *right,
+                )? {
+                    stmts.extend(assignment);
+                    return Ok(stmts);
+                }
                 if let Some(assignment) =
                     self.aggregate_property_assignment(operator, *nonblocking, *left, *right)?
                 {
@@ -3745,6 +3754,97 @@ impl BodyBuilder<'_, '_, '_> {
             }
         }
         Ok(body)
+    }
+
+    /// An assignment to a streaming concatenation (IEEE 1800-2023 11.4.14.3),
+    /// or `None` when the target is no stream. Fixed-size variables receive
+    /// the source in one assignment; when some are dynamically sized, a
+    /// hidden local holds the heap stream of the source, from which each
+    /// variable takes its bits in turn.
+    fn stream_assignment(
+        &self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let native = self.tree.declarations();
+        let Some(unpack) =
+            expression_binding::stream_unpack(left, right, native, self.tree, &self.dims)?
+        else {
+            return Ok(None);
+        };
+        if op != "=" {
+            return Err(unsupported(
+                "compound assignment to a streaming concatenation",
+            ));
+        }
+        let mut stmts = match unpack {
+            expression_binding::StreamUnpack::Fixed(parts, rhs) => vec![Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking,
+            }],
+            expression_binding::StreamUnpack::Dynamic { source, targets } => {
+                if nonblocking {
+                    return Err(unsupported(
+                        "nonblocking assignment to a streaming concatenation of dynamically sized data",
+                    ));
+                }
+                let sink = self.dims.locator_locals.as_ref().ok_or_else(|| {
+                    unsupported(
+                        "streaming concatenation of dynamically sized data outside a procedural body",
+                    )
+                })?;
+                let tokens = native.expression(left).tokens;
+                let mut handle = Type::new(TypeKind::Bit);
+                handle.packed_ranges.push(PackedRange::new(
+                    ConstExpr::Literal("31".into()),
+                    ConstExpr::Literal("0".into()),
+                ));
+                let name = sink.declare(
+                    &format!("{}.{}.stream", tokens.start, tokens.end),
+                    "stream",
+                    handle,
+                    self.tree,
+                    &self.dims,
+                );
+                let stream = Expr::Ident(name.clone());
+                let mut stmts = vec![Stmt::Assign {
+                    lhs: LValue::Ident(name),
+                    rhs: source,
+                    nonblocking: false,
+                }];
+                for (lhs, take) in targets {
+                    let (rhs, read) = expression_binding::stream_take(&stream, take);
+                    stmts.push(Stmt::Assign {
+                        lhs,
+                        rhs,
+                        nonblocking: false,
+                    });
+                    stmts.extend(read.map(Stmt::Eval));
+                }
+                stmts.push(Stmt::Eval(expression_binding::stream_free(stream)));
+                stmts
+            }
+        };
+        for stmt in &mut stmts {
+            match stmt {
+                Stmt::Assign { lhs, rhs, .. } => {
+                    self.rename_lvalue(lhs);
+                    self.rename_expr(rhs);
+                }
+                Stmt::AssignConcat { parts, rhs, .. } => {
+                    for part in parts {
+                        self.rename_lvalue(part);
+                    }
+                    self.rename_expr(rhs);
+                }
+                Stmt::Eval(expr) => self.rename_expr(expr),
+                _ => unreachable!("a stream assignment assigns and evaluates"),
+            }
+        }
+        Ok(Some(stmts))
     }
 
     /// An assignment to a whole class property of unpacked structure type,

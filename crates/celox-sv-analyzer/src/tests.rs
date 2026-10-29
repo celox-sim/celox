@@ -7944,8 +7944,12 @@ fn streaming_concatenations_follow_the_lrm_constraints() {
             "initial i = {>>{r}};",
             "real value is not of bit-stream type",
         ),
+        ("initial i = {>>{x}};", "string"),
+        ("initial {>>{x}} = 32'd0;", "string"),
     ] {
-        let source = format!("module Top; int a, b, c, i; real r; {body} endmodule");
+        let source = format!(
+            "module Top; typedef struct {{ string s; }} S; S x; int a, b, c, i; real r; {body} endmodule"
+        );
         let error = analyze_source(&source, Path::new("streams.sv"))
             .expect_err(body)
             .to_string();
@@ -8005,4 +8009,36 @@ fn constant_streams_evaluate_like_the_lrm_examples() {
         targets: vec![StreamArg::packed(16)],
     };
     assert_eq!(array.evaluate(&[0x2211]), Some(0x1122));
+}
+
+#[test]
+fn dynamically_sized_streams_follow_the_lrm_constraints() {
+    // IEEE 1800-2023 6.24.3: an associative array is illegal as the
+    // destination of a bit-stream conversion; a stream that fills
+    // dynamically sized variables unpacks in a procedural body.
+    for (body, expected) in [
+        (
+            "initial m = {>>{q}};",
+            "associative array cannot receive a stream",
+        ),
+        (
+            "initial {>>{m}} = 32'd0;",
+            "associative array cannot receive a stream",
+        ),
+        (
+            "initial {>>{q}} <= 32'd0;",
+            "nonblocking assignment to a streaming concatenation",
+        ),
+        ("initial i = {>>{q with [0]}} + 1;", "shall first be cast"),
+        ("initial i = {>>{h}};", "class handle"),
+        ("initial sq = {>>{32'h61626364}};", "container of strings"),
+    ] {
+        let source = format!(
+            "module Top; class C; endclass byte q[$]; int m[int]; int i; C h; string sq[$]; {body} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("dynamic_streams.sv"))
+            .expect_err(body)
+            .to_string();
+        assert!(error.contains(expected), "{body}: {error}");
+    }
 }

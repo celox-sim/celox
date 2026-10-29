@@ -647,9 +647,12 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_increment_in_conditional_operand` | compile | verilator | 2 | Verilator 5.052 rejects `++` and `--` in an arm of `?:` and in the right operand of `->` ("Unsupported: Pre/post increment/decrement operator within a logical expression"). IEEE 1800-2023 11.4.2 allows them in any expression; Icarus 13.0 and xezim 0.11.3 compile both cases. [Standalone probe](verification/repros/sv_increment_decrement_conditional_operands.json). |
 | `sv_icarus_increment_operands` | compile | icarus | 2 | Icarus 13.0 rejects `++` used as a value of a vector narrower than `int`, an array element or a packed structure member ("sorry: ++ operation is not yet supported on vector slice."), lacks queues and associative arrays in classes, and aborts on `++` of a class property in an expression. IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable. The [pre-exclusion diagnostics](verification/sv/limitations/increment-decrement-icarus.json) retain a reduced source. |
 | `sv_icarus_implication_short_circuit` | execute | icarus | 1 | Icarus 13.0 evaluates the right operand of `->` when the left one is false, so `(i == 0) -> (j++ > 0)` increments `j`; IEEE 1800-2023 11.4.7 skips it. xezim 0.11.3 shares the error. [Standalone probe](verification/repros/sv_increment_decrement_conditional_operands.json). |
-| `sv_icarus_streaming_concatenation` | compile | icarus | 7 | Icarus 13.0 does not support streaming concatenation: it reports "sorry: Streaming concatenation not supported." for `{>>{...}}` and `{<<{...}}`, also as an assignment target, and rejects a stream with a slice size or a `with` range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases. The [pre-exclusion diagnostics](verification/sv/limitations/streaming-icarus.json) retain a reduced source. |
-| `sv_verilator_streaming_with_range` | compile | verilator | 1 | Verilator 5.052 rejects `{>>{up with [1 +: 2]}}` and `{>>{down with [4:2]}}` ("Unsupported: with[] stream expression"). IEEE 1800-2023 11.4.14.4 (Syntax 11-5) permits a `with` range after a one-dimensional unpacked array and packs only the specified items, giving `32'h22330000`, and the nonexistent-entry value of Table 7-1 for an index outside `byte down [3:0]`, giving `32'h00112200`; xezim 0.11.3 compiles the case but packs the whole array. [Standalone probe](verification/repros/sv_streaming_with_range.json). |
+| `sv_icarus_streaming_concatenation` | compile | icarus | 11 | Icarus 13.0 does not support streaming concatenation: it reports "sorry: Streaming concatenation not supported." for `{>>{...}}` and `{<<{...}}`, also as an assignment target, and rejects a stream with a slice size or a `with` range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases. The [pre-exclusion diagnostics](verification/sv/limitations/streaming-icarus.json) retain a reduced source. |
+| `sv_verilator_streaming_with_range` | compile | verilator | 2 | Verilator 5.052 rejects `{>>{up with [1 +: 2]}}`, `{>>{down with [4:2]}}` and the dynamic array ranges `i_data with [1 +: 3]` and `o_data with [0 +: o_len]` ("Unsupported: with[] stream expression"). IEEE 1800-2023 11.4.14.4 (Syntax 11-5) permits a `with` range after a one-dimensional unpacked array and packs only the specified items, giving `32'h22330000`, and the nonexistent-entry value of Table 7-1 for an index outside `byte down [3:0]`, giving `32'h00112200`; an unpack resizes a dynamic array to the range. xezim 0.11.3 compiles the cases but ignores the ranges. Standalone probes: [fixed-size](verification/repros/sv_streaming_with_range.json), [dynamic](verification/repros/sv_streaming_dynamic_with.json). |
 | `sv_verilator_streaming_partial_block_unpack` | execute | verilator | 1 | Verilator 5.052 unpacks `{<< 3 {x, z}} = 8'b1101_0011` (`logic [3:0] x, z`) into x = `4'b0110`, z = `4'b1011` by applying the pack's re-ordering to the source, so packing x and z again gives `8'b0111_0101`. IEEE 1800-2023 11.4.14.3 makes the unpack the reverse of the pack of 11.4.14.2, giving x = `4'b1110`, z = `4'b0110`, which pack back to the source; the orders differ only when the last block is partial. xezim 0.11.3 gives Verilator's values. [Standalone probe](verification/repros/sv_streaming_partial_block_unpack.json). |
+| `sv_verilator_streaming_dynamic_target` | compile | verilator | 1 | Verilator 5.052 generates C++ that g++ rejects for `d = {<< byte {32'h11223344}}` with `byte d[]`: it assigns the packed constant to the dynamic array ("no match for 'operator='"). IEEE 1800-2023 11.4.14 resizes a dynamically sized target to hold the stream. Its probes also right-align the stream of a queue in a wider fixed-size target, which 11.4.14 fills with zero bits on the right. [Standalone probes](verification/repros/sv_streaming_dynamic_verilator.json). |
+| `sv_verilator_streaming_empty_queue_operand` | compile | verilator | 1 | Verilator 5.052 generates C++ that g++ rejects for `i = {>>{q, 16'h1234}}` with an empty `byte q[$]` ("invalid cast from type 'VlQueue<unsigned char>' to type 'IData'"). IEEE 1800-2023 11.4.14.1 streams every element of a queue operand, none of an empty one, giving `32'h12340000`; xezim 0.11.3 passes the case. [Standalone probes](verification/repros/sv_streaming_dynamic_verilator.json). |
+| `sv_verilator_streaming_dynamic_unpack` | compile | verilator | 1 | Verilator 5.052 stops with an internal error ("V3Expand.cpp:574: Width mismatch") at `{<< 8 {o_header, o_len, o_data, o_crc}} = pkt` with `byte o_data[]`, and generates a `VL_STREAML_RII` call that g++ rejects for `{>> {o_data}} = {<< byte {o_data}}`. IEEE 1800-2023 11.4.14.4 and 6.24.3 make the unpack greedy: the dynamic array takes the bytes left after the fixed-size items. [Standalone probes](verification/repros/sv_streaming_dynamic_verilator.json). |
 
 The `string_format` cases compare `$sformatf`, `$sformat` and `$swrite` with
 `$display` / `$write` of the same format and arguments. The [Icarus observations](verification/sv/limitations/string-format-icarus.json)
@@ -679,13 +682,20 @@ count twice (`sv_implication_short_circuit` and
 
 The `streaming` cases pack and unpack streaming concatenations (IEEE 1800-2023
 11.4.14). Icarus 13.0 does not support them; Verilator 5.052 passes the other
-cases. xezim 0.11.3 packs a whole fixed-size array despite a `with` range,
-unpacks an unpacked array source from its right index, shares Verilator's
-partial-block unpack and leaves an unpacked subarray target such as `sub[0]`
-unwritten (`sv_streaming_with_range`, `sv_streaming_unpack_order` and
-`sv_streaming_subarray_target` in the xezim review, see the
-[array order](verification/repros/sv_streaming_unpack_array_order_xezim.json)
-and [subarray](verification/repros/sv_streaming_subarray_target_xezim.json)
+fixed-size cases and fails to build every dynamically sized one. xezim 0.11.3
+ignores `with` ranges, unpacks an unpacked array source from its right index,
+shares Verilator's partial-block unpack, leaves an unpacked subarray target
+such as `sub[0]` unwritten, pads a string target with NUL characters, makes a
+one-element queue of a cast to a module's queue typedef in an instantiated
+module, sizes the dynamic array of a greedy unpack one element short and
+never writes a nonblocking streaming target such as
+`{<< 4 {hi, lo}} <= a` (`sv_streaming_*` in the xezim review, see the
+[array order](verification/repros/sv_streaming_unpack_array_order_xezim.json),
+[subarray](verification/repros/sv_streaming_subarray_target_xezim.json),
+[string](verification/repros/sv_streaming_string_target_xezim.json),
+[typedef](verification/repros/sv_streaming_module_queue_typedef_xezim.json),
+[greedy unpack](verification/repros/sv_streaming_dynamic_unpack_xezim.json)
+and [nonblocking target](verification/repros/sv_streaming_nonblocking_target_xezim.json)
 probes).
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)

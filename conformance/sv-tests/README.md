@@ -240,6 +240,14 @@ dynamic arrays and queues, which remain unsupported. Full official runs at the
 pinned revision report 1294 passing cases in 2state and 1305 in 4state, and
 change only these 22 verdicts.
 
+Streaming concatenations of dynamically sized data (11.4.14.4) update 6 more
+rows: both state modes of `11.4.14.4--dynamic_array_stream.sv`,
+`dynamic_array_stream-sim.sv` and `dynamic_array_stream_with.sv` change from
+fail to pass. Each was simulated in both modes and unpacks the packet's header,
+length, payload and checksum as they were packed, greedily and with
+`with [0 +: o_len]`. Full official runs at the pinned revision report 1297
+passing cases in 2state and 1308 in 4state, and change only these 6 verdicts.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

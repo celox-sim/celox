@@ -888,12 +888,24 @@
       "standard": "IEEE 1800-2023 11.4.14.2, 11.4.14.3"
     },
     "sv_streaming_with_range": {
-      "title": "A with range on a fixed-size array in a streaming concatenation is ignored, and the whole array is packed instead of the specified items and nonexistent entries",
+      "title": "A with range in a streaming concatenation is ignored: a pack streams the whole fixed-size or dynamic array instead of the specified items and nonexistent entries, and an unpack into a dynamic array with a range leaves it empty",
       "standard": "IEEE 1800-2023 11.4.14.4"
     },
     "sv_streaming_subarray_target": {
       "title": "A streaming concatenation assigned to an unpacked subarray, such as sub[0] of a two-dimensional array, leaves the subarray unwritten",
       "standard": "IEEE 1800-2023 11.4.14, 6.24.3"
+    },
+    "sv_streaming_dynamic_unpack": {
+      "title": "Unpacking a stream into a target list with a dynamic array sizes the array one element short and misplaces the fixed-size items after it",
+      "standard": "IEEE 1800-2023 11.4.14.4, 6.24.3"
+    },
+    "sv_streaming_dynamic_destination_size": {
+      "title": "A streaming concatenation assigned or cast to a dynamically sized type gets the wrong size: a string target, also a function result, is padded with NUL characters to 128 characters, and in an instantiated module a cast to a queue typedef of that module gives a one-element queue",
+      "standard": "IEEE 1800-2023 11.4.14, 6.24.3"
+    },
+    "sv_streaming_nonblocking_target": {
+      "title": "A nonblocking assignment to a streaming concatenation target never writes the target variables",
+      "standard": "IEEE 1800-2023 10.4.2, 11.4.14.3"
     }
   },
   "cases": [
@@ -5111,6 +5123,38 @@
       "classification": "xezim_bug",
       "bug": "sv_streaming_subarray_target",
       "note": "With bit [7:0] sub [0:1][0:1], xezim 0.11.3 leaves sub[0][0] and sub[0][1] at 0 after sub[0] = {>>{16'h1122}}; 11.4.14 casts the stream to the type of the target and 6.24.3 fills the unpacked array in element order, giving 8'h11 and 8'h22, as Verilator 5.052 does. The self-determined operand {>>{a >>> 1}} passes. See verification/repros/sv_streaming_subarray_target_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_dynamic_pack",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_dynamic_destination_size",
+      "note": "xezim 0.11.3 assigns {>>{sq}} of string sq[$] = '{\"ab\", \"c\", \"def\"} to a string, and returns it from a function, as \"abcdef\" followed by 122 NUL characters (len() is 128); 11.4.14 resizes a dynamically sized target to hold the stream, and 6.24.3 treats a string as a dynamic array of bytes, so the result is \"abcdef\" (verification/repros/sv_streaming_string_target_xezim.json). Flags 3 and 4 fail for the same reason: in the instantiated Top, bit_q_t'({<< {p}}) with the module's typedef bit bit_q_t[$] is a one-element queue, so b has 1 element instead of 16 and back differs from p; the same code passes as the top-level module (verification/repros/sv_streaming_module_queue_typedef_xezim.json)."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_dynamic_unpack",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_dynamic_unpack",
+      "note": "xezim 0.11.3 unpacks the 17-byte packet {<< 8 {o_header, o_len, o_data, o_crc}} = pkt into o_data of 4 zero bytes and o_crc = 83886080; 11.4.14.4 gives the dynamic array the 5 bytes left after the fixed-size items, so o_data = '{1, 2, 3, 4, 5} and o_crc = 42. The later {>> {o_data}} = {<< byte {o_data}} fails only because o_data is wrong; it passes standalone. See verification/repros/sv_streaming_dynamic_unpack_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_dynamic_with",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_with_range",
+      "note": "xezim 0.11.3 packs {<< 8 {i_header, i_len, i_data with [1 +: 3], i_crc}} with all five items of i_data (17 bytes instead of 15), and unpacking {<< 8 {o_header, o_len, o_data with [0 +: o_len], o_crc}} leaves o_data empty and o_crc = 33818120. 11.4.14.4 streams only the specified items and resizes o_data to the o_len = 5 items, giving o_crc = 42. Verilator 5.052 rejects the ranges (sv_verilator_streaming_with_range). See verification/repros/sv_streaming_dynamic_with.json."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_contexts",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_nonblocking_target",
+      "note": "After a = 8'h01 and a rising clk edge, always_ff @(posedge clk) {<< 4 {hi, lo}} <= a leaves hi and lo at X in xezim 0.11.3, so the two-state run reads hi with unknown bits; the blocking {<< 4 {x, z}} = ... unpacks correctly. 10.4.2 permits a streaming concatenation as the nonblocking target and 11.4.14.3 unpacks into it, giving hi = 4'h1 and lo = 4'h0, as Verilator 5.052 does. See verification/repros/sv_streaming_nonblocking_target_xezim.json."
     }
   ]
 }
