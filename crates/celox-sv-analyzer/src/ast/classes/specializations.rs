@@ -786,17 +786,11 @@ fn finish_specialization(
                     .ok()
                     .flatten()
                     .and_then(|ty| {
-                        let ranges = constant_binding::bind_unpacked_ranges(
-                            &alias.dimensions,
-                            tree,
-                            &context,
-                        )
-                        .ok()?;
-                        type_parameters::resolve(
-                            &tree.state,
-                            types::type_with_unpacked_ranges(ty, ranges),
-                            &env,
-                        )
+                        // Its unpacked dimensions may make it a dynamic
+                        // container (IEEE 1800-2023 7.5, 7.8, 7.10).
+                        let ty = containers::with_dimensions(ty, &alias.dimensions, tree, &context)
+                            .ok()?;
+                        type_parameters::resolve(&tree.state, ty, &env)
                     });
                 if let Some(mut ty) = ty {
                     let alias = instances::normalize_identifier(&alias.name.spelling);

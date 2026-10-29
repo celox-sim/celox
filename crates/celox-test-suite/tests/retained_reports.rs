@@ -543,6 +543,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Unsupported: Multiple '::' package/class reference",
                         ),
+                        ("icarus", "class::container_type_aliases_of_classes") => (
+                            "compile_error",
+                            "compile",
+                            "Overriding the default variable lifetime is not yet supported",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

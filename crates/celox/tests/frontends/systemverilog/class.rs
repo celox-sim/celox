@@ -10,6 +10,7 @@ sv_backends! {
     fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
     fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
     fn class_enumeration_constants_of_classes(sim) { @case "class::enumeration_constants_of_classes"; }
+    fn class_container_type_aliases_of_classes(sim) { @case "class::container_type_aliases_of_classes"; }
     fn class_generate_scope_enum_type_arguments(sim) { @case "class::generate_scope_enum_type_arguments"; }
     fn class_method_ranges_of_scope_declarations(sim) { @case "class::method_ranges_of_scope_declarations"; }
     fn class_type_alias_members(sim) { @case "class::type_alias_members"; }

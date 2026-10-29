@@ -1297,3 +1297,15 @@ and [observations](verification/repros/sv_class_enum_constants_xezim.json)
 for Top and Wrapped; its exact mismatch remains an executed failure in
 [the xezim class report](verification/sv/xezim/class.json).
 No assertions or exclusions are weakened.
+
+### Container type aliases of classes
+
+`class::container_type_aliases_of_classes` declares queue, associative and
+dynamic array typedefs in a class and uses them for properties, a `ref`
+formal, a local variable and, as `C::queue_t`, a module variable (IEEE
+1800-2023 7.5, 7.8, 7.10 and 8.23); the sum is 703282. Verilator 5.052 and
+the pinned xezim 0.11.3 pass. Icarus 13.0 does not support `automatic` on a
+variable of an `initial` block and rejects the module's `C::queue_t`
+declaration; its exact compile diagnostic remains an
+executed failure in [the Icarus class report](verification/sv/icarus/class.json).
+No assertions or exclusions are weakened.

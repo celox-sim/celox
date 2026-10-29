@@ -3235,3 +3235,41 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 172622212))
+(case container_type_aliases_of_classes
+  (source "package.sv" #"
+package p;
+    class C;
+        typedef int queue_t[$];
+        typedef bit flags_t[string];
+        typedef byte bytes_t[];
+        queue_t q;
+        flags_t flags;
+        bytes_t b;
+        function void fill(ref queue_t r);
+            foreach (q[i]) r.push_back(q[i] * 2);
+        endfunction
+        function int f();
+            queue_t copy;
+            q.push_back(3);
+            q.push_back(4);
+            flags["a"] = 1;
+            flags["b"] = 0;
+            b = new[3];
+            fill(copy);
+            return copy.size() + 10 * copy[1] + 100 * flags.num() + 1000 * b.size();
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic C c = new();
+        C::queue_t outside;
+        outside.push_back(7);
+        sum = c.f() + 100000 * outside[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 703282))
