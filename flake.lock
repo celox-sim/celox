@@ -68,17 +68,17 @@
     "xezim": {
       "flake": false,
       "locked": {
-        "lastModified": 1793199017,
-        "narHash": "sha256-8yxrHK5d+MUTJhGzUjkSBdiRlCwSDYSN5gHQfStCvBM=",
+        "lastModified": 1793259477,
+        "narHash": "sha256-6/MKY1FeMXn9Xc191Rx1OxyLTFD4EMD6+pqNkG4PCU4=",
         "owner": "aionhw",
         "repo": "xezim",
-        "rev": "21834c5017df105a76050e53ee138fa087b816c8",
+        "rev": "0fca605f7ce2efd9437f20e82f966cf773943ced",
         "type": "github"
       },
       "original": {
         "owner": "aionhw",
         "repo": "xezim",
-        "rev": "21834c5017df105a76050e53ee138fa087b816c8",
+        "rev": "0fca605f7ce2efd9437f20e82f966cf773943ced",
         "type": "github"
       }
     }
