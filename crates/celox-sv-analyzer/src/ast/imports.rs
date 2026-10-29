@@ -299,7 +299,10 @@ pub(super) fn item_names(id: celox_sv_syntax::BodyItemId, tree: &SyntaxTree) -> 
             }
         }
         BodyItemKind::Subroutine(id) => add(&native.subroutine(*id).name),
-        BodyItemKind::Dpi(id) => add(&native.dpi_declaration(*id).name),
+        // An export names a subroutine the scope already declares.
+        BodyItemKind::Dpi(id) if native.dpi_declaration(*id).import => {
+            add(&native.dpi_declaration(*id).name)
+        }
         BodyItemKind::Instance(id) => {
             for instance in &native.instantiation(*id).instances {
                 add(&instance.name);

@@ -1531,3 +1531,32 @@
   (top Top) (run_until 0)
   (assert_eq first 20)
   (assert_eq looped 5))
+(case dpi_exports_leave_subroutines_unchanged
+  (source "package.sv" #"
+    package p;
+      export "DPI-C" function twice;
+      function int twice(int a);
+        return 2 * a;
+      endfunction
+    endpackage
+  "#)
+  (source "top.sv" #"
+    module Top(output int sum);
+      import p::*;
+      export "DPI-C" c_add = function add;
+      export "DPI-C" task fill;
+      function int add(int a, int b);
+        return a + b;
+      endfunction
+      task fill(output int o);
+        o = 5;
+      endtask
+      initial begin
+        int o;
+        fill(o);
+        sum = add(twice(o), 100);
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0)
+  (assert_eq sum 110))

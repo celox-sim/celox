@@ -221,6 +221,9 @@ pub enum AnalyzerError {
     /// none for a formal without a default (13.5.3).
     #[error("arguments of `{subroutine}`: {detail}")]
     InvalidCallArguments { subroutine: String, detail: String },
+    /// A DPI export declaration that IEEE 1800-2023 35.7 forbids.
+    #[error("DPI-C export of `{name}`: {detail}")]
+    InvalidDpiExport { name: String, detail: String },
 }
 
 impl miette::Diagnostic for AnalyzerError {}

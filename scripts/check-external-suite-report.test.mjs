@@ -348,6 +348,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "hierarchy::packed_pattern_parameter_arguments_keep_types_and_unknown_bits",
                 "hierarchy::packed_pattern_parameter_arguments_preserve_wide_values",
                 "hierarchy::packed_pattern_parameters_forward_whole_values",
+                "procedural::dpi_exports_leave_subroutines_unchanged",
                 "references::const_ref_in_a_continuous_assignment",
                 "references::const_ref_reads_the_current_value",
                 "references::ref_actual_of_an_equivalent_type",

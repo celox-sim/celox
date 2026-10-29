@@ -104,6 +104,17 @@
     },
     {
       "category": "ControlFlow",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "procedural::dpi_exports_leave_subroutines_unchanged",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "ControlFlow",
       "detail": "",
       "expectation": "Simulation",
       "name": "procedural::ff_processes_write_bits_of_separate_array_elements",

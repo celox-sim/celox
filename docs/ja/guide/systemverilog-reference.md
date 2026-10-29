@@ -253,7 +253,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
   使われていないパラメータや関数本体の中を含め、書かれた
   場所にかかわらず名前を示して報告します。システムタスクでもシステム関数でもない `$` 名、
   引数の数が誤っている呼び出し、既定値のない引数の省略、値として使ったタスクはエラーです。
-- [DPI-C の対応範囲](#dpi-c-imports)を超える機能と DPI export、複数のドライバを持つネット（トライステートバスを含む）、トップモジュールの `inout` ポート、階層参照。
+- [DPI-C の対応範囲](#dpi-c-imports)を超える機能、複数のドライバを持つネット（トライステートバスを含む）、トップモジュールの `inout` ポート、階層参照。
 
 ## 実行時の挙動 {#semantics-worth-knowing}
 
@@ -846,7 +846,8 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 
 対応するのは、モジュール・package で宣言した関数を `always_ff` とそこから呼ぶ関数で使う場合です。
 最大16個の `input` 引数を扱い、型は `bit`、`logic`、`byte`、`shortint`、`int`、`longint`（符号付き・符号なし）、戻り値はそれらか `void` です。
-組み合わせ回路からの呼び出し、`context`、task import、export、`output` / `inout`、packed vector、`real`、`string` などは未対応です。
+組み合わせ回路からの呼び出し、`context`、task import、`output` / `inout`、packed vector、`real`、`string` などは未対応です。
+同じモジュール・package で定義した関数・task の `export "DPI-C"` 宣言は受理して検査します（1 つのサブルーチンにつき 1 回、C 名の重複なし、`ref` 仮引数とクラスハンドルなし、35.7）。export はサブルーチンを変えず（35.7）、export したサブルーチンを呼べるのは `context` import だけなので（35.5.3）、C から呼ばれることはありません。
 
 登録のコード例と詳細は[英語版の DPI-C imports](/guide/systemverilog-reference#dpi-c-imports)を参照してください。
 

@@ -1080,7 +1080,7 @@ impl Module {
             }
         }
         let dpi_items = generate::items(syntax_tree, &const_env, &type_aliases)?;
-        let mut dpi_imports = dpi::imports(&dpi_items, syntax_tree.declarations())?;
+        let mut dpi_imports = dpi::imports(&dpi_items, syntax_tree, &type_aliases)?;
         for import in &dpi_imports {
             subroutine_params.insert(
                 import.name().to_string(),
