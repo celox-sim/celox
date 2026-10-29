@@ -1,1 +1,6 @@
-Address reviews r4410019227/r4410019235: retain intermediate aggregate port types, recursively lower structure defaults and preserve matching structure values; fix integration-test err_expect CI failure. Verified 882 backend tests, external cases and targeted clippy.
+Revision history for #2548:
+
+rev 2 (content) 2026-10-29 11:01 UTC — Address reviews r4410019227/r4410019235: retain intermediate aggregate port types, recursively lower structure defaults and preserve matching structure values; fix integration-test err_expect CI failure. Verified 882 backend tests, external cases and targeted clippy.
+rev 1 (initial) 2026-10-29 11:01 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2548,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"6e971646de573e18a237e383c17f253ae8c06a15","timestamp_iso":"2026-10-29T11:01:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"6e971646de573e18a237e383c17f253ae8c06a15","new_sha":"0734b91b04d99b3db60c266afb22fce404e7d906","timestamp_iso":"2026-10-29T11:01:57Z","reason":"Address reviews r4410019227/r4410019235: retain intermediate aggregate port types, recursively lower structure defaults and preserve matching structure values; fix integration-test err_expect CI failure. Verified 882 backend tests, external cases and targeted clippy.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/6e971646de573e18a237e383c17f253ae8c06a15...0734b91b04d99b3db60c266afb22fce404e7d906"}]} -->
