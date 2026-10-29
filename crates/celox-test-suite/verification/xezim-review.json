@@ -850,6 +850,10 @@
     "sv_array_locator_unique_four_state": {
       "title": "unique treats four-state values that differ only in X versus Z bits as one value",
       "standard": "IEEE 1800-2023 7.12.1, 6.3.1"
+    },
+    "sv_typename": {
+      "title": "`$typename` drops the constants of enumerations, the members of structs and unions, signings, queue bounds and packed dimensions, and writes logic as reg",
+      "standard": "IEEE 1800-2023 20.6.1"
     }
   },
   "cases": [
@@ -4851,6 +4855,46 @@
       "classification": "xezim_bug",
       "bug": "sv_array_locator_unique_four_state",
       "note": "For logic [3:0] q[$] = '{4'b1x00, 4'd3, 4'b1x00, 4'bzzzz, 4'd3, 4'bzzzz, 4'b1z00}, q.unique and q.unique_index return three entries in xezim 0.11.3, merging 4'b1x00 with 4'b1z00; 7.12.1 keeps one entry for each of the four values. The case also reads r.find with (...).size() as an operand (sv_array_locator_operand). See verification/repros/sv_array_locator_unique_four_state.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_aggregates",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "Expected enum logic[1:0]{R=2'd0,G=2'd2}typename_pkg::color_t and struct packed{bit a;bit b;}Top.ab_t$[0:9]; xezim 0.11.3 prints enum reg[1:0] typename_pkg::color_t, enum int typename_pkg::abc_t and struct packed celox_suite_tb.dut.ab_t$[0:9]: no named constants and values (20.6.1 e), no members, no signed of a signed packed struct, no packed dimensions of signed_t [1:0], and the instance path where 20.6.1 f names the declaring scope. See verification/repros/sv_typename_aggregates.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_class_parameters",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "Expected int|resource_pkg::item|bit[3:0]|logic[4:0]; xezim 0.11.3 prints logic|class resource_pkg::item|logic|logic: a variable whose type is a type parameter T = int or T = bit [3:0] is spelled logic, and resource#(switch_t)::type_name gives resource#(logic), where 20.6.1 returns the resolved type, the actual of T (8.25). See verification/repros/sv_typename_classes.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_elaboration_constant",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "Both generate conditions on $typename(T) are false in xezim 0.11.3 (flags 0, expected 9): $typename(T) == \"int\" fails for the default T = int and NAME == \"logic[1:0]\" for T = logic [1:0]. A standalone run prints an empty string for the constant $typename(byte unsigned), which 20.6.1 b spells byte unsigned. See verification/repros/sv_typename_constant.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_vectors_and_arrays",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "Expected bit[2:0]|int|logic[3:0]|logic signed[0:7]|bit[3:0][1:0]|logic; xezim 0.11.3 prints bit|int|reg|reg signed[0:7]|bit[1:0][3:0]|reg: it drops the packed dimensions of node [2:0] (a typedef resolved by 20.6.1 a) and logic [W-1:0], writes logic as reg, reverses packed dimensions, writes integer unsigned as integer, int$[] for the queues q[$] and q[$:5], and logic for the data types bit [3:0] and int unsigned. See verification/repros/sv_typename_vectors.json."
+    },
+    {
+      "suite": "sv",
+      "name": "system_functions::typename_scopes_and_string_operands",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_typename",
+      "note": "local_int is 0 in xezim 0.11.3 (expected 1): the generate-local $typename(v) of int v is not \"int\". A standalone run prints an empty string for $typename(Holder::T), a byte typedef of a class (8.23), and 0 for $typename(integer) < $typename(logic), which compares the strings \"integer\" and \"logic\" (11.4.4, 6.16). See verification/repros/sv_typename_scopes.json."
     }
   ]
 }

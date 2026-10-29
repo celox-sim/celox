@@ -174,7 +174,7 @@ pub(in crate::ast) fn native_string(
         }
         ExprKind::Call { expression, .. } => {
             matches!(&native.expression(ungroup(*expression, native)).kind,
-                ExprKind::Name(name) if name.spelling == "$sformatf")
+                ExprKind::Name(name) if matches!(name.spelling.as_str(), "$sformatf" | "$typename"))
                 || method(tree, *expression, native, dimensions)
                     .is_some_and(|(op, _)| op.returns_string())
                 || enum_name(tree, *expression, native, dimensions)

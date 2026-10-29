@@ -2952,3 +2952,259 @@ module Top(output bit done, output int errors);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq errors 0))
+
+; IEEE 1800-2023 20.6.1: `$typename` resolves typedefs, writes only a signing
+; other than the default, keeps the integer types with predefined widths
+; apart from vectors of their width, writes ranges as decimal `[left:right]`
+; numbers and puts `$` for the name of an unpacked array before its
+; dimensions; `realtime` is `real` (6.12) and `reg` is `logic` (6.11.2).
+(case typename_vectors_and_arrays
+  (source "typename_vectors.sv" #"
+package typename_pkg;
+    typedef bit [9:1'b1] word;
+endpackage
+module Top(output bit done);
+    import typename_pkg::*;
+    typedef bit node;
+    localparam W = 4;
+    node [2:0] x;
+    int signed y;
+    logic [W-1:0] l;
+    logic signed [0:7] ls;
+    bit [3:0][1:0] pp;
+    reg r;
+    integer ii;
+    integer unsigned iu;
+    time t;
+    byte by;
+    shortint si;
+    longint li;
+    int unsigned ui;
+    real re;
+    shortreal sr;
+    realtime rt;
+    string s;
+    int da[];
+    int q[$];
+    int qb[$:5];
+    int aa[string];
+    int ai[int];
+    logic [7:0] mem [0:3][4];
+    word w;
+    initial begin
+        $display("%s|%s|%s|%s|%s|%s", $typename(x), $typename(y), $typename(l), $typename(ls), $typename(pp), $typename(r));
+        $display("%s|%s|%s|%s|%s|%s|%s", $typename(ii), $typename(iu), $typename(t), $typename(by), $typename(si), $typename(li), $typename(ui));
+        $display("%s|%s|%s|%s", $typename(re), $typename(sr), $typename(rt), $typename(s));
+        $display("%s|%s|%s|%s|%s", $typename(da), $typename(q), $typename(qb), $typename(aa), $typename(ai));
+        $display("%s|%s|%s", $typename(mem), $typename(w), $typename(word));
+        $display("%s|%s|%s", $typename(logic), $typename(bit [3:0]), $typename(int unsigned));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "bit[2:0]|int|logic[3:0]|logic signed[0:7]|bit[3:0][1:0]|logic\ninteger|integer unsigned|time|byte|shortint|longint|int unsigned\nreal|shortreal|real|string\nint$[]|int$[$]|int$[$:5]|int$[string]|int$[int]\nlogic[7:0]$[0:3][0:3]|bit[9:1]|bit[9:1]\nlogic|bit[3:0]|int unsigned\n"))
+
+; 20.6.1: an enumeration is written with its named constants and their
+; values, a packed or unpacked struct or a packed union with its members, as
+; the clause's example `struct{bit A;bit B;}top.AB_t`, each followed by the
+; name of its typedef prefixed with the package (`p::`) or module (`m.`)
+; that declares it.
+(case typename_aggregates
+  (source "typename_aggregates.sv" #"
+package typename_pkg;
+    typedef enum logic [1:0] {R, G = 2} color_t;
+    typedef enum {A, B, C = 99} abc_t;
+endpackage
+module Top(output bit done);
+    import typename_pkg::*;
+    typedef bit node;
+    typedef struct packed {node a, b;} ab_t;
+    typedef struct packed signed {logic [3:0] x; bit y;} signed_t;
+    typedef union packed {logic [3:0] a; bit [3:0] b;} either_t;
+    typedef struct packed {ab_t inner; int j;} outer_t;
+    typedef struct {node a, b;} pair_t;
+    color_t c;
+    abc_t e;
+    ab_t abs [10];
+    signed_t sv;
+    signed_t [1:0] sa;
+    either_t u;
+    outer_t o;
+    pair_t pr;
+    initial begin
+        $display("%s", $typename(c));
+        $display("%s", $typename(e));
+        $display("%s", $typename(abs));
+        $display("%s", $typename(sv));
+        $display("%s", $typename(sa));
+        $display("%s", $typename(u));
+        $display("%s", $typename(o));
+        $display("%s", $typename(ab_t));
+        $display("%s", $typename(pr));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "enum logic[1:0]{R=2'd0,G=2'd2}typename_pkg::color_t\nenum{A=32'sd0,B=32'sd1,C=32'sd99}typename_pkg::abc_t\nstruct packed{bit a;bit b;}Top.ab_t$[0:9]\nstruct packed signed{logic[3:0] x;bit y;}Top.signed_t\nstruct packed signed{logic[3:0] x;bit y;}Top.signed_t[1:0]\nunion packed{logic[3:0] a;bit[3:0] b;}Top.either_t\nstruct packed{struct packed{bit a;bit b;}Top.ab_t inner;int j;}Top.outer_t\nstruct packed{bit a;bit b;}Top.ab_t\nstruct{bit a;bit b;}Top.pair_t\n"))
+
+; 20.6.1 in the shape the UVM library uses it (`uvm_resource#(T)::type_name`):
+; `$typename` of a type parameter and of a local variable and a property of
+; that type. A class type is written with the scope that declares the class
+; and, for a parameterized class, its parameter values (8.25).
+(case typename_class_parameters
+  (source "typename_classes.sv" #"
+package resource_pkg;
+    class item;
+    endclass
+    typedef enum bit {OFF, ON} switch_t;
+    class resource #(type T = int);
+        T val;
+        static function string type_name();
+            return $sformatf("resource#(%s)", $typename(T));
+        endfunction
+        virtual function string get_type_name();
+            return type_name();
+        endfunction
+        function string value_type_name();
+            T foo;
+            string msg = $typename(foo);
+            return msg;
+        endfunction
+        function string property_type_name();
+            return $typename(val);
+        endfunction
+    endclass
+    class sized #(int N = 3, type T = logic);
+        T [N-1:0] v;
+        function string name();
+            return $typename(v);
+        endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    import resource_pkg::*;
+    class local_class;
+    endclass
+    resource #(int) ri;
+    resource #(item) rc;
+    resource #(bit [3:0]) rb;
+    resource #(switch_t) re;
+    sized #(5) sz;
+    local_class lc;
+    initial begin
+        ri = new;
+        rc = new;
+        rb = new;
+        re = new;
+        sz = new;
+        $display("%s|%s|%s", resource#(int)::type_name(), rc.get_type_name(), rb.get_type_name());
+        $display("%s", re.get_type_name());
+        $display("%s|%s|%s|%s", ri.value_type_name(), rc.value_type_name(), rb.property_type_name(), sz.name());
+        $display("%s|%s|%s|%s", $typename(ri), $typename(rc), $typename(lc), $typename(item));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "resource#(int)|resource#(resource_pkg::item)|resource#(bit[3:0])\nresource#(enum bit{OFF=1'd0,ON=1'd1}resource_pkg::switch_t)\nint|resource_pkg::item|bit[3:0]|logic[4:0]\nresource_pkg::resource#(int)|resource_pkg::resource#(resource_pkg::item)|Top.local_class|resource_pkg::item\n"))
+
+; 20.6.1: `$typename` is a constant function, usable where elaboration
+; needs a constant: a string parameter and a generate condition.
+(case typename_elaboration_constant
+  (source "typename_constant.sv" #"
+module Child #(type T = int) (output bit is_int, output bit is_pair);
+    localparam string NAME = $typename(T);
+    if ($typename(T) == "int") begin : g
+        assign is_int = 1'b1;
+    end else begin : g
+        assign is_int = 1'b0;
+    end
+    if (NAME == "logic[1:0]") begin : h
+        assign is_pair = 1'b1;
+    end else begin : h
+        assign is_pair = 1'b0;
+    end
+endmodule
+module Top(output bit done, output bit [3:0] flags);
+    localparam string P = $typename(byte unsigned);
+    Child c0(.is_int(flags[0]), .is_pair(flags[1]));
+    Child #(.T(logic [1:0])) c1(.is_int(flags[2]), .is_pair(flags[3]));
+    function automatic string names(input shortint x);
+        logic [2:0] v;
+        return {$typename(x), "/", $typename(v)};
+    endfunction
+    initial begin
+        $display("%s %s", P, names(3));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq flags 9)
+  (expect_output "byte unsigned shortint/logic[2:0]\n"))
+
+; 20.6.1: `$typename` of a scope-qualified type, of a type name with packed
+; dimensions, of a parameterized class named alone (its default
+; specialization, 8.25) and of generate-local variables, and its result as a
+; `string` operand: ordering compares the characters (11.4.4, 6.16) and
+; string methods apply (6.16.1).
+(case typename_scopes_and_string_operands
+  (source "typename_operands.sv" #"
+package typename_scope_pkg;
+    typedef bit [3:0] word_t;
+    typedef int count_t;
+    class Box;
+        typedef logic [2:0] T;
+    endclass
+    class Sized #(int N = 4);
+    endclass
+endpackage
+class Holder;
+    typedef byte T;
+    typedef bit [1:0] P;
+    static shortint s;
+endclass
+class Counted #(typename_scope_pkg::count_t N = 3);
+endclass
+module Top(output bit done, output bit local_int);
+    typedef bit node_t;
+    typedef enum bit {OFF, ON} mode_t;
+    typedef struct packed {bit a;} one_t;
+    mode_t m;
+    one_t o;
+    // Constant queries of variables of named types (20.6.1 e, f).
+    localparam string MODE = $typename(m);
+    localparam string ONE = $typename(o);
+    localparam string HELD = $typename(Holder::T);
+    localparam string COUNTED = $typename(Counted);
+    localparam string SIZED = $typename(typename_scope_pkg::Sized);
+    // Strings compare in lexicographic order (11.4.4).
+    localparam bit ORDER = $typename(integer) < $typename(logic);
+    if (1) begin : g
+        int v;
+        localparam string N = $typename(v);
+        if (N == "int") begin : h
+            assign local_int = 1'b1;
+        end else begin : h
+            assign local_int = 1'b0;
+        end
+    end
+    Holder h;
+    int w;
+    // The operand of $typename is not evaluated (20.6.1).
+    localparam bit SKIPPED = 1'b0 && (($typename(w) == "int") && {2{1'b1}});
+    initial begin
+        $display("%s|%s", $typename(typename_scope_pkg::word_t), HELD);
+        $display("%s|%s", $typename(Holder::s), $typename(h.s));
+        $display("%s|%s|%0d", $typename(Holder::P [3:0]), $typename(typename_scope_pkg::Box::T), SKIPPED);
+        $display("%s|%0d", SIZED, ORDER);
+        $display("%s|%s", MODE, ONE);
+        $display("%s|%s|%s", $typename(node_t [3:0]), $typename(g.v), COUNTED);
+        $display("%0d %0d %0d %s", $typename(integer) < $typename(logic), $typename(int).len(), $typename(bit) == "bit", {$typename(byte), "!"});
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq local_int 1)
+  (expect_output "bit[3:0]|byte\nshortint|shortint\nbit[3:0][1:0]|logic[2:0]|0\ntypename_scope_pkg::Sized#(4)|1\nenum bit{OFF=1'd0,ON=1'd1}Top.mode_t|struct packed{bit a;}Top.one_t\nbit[3:0]|int|$unit::Counted#(3)\n1 3 1 byte!\n"))

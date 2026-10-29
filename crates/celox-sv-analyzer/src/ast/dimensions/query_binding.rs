@@ -568,7 +568,7 @@ fn validate_index(
                 if expression_binding::native_name(&tree.state, *expression, native)
                     .as_deref()
                     .and_then(SystemFunction::from_name)
-                    .is_some_and(SystemFunction::is_data_query)
+                    .is_some_and(SystemFunction::has_unevaluated_operand)
                 {
                     continue;
                 }

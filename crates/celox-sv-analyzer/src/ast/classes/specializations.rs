@@ -35,6 +35,8 @@ pub(in crate::ast) struct Specialization {
     /// interface class extends, whose parameters and typedefs it inherits
     /// (IEEE 1800-2023 8.13, 8.26.3).
     pub bases: Vec<String>,
+    /// The parameters of the port list, for `$typename`.
+    pub arguments: Vec<type_names::ClassArgument>,
 }
 
 /// The types that a scope inside the class declared as `own` sees from
@@ -637,6 +639,7 @@ fn prepare_bound(
         literals: HashMap::default(),
         lowered: Vec::new(),
         spelled: Vec::new(),
+        arguments: Vec::new(),
         own_env: HashMap::default(),
         own_aliases: HashMap::default(),
     };
@@ -830,7 +833,15 @@ fn finish_specialization(
                             );
                         }
                     }
-                    ty.name_declaration(|| format!("{name}::{alias}"));
+                    ty.name_declaration(|| {
+                        (
+                            format!("{name}::{alias}"),
+                            type_names::TypedefName::Class {
+                                class: name.as_str().into(),
+                                name: alias.as_str().into(),
+                            },
+                        )
+                    });
                     parameters.own_aliases.insert(alias.clone(), ty.clone());
                     aliases.insert(alias, ty);
                 }
@@ -853,6 +864,7 @@ fn finish_specialization(
             literals: parameters.literals,
             aliases,
             bases,
+            arguments: parameters.arguments,
         }),
     ));
     Ok(name)
@@ -868,6 +880,8 @@ struct Parameters {
     /// The parameters of the port list as the name of the specialization
     /// spells them.
     spelled: Vec<String>,
+    /// The parameters of the port list as `$typename` writes them.
+    arguments: Vec<type_names::ClassArgument>,
     /// The constants and types the class declares itself, which hide those
     /// of its bases; a constant without a value hides one of a base too.
     own_env: HashMap<String, Option<i128>>,
@@ -875,6 +889,56 @@ struct Parameters {
 }
 
 impl Parameters {
+    /// Record type parameter `ty` of the port list for `$typename`. This and
+    /// [`Self::record_value`] stay off the recursive specialization frames,
+    /// as the phases below do.
+    #[inline(never)]
+    fn record_type(&mut self, ty: &Type) {
+        self.arguments
+            .push(type_names::ClassArgument::Type(ty.clone()));
+    }
+
+    /// Record the value of value parameter `parameter` of the port list,
+    /// lowered from `first` on, for `$typename`, which writes the value of
+    /// an integral parameter.
+    #[inline(never)]
+    fn record_value(
+        &mut self,
+        tree: &AnalysisContext<'_>,
+        parameter: &celox_sv_syntax::Parameter,
+        first: usize,
+        env: &HashMap<String, i128>,
+        aliases: &HashMap<String, Type>,
+    ) {
+        let ParameterKind::Value {
+            data_type,
+            dimensions,
+            ..
+        } = &parameter.kind
+        else {
+            return;
+        };
+        let integral = dimensions.is_empty()
+            && self.lowered[first..]
+                .iter()
+                .all(|parameter| parameter.floating.is_none())
+            && type_binding::procedural_type(*data_type, tree.declarations(), tree, env, aliases)
+                .ok()
+                .flatten()
+                .is_some_and(|ty| {
+                    matches!(
+                        ty.kind(),
+                        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                    ) && ty.container.is_none()
+                        && ty.class().is_none()
+                        && ty.unpacked_ranges.is_empty()
+                });
+        let name = instances::normalize_identifier(&parameter.name.spelling);
+        self.arguments.push(type_names::ClassArgument::Value(
+            env.get(&name).copied().filter(|_| integral),
+        ));
+    }
+
     /// Bind parameter declaration `id` of class `declaration`, one of its
     /// parameter port list when `port`, in `env` and `aliases`. Return the
     /// first value parameter that cannot yet be evaluated, without publishing
@@ -913,6 +977,7 @@ impl Parameters {
                         .ok_or_else(|| unsupported(format!("type of type parameter `{name}`")))?;
                     if port {
                         self.spelled.push(format!("{name}={}", spelling(&ty)));
+                        self.record_type(&ty);
                     }
                     aliases.insert(name.clone(), ty.clone());
                     self.own_aliases.insert(name, ty);
@@ -967,6 +1032,7 @@ impl Parameters {
                     };
                     if port {
                         self.spelled.push(format!("{name}={spelling}"));
+                        self.record_value(tree, parameter, first, env, aliases);
                     }
                     for key in keys {
                         let value = env.get(&key).copied();
@@ -1041,54 +1107,65 @@ fn type_argument(
             expression_binding::named_class(tree, id, native, context)?
                 .map(|name| super::handle(&name))
         }
-        // A type of a class, `C::T` or `C#(...)::T`, or of a package
-        // (IEEE 1800-2023 8.23, 26.3).
-        ExprKind::Member {
-            expression,
-            separator,
-            name,
-        } if separator == "::" => {
-            let member = instances::normalize_identifier(&name.spelling);
-            let class = match &native.expression(*expression).kind {
-                ExprKind::Name(scope) => {
-                    let scope = instances::normalize_identifier(&scope.spelling);
-                    if let Some(class) = super::resolve(tree, &scope) {
-                        // Inside the class, its name refers to the
-                        // specialization being declared (8.25).
-                        match context
-                            .type_aliases
-                            .get(&scope_key(&scope))
-                            .or_else(|| context.type_aliases.get(&scope_key(&class)))
-                            .and_then(|ty| ty.class().map(str::to_owned))
-                        {
-                            Some(specialization) => Some(specialization),
-                            None if super::is_declared(tree, &class) => {
-                                Some(specialize(tree, &class, &[], context)?)
-                            }
-                            None => Some(class),
-                        }
-                    } else {
-                        let qualified = scope::qualified_name(&tree.state, &scope, &member);
-                        return finish(
-                            context.type_aliases.get(&qualified).cloned().or_else(|| {
-                                (qualified == "std::process")
-                                    .then(|| super::handle(super::super::processes::CLASS))
-                            }),
-                            context,
-                            tree,
-                        );
-                    }
-                }
-                ExprKind::Parameterized { .. } => {
-                    expression_binding::named_class(tree, *expression, native, context)?
-                }
-                _ => None,
-            };
-            class.and_then(|class: String| member_type(tree, &class, &member))
-        }
+        ExprKind::Member { separator, .. } if separator == "::" => scoped_type(tree, id, context)?,
         _ => None,
     };
     finish(ty, context, tree)
+}
+
+/// The type that scope-qualified name `id` names: a type of a class, `C::T`
+/// or `C#(...)::T`, or of a package (IEEE 1800-2023 8.23, 26.3).
+pub(in crate::ast) fn scoped_type(
+    tree: &AnalysisContext<'_>,
+    id: celox_sv_syntax::ExprId,
+    context: &PackedDimensions,
+) -> Converted<Option<Type>> {
+    let native = tree.declarations();
+    let ExprKind::Member {
+        expression,
+        separator,
+        name,
+    } = &native.expression(id).kind
+    else {
+        return Ok(None);
+    };
+    if separator != "::" {
+        return Ok(None);
+    }
+    let member = instances::normalize_identifier(&name.spelling);
+    let class = match &native.expression(*expression).kind {
+        ExprKind::Name(scope) => {
+            let scope = instances::normalize_identifier(&scope.spelling);
+            if let Some(class) = super::resolve(tree, &scope) {
+                // Inside the class, its name refers to the
+                // specialization being declared (8.25).
+                match context
+                    .type_aliases
+                    .get(&scope_key(&scope))
+                    .or_else(|| context.type_aliases.get(&scope_key(&class)))
+                    .and_then(|ty| ty.class().map(str::to_owned))
+                {
+                    Some(specialization) => Some(specialization),
+                    None if super::is_declared(tree, &class) => {
+                        Some(specialize(tree, &class, &[], context)?)
+                    }
+                    None => Some(class),
+                }
+            } else {
+                let qualified = scope::qualified_name(&tree.state, &scope, &member);
+                return Ok(context.type_aliases.get(&qualified).cloned().or_else(|| {
+                    (qualified == "std::process")
+                        .then(|| super::handle(super::super::processes::CLASS))
+                }));
+            }
+        }
+        // A class of a package, `p::C::T`, or a specialization.
+        ExprKind::Member { .. } | ExprKind::Parameterized { .. } => {
+            expression_binding::named_class(tree, *expression, native, context)?
+        }
+        _ => None,
+    };
+    Ok(class.and_then(|class: String| member_type(tree, &class, &member)))
 }
 
 /// The type argument `ty`, bound in `context`, fixed there and checked.
