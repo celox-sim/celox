@@ -13,7 +13,51 @@
     },
     {
       "category": "Operators",
-      "detail": "streaming::streaming_operand_types at 181:27: assert_eq flags: expected 0x3, got 0x1",
+      "detail": "streaming::streaming_contexts reads hi with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "streaming::streaming_contexts",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "streaming::streaming_dynamic_pack at 227:27: assert_eq flags: expected 0xff, got 0xe3",
+      "expectation": "Simulation",
+      "name": "streaming::streaming_dynamic_pack",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "streaming::streaming_dynamic_unpack at 271:27: assert_eq flags: expected 0x1f, got 0x15",
+      "expectation": "Simulation",
+      "name": "streaming::streaming_dynamic_unpack",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "streaming::streaming_dynamic_with at 292:27: assert_eq flags: expected 0x3, got 0x0",
+      "expectation": "Simulation",
+      "name": "streaming::streaming_dynamic_with",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "streaming::streaming_operand_types at 185:27: assert_eq flags: expected 0x3, got 0x1",
       "expectation": "Simulation",
       "name": "streaming::streaming_operand_types",
       "phase": "execute",

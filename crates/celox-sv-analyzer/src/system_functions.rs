@@ -1145,6 +1145,108 @@ pub enum ObjectOp {
     Locator(Locator),
     /// A new synchronization object of a named event (15.5).
     NewEvent,
+    /// A streaming concatenation of dynamically sized data, see [`StreamOp`].
+    Stream(StreamOp),
+}
+
+/// An operation on the heap stream of a streaming concatenation that holds
+/// dynamically sized data (IEEE 1800-2023 11.4.14). A stream is a handle that
+/// lives until the operation that converts it last, or [`StreamOp::Free`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum StreamOp {
+    /// A new stream of the items in the arguments, see [`StreamPack`].
+    Pack(Box<StreamPack>),
+    /// The stream in the argument as `width` bits, aligned to the left and
+    /// filled with zeros; a stream wider than `width` bits, or for a
+    /// bit-stream cast (`exact`) of another width, is a fault. The stream is
+    /// freed.
+    ToBits { width: usize, exact: bool },
+    /// The stream in the argument as a new container, in as few elements as
+    /// hold it; the stream is freed.
+    ToContainer(ContainerLayout),
+    /// The stream in the argument as a new string; the stream is freed.
+    ToString,
+    /// `width` unread bits of the stream in the first argument after the
+    /// number in the second, which are not read.
+    Peek(usize),
+    /// Read `count` more bits of the stream in the argument: a fault past
+    /// its end.
+    Skip(usize),
+    /// A new container with the unread bits of the stream in the argument
+    /// but the last `reserve`, which are read.
+    TakeRest {
+        layout: ContainerLayout,
+        reserve: usize,
+    },
+    /// A copy of the container in the second argument whose elements from
+    /// the third argument, as many as the fourth, are read from the stream
+    /// in the first.
+    TakeRange(ContainerLayout, StreamRange),
+    /// A new string with the unread bits of the stream in the argument but
+    /// the last `reserve`, which are read.
+    TakeString { reserve: usize },
+    /// Free the stream in the argument.
+    Free,
+}
+
+/// The items of a new heap stream, one or three arguments each, first
+/// streamed first; the stream is then re-ordered by `slice` as a
+/// [`Stream`] does, or for `unorder` put back in the order that re-ordering
+/// would undo, after keeping the first `limit` bits.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct StreamPack {
+    pub items: Vec<StreamItem>,
+    pub slice: Option<usize>,
+    pub unorder: bool,
+    pub limit: Option<usize>,
+}
+
+/// The form of a `with [first ... second]` range of a queue or dynamic array
+/// (IEEE 1800-2023 11.4.14.4), whose operands are evaluated once each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamRange {
+    /// `[first +: second]`, and `[first]` with a second operand of 1.
+    Up,
+    /// `[first : second]`.
+    Bounds,
+    /// `[first -: second]`.
+    Down,
+}
+
+/// An item of a [`StreamPack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StreamItem {
+    /// A fixed-size value.
+    Bits(StreamArg),
+    /// The bytes of a string.
+    String,
+    /// The elements of a container, or with `range` those that the second
+    /// and third arguments select.
+    Container {
+        layout: ContainerLayout,
+        range: Option<StreamRange>,
+    },
+    /// The unread bits of another stream, which is freed.
+    Stream,
+}
+
+impl StreamItem {
+    /// The number of arguments of the item.
+    pub fn arguments(self) -> usize {
+        match self {
+            Self::Container { range: Some(_), .. } => 3,
+            _ => 1,
+        }
+    }
+}
+
+impl StreamOp {
+    pub fn result_type(&self) -> (usize, bool) {
+        match self {
+            Self::ToBits { width, .. } | Self::Peek(width) => (*width, false),
+            _ => (32, false),
+        }
+    }
 }
 
 impl ObjectOp {
@@ -1177,6 +1279,7 @@ impl ObjectOp {
             Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::Unbox(record) => (record.width(), false),
+            Self::Stream(op) => op.result_type(),
             Self::New { .. }
             | Self::ClassOf
             | Self::Store(_)
@@ -1193,6 +1296,7 @@ impl fmt::Display for ObjectOp {
         f.write_str(match self {
             Self::Container { .. } => "container operation",
             Self::Locator(_) => "array locator method",
+            Self::Stream(_) => "streaming concatenation",
             Self::New { .. } => "new",
             Self::Load(_) => "property read",
             Self::Store(_) => "property write",

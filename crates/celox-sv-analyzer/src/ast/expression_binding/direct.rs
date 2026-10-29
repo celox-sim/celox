@@ -314,9 +314,13 @@ enum Job {
         Option<Rc<PackedDimensions>>,
     ),
     Finish(Finish, usize, Option<Rc<PackedDimensions>>),
-    /// A streaming concatenation operand of a bit-stream cast, which keeps
-    /// the width of its stream (IEEE 1800-2023 11.4.14).
-    Stream(ExprId, Option<Rc<PackedDimensions>>),
+    /// A streaming concatenation operand of a bit-stream cast to an integral
+    /// type (IEEE 1800-2023 11.4.14).
+    Stream(
+        ExprId,
+        Option<streams::Receiver>,
+        Option<Rc<PackedDimensions>>,
+    ),
 }
 
 /// Whether the call copies actual `position` of `name` into its formal and
@@ -707,18 +711,57 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Cast { target, expression }
                         if streams::is_stream(*expression, native) =>
                     {
-                        jobs.push(Job::Finish(
-                            Finish::Cast(cast_target_native(
-                                *target,
+                        // A cast to a type that is not integral receives the
+                        // stream as an assignment does.
+                        let ty = match call_name(&tree.state, *target, native) {
+                            Some(name) => dimensions.type_aliases.get(&name).cloned(),
+                            None => match native.expression(ungroup(*target, native)).kind {
+                                ExprKind::Type(ty) => {
+                                    type_binding::binding::bind_in(ty, native, tree, dimensions)?
+                                }
+                                _ => None,
+                            },
+                        };
+                        if let Some(shape) = ty
+                            .as_ref()
+                            .map(procedural::dimensions_from_type)
+                            .filter(|shape| {
+                                shape.container.is_some()
+                                    || shape.string
+                                    || !shape.unpacked.is_empty()
+                            })
+                        {
+                            let receiver = streams::receiver(&shape, &tree.state, dimensions)?;
+                            values.push(streams::pack(
                                 *expression,
+                                Some(receiver),
                                 native,
                                 tree,
                                 dimensions,
-                            )?),
-                            1,
-                            scope.clone(),
-                        ));
-                        jobs.push(Job::Stream(*expression, scope.clone()));
+                            )?);
+                            continue;
+                        }
+                        let cast =
+                            cast_target_native(*target, *expression, native, tree, dimensions)?;
+                        let receiver = match &cast {
+                            casts::RuntimeCastTarget::String => {
+                                values.push(streams::pack(
+                                    *expression,
+                                    Some(streams::Receiver::String),
+                                    native,
+                                    tree,
+                                    dimensions,
+                                )?);
+                                continue;
+                            }
+                            casts::RuntimeCastTarget::Integral { target, .. }
+                            | casts::RuntimeCastTarget::Zero(target) => {
+                                Some(streams::Receiver::Cast(target.width))
+                            }
+                            _ => None,
+                        };
+                        jobs.push(Job::Finish(Finish::Cast(cast), 1, scope.clone()));
+                        jobs.push(Job::Stream(*expression, receiver, scope.clone()));
                         continue;
                     }
                     ExprKind::Cast { target, expression } => (
@@ -1379,9 +1422,9 @@ pub(in crate::ast) fn bind_value(
                         .map(|(id, shape)| Job::Enter(id, shape, scope.clone())),
                 );
             }
-            Job::Stream(id, scope) => {
+            Job::Stream(id, receiver, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
-                values.push(streams::pack(id, None, native, tree, dimensions)?);
+                values.push(streams::pack(id, receiver, native, tree, dimensions)?);
             }
             Job::Finish(finish, count, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);

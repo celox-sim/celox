@@ -22,7 +22,31 @@
       "case": "streaming::streaming_contexts",
       "status": "compile_error",
       "phase": "compile",
-      "stderr": "<case>/source_0.sv:5: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:14: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Malformed statement\n"
+      "stderr": "<case>/source_0.sv:6: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:15: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: Syntax in assignment statement l-value.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n"
+    },
+    {
+      "case": "streaming::streaming_dynamic_alignment",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:6: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:8: sorry: Streaming concatenation not supported.\n"
+    },
+    {
+      "case": "streaming::streaming_dynamic_pack",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:15: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:19: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n<case>/source_0.sv:24: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n<case>/source_0.sv:29: syntax error\n<case>/source_0.sv:29: error: Malformed statement\n<case>/source_0.sv:31: syntax error\n<case>/source_0.sv:31: Syntax in assignment statement l-value.\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: error: Malformed statement\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n<case>/source_0.sv:36: sorry: Streaming concatenation not supported.\n"
+    },
+    {
+      "case": "streaming::streaming_dynamic_unpack",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: Syntax in assignment statement l-value.\n<case>/source_0.sv:21: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:21: sorry: Streaming concatenation not supported in l-values.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: Syntax in assignment statement l-value.\n"
+    },
+    {
+      "case": "streaming::streaming_dynamic_with",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n"
     },
     {
       "case": "streaming::streaming_operand_types",

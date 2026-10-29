@@ -116,6 +116,12 @@ impl<'a> ProcModule<'a> {
                 matches!(**op, sv::ir::ObjectOp::Load(field)
                 if field.handle == Some(sv::ir::HandleProperty::String))
                     || matches!(**op, sv::ir::ObjectOp::Container { op: sv::ir::ContainerOp::Get | sv::ir::ContainerOp::PopFront | sv::ir::ContainerOp::PopBack, layout } if layout.handle == Some(sv::ir::HandleProperty::String))
+                    || matches!(
+                        **op,
+                        sv::ir::ObjectOp::Stream(
+                            sv::ir::StreamOp::ToString | sv::ir::StreamOp::TakeString { .. }
+                        )
+                    )
             }
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),

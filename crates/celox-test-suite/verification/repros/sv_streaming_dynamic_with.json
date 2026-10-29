@@ -1,0 +1,30 @@
+{
+  "case": "streaming::streaming_dynamic_with",
+  "source": "src/sv/cases/streaming.vtest",
+  "standard": "IEEE 1800-2023 11.4.14.4: in a pack a with range streams only the specified items of a dynamic array; in an unpack the expression in the with is evaluated immediately before its array is unpacked and may read items unpacked before it, here o_len, and a variable-size array is resized to the range.",
+  "method": "The shared cases run unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; each reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top). Celox's output is the one the passing shared assertions require.",
+  "reduced_source": "module Top;\n    int i_header = 12, i_len = 5, i_crc = 42;\n    byte i_data[];\n    int o_header, o_len, o_crc;\n    byte o_data[];\n    byte pkt[$];\n    initial begin\n        i_data = new[5];\n        foreach (i_data[k]) i_data[k] = byte'(k + 1);\n        pkt = {<< 8 {i_header, i_len, i_data with [1 +: 3], i_crc}};\n        $display(\"pkt size=%0d pkt[4]=%0d pkt[6]=%0d\", pkt.size(), pkt[4], pkt[6]);\n        {<< 8 {o_header, o_len, o_data with [0 +: o_len], o_crc}} = {<< 8 {i_header, i_len, i_data, i_crc}};\n        $display(\"len=%0d crc=%0d size=%0d data[0]=%0d data[4]=%0d\", o_len, o_crc, o_data.size(), o_data[0], o_data[4]);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "status": "compile_error",
+      "stderr": "%Error-UNSUPPORTED: repro.sv:10:46: Unsupported: with[] stream expression\n%Error-UNSUPPORTED: repro.sv:12:40: Unsupported: with[] stream expression\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:10: syntax error\nrepro.sv:10: error: Malformed statement\nrepro.sv:12: syntax error\nrepro.sv:12: syntax error\nrepro.sv:12: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "pkt size=17 pkt[4]=5 pkt[6]=3\nlen=5 crc=33818120 size=0 data[0]=0 data[4]=0\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "pkt size=15 pkt[4]=4 pkt[6]=2\nlen=5 crc=42 size=5 data[0]=1 data[4]=5\n"
+    }
+  ]
+}
