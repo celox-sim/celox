@@ -52,6 +52,10 @@ pub(super) const GROUPS: &[Group] = &[
         text: include_str!("container_formals.vtest"),
     },
     Group {
+        file: "src/sv/cases/wide_class_properties.vtest",
+        text: include_str!("wide_class_properties.vtest"),
+    },
+    Group {
         file: "src/sv/cases/references.vtest",
         text: include_str!("references.vtest"),
     },

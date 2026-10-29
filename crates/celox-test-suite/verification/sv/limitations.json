@@ -2098,7 +2098,8 @@
     ],
     "cases": {
       "icarus": [
-        "class::shallow_copies"
+        "class::shallow_copies",
+        "wide_class_properties::wide_properties_keep_every_bit"
       ]
     }
   },
@@ -2211,7 +2212,8 @@
     "cases": {
       "icarus": [
         "class::randomize_without_rand_members",
-        "class::unconstrained_randomize"
+        "class::unconstrained_randomize",
+        "wide_class_properties::wide_random_properties_fill_every_word"
       ]
     }
   },
@@ -3004,7 +3006,8 @@
         "unpacked_structs::reference_formals_four_state",
         "unpacked_structs::reference_formals_of_virtual_methods",
         "unpacked_structs::results_and_outputs",
-        "unpacked_structs::subroutine_arguments_and_results"
+        "unpacked_structs::subroutine_arguments_and_results",
+        "wide_class_properties::wide_type_parameters_and_records"
       ]
     }
   },
