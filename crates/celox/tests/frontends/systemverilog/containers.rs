@@ -109,6 +109,52 @@ sv_backends! {
 }
 
 #[test]
+fn dollar_indices_reject_receivers_with_side_effects() {
+    // `$` reads the queue's size through the receiver again; with a call in
+    // the receiver, the two reads could name different queues.
+    for read in ["m[next_index()][$]", "m[next_index()][$ - 1]"] {
+        let source = format!(
+            "module Top; int m[int][$]; int calls; int v;
+                function automatic int next_index(); calls++; return calls; endfunction
+                initial v = {read};
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("dollar-receiver.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .err()
+        .unwrap_or_else(|| panic!("`{read}` must be rejected"))
+        .to_string();
+        assert!(
+            error.contains("`$` index of a queue read through"),
+            "{read}: {error}"
+        );
+    }
+    // An explicit size query is a read of its own: both calls are made.
+    let source = r#"module Top(output int value);
+        int m[int][$];
+        int calls;
+        int v;
+        function automatic int next_index(); calls++; return calls; endfunction
+        initial begin
+            m[1] = '{10, 11, 12};
+            m[2] = '{20, 21};
+            v = m[next_index()][m[next_index()].size() - 1];
+            value = calls;
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("explicit.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(0).unwrap();
+    let value = sim.signal("value");
+    assert_eq!(sim.get(value), BigUint::from(2u8));
+}
+
+#[test]
 fn container_element_events_reject_mutating_index_calls() {
     for event in ["q.pop_front", "q[q.pop_front()]", "q[q.pop_back]"] {
         let source =

@@ -324,7 +324,7 @@ impl Ff<'_, '_> {
                 let offset = self.constant64(u64::from(field.offset + plane));
                 let count = self.constant64(u64::from(field.bytes()));
                 let stored = self.heap_call(opcode, &[object, offset, count]);
-                self.complement(stored)
+                self.complement(stored, field.width)
             });
             return self.container_join(value, mask, width, true);
         }
@@ -342,8 +342,8 @@ impl Ff<'_, '_> {
         let planes = if field.four_state && self.m.four_state {
             let (value, mask) = self.container_split(value);
             vec![
-                (0, self.complement(value)),
-                (field.bytes(), self.complement(mask)),
+                (0, self.complement(value, field.width)),
+                (field.bytes(), self.complement(mask, field.width)),
             ]
         } else {
             let known = self.b.alloc_bit(field.width as usize, false);
@@ -363,10 +363,19 @@ impl Ff<'_, '_> {
 
     /// A 4-state property holds the complement of its value and mask planes,
     /// so the zeroed bytes of a new object read as X (IEEE 1800-2023 6.8).
-    fn complement(&mut self, plane: RegisterId) -> RegisterId {
+    /// Bits past `width` stay zero, so a default value is all zero bytes.
+    fn complement(&mut self, plane: RegisterId, width: u32) -> RegisterId {
         let complement = self.b.alloc_bit(64, false);
         self.b
             .emit(SIRInstruction::Unary(complement, UnaryOp::BitNot, plane));
-        complement
+        let bits = self.constant64(u64::MAX >> (64 - width.min(64)));
+        let masked = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::Binary(
+            masked,
+            complement,
+            BinaryOp::And,
+            bits,
+        ));
+        masked
     }
 }

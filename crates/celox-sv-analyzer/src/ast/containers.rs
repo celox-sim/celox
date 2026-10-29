@@ -374,6 +374,23 @@ fn element_value(
         value
     })
 }
+/// `$`, the last index of queue `receiver` of type `target`, read in an
+/// index of an element of it. A read evaluates the receiver again for the
+/// size, so a receiver with a side effect, such as `m[f()]`, could name
+/// another queue.
+fn last_index(target: &ContainerType, receiver: Expr) -> Converted<Expr> {
+    if inlining::effectful(&receiver) {
+        return Err(unsupported(
+            "`$` index of a queue read through an expression with a side effect",
+        ));
+    }
+    Ok(Expr::Binary {
+        left: Box::new(call(ContainerOp::Size, target.layout, vec![receiver])),
+        op: BinaryOp::Sub,
+        right: Box::new(Expr::Literal("1".into())),
+    })
+}
+
 fn index_value(
     id: ExprId,
     base: ExprId,
@@ -411,15 +428,7 @@ fn index_value(
             if name.spelling == "$"
                 && matches!(target.layout.kind, ContainerKind::Queue { .. }) =>
         {
-            Expr::Binary {
-                left: Box::new(call(
-                    ContainerOp::Size,
-                    target.layout,
-                    vec![expression_binding::value(base, native, tree, dims)?],
-                )),
-                op: BinaryOp::Sub,
-                right: Box::new(Expr::Literal("1".into())),
-            }
+            last_index(target, expression_binding::value(base, native, tree, dims)?)?
         }
         ExprKind::Binary {
             left,
@@ -535,20 +544,10 @@ pub(super) fn value(
                         expression_binding::value(*expression, native, tree, dims)?,
                         match index {
                             Some(index) => index_value(index, *expression, tree, dims, &target)?,
-                            None => Expr::Binary {
-                                left: Box::new(call(
-                                    ContainerOp::Size,
-                                    target.layout,
-                                    vec![expression_binding::value(
-                                        *expression,
-                                        native,
-                                        tree,
-                                        dims,
-                                    )?],
-                                )),
-                                op: BinaryOp::Sub,
-                                right: Box::new(Expr::Literal("1".into())),
-                            },
+                            None => last_index(
+                                &target,
+                                expression_binding::value(*expression, native, tree, dims)?,
+                            )?,
                         },
                     ],
                 ),
