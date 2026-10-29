@@ -28,6 +28,7 @@
     "xezim/operators.json",
     "xezim/packed_structs.json",
     "xezim/procedural.json",
+    "xezim/property_selects.json",
     "xezim/random_plusargs.json",
     "xezim/real_extensions.json",
     "xezim/real_math.json",

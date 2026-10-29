@@ -1489,6 +1489,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     stmts.extend(assignment);
                     return Ok(stmts);
                 }
+                if let Some(assignment) =
+                    self.property_select_assignment(operator, *nonblocking, *left, *right)?
+                {
+                    stmts.extend(assignment);
+                    return Ok(stmts);
+                }
                 stmts.push(self.assignment_value(
                     if *nonblocking { "=" } else { operator },
                     *nonblocking,
@@ -3876,6 +3882,298 @@ impl BodyBuilder<'_, '_, '_> {
 
     /// An assignment to a whole class property of unpacked structure type,
     /// `h.p = v`: a store of each of its leaf properties.
+    /// `h.p[i] op value`: property `p` is read into a local, the select
+    /// assigned there, and the local stored back, so the select keeps the
+    /// semantics of a select of a variable (IEEE 1800-2023 11.5.1).
+    fn property_select_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let native = self.tree.declarations();
+        let mut base = expression_binding::ungroup(left, native);
+        let mut selected = false;
+        while let celox_sv_syntax::ExprKind::Select { expression, .. } =
+            &native.expression(base).kind
+        {
+            selected = true;
+            base = expression_binding::ungroup(*expression, native);
+        }
+        if !selected {
+            return Ok(None);
+        }
+        let Some((property, receiver)) =
+            expression_binding::object_property(self.tree, base, native, &self.dims)?
+        else {
+            return Ok(None);
+        };
+        if property.field.handle.is_some()
+            || property.r#type.container.is_some()
+            || property.r#type.unpacked_struct().is_some()
+        {
+            return Ok(None);
+        }
+        if nonblocking {
+            return Err(unsupported("nonblocking assignment to a class property"));
+        }
+        let mut handle =
+            expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
+        self.rename_expr(&mut handle);
+        let mut body = Vec::new();
+        // The object is evaluated once, for both the load and the store; an
+        // assignment operator reads the target before its value, which may
+        // change the handle.
+        let handle = if inlining::calls_subroutine(&handle) || op != "=" {
+            let receiver = self.declare("$receiver", classes::handle(&property.owner));
+            body.push(Stmt::Local {
+                name: receiver.clone(),
+                init: None,
+            });
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(receiver.clone()),
+                rhs: handle,
+                nonblocking: false,
+            });
+            Expr::Ident(receiver)
+        } else {
+            handle
+        };
+        // Only the target is bound against the template; every other read
+        // of the property, the value's included, reads its object.
+        self.push_scope();
+        let local = self.declare(
+            &expression_binding::object_select_template(&property),
+            property.r#type.clone(),
+        );
+        self.dims.property_select_base = Some(base);
+        let lhs = expression_binding::variable_lvalue(left, native, self.tree, &self.dims);
+        self.dims.property_select_base = None;
+        let lhs = lhs.and_then(|lhs| self.hoist_index_calls(lhs, op != "=", &mut body));
+        // The width of the selection, which a runtime position leaves unknown
+        // to a constant evaluation, is that of its value.
+        let width = lhs.as_ref().ok().and_then(|_| {
+            self.dims.property_select_base = Some(base);
+            let target = expression_binding::value(left, native, self.tree, &self.dims);
+            self.dims.property_select_base = None;
+            dimensions::bound_bits_type(&self.tree.state, &target.ok()?, &self.dims)
+                .map(|ty| ty.width)
+        });
+        let rhs = lhs.and_then(|lhs| {
+            let rhs = if op == "=" {
+                expression_binding::expression(right, native, &lhs, self.tree, &self.dims)
+            } else {
+                expression_binding::value(right, native, self.tree, &self.dims).and_then(|value| {
+                    assignment_op_expr(&self.tree.state, &lhs, op, value, &self.dims)
+                })
+            };
+            let mut lhs = lhs;
+            self.rename_lvalue(&mut lhs);
+            rhs.map(|mut rhs| {
+                self.rename_expr(&mut rhs);
+                (lhs, rhs)
+            })
+        });
+        self.pop_scope();
+        let (lhs, mut rhs) = rhs?;
+        let load = Stmt::Assign {
+            lhs: LValue::Ident(local.clone()),
+            rhs: classes::object_call(
+                system_functions::ObjectOp::Load(property.field),
+                vec![handle.clone()],
+            ),
+            nonblocking: false,
+        };
+        // A value that calls a subroutine, which may write the property, is
+        // evaluated before the bits it does not replace are read.
+        if inlining::calls_subroutine(&rhs) {
+            let width = width.ok_or_else(|| unsupported("select of a class property"))?;
+            let (_, value) = self.hidden(vector_type(width, false));
+            if op != "=" {
+                // The operator reads the target as it is before the call.
+                body.push(load.clone());
+            }
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(value.clone()),
+                rhs,
+                nonblocking: false,
+            });
+            rhs = Expr::Ident(value);
+        }
+        body.extend([
+            load,
+            Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: false,
+            },
+            Stmt::Eval(classes::object_call(
+                system_functions::ObjectOp::Store(property.field),
+                vec![handle, Expr::Ident(local)],
+            )),
+        ]);
+        Ok(Some(body))
+    }
+
+    /// `lhs` with each subroutine call in its selection evaluated before
+    /// it, into a local that `body` assigns: the call may write the property
+    /// whose value the selection is written into.
+    /// With `whole`, for an assignment operator that reads the target
+    /// before its value is evaluated, the variables the bounds read are
+    /// evaluated too, so the read and the write select the same bits.
+    fn hoist_index_calls(
+        &mut self,
+        mut lhs: LValue,
+        whole: bool,
+        body: &mut Vec<Stmt>,
+    ) -> Converted<LValue> {
+        if let LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            ..
+        } = &mut lhs
+        {
+            let mut bounds = [Some(msb), Some(lsb), array_slice_width.as_mut()];
+            let mut calls = Vec::new();
+            for bound in bounds.iter_mut().flatten() {
+                self.hoist_calls(bound, &mut calls, body)?;
+            }
+            if whole {
+                let mut reads = Vec::new();
+                for bound in bounds.into_iter().flatten() {
+                    self.hoist_reads(bound, &calls, &mut reads, body)?;
+                }
+            }
+        }
+        Ok(lhs)
+    }
+
+    /// Replace each variable that `expr` reads by a local holding its value,
+    /// keeping the shape of the bound; `calls` are the locals of its calls.
+    fn hoist_reads(
+        &mut self,
+        expr: &mut ConstExpr,
+        calls: &[(ConstExpr, String)],
+        reads: &mut Vec<(ConstExpr, String)>,
+        body: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        if eval_ast_const_expr(&self.tree.state, expr, &self.dims.const_env).is_some() {
+            return Ok(());
+        }
+        match expr {
+            ConstExpr::Ident(name) if calls.iter().any(|(_, local)| local == name) => {}
+            // A read, such as a property load, is evaluated as a whole; so is
+            // a conditional operator, whose operands are read only when it
+            // selects them.
+            ConstExpr::Ident(_)
+            | ConstExpr::Select { .. }
+            | ConstExpr::SelectRange { .. }
+            | ConstExpr::Function { .. }
+            | ConstExpr::Mux { .. }
+            | ConstExpr::Binary {
+                op: BinaryOp::LogicAnd | BinaryOp::LogicOr,
+                ..
+            } => self.hoist_value(expr, reads, body)?,
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.hoist_reads(expr, calls, reads, body)?;
+            }
+            ConstExpr::Binary { left, right, .. } => {
+                self.hoist_reads(left, calls, reads, body)?;
+                self.hoist_reads(right, calls, reads, body)?;
+            }
+            ConstExpr::Literal(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Replace `expr` by a local that `body` assigns its value to; equal
+    /// expressions share one local.
+    fn hoist_value(
+        &mut self,
+        expr: &mut ConstExpr,
+        values: &mut Vec<(ConstExpr, String)>,
+        body: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        let source = match values.iter().find(|(value, _)| value == expr) {
+            Some((_, source)) => source.clone(),
+            None => {
+                let mut value = parameters::const_expr_to_expr(expr.clone());
+                let ty = dimensions::bound_bits_type(&self.tree.state, &value, &self.dims)
+                    .ok_or_else(|| unsupported("index of a select of a class property"))?;
+                let (source, unique) = self.hidden(vector_type(ty.width, ty.signed));
+                self.rename_expr(&mut value);
+                body.push(Stmt::Assign {
+                    lhs: LValue::Ident(unique),
+                    rhs: value,
+                    nonblocking: false,
+                });
+                values.push((expr.clone(), source.clone()));
+                source
+            }
+        };
+        *expr = ConstExpr::Ident(source);
+        Ok(())
+    }
+
+    fn hoist_calls(
+        &mut self,
+        expr: &mut ConstExpr,
+        calls: &mut Vec<(ConstExpr, String)>,
+        body: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        let call = match expr {
+            ConstExpr::Function { callee, .. } => {
+                callee.subroutine().is_some() || matches!(callee, Callee::Checked { .. })
+            }
+            // A conditional operand runs only when its operator selects it, so
+            // a call in one is evaluated with the whole operator.
+            ConstExpr::Mux { .. }
+            | ConstExpr::Binary {
+                op: BinaryOp::LogicAnd | BinaryOp::LogicOr,
+                ..
+            } => inlining::calls_subroutine(&parameters::const_expr_to_expr(expr.clone())),
+            _ => false,
+        };
+        match expr {
+            // The copies of one call in the bounds share one value.
+            _ if call => self.hoist_value(expr, calls, body)?,
+            ConstExpr::Function { args, .. } => {
+                for arg in args {
+                    self.hoist_calls(arg, calls, body)?;
+                }
+            }
+            ConstExpr::Select { expr, bit } => {
+                self.hoist_calls(expr, calls, body)?;
+                self.hoist_calls(bit, calls, body)?;
+            }
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.hoist_calls(expr, calls, body)?;
+                self.hoist_calls(msb, calls, body)?;
+                self.hoist_calls(lsb, calls, body)?;
+            }
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.hoist_calls(expr, calls, body)?;
+            }
+            ConstExpr::Binary { left, right, .. } => {
+                self.hoist_calls(left, calls, body)?;
+                self.hoist_calls(right, calls, body)?;
+            }
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.hoist_calls(condition, calls, body)?;
+                self.hoist_calls(then_expr, calls, body)?;
+                self.hoist_calls(else_expr, calls, body)?;
+            }
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        }
+        Ok(())
+    }
+
     fn aggregate_property_assignment(
         &mut self,
         op: &str,
@@ -4812,4 +5110,17 @@ fn dump_selection_name(
         .chain(fields)
         .collect::<Vec<_>>()
         .join("\0"))
+}
+
+/// A `logic` vector of `width` bits.
+fn vector_type(width: usize, signed: bool) -> Type {
+    let mut r#type = Type::new(TypeKind::Logic);
+    r#type.is_signed = signed;
+    if width > 1 {
+        r#type.packed_ranges = vec![PackedRange::new(
+            ConstExpr::Literal((width - 1).to_string()),
+            ConstExpr::Literal("0".into()),
+        )];
+    }
+    r#type
 }

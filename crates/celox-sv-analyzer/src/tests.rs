@@ -8047,3 +8047,31 @@ fn dynamically_sized_streams_follow_the_lrm_constraints() {
         assert!(error.contains(expected), "{body}: {error}");
     }
 }
+
+#[test]
+fn property_select_reads_require_a_zero_based_range() {
+    // A read replaces the property's template by its value, a `[N-1:0]`
+    // vector; a write goes through a local of the property's type.
+    for (declaration, statement, accepted) in [
+        ("logic [15:0] p", "r = c.p[3:0];", true),
+        ("logic [8:1] p", "c.p[8:5] = 4'h0;", true),
+        ("logic [0:7] p", "c.p[0:1] = 2'b11;", true),
+        ("logic [8:1] p", "r = c.p[8:5];", false),
+        ("logic [0:7] p", "r = c.p[1:3];", false),
+    ] {
+        let source = format!(
+            "module Top; class C; {declaration}; endclass C c; logic [15:0] r; \
+             initial begin c = new; {statement} end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("property_select.sv"));
+        match result {
+            Ok(_) => assert!(accepted, "{declaration}: {statement} was accepted"),
+            Err(error) => assert!(
+                !accepted
+                    && matches!(error, AnalyzerError::Unsupported(_))
+                    && error.to_string().contains("not declared [N-1:0]"),
+                "{declaration}: {statement}: {error}"
+            ),
+        }
+    }
+}

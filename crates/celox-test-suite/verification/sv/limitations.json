@@ -706,7 +706,8 @@
         "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside",
         "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside",
         "indexed_select::known_run_time_selects_stay_within_their_element",
-        "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang"
+        "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang",
+        "property_selects::property_selects_through_handles_and_this"
       ]
     }
   },
@@ -2098,7 +2099,8 @@
         "class::class_declarations_bind_in_their_scopes",
         "class::parameter_defaults_bind_where_the_class_is_declared",
         "class::specialization_keys_follow_the_bound_parameters",
-        "class::derived_classes_keep_their_declaration_scopes"
+        "class::derived_classes_keep_their_declaration_scopes",
+        "property_selects::property_selects_of_parameterized_classes"
       ]
     }
   },
@@ -3088,6 +3090,45 @@
         "container_formals::output_container_starts_empty_and_is_copied_back",
         "container_formals::static_subroutine_container_formals",
         "container_formals::task_copies_containers_back_when_it_returns"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_property_selects",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_icarus_property_selects.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "property_selects::property_selects_evaluate_the_object_and_value_once",
+        "property_selects::property_selects_keep_unknown_bits",
+        "property_selects::property_selects_through_handles_and_this",
+        "property_selects::wide_property_selects_pack_and_unpack",
+        "property_selects::property_selects_compound_indices_evaluate_once",
+        "property_selects::property_selects_compound_receivers_evaluate_once"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_compound_part_select_index",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 evaluates the index of an indexed part-select target of an assignment operator twice: v[next_bit() +: 2] += 2'd1 calls next_bit() once for the read and again for the write, so the sum lands in other bits. IEEE 1800-2023 11.4.1 evaluates a left-hand index expression of an assignment operator only once; Verilator does so for a bit-select target, and the standalone source reproduces the difference. xezim 0.11.3 calls it once.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_verilator_compound_part_select_index.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "property_selects::property_selects_compound_indices_evaluate_once"
       ]
     }
   },

@@ -1,0 +1,81 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "property_selects::property_selects_compound_indices_evaluate_once at 247:3: expect_output: expected [105, 110, 100, 101, 120, 32, 48, 49, 32, 49, 10, 112, 114, 111, 112, 101, 114, 116, 121, 32, 105, 110, 100, 101, 120, 32, 48, 49, 32, 49, 10, 103, 117, 97, 114, 100, 101, 100, 32, 48, 51, 10, 99, 97, 108, 108, 115, 32, 48, 54, 32, 51, 10], got [105, 110, 100, 101, 120, 32, 48, 51, 32, 49, 10, 112, 114, 111, 112, 101, 114, 116, 121, 32, 105, 110, 100, 101, 120, 32, 48, 51, 32, 49, 10, 103, 117, 97, 114, 100, 101, 100, 32, 48, 51, 10, 99, 97, 108, 108, 115, 32, 48, 54, 32, 51, 10]",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_compound_indices_evaluate_once",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_compound_receivers_evaluate_once",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "property_selects::property_selects_evaluate_the_object_and_value_once at 175:3: expect_output: expected [97, 103, 97, 105, 110, 32, 51, 52, 32, 53, 52, 32, 51, 52, 10, 111, 98, 106, 101, 99, 116, 32, 49, 32, 57, 52, 32, 53, 52, 10, 118, 97, 108, 117, 101, 32, 56, 49, 10, 99, 111, 109, 112, 111, 117, 110, 100, 32, 99, 51, 10, 105, 110, 100, 101, 120, 32, 48, 32, 49, 10, 116, 97, 114, 103, 101, 116, 32, 105, 110, 100, 101, 120, 32, 48, 49, 10, 105, 110, 100, 101, 120, 32, 99, 97, 108, 108, 32, 56, 49, 10, 114, 117, 110, 116, 105, 109, 101, 32, 112, 111, 115, 105, 116, 105, 111, 110, 32, 99, 99, 10, 115, 107, 105, 112, 112, 101, 100, 32, 99, 97, 108, 108, 115, 32, 48, 51, 10], got [97, 103, 97, 105, 110, 32, 51, 52, 32, 53, 52, 32, 51, 52, 10, 111, 98, 106, 101, 99, 116, 32, 49, 32, 51, 52, 32, 53, 52, 10, 118, 97, 108, 117, 101, 32, 56, 49, 10, 99, 111, 109, 112, 111, 117, 110, 100, 32, 99, 51, 10, 105, 110, 100, 101, 120, 32, 48, 32, 49, 10, 116, 97, 114, 103, 101, 116, 32, 105, 110, 100, 101, 120, 32, 48, 49, 10, 105, 110, 100, 101, 120, 32, 99, 97, 108, 108, 32, 56, 49, 10, 114, 117, 110, 116, 105, 109, 101, 32, 112, 111, 115, 105, 116, 105, 111, 110, 32, 99, 99, 10, 115, 107, 105, 112, 112, 101, 100, 32, 99, 97, 108, 108, 115, 32, 48, 51, 10]",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_evaluate_the_object_and_value_once",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_keep_unknown_bits",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_of_parameterized_classes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_through_handles_and_this",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::wide_property_selects_pack_and_unpack",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

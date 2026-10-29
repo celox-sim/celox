@@ -350,7 +350,7 @@ impl BodyBuilder<'_, '_, '_> {
         };
         let Some(postfix) = postfix else {
             self.bind_effect(id, step(current));
-            stmts.push(self.assignment_value("=", false, (operand, id))?);
+            self.write_update(operand, id, stmts)?;
             return Ok(());
         };
         let ty = dimensions::bound_bits_type(&self.tree.state, &current, &self.dims)
@@ -391,8 +391,24 @@ impl BodyBuilder<'_, '_, '_> {
             read(self, step(current), stmts);
             self.bind_effect(id, local.clone());
         }
-        stmts.push(self.assignment_value("=", false, (operand, id))?);
+        self.write_update(operand, id, stmts)?;
         self.bind_effect(id, local);
+        Ok(())
+    }
+
+    /// Write the value that `id` binds into `operand`.
+    fn write_update(
+        &mut self,
+        operand: ExprId,
+        id: ExprId,
+        stmts: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        // A select of a class property is written through a local.
+        if let Some(write) = self.property_select_assignment("=", false, operand, id)? {
+            stmts.extend(write);
+        } else {
+            stmts.push(self.assignment_value("=", false, (operand, id))?);
+        }
         Ok(())
     }
 

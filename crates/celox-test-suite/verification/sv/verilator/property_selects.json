@@ -1,0 +1,105 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 evaluates the index of an indexed part-select target of an assignment operator twice: v[next_bit() +: 2] += 2'd1 calls next_bit() once for the read and again for the write, so the sum lands in other bits. IEEE 1800-2023 11.4.1 evaluates a left-hand index expression of an assignment operator only once; Verilator does so for a bit-select target, and the standalone source reproduces the difference. xezim 0.11.3 calls it once.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_verilator_compound_part_select_index.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_compound_part_select_index",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 evaluates the index of an indexed part-select target of an assignment operator twice: v[next_bit() +: 2] += 2'd1 calls next_bit() once for the read and again for the write, so the sum lands in other bits. IEEE 1800-2023 11.4.1 evaluates a left-hand index expression of an assignment operator only once; Verilator does so for a bit-select target, and the standalone source reproduces the difference. xezim 0.11.3 calls it once.",
+        "upstream": []
+      },
+      "name": "property_selects::property_selects_compound_indices_evaluate_once",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_compound_receivers_evaluate_once",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_evaluate_the_object_and_value_once",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_keep_unknown_bits",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_of_parameterized_classes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 writes bits that IEEE 1800-2023 11.5.1 discards: the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) lands in bit 7, a constant part-select wholly outside the vector (comb_out[11:8]) writes its low bits, a partly outside one of an ascending vector (comb_up[6:9]) takes the wrong end of the value, and run-time selects within one array element whose positions are known at compile time reach past it. Icarus agrees with the expected values.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_part_select_write_overhang",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 writes bits that IEEE 1800-2023 11.5.1 discards: the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) lands in bit 7, a constant part-select wholly outside the vector (comb_out[11:8]) writes its low bits, a partly outside one of an ascending vector (comb_up[6:9]) takes the wrong end of the value, and run-time selects within one array element whose positions are known at compile time reach past it. Icarus agrees with the expected values.",
+        "upstream": []
+      },
+      "name": "property_selects::property_selects_through_handles_and_this",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "property_selects::wide_property_selects_pack_and_unpack",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
