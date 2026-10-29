@@ -422,12 +422,13 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # The driver is built once; the shards run the conformance cases with it.
   sv-tests:
-    name: sv-tests conformance
+    name: sv-tests driver
     needs: changes
     if: ${{ !cancelled() && needs.changes.outputs.fast_queue != 'true' && (needs.changes.result != 'success' || (needs.changes.outputs.rust == 'true' && needs.changes.outputs.rust_sv_tests != 'false')) }}
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
         with:
@@ -438,6 +439,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+
+      - name: Build the Celox single-case driver
+        run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+
+      - name: Hand the driver to the shards
+        uses: actions/upload-artifact@v7
+        with:
+          name: sv-tests-driver
+          path: target/release/examples/sv_tests
+          if-no-files-found: error
+          retention-days: 1
+
+  sv-tests-shard:
+    name: sv-tests conformance (${{ matrix.shard }}/3)
+    needs: [changes, sv-tests]
+    if: ${{ !cancelled() && needs.sv-tests.result == 'success' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.validation_ref || github.sha }}
 
       - uses: actions/setup-python@v7
         with:
@@ -461,13 +488,17 @@ jobs:
         run: python conformance/sv-tests/prepare.py "$RUNNER_TEMP/sv-tests"
 
       - name: Validate the adapter against the official runner
+        if: matrix.shard == 1
         env:
           SV_TESTS_ROOT: ${{ runner.temp }}/sv-tests
           PYTHONDONTWRITEBYTECODE: "1"
         run: python -m unittest discover -s conformance/sv-tests -p 'test_*.py' -v
 
-      - name: Build the Celox single-case driver
-        run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+      - name: Receive the driver
+        uses: actions/download-artifact@v8
+        with:
+          name: sv-tests-driver
+          path: ${{ runner.temp }}/driver
 
       # The unmodified upstream tools/runner owns test selection and judgement.
       # Improvements also require review before changing the retained results.
@@ -475,11 +506,13 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: "1"
         run: >-
+          chmod +x "$RUNNER_TEMP/driver/sv_tests" &&
           python conformance/sv-tests/run.py "$RUNNER_TEMP/sv-tests"
-          --driver target/release/examples/sv_tests
+          --driver "$RUNNER_TEMP/driver/sv_tests"
           --out-dir "$RUNNER_TEMP/sv-tests-results"
           --jobs 4
           --state-mode both
+          --shard ${{ matrix.shard }}/3
           --expected conformance/sv-tests/expected.tsv
           --report "$RUNNER_TEMP/sv-tests-report.tsv"
 
@@ -496,7 +529,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: sv-tests-report
+          name: sv-tests-report-${{ matrix.shard }}
           path: |
             ${{ runner.temp }}/sv-tests-report.tsv
             ${{ runner.temp }}/sv-tests-report.summary.json
@@ -610,7 +643,7 @@ jobs:
   # into a successful check merely because a downstream job was skipped.
   rust:
     name: Rust Test & NAPI Build
-    needs: [changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm]
+    needs: [changes, rust-tests, rust-default-tests, sv-tests, sv-tests-shard, arm64-backend, napi-linux, napi-wasm]
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.napi == 'true') }}
     runs-on: ubuntu-latest
     env:
@@ -621,6 +654,7 @@ jobs:
       DEFAULT_RESULT: ${{ needs.rust-default-tests.result }}
       SV_TESTS_REQUIRED: ${{ needs.changes.outputs.fast_queue != 'true' && needs.changes.outputs.rust != 'false' && needs.changes.outputs.rust_sv_tests != 'false' }}
       SV_TESTS_RESULT: ${{ needs.sv-tests.result }}
+      SV_TESTS_SHARDS_RESULT: ${{ needs.sv-tests-shard.result }}
       # Platform coverage is mandatory in full validation, outside the queue.
       ARM64_REQUIRED: ${{ needs.changes.outputs.full_validation != 'false' && needs.changes.outputs.rust != 'false' }}
       ARM64_RESULT: ${{ needs.arm64-backend.result }}
@@ -640,6 +674,7 @@ jobs:
           fi
           if [ "$SV_TESTS_REQUIRED" != false ] || [ "$SV_TESTS_RESULT" != skipped ]; then
             test "$SV_TESTS_RESULT" = success
+            test "$SV_TESTS_SHARDS_RESULT" = success
           fi
           if [ "$ARM64_REQUIRED" != false ] || [ "$ARM64_RESULT" != skipped ]; then
             test "$ARM64_RESULT" = success
@@ -946,6 +981,7 @@ jobs:
         rust-tests,
         rust-default-tests,
         sv-tests,
+        sv-tests-shard,
         common-cells,
         napi-linux,
         napi-wasm,
@@ -981,6 +1017,7 @@ jobs:
         rust-tests,
         rust-default-tests,
         sv-tests,
+        sv-tests-shard,
         common-cells,
         napi-linux,
         napi-wasm,
