@@ -3175,6 +3175,9 @@ struct PackedDimensions {
     locator_locals: Option<locators::LocalSink>,
     /// The iterators of the enclosing `with` expressions, innermost last.
     locator_iterators: Arc<Vec<locators::Iterator>>,
+    /// The values of the operands whose side effects a procedural body has
+    /// already executed before their statement (see [`effects`]).
+    effect_values: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
 }
 
 impl PackedDimensions {
@@ -3201,6 +3204,7 @@ impl PackedDimensions {
             class_scope: None,
             locator_locals: None,
             locator_iterators: Arc::default(),
+            effect_values: Arc::default(),
         }
     }
 }

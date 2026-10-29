@@ -18,6 +18,7 @@
     "xezim/fork_deferred.json",
     "xezim/generate.json",
     "xezim/hierarchy.json",
+    "xezim/increment_decrement.json",
     "xezim/indexed_select.json",
     "xezim/interfaces.json",
     "xezim/latch.json",

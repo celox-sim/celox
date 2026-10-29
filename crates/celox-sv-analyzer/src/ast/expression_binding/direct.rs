@@ -370,6 +370,10 @@ pub(in crate::ast) fn bind_value(
         match job {
             Job::Enter(id, target, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
+                if let Some(value) = dimensions.effect_values.get(&id) {
+                    values.push(value.clone());
+                    continue;
+                }
                 unpacked_structs::check_operands(id, native, tree, dimensions)?;
                 // An argument, result or other value received as an unpacked
                 // structure is a pattern or a value of its type (6.22.3).

@@ -56,6 +56,9 @@ enum Job {
         kind: LoopKind<Expr>,
         init: Vec<Stmt>,
         condition: Option<Expr>,
+        /// Statements that start each iteration (see
+        /// [`BodyBuilder::loop_condition`]).
+        prologue: Vec<Stmt>,
         step: Vec<Stmt>,
         scope: bool,
         start: usize,
@@ -245,11 +248,18 @@ impl BodyBuilder<'_, '_, '_> {
                         branches: Vec::new(),
                     })),
                     StatementKind::Loop { kind, body } => {
+                        let mut prologue = Vec::new();
                         let (kind, condition, scope) = match kind {
-                            LoopSyntax::While(value) => {
-                                (LoopKind::While, Some(self.native_value(*value)?), false)
-                            }
+                            LoopSyntax::While(value) => match self.loop_condition(*value)? {
+                                Some(stmts) => {
+                                    prologue = stmts;
+                                    (LoopKind::For, None, false)
+                                }
+                                None => (LoopKind::While, Some(self.native_value(*value)?), false),
+                            },
                             LoopSyntax::Repeat(value) => {
+                                // The count is evaluated once (12.7.2).
+                                output.extend(self.effects(&[*value])?);
                                 (LoopKind::Repeat(self.native_value(*value)?), None, false)
                             }
                             LoopSyntax::Forever => (LoopKind::Forever, None, false),
@@ -263,12 +273,13 @@ impl BodyBuilder<'_, '_, '_> {
                             }
                             LoopSyntax::For(header) => {
                                 self.push_scope();
-                                let (init, condition, step) = self.for_header(header)?;
+                                let header = self.for_header(header)?;
                                 jobs.push(Job::Loop {
                                     kind: LoopKind::For,
-                                    init,
-                                    condition,
-                                    step,
+                                    init: header.init,
+                                    condition: header.condition,
+                                    prologue: header.prologue,
+                                    step: header.steps,
                                     scope: true,
                                     start: output.len(),
                                 });
@@ -290,6 +301,7 @@ impl BodyBuilder<'_, '_, '_> {
                             kind,
                             init: Vec::new(),
                             condition,
+                            prologue,
                             step: Vec::new(),
                             scope,
                             start: output.len(),
@@ -315,6 +327,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 _ => return Err(disagreement()),
                             }
                         };
+                        output.extend(self.effects(&[*value])?);
                         let selector = self.native_value(*value)?;
                         jobs.push(Job::CaseNext(CaseState {
                             id,
@@ -439,6 +452,9 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Break => output.push(Stmt::Break),
                     StatementKind::Continue => output.push(Stmt::Continue),
                     StatementKind::Return(value) => {
+                        if let Some(id) = value {
+                            output.extend(self.effects(&[*id])?);
+                        }
                         let value = value
                             .map(|id| {
                                 let mut value = expression_binding::bind_value(
@@ -558,6 +574,27 @@ impl BodyBuilder<'_, '_, '_> {
                         }
                     } else {
                         let branch = &branches[state.index];
+                        let effects = match branch.predicate.items.as_slice() {
+                            [item] if item.pattern.is_none() => self.effects(&[item.expression])?,
+                            _ => Vec::new(),
+                        };
+                        // The condition of an `else if` is evaluated only
+                        // when the previous ones fail: the rest of the chain
+                        // becomes the else branch.
+                        let state = if effects.is_empty() || state.index == 0 {
+                            state
+                        } else {
+                            jobs.push(Job::IfFinish {
+                                branches: state.branches,
+                                start: output.len(),
+                            });
+                            IfState {
+                                id: state.id,
+                                index: state.index,
+                                branches: Vec::new(),
+                            }
+                        };
+                        output.extend(effects);
                         let condition = self.cond_predicate(&branch.predicate)?;
                         jobs.push(Job::IfBranch {
                             state,
@@ -628,11 +665,13 @@ impl BodyBuilder<'_, '_, '_> {
                     kind,
                     init,
                     condition,
+                    mut prologue,
                     step,
                     scope,
                     start,
                 } => {
-                    let body = output.split_off(start);
+                    prologue.extend(output.split_off(start));
+                    let body = prologue;
                     if scope {
                         self.pop_scope();
                     }
@@ -645,7 +684,37 @@ impl BodyBuilder<'_, '_, '_> {
                     });
                 }
                 Job::DoWhile { native, start } => {
-                    let body = output.split_off(start);
+                    let mut body = output.split_off(start);
+                    if let Some(prologue) = self.loop_condition(native)? {
+                        // `continue` evaluates the condition too (12.8): it
+                        // starts every iteration but the first.
+                        let first = self.hidden(Type::new(TypeKind::Logic)).1;
+                        output.push(Stmt::Assign {
+                            lhs: LValue::Ident(first.clone()),
+                            rhs: Expr::Literal("1'b1".into()),
+                            nonblocking: false,
+                        });
+                        body.insert(
+                            0,
+                            Stmt::If {
+                                condition: Expr::Ident(first.clone()),
+                                then_body: vec![Stmt::Assign {
+                                    lhs: LValue::Ident(first),
+                                    rhs: Expr::Literal("1'b0".into()),
+                                    nonblocking: false,
+                                }],
+                                else_body: prologue,
+                            },
+                        );
+                        output.push(Stmt::Loop {
+                            kind: LoopKind::For,
+                            init: Vec::new(),
+                            condition: None,
+                            step: Vec::new(),
+                            body,
+                        });
+                        continue;
+                    }
                     let condition = self.native_value(native)?;
                     output.push(Stmt::Loop {
                         kind: LoopKind::DoWhile,

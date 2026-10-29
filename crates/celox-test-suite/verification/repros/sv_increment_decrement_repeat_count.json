@@ -1,0 +1,28 @@
+{
+  "case": "increment_decrement::increment_decrement_repeat_count",
+  "source": "src/sv/cases/increment_decrement.vtest",
+  "standard": "IEEE 1800-2023 12.7.2: the repeat loop evaluates its expression once before the loop starts; 11.4.2: i++ increments i as a blocking assignment.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters.",
+  "reduced_source": "module Top;\n    int i, k;\n    initial begin\n        i = 1;\n        k = 0;\n        repeat (i++ + 2) k++;\n        $display(\"repeat %0d %0d\", i, k);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "repeat 2 3\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stdout": "repeat 2 3\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "repeat 3 4\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "repeat 2 3\n"
+    }
+  ]
+}
