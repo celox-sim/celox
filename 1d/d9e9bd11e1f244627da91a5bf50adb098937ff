@@ -1,0 +1,6 @@
+Revision history for #2500:
+
+rev 2 (content) 2026-10-29 04:27 UTC — Review fix: a $ index read through a receiver with a side effect is rejected instead of sharing structurally equal receivers, which merged explicit repeated calls.
+rev 1 (initial) 2026-10-29 04:27 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2500,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2332d0a4dfc1767d0335bc580de7ba78da1ef000","timestamp_iso":"2026-10-29T04:27:33Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"2332d0a4dfc1767d0335bc580de7ba78da1ef000","new_sha":"6e06662ae8505ba828771dca2f39822ee29a23ed","timestamp_iso":"2026-10-29T04:27:33Z","reason":"Review fix: a $ index read through a receiver with a side effect is rejected instead of sharing structurally equal receivers, which merged explicit repeated calls.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2332d0a4dfc1767d0335bc580de7ba78da1ef000...6e06662ae8505ba828771dca2f39822ee29a23ed"}]} -->
