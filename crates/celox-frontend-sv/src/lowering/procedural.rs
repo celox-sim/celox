@@ -1857,7 +1857,7 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
             let (value, mask, inner_width) = child(*inner)?;
             let inner_all = mask_of(inner_width);
             match op {
-                UnaryOp::Float { .. } => return None,
+                UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => return None,
                 UnaryOp::Ident => (value, mask, width),
                 UnaryOp::ToTwoState => (
                     (&value & (&inner_all ^ &mask)) & &all,

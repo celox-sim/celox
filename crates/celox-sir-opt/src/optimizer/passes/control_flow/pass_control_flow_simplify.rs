@@ -1930,7 +1930,9 @@ fn evaluate_instruction(
     match instruction {
         SIRInstruction::Imm(_, value) => LatticeValue::Constant(value.clone()),
         SIRInstruction::Unary(dst, op, source) => match op {
-            UnaryOp::Float { .. } => LatticeValue::Overdefined,
+            UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+                LatticeValue::Overdefined
+            }
             UnaryOp::Ident => state(*source),
             UnaryOp::ToTwoState => unary(*source, |value, ty| {
                 let width_mask = width_mask(ty.width());

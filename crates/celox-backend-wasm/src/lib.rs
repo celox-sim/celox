@@ -565,6 +565,8 @@ fn compile_instruction(
                     locals,
                     instrs,
                 );
+            } else if matches!(op, UnaryOp::ToPlanes | UnaryOp::FromPlanes) {
+                compile_planes(dst, op, src, locals, instrs);
             } else {
                 compile_unary(dst, op, src, unit, four_state, locals, instrs);
             }
@@ -3507,6 +3509,53 @@ fn emit_wide_sar(
     }
 }
 
+/// `ToPlanes` and `FromPlanes`: whole 64-bit words move between the value
+/// and mask locals of a four-state register and the value locals of a
+/// two-state one.
+fn compile_planes(
+    dst: &RegisterId,
+    op: &UnaryOp,
+    src: &RegisterId,
+    locals: &LocalAllocator,
+    instrs: &mut Vec<Instruction<'static>>,
+) {
+    let d = locals.reg_map[dst].clone();
+    let s = locals.reg_map[src].clone();
+    let copy = |instrs: &mut Vec<Instruction<'static>>, from: Option<u32>, to: u32| {
+        instrs.push(match from {
+            Some(local) => Instruction::LocalGet(local),
+            None => Instruction::I64Const(0),
+        });
+        instrs.push(Instruction::LocalSet(to));
+    };
+    if *op == UnaryOp::ToPlanes {
+        for c in 0..s.num_chunks as u32 {
+            copy(instrs, Some(s.value_idx + c), d.value_idx + c);
+            copy(
+                instrs,
+                s.mask_idx.map(|mask| mask + c),
+                d.value_idx + s.num_chunks as u32 + c,
+            );
+        }
+        if let Some(mask) = d.mask_idx {
+            for c in 0..d.num_chunks as u32 {
+                copy(instrs, None, mask + c);
+            }
+        }
+    } else {
+        for c in 0..d.num_chunks as u32 {
+            copy(instrs, Some(s.value_idx + c), d.value_idx + c);
+            if let Some(mask) = d.mask_idx {
+                copy(
+                    instrs,
+                    Some(s.value_idx + d.num_chunks as u32 + c),
+                    mask + c,
+                );
+            }
+        }
+    }
+}
+
 fn compile_unary(
     dst: &RegisterId,
     op: &UnaryOp,
@@ -3522,8 +3571,8 @@ fn compile_unary(
     let s_width = unit.register_map[src].width();
 
     match op {
-        UnaryOp::Float { .. } => {
-            unreachable!("float operations are lowered before integer operations")
+        UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+            unreachable!("float and plane operations are lowered before integer operations")
         }
         UnaryOp::Ident | UnaryOp::ToTwoState => {
             for c in 0..d.num_chunks {
@@ -3740,8 +3789,8 @@ fn compile_unary_mask(
     };
 
     match op {
-        UnaryOp::Float { .. } => {
-            unreachable!("float operations are lowered before integer operations")
+        UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+            unreachable!("float and plane operations are lowered before integer operations")
         }
         UnaryOp::Ident | UnaryOp::BitNot => {
             for c in 0..dst.num_chunks {

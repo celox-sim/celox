@@ -137,7 +137,9 @@ impl SLTToSIRLowerer {
                     UnaryOp::LogicNot
                     | UnaryOp::BitNot
                     | UnaryOp::CountLeadingZeros
-                    | UnaryOp::CountTrailingZeros => ZeroControllerFacts::default(),
+                    | UnaryOp::CountTrailingZeros
+                    | UnaryOp::ToPlanes
+                    | UnaryOp::FromPlanes => ZeroControllerFacts::default(),
                 },
                 SLTNode::Capture { expr, .. } => child(*expr),
                 SLTNode::Slice { expr, .. } => child(*expr),

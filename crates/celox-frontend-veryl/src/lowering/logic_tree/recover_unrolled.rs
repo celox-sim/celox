@@ -3824,7 +3824,9 @@ fn proof_node_signed(
                 | UnaryOp::Xor
                 | UnaryOp::PopCount
                 | UnaryOp::CountLeadingZeros
-                | UnaryOp::CountTrailingZeros,
+                | UnaryOp::CountTrailingZeros
+                | UnaryOp::ToPlanes
+                | UnaryOp::FromPlanes,
                 _,
             ) => Rule::Known(false),
             SLTNode::Unary(
@@ -3999,7 +4001,9 @@ fn specialized_unary_result_signed(op: UnaryOp, inner: &SpecializedConstant) -> 
         | UnaryOp::Xor
         | UnaryOp::PopCount
         | UnaryOp::CountLeadingZeros
-        | UnaryOp::CountTrailingZeros => false,
+        | UnaryOp::CountTrailingZeros
+        | UnaryOp::ToPlanes
+        | UnaryOp::FromPlanes => false,
     }
 }
 
@@ -4276,6 +4280,7 @@ fn specialize_unary_constant(
         return None;
     }
     let value = match op {
+        UnaryOp::ToPlanes | UnaryOp::FromPlanes => return None,
         UnaryOp::Float { op, precision } => BigUint::from(celox_design::eval_float_unary(
             op,
             precision,

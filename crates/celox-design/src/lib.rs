@@ -1990,6 +1990,14 @@ pub enum UnaryOp {
     /// Convert a four-state value to two-state form. Unknown bits become zero:
     /// `(value, mask) -> (value & !mask, 0)`.
     ToTwoState,
+    /// The planes of a four-state value as a two-state value of twice its
+    /// width: `(value, mask) -> mask << width | value`. A two-state operand
+    /// has a zero mask plane. The bits move unchanged, in whole 64-bit
+    /// words: the operand width is a nonzero multiple of 64.
+    ToPlanes,
+    /// The four-state value whose planes `ToPlanes` gives: the low half of
+    /// the operand is the value plane and the high half the mask plane.
+    FromPlanes,
     Minus,
     BitNot,
     LogicNot,
@@ -2026,6 +2034,8 @@ impl UnaryOp {
             UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => {
                 operand_width
             }
+            UnaryOp::ToPlanes => operand_width * 2,
+            UnaryOp::FromPlanes => operand_width / 2,
             UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
                 usize::BITS as usize - operand_width.leading_zeros() as usize
             }
@@ -2039,6 +2049,8 @@ impl fmt::Display for UnaryOp {
             UnaryOp::Float { op, precision } => return write!(f, "Float{precision:?}{op:?}"),
             UnaryOp::Ident => "Ident",
             UnaryOp::ToTwoState => "ToTwoState",
+            UnaryOp::ToPlanes => "ToPlanes",
+            UnaryOp::FromPlanes => "FromPlanes",
             UnaryOp::Minus => "Minus",
             UnaryOp::BitNot => "BitNot",
             UnaryOp::LogicNot => "LogicNot",
