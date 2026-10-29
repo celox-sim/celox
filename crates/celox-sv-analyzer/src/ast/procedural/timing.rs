@@ -216,10 +216,10 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(vec![Stmt::Wait(condition)])
     }
 
-    /// Whether a wait can watch virtual interface `handle` with the members
-    /// it reads through it: whether a variable of the design, not a local or
-    /// an argument of the subroutine, holds it.
-    fn watched_handle(&self, handle: &Expr) -> bool {
+    /// Whether a wait can watch handle `handle`, of a virtual interface or a
+    /// named event, for changes: whether a variable of the design, not a
+    /// local or an argument of the subroutine, holds it.
+    pub(super) fn watched_handle(&self, handle: &Expr) -> bool {
         matches!(handle, Expr::Ident(name)
             if !self.state.locals.iter().any(|local| &local.name == name))
     }

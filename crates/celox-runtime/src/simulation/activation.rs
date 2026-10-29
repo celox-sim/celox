@@ -20,6 +20,10 @@ pub struct ProcessControl {
     /// The named events the process is blocked on.
     #[serde(default)]
     pub events: Vec<u32>,
+    /// The named events whose `triggered` state the predicate of its level
+    /// wait read: a trigger of one checks the predicate again.
+    #[serde(default)]
+    pub observed_events: Vec<u32>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SuspendedProcess {

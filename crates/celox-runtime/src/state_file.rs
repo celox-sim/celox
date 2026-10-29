@@ -39,6 +39,7 @@
 //!   activation ID, then appends the named activation graph, typed shared
 //!   cells and Reactive/Re-Inactive/Re-NBA queues (see `activations`).
 //! strings (only with FLAG_STRINGS): count u32, then per string: bytes
+//! heap (only with FLAG_HEAP, version 5): next object handle u64
 //! scheduled event: time u64 | event str | signal str | value u8
 //! str: byte length u32 | UTF-8
 //! bytes: byte length u32 | little-endian bytes
@@ -52,12 +53,13 @@
 //! processes have nothing to record is written as version 1, which older
 //! builds read too. Static-only process schedules retain version 2; graphs
 //! and reactive queues require version 3. Pending Observed assertion evaluations
-//! require version 4. Versions 1 through 3 remain readable.
+//! require version 4, and a heap section version 5. Versions 1 through 4
+//! remain readable.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 4;
+const VERSION: u16 = 5;
 
 mod activations;
 use activations::*;
@@ -69,6 +71,9 @@ const FLAG_SCHEDULE: u16 = 1 << 1;
 const FLAG_UNKNOWN_EVENTS: u16 = 1 << 2;
 /// String objects refer to a strings section after the schedule.
 const FLAG_STRINGS: u16 = 1 << 3;
+/// A heap section after the strings records the next object handle, which
+/// the handles of named events in the saved values stay below.
+const FLAG_HEAP: u16 = 1 << 4;
 
 /// How a state object gets its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -211,6 +216,9 @@ pub struct StateFile {
     pub schedule: Option<ScheduleRecord>,
     /// Contents of the strings that string objects refer to.
     pub strings: Vec<Vec<u8>>,
+    /// The handle the next heap object gets, when named events, whose
+    /// handles are saved as values, were created (IEEE 1800-2023 15.5).
+    pub next_object: Option<u64>,
 }
 
 /// A state file that could not be read.
@@ -259,6 +267,13 @@ impl StateFile {
                 2
             }
         });
+        // A heap section needs version 5, which always lists processes.
+        let empty = ProcessRecord::default();
+        let (version, processes) = match (self.next_object, &self.schedule) {
+            (Some(_), Some(_)) => (5, Some(processes.unwrap_or(&empty))),
+            (Some(_), None) => (5, processes),
+            (None, _) => (version, processes),
+        };
         put_u16(w, version)?;
         let mut flags = 0;
         if self.four_state {
@@ -272,6 +287,9 @@ impl StateFile {
         }
         if !self.strings.is_empty() {
             flags |= FLAG_STRINGS;
+        }
+        if self.next_object.is_some() {
+            flags |= FLAG_HEAP;
         }
         put_u16(w, flags)?;
         put_len(w, self.objects.len())?;
@@ -329,6 +347,9 @@ impl StateFile {
             for string in &self.strings {
                 put_bytes(w, string)?;
             }
+        }
+        if let Some(next_object) = self.next_object {
+            put_u64(w, next_object)?;
         }
         Ok(())
     }
@@ -425,6 +446,11 @@ impl StateFile {
         } else {
             Vec::new()
         };
+        let next_object = if flags & FLAG_HEAP != 0 {
+            Some(get_u64(r)?)
+        } else {
+            None
+        };
         let mut rest = [0; 1];
         if r.read(&mut rest)? != 0 {
             return Err(StateFileError::Malformed(
@@ -436,6 +462,7 @@ impl StateFile {
             objects,
             schedule,
             strings,
+            next_object,
         })
     }
 
@@ -835,6 +862,7 @@ mod tests {
                 },
             }),
             strings: Vec::new(),
+            next_object: None,
         }
     }
 
@@ -919,6 +947,21 @@ mod tests {
         let mut bytes = Vec::new();
         file.write_to(&mut bytes).unwrap();
         assert_eq!(bytes[8..10], 4u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+    }
+
+    #[test]
+    fn heap_section_round_trips_in_v5() {
+        let mut file = sample();
+        file.next_object = Some(42);
+        file.schedule.as_mut().unwrap().processes = ProcessRecord::default();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 5u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+        file.schedule = None;
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
         assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }
 
