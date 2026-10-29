@@ -57,6 +57,24 @@ impl Cones<'_> {
     }
 }
 
+/// Generate the testbench unit again in place, after the shared scheduler's
+/// unit it inlines changed.
+pub(super) fn regenerate(program: &mut LaidOutProgram, deferred: bool) {
+    let Some(tb) = program.runtime.testbench.clone() else {
+        return;
+    };
+    let Some(meta) = tb.scheduler() else {
+        return;
+    };
+    let (Some(entry), Some(schema)) =
+        (meta.entry, program.runtime.runtime_schema.scheduler.clone())
+    else {
+        return;
+    };
+    let unit = generate(program, &tb, meta, &schema.slots, deferred);
+    program.sir.processes[entry] = unit;
+}
+
 fn put(g: &mut Generator<'_>, a: AbsoluteAddr, value: u64) {
     let value = g.constant(value, 64);
     g.store(a, 64, value);
