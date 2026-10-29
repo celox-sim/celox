@@ -147,6 +147,42 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     testbench::attach(program, lazy);
 }
 
+/// `program` with its compiled scheduler, and the testbench unit that
+/// inlines it, generated without fused domain units: a domain that reads
+/// combinational state settles first, so the units hold one copy of the
+/// settle instead of one per domain. A first execution tier compiles them
+/// sooner and runs the same schedule.
+pub(crate) fn without_fused_domains(
+    mut program: LaidOutProgram,
+    wiring_clocks: bool,
+) -> LaidOutProgram {
+    let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
+        return program;
+    };
+    let Some(unit) = schema.unit else {
+        return program;
+    };
+    let Ok(mut plan) = Plan::new(&program, &schema.slots, wiring_clocks) else {
+        return program;
+    };
+    let Some(lazy) = &mut plan.lazy else {
+        return program;
+    };
+    let mut fused = false;
+    for domain in &mut lazy.domains {
+        if matches!(domain, DomainSettle::Fused(_)) {
+            *domain = DomainSettle::Settled;
+            fused = true;
+        }
+    }
+    if !fused {
+        return program;
+    }
+    program.sir.processes[unit] = plan.generate(&program, &schema.slots);
+    testbench::regenerate(&mut program, true);
+    program
+}
+
 /// An event the scheduler records edges of.
 struct Event {
     /// The canonical event address, which is also its signal.
