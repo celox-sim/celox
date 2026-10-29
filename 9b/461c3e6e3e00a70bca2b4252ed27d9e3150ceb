@@ -1,0 +1,6 @@
+Revision history for #2582:
+
+rev 2 (content) 2026-10-29 16:15 UTC — Use the timing module's Instant so builds without the timing feature (wasm) compile
+rev 1 (initial) 2026-10-29 16:15 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2582,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"ea2813ab100dad9d5ba4ad94352118581a6d1da6","timestamp_iso":"2026-10-29T16:15:11Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"ea2813ab100dad9d5ba4ad94352118581a6d1da6","new_sha":"5aa02cf7f5199f2f46107d07ad7d0d118d8a79d3","timestamp_iso":"2026-10-29T16:15:11Z","reason":"Use the timing module's Instant so builds without the timing feature (wasm) compile","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ea2813ab100dad9d5ba4ad94352118581a6d1da6...5aa02cf7f5199f2f46107d07ad7d0d118d8a79d3"}]} -->
