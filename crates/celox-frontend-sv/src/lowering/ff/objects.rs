@@ -34,7 +34,9 @@ impl Ff<'_, '_> {
                     (32, false)
                 } else {
                     match op {
-                        ObjectOp::Store(field) => (field.width as usize, field.signed),
+                        // A stored value extends by its own signedness
+                        // (IEEE 1800-2023 10.7).
+                        ObjectOp::Store(field) => (field.width as usize, self.expr_signed(arg)),
                         ObjectOp::Randomize(_) if index == 1 => (1, false),
                         ObjectOp::ConstraintModeSet(_)
                         | ObjectOp::ModeSet(_)
@@ -208,14 +210,16 @@ impl Ff<'_, '_> {
             ObjectOp::Store(field) if field.four_state && self.m.four_state => {
                 let object = self.handle(&args[0])?;
                 let expr = self.hoist(&args[1])?;
-                let value = self.eval(&expr, Some((field.width as usize, field.signed)))?;
+                let signed = self.expr_signed(&expr);
+                let value = self.eval(&expr, Some((field.width as usize, signed)))?;
                 self.store_field(object, *field, value);
                 self.constant64(0)
             }
             ObjectOp::Store(field) if field.width > 64 => {
                 let object = self.handle(&args[0])?;
                 let expr = self.hoist(&args[1])?;
-                let value = self.eval(&expr, Some((field.width as usize, field.signed)))?;
+                let signed = self.expr_signed(&expr);
+                let value = self.eval(&expr, Some((field.width as usize, signed)))?;
                 self.store_field(object, *field, value);
                 self.constant64(0)
             }
@@ -223,7 +227,8 @@ impl Ff<'_, '_> {
                 let object = self.handle(&args[0])?;
                 let place =
                     self.constant64(u64::from(field.offset) | u64::from(field.bytes()) << 32);
-                let value = self.integer_of_width(&args[1], field.width as usize, field.signed)?;
+                let signed = self.expr_signed(&args[1]);
+                let value = self.integer_of_width(&args[1], field.width as usize, signed)?;
                 self.heap_call(ops::OBJECT_STORE, &[object, place, value])
             }
             ObjectOp::RandomCyclic { offset, count } => {
