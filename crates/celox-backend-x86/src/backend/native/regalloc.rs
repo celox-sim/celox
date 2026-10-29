@@ -31,6 +31,8 @@ mod ssa;
 mod ssa_state_home;
 mod stack_color;
 #[cfg(test)]
+mod test_programs;
+#[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod unified;
@@ -574,6 +576,10 @@ fn allocate_optimizing(
             Ok(())
         }
     };
+    let rotation_copies = isolate_phi_rotations(func, normalized_cfg)?;
+    if timing && rotation_copies != 0 {
+        tracing::debug!("[regalloc-timing] label={label} phi_rotation_copies={rotation_copies}");
+    }
     let allocation_constraints =
         constraints::ConstraintModel::build_for_codegen(func, normalized_cfg, verify)
             .map_err(|error| constraint_error("placement constraint construction", error))?;
@@ -642,6 +648,90 @@ fn allocate_optimizing(
         is_cancelled,
     )?;
     Ok((allocation.assignment, allocation.spill_frame_size))
+}
+
+/// Copy every phi source that is itself a phi of the same block.
+///
+/// Phis read their sources in parallel, so on a loop backedge a row such as
+/// `q = phi(.., latch: p)` needs `p`'s value from this iteration while `p`'s
+/// own row writes `p`'s next value. The spill planner gives each value one
+/// home and materializes all stores at an edge before its reloads, so a
+/// stack-resident `p` would be overwritten before `q` reads it. Reading `p`
+/// through a copy made at the end of the predecessor gives the row a
+/// distinct value and home, which no row on that edge writes. Only rotated
+/// or swapped loop-carried values have such rows.
+fn isolate_phi_rotations(
+    func: &mut MFunction,
+    cfg: &cfg::NormalizedCfg,
+) -> Result<usize, RegallocError> {
+    let mut inserted = 0;
+    for successor in 0..func.blocks.len() {
+        let block = &func.blocks[successor];
+        if block.phis.is_empty() {
+            continue;
+        }
+        let own = block
+            .phis
+            .iter()
+            .map(|phi| phi.dst)
+            .collect::<crate::HashSet<_>>();
+        let rows = block
+            .phis
+            .iter()
+            .enumerate()
+            .flat_map(|(phi, node)| {
+                node.sources
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, source))| own.contains(source))
+                    .map(move |(row, &(predecessor, source))| (phi, row, predecessor, source))
+            })
+            .collect::<Vec<_>>();
+        let mut copies = crate::HashMap::<(BlockId, VReg), VReg>::default();
+        for (phi, row, predecessor, source) in rows {
+            let copy = match copies.get(&(predecessor, source)) {
+                Some(&copy) => copy,
+                None => {
+                    let Some(&predecessor_index) = cfg.block_index.get(&predecessor) else {
+                        return Err(RegallocError::new(
+                            "phi rotation isolation",
+                            "PHI_ISOLATION.PREDECESSOR",
+                            Some(func.blocks[successor].id),
+                            None,
+                            vec![source],
+                            format!("phi source predecessor {predecessor} is not in the CFG"),
+                        ));
+                    };
+                    let copy = func.vregs.try_alloc().map_err(|error| {
+                        RegallocError::new(
+                            "phi rotation isolation",
+                            "PHI_ISOLATION.VREG_EXHAUSTED",
+                            Some(predecessor),
+                            None,
+                            vec![source],
+                            error.to_string(),
+                        )
+                    })?;
+                    let desc = func.spill_descs[source.0 as usize].copy_for_snapshot();
+                    func.spill_descs.push(desc);
+                    let insts = &mut func.blocks[predecessor_index].insts;
+                    let terminator = insts.len().saturating_sub(1);
+                    insts.insert(
+                        terminator,
+                        MInst::Mov {
+                            dst: copy,
+                            src: source,
+                        },
+                    );
+                    copies.insert((predecessor, source), copy);
+                    inserted += 1;
+                    copy
+                }
+            };
+            func.blocks[successor].phis[phi].sources[row].1 = copy;
+        }
+    }
+    Ok(inserted)
 }
 
 /// Normalize block layout to reverse postorder before the single forward

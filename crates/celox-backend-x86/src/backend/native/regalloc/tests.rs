@@ -676,3 +676,210 @@ fn uncancelled_allocation_never_reports_cancellation() {
 
     assert!(!super::is_cancellation(&error));
 }
+
+/// Run the optimizing allocator on `func` and require the interpreter's
+/// effects from its machine code.
+fn assert_optimizing_matches_reference(func: &MFunction, inputs: &[Vec<u8>], context: &str) {
+    use super::test_programs::{allocate, execute, interpret};
+    let (allocated, result) = allocate(func, RegallocStrategy::Optimizing);
+    for input in inputs {
+        assert_eq!(
+            execute(&allocated, &result, input),
+            (0, interpret(func, input)),
+            "optimizing result differs ({context})\ninput MIR:\n{func}\nallocated MIR:\n{allocated}"
+        );
+    }
+}
+
+/// `v18` reads the header phi `v20` on the backedge while `v20`'s own row
+/// writes its next value. With `v20` stack-resident, the edge stored the
+/// next `v20` into its home before reloading the current one for `v18`.
+/// Minimized from random program 32 of an earlier generator; the dead
+/// definitions supply the register pressure that spills `v20`.
+const BACKEDGE_PHI_READ_AFTER_WRITE: &str = "
+    bb0:
+      v0 = load.i64 [sim + 0]
+      v2 = load.i64 [sim + 16]
+      v3 = load.i64 [sim + 24]
+      v4 = imm 0x1
+      v6 = load.i64 [sim + 48]
+      v7 = load.i64 [sim + 56]
+      v8 = imm 0x0
+      jmp bb1
+    bb1:
+      v9 = phi(bb0: v8, bb12: v242)
+      v10 = phi(bb0: v6, bb12: v67)
+      jmp bb2
+    bb2:
+      v11 = or v7, 0x1
+      v12 = udiv v6, v11
+      v13 = add v12, 4660
+      v14 = mul.w64 v10, v0
+      v16 = imm 0x0
+      jmp bb4
+    bb4:
+      v17 = phi(bb2: v16, bb9: v68)
+      v18 = phi(bb2: v14, bb9: v20)
+      v19 = phi(bb2: v6, bb9: v29)
+      v20 = phi(bb2: v3, bb9: v30)
+      v21 = phi(bb2: v13, bb9: v30)
+      jmp bb5
+    bb5:
+      v24 = mov.w64 v6
+      v26 = mov.w64 v17
+      v27 = and.w64 v7, v3
+      v28 = imm 0xbd7068da3e930e65
+      v29 = imm 0x1
+      v30 = add.w64 v17, v26
+      v34 = add v19, 4660
+      v36 = cmp.LtU v10, v0
+      v37 = select v36, v10, v18
+      v40 = xor.w64 v34, v9
+      v46 = and.w64 v29, v13
+      v47 = and.w64 v2, 0x1
+      br v47, bb7, bb8
+    bb7:
+      v51 = imm 0x1
+      v52 = select v51, v4, v14
+      jmp bb9
+    bb8:
+      jmp bb9
+    bb9:
+      v65 = phi(bb7: v21, bb8: v21)
+      v67 = phi(bb7: v28, bb8: v28)
+      v68 = add v17, 1
+      v69 = cmp.LtU v68, 4
+      br v69, bb4, bb6
+    bb6:
+      v70 = and.w64 v21, 0x1
+      br v70, bb10, bb11
+    bb10:
+      v71 = and.w64 v3, 0x1
+      br v71, bb13, bb14
+    bb13:
+      jmp bb15
+    bb14:
+      jmp bb15
+    bb15:
+      v152 = and.w64 v37, 0x1
+      br v152, bb16, bb17
+    bb16:
+      jmp bb18
+    bb17:
+      jmp bb18
+    bb18:
+      jmp bb12
+    bb11:
+      jmp bb12
+    bb12:
+      v242 = add v9, 1
+      v243 = cmp.LtU v242, 1
+      br v243, bb1, bb3
+    bb3:
+      store.i64 [sim + 80], v37
+      ret
+";
+
+/// A three-phi rotation (`v37 <- v48`, `v39 <- v40`, `v40 <- v37`) on an
+/// inner-loop backedge, minimized from random program 16.
+const BACKEDGE_PHI_ROTATION: &str = "
+    bb0:
+      v0 = imm 0x1
+      v1 = imm 0x1
+      v2 = imm 0x1
+      v3 = imm 0x1
+      v5 = imm 0x1
+      v8 = imm 0x0
+      jmp bb1
+    bb1:
+      v9 = phi(bb0: v8, bb6: v82)
+      jmp bb2
+    bb2:
+      v12 = imm 0x1
+      v13 = imm 0x1
+      v14 = imm 0x1
+      v15 = imm 0x1
+      v18 = imm 0x1
+      v20 = imm 0x1
+      v24 = imm 0x1
+      v25 = not v24
+      v26 = imm 0x0
+      jmp bb4
+    bb4:
+      v27 = phi(bb2: v26, bb9: v80)
+      jmp bb5
+    bb5:
+      v34 = imm 0x1
+      v35 = imm 0x0
+      jmp bb7
+    bb7:
+      v36 = phi(bb5: v35, bb8: v78)
+      v37 = phi(bb5: v3, bb8: v48)
+      v39 = phi(bb5: v0, bb8: v40)
+      v40 = phi(bb5: v15, bb8: v37)
+      jmp bb8
+    bb8:
+      v42 = sub.w64 v25, v37
+      v48 = mov.w64 v42
+      v51 = or.w64 v39, v1
+      v58 = imm 0x1
+      v59 = sar v5, v58
+      v60 = mov.w64 v14
+      v61 = or.w64 v48, v13
+      v67 = imm 0x1
+      v68 = shr v34, v67
+      v69 = and.w64 v2, 0x3f
+      v71 = mov.w64 v12
+      v72 = and.w64 v20, 0x3f
+      v74 = add v18, 4660
+      v75 = shr v27, 7
+      v78 = add v36, 1
+      v79 = cmp.LtU v78, 4
+      br v79, bb7, bb9
+    bb9:
+      v80 = add v27, 1
+      v81 = cmp.LtU v80, 2
+      br v81, bb4, bb6
+    bb6:
+      v82 = add v9, 1
+      v83 = cmp.LtU v82, 3
+      br v83, bb1, bb3
+    bb3:
+      store.i64 [sim + 88], v51
+      ret
+";
+
+fn assert_fixed_program(text: &str, seed: u64, context: &str) {
+    use super::test_programs::{parse_mir, random_inputs};
+    use crate::native::features::X86Features;
+    for bmi2 in [true, false] {
+        let func = parse_mir(text, X86Features::for_test(bmi2));
+        assert_optimizing_matches_reference(&func, &random_inputs(seed), context);
+    }
+}
+
+#[test]
+fn optimizing_backedge_phi_reads_the_current_value() {
+    assert_fixed_program(BACKEDGE_PHI_READ_AFTER_WRITE, 32, "read after write");
+}
+
+#[test]
+fn optimizing_backedge_phi_rotation_is_parallel() {
+    assert_fixed_program(BACKEDGE_PHI_ROTATION, 16, "rotation");
+}
+
+#[test]
+fn random_programs_match_reference_semantics_with_the_optimizing_allocator() {
+    use super::test_programs::{random_function, random_inputs};
+    use crate::native::features::X86Features;
+    for seed in 0..120 {
+        for bmi2 in [true, false] {
+            let func = random_function(seed, X86Features::for_test(bmi2));
+            assert_optimizing_matches_reference(
+                &func,
+                &random_inputs(seed),
+                &format!("seed {seed}, bmi2 {bmi2}"),
+            );
+        }
+    }
+}
