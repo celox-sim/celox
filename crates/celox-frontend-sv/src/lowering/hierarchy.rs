@@ -27,6 +27,8 @@ use super::{
 /// instances and the signals names can denote.
 pub(super) struct ElaboratedModule {
     name: String,
+    /// The interface instances and ports a virtual interface may denote.
+    pub(super) interface_handles: Vec<sv::ir::InterfaceHandle>,
     /// Ports and signals, by local name, with their net kind.
     signals: Vec<(String, sv::ir::Type, bool)>,
     interface_scopes: HashSet<String>,
@@ -39,6 +41,7 @@ impl ElaboratedModule {
     pub(super) fn from_lowered(lowered: LoweredSvModule) -> Self {
         Self {
             name: lowered.source.name().to_string(),
+            interface_handles: lowered.source.interface_handles().to_vec(),
             signals: signals(&lowered.source),
             interface_scopes: lowered
                 .source
@@ -63,6 +66,7 @@ impl ElaboratedModule {
         propagate_force_signals(&mut instances, force_signals);
         Ok(Self {
             name: source.name().to_string(),
+            interface_handles: source.interface_handles().to_vec(),
             signals: signals(source),
             interface_scopes: source.interface_scope_names().iter().cloned().collect(),
             instances,
@@ -141,6 +145,22 @@ struct Found {
     is_net: bool,
     /// The specializations that hold the signal.
     modules: Vec<ModuleId>,
+}
+
+impl HierarchicalReference {
+    /// A reference from the top instance along `path` to `targets`.
+    pub(super) fn rooted(
+        signal: sv::ast::HierarchicalSignal,
+        path: Vec<(String, usize)>,
+        targets: Vec<(ModuleId, String)>,
+    ) -> Self {
+        Self {
+            signal,
+            start: HierarchicalStart::Root,
+            path,
+            targets,
+        }
+    }
 }
 
 impl Found {
@@ -533,6 +553,30 @@ pub(super) fn collect_foreign_writes(
                 .or_default();
             entry.repeating += usize::from(repeating);
             entry.always_ff |= by_always_ff;
+        }
+    }
+}
+
+/// [`collect_foreign_writes`] for `references` to the members of the
+/// interface instances that virtual interfaces of `module` may denote: each
+/// instance of a specialization may denote the same instances, so the
+/// specialization counts once for each signal it writes.
+pub(super) fn collect_virtual_writes(
+    module: &sv::ir::Module,
+    references: &[HierarchicalReference],
+    writes: &mut HashMap<ModuleId, HashMap<String, ForeignWrites>>,
+) {
+    let mut own = HashMap::default();
+    collect_foreign_writes(module, references, &mut own);
+    for (target_module, targets) in own {
+        for (target, foreign) in targets {
+            let entry = writes
+                .entry(target_module)
+                .or_default()
+                .entry(target)
+                .or_default();
+            entry.repeating += foreign.repeating.min(1);
+            entry.always_ff |= foreign.always_ff;
         }
     }
 }

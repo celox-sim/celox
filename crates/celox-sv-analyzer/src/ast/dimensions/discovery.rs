@@ -437,6 +437,7 @@ fn return_metadata(
         class: ty
             .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
             .and_then(|ty| ty.class().map(str::to_owned)),
+        virtual_interface: ty.and_then(|ty| ty.virtual_interface.clone()),
         pattern_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()
@@ -786,6 +787,7 @@ fn settle(
                             pattern_type: None,
                             enum_domain: None,
                             class: None,
+                            virtual_interface: None,
                         },
                     );
                     publish(&tree.state.dimensions, key, context);

@@ -357,9 +357,19 @@ fn bind_in_mode(
                         };
                         jobs.push(Job::Enter(inner));
                     }
-                    DataTypeKind::Interface { .. } | DataTypeKind::VirtualInterface { .. } => {
-                        return Ok(None);
+                    DataTypeKind::VirtualInterface {
+                        name,
+                        arguments,
+                        modport,
+                    } => {
+                        values.push(super::super::virtual_interfaces::bind_type(
+                            &tree.state,
+                            name,
+                            arguments.as_deref(),
+                            modport.as_ref(),
+                        )?);
                     }
+                    DataTypeKind::Interface { .. } => return Ok(None),
                 }
             }
             Job::Enum(id, ranges) => {

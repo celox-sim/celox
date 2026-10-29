@@ -44,6 +44,7 @@ mod ff;
 mod floating;
 mod hierarchy;
 mod procedural;
+mod virtual_interfaces;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
 type GlueBlock = GlueBlockBase<SourceVarId>;
@@ -425,7 +426,7 @@ fn analyze_sources_with_requests(
         sv::generated_time_declarations_with_options(
             sources,
             selected_roots.as_deref(),
-            analysis_options,
+            analysis_options.clone(),
         )?
     } else {
         String::new()
@@ -491,6 +492,24 @@ fn analyze_sources_with_requests(
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
+    // The interfaces that virtual interface types name, before their
+    // instances are known (see `virtual_interfaces`).
+    let analysis_options = if analysis_options.virtual_interfaces.is_none() {
+        let texts = sources
+            .iter()
+            .map(|(_, code, path)| (*code, *path))
+            .collect::<Vec<_>>();
+        sv::AnalysisOptions {
+            virtual_interfaces: sv::VirtualInterfaces::declarations_of(
+                &texts,
+                &parsed,
+                &analysis_options,
+            )?,
+            ..analysis_options
+        }
+    } else {
+        analysis_options
+    };
     let mut packages = match roots {
         Some(roots) => {
             let roots = roots
@@ -2845,7 +2864,8 @@ fn schedule_sources_collecting(
     analysis_options: sv::AnalysisOptions,
     force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources, &[top], analysis_options)?;
+    let found_warnings = warnings.len();
+    let analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
     package_warnings(&analyzed, warnings);
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
@@ -2877,6 +2897,13 @@ fn schedule_sources_collecting(
     let mut index = 0;
     let mut elaborated = HashMap::default();
     let mut hierarchical_modules = Vec::new();
+    // The virtual interfaces of the design, and the analyses of the modules
+    // that may refer to their instances (see `virtual_interfaces`).
+    let virtual_interfaces = analyzed[&top].packages.virtual_interfaces().cloned();
+    let instances_known = virtual_interfaces
+        .as_ref()
+        .is_some_and(|declarations| declarations.elaborated);
+    let mut virtual_sources = HashMap::default();
     while index < queue.len() {
         let key = queue[index].clone();
         index += 1;
@@ -2893,7 +2920,12 @@ fn schedule_sources_collecting(
             LevelLists::Processes,
             HierarchicalNames::default(),
         ) {
-            Ok(lowered) => hierarchy::ElaboratedModule::from_lowered(lowered),
+            Ok(lowered) => {
+                if instances_known {
+                    virtual_sources.insert(module_id, lowered.source.clone());
+                }
+                hierarchy::ElaboratedModule::from_lowered(lowered)
+            }
             // Elaborate the hierarchy below the module before resolving its
             // hierarchical names.
             Err(error) if hierarchical_reference_path(&error).is_some() => {
@@ -2917,6 +2949,43 @@ fn schedule_sources_collecting(
         }
     }
 
+    // The ids of interface instances depend on the elaborated hierarchy, which
+    // the virtual interface accesses do not change: analyze again with them.
+    let virtual_instances = match &virtual_interfaces {
+        Some(declarations) => {
+            let instances = virtual_interfaces::Instances::elaborate(
+                root_id,
+                &module_ids,
+                &elaborated,
+                declarations,
+            );
+            if !declarations.elaborated {
+                warnings.truncate(found_warnings);
+                return schedule_sources_collecting(
+                    sources,
+                    &top,
+                    parameter_overrides,
+                    ignored_loops,
+                    true_loops,
+                    four_state,
+                    parallel,
+                    trace_options,
+                    trace,
+                    allow_inferred_latches,
+                    warnings,
+                    sv::AnalysisOptions {
+                        virtual_interfaces: Some(std::sync::Arc::new(
+                            instances.table(declarations),
+                        )),
+                        ..analysis_options
+                    },
+                    force_signals,
+                );
+            }
+            Some((instances, declarations.clone()))
+        }
+        None => None,
+    };
     let keys: HashMap<ModuleId, &LoweredSvModuleKey> =
         module_ids.iter().map(|(key, &id)| (id, key)).collect();
     let hierarchy = hierarchy::Hierarchy::new(
@@ -2966,6 +3035,33 @@ fn schedule_sources_collecting(
     // The elaboration only served to resolve the hierarchical names.
     drop(hierarchy);
     drop(elaborated);
+    // Signals that denote members of interface instances for virtual
+    // interfaces, which other modules then write and watch.
+    let mut virtual_references: HashMap<ModuleId, Vec<hierarchy::HierarchicalReference>> =
+        HashMap::default();
+    if let Some((instances, declarations)) = &virtual_instances {
+        for (&module_id, ir) in
+            virtual_sources
+                .iter()
+                .chain(analyses.iter().filter_map(|(module_id, ir)| {
+                    let key = keys[module_id];
+                    Some((
+                        module_id,
+                        ir.modules()
+                            .iter()
+                            .find(|module| module.name() == key.name)?,
+                    ))
+                }))
+        {
+            let references = instances.references(ir, declarations);
+            if references.is_empty() {
+                continue;
+            }
+            hierarchy::collect_virtual_writes(ir, &references, &mut foreign_writes);
+            virtual_references.insert(module_id, references);
+        }
+    }
+    drop(virtual_sources);
 
     // A combinational loop through an `always @(list)` lowered like
     // `always @*` may converge as a process: demote the lists in the loop
@@ -3030,7 +3126,11 @@ fn schedule_sources_collecting(
         // Waits and flip-flop domains of other modules may watch the
         // signals that hierarchical names reach.
         let mut hierarchical_targets: HashMap<ModuleId, HashSet<String>> = HashMap::default();
-        for reference in references.values().flatten() {
+        for reference in references
+            .values()
+            .flatten()
+            .chain(virtual_references.values().flatten())
+        {
             for (module, target) in &reference.targets {
                 hierarchical_targets
                     .entry(*module)
@@ -3039,6 +3139,7 @@ fn schedule_sources_collecting(
             }
         }
         let no_targets = HashSet::default();
+        let mut instance_values = Vec::new();
         let mut modules = HashMap::default();
         let mut module_names = HashMap::default();
         for (key, &module_id) in &module_ids {
@@ -3047,6 +3148,16 @@ fn schedule_sources_collecting(
             if let Some(references) = references.get(&module_id) {
                 sim_module.hierarchical_bindings =
                     hierarchy::bindings(references, lowered, &lowered_modules)?;
+            }
+            if let Some(references) = virtual_references.get(&module_id) {
+                sim_module.hierarchical_bindings.extend(hierarchy::bindings(
+                    references,
+                    lowered,
+                    &lowered_modules,
+                )?);
+            }
+            if let Some((instances, _)) = &virtual_instances {
+                instance_values.extend(instances.values(module_id, lowered));
             }
             attach_instance_glue(
                 &mut sim_module,
@@ -3093,6 +3204,7 @@ fn schedule_sources_collecting(
             module_names,
             root_id,
             packages,
+            instance_values,
         };
         let mut loop_members = Vec::new();
         let scheduled =

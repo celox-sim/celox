@@ -39,6 +39,9 @@ pub struct Packages {
     units: HashMap<PathBuf, Arc<Unit>>,
     /// What analyzing the packages warned about.
     warnings: Vec<super::warnings::AnalyzerWarning>,
+    /// The virtual interfaces of the design, which the modules that use the
+    /// packages are analyzed with.
+    pub(crate) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
 }
 
 /// The compilation-unit scope of a source file.
@@ -122,6 +125,11 @@ impl Packages {
             .modules
             .get(name)
             .map_or(name, |plan| plan.original.as_str())
+    }
+
+    /// The virtual interfaces the packages were analyzed with.
+    pub fn virtual_interfaces(&self) -> Option<&Arc<virtual_interfaces::VirtualInterfaces>> {
+        self.virtual_interfaces.as_ref()
     }
 
     /// Global simulation precision, as a power of ten seconds (IEEE 1800-2023 3.14.3).
@@ -265,14 +273,18 @@ impl Packages {
         roots: Option<&[&str]>,
         options: crate::AnalysisOptions,
     ) -> Result<Self, AnalyzerError> {
-        let mut timescales = timescales::Timescales::collect_with_options(trees, options)?;
+        let mut timescales = timescales::Timescales::collect_with_options(trees, options.clone())?;
         if let Some(roots) = roots {
             timescales.select_roots(roots);
         }
         let mixed_timescales = timescales.has_mixed_timescales();
         let timescales = Arc::new(timescales);
-        let state = std::rc::Rc::new(AnalysisState::default());
+        let state = std::rc::Rc::new(AnalysisState {
+            virtual_interfaces: options.virtual_interfaces.clone(),
+            ..AnalysisState::default()
+        });
         let mut packages = Self::analyze_packages(trees, timescales, &state)?;
+        packages.virtual_interfaces = options.virtual_interfaces;
         if mixed_timescales {
             packages
                 .warnings
@@ -583,6 +595,10 @@ pub(super) fn analyze_package_with_symbols(
                 .map(|property| property.variable.clone()),
         );
     }
+    // Each scope declares its own signals for virtual interfaces.
+    symbols
+        .signals
+        .retain(|signal| virtual_interfaces::VirtualInterfaceSignal::of(&signal.name).is_none());
     // The package's variables, and those it imports, are shared objects;
     // the other signals are constants, copied with their initializers.
     let (state, constants): (Vec<_>, Vec<_>) = std::mem::take(&mut symbols.signals)

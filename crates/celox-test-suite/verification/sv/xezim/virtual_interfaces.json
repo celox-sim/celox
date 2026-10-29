@@ -1,0 +1,136 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "virtual_interfaces::class_call_arguments_and_package_results at 403:3: expect_output: expected [49, 50, 32, 50, 50, 32, 49, 32, 49, 10], got [49, 50, 32, 50, 50, 32, 49, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::class_call_arguments_and_package_results",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "virtual_interfaces::function_results at 158:3: expect_output: expected [54, 54, 32, 49, 32, 48, 10], got [54, 54, 32, 48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::function_results",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "virtual_interfaces::multidimensional_and_package_arrays at 353:3: expect_output: expected [49, 50, 32, 51, 53, 32, 49, 50, 32, 51, 53, 10], got [120, 120, 32, 120, 120, 32, 48, 48, 48, 48, 48, 48, 48, 48, 32, 48, 48, 48, 48, 48, 48, 48, 48, 10]",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::multidimensional_and_package_arrays",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_another_interface",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_another_interface",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_call_results_of_other_types",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_call_results_of_other_types",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_integers_as_class_call_arguments",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_integers_as_class_call_arguments",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_integers_as_constructor_arguments",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_integers_as_constructor_arguments",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_integers_in_arrays_of_virtual_interfaces",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_integers_in_arrays_of_virtual_interfaces",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_integers_in_conditional_array_elements",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_integers_in_conditional_array_elements",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_modport_ports_to_full_interface",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_modport_ports_to_full_interface",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_modport_to_full_interface",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_modport_to_full_interface",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "invalid design was accepted: virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
+      "phase": "execute",
+      "status": "unexpected_accept",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

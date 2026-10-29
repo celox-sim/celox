@@ -19,7 +19,9 @@ pub(in crate::ast) fn net_lvalue(
     {
         return Err(unsupported("continuous driver of a tagged union member"));
     }
-    direct::selected_lvalue(root, native, tree, dimensions, true)
+    let target = direct::selected_lvalue(root, native, tree, dimensions, true)?;
+    crate::ast::virtual_interfaces::check_target(&target)?;
+    Ok(target)
 }
 #[cfg(test)]
 mod tests {

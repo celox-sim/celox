@@ -123,7 +123,7 @@ pub(super) fn revision(state: &State) -> &generate::Revision {
 }
 
 pub(super) fn analysis_options(state: &State) -> crate::AnalysisOptions {
-    state.design.borrow().design.options
+    state.design.borrow().design.options.clone()
 }
 
 pub(super) fn with_interface_instance<T>(
@@ -511,7 +511,7 @@ impl Timescales {
         self.precision.unwrap_or(DEFAULT.precision)
     }
     fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
-        let local = Self::collect_with_options(&[(tree, Path::new(""))], self.options)?;
+        let local = Self::collect_with_options(&[(tree, Path::new(""))], self.options.clone())?;
         let specified = [
             self.specified[0] | local.specified[0],
             self.specified[1] | local.specified[1],
@@ -593,7 +593,7 @@ impl Timescales {
         };
         let mut design = Self {
             precision: options.default_timescale.map(|(_, precision)| precision),
-            options,
+            options: options.clone(),
             ..Self::default()
         };
         // Each bit records whether a design element uses a default (1) or an
