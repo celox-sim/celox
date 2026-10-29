@@ -2900,10 +2900,13 @@ pub(super) fn lower_subroutine(
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
         .iter()
-        .map(|(_, _, ty, default)| {
+        .map(|(_, direction, ty, default)| {
             default
                 .map(|root| {
-                    let shape = (ty.tagged_identity().is_some() || ty.unpacked_struct().is_some())
+                    // The default of a container input is a container value.
+                    let shape = (ty.tagged_identity().is_some()
+                        || ty.unpacked_struct().is_some()
+                        || ty.container.is_some() && *direction == ParamDirection::Input)
                         .then(|| dimensions_from_type(ty));
                     let mut value = expression_binding::bind_value(
                         root,

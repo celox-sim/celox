@@ -7843,3 +7843,68 @@ fn long_handle_chains_resolve_in_linear_time() {
         started.elapsed()
     );
 }
+
+#[test]
+fn container_formals_copy_only_what_container_assignment_represents() {
+    // IEEE 1800-2023 13.5.1: a container formal that is not a reference
+    // holds a copy, which an input receives as a container value and an
+    // output or inout returns to a container its value fits.
+    for formal in [
+        "int q[$]",
+        "output int q[$]",
+        "inout int q[$]",
+        "q_t q",
+        "output q_t q",
+        "int q[]",
+        "int q[string]",
+        "output int q[string]",
+    ] {
+        let source = format!(
+            "module Top; typedef int q_t[$]; int a[$]; int d[]; int m[string]; \
+             function automatic void f({formal}); endfunction \
+             initial f({}); endmodule",
+            if formal.contains("[string]") {
+                "m"
+            } else if formal.contains("[]") {
+                "d"
+            } else {
+                "a"
+            }
+        );
+        analyze_source(&source, Path::new("container_formal.sv"))
+            .unwrap_or_else(|error| panic!("{formal}: {error}"));
+    }
+    for (formal, actual, detail) in [
+        ("output int q[$]", "b", "another queue bound"),
+        ("inout int q[$:3]", "a", "another queue bound"),
+        ("output int q[$]", "x", "compatible container"),
+        ("inout int q[$]", "m", "incompatible dynamic container"),
+        ("int q[$]", "m", "incompatible dynamic container"),
+        ("int q[$]", "make()", "compatible container"),
+    ] {
+        let source = format!(
+            "module Top; typedef int q_t[$]; int a[$]; int b[$:3]; int x; int m[string]; \
+             function automatic q_t make(); return a; endfunction \
+             function automatic void f({formal}); endfunction \
+             initial f({actual}); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("container_formal.sv"))
+            .expect_err("an actual the copy cannot represent must be rejected");
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(_)) && error.to_string().contains(detail),
+            "{formal} <- {actual}: {error}"
+        );
+    }
+    // `new[]` is no expression (IEEE 1800-2023 7.5.1, A.6.2).
+    for call in ["f(new[2])", "f((new[2](d)))", "g()"] {
+        let source = format!(
+            "module Top; int d[]; \
+             function automatic void f(int q[]); endfunction \
+             function automatic void g(int q[] = new[2]); endfunction \
+             initial {call}; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("container_formal.sv"))
+            .expect_err("`new[]` must not be an argument");
+        assert!(matches!(error, AnalyzerError::Parse(_)), "{call}: {error}");
+    }
+}
