@@ -1266,6 +1266,7 @@ impl Module {
                         string: function.return_string,
                         pattern_type: function.return_type.clone(),
                         enum_domain: function.return_enum_domain.clone(),
+                        class: function.return_class.clone(),
                     },
                 )
             }));
@@ -1286,6 +1287,7 @@ impl Module {
                         string: false,
                         pattern_type: None,
                         enum_domain: None,
+                        class: None,
                     },
                 ))
             }));
@@ -2880,6 +2882,8 @@ struct Function {
     return_is_2state: bool,
     /// The members of an enumerated return type, for its methods.
     return_enum_domain: Option<Arc<enums::EnumDomain>>,
+    /// The class of a class handle result.
+    return_class: Option<String>,
 }
 
 fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
@@ -3137,6 +3141,9 @@ struct FunctionReturnMetadata {
     pattern_type: Option<Type>,
     /// The members of an enumerated return type, for its methods.
     enum_domain: Option<Arc<enums::EnumDomain>>,
+    /// The class of a class handle result, whose members a call may select
+    /// (IEEE 1800-2023 8.4).
+    class: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

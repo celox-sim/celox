@@ -3331,3 +3331,57 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 703282))
+(case members_of_call_results
+  (source "package.sv" #"
+package p;
+    class Base;
+        int n;
+        virtual function Base report_object();
+            return this;
+        endfunction
+        function int v();
+            return n;
+        endfunction
+    endclass
+    class Derived extends Base;
+        virtual function Base report_object();
+            return this;
+        endfunction
+        function int probe();
+            return report_object().v() + 10 * report_object().report_object().n;
+        endfunction
+    endclass
+    class R;
+        int n = 3;
+        static R inst;
+        function R get();
+            return this;
+        endfunction
+        function int v();
+            return n;
+        endfunction
+        static function R instance_of();
+            if (inst == null) inst = new();
+            return inst;
+        endfunction
+    endclass
+    function R get();
+        return R::instance_of();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic Derived d = new();
+        automatic R r;
+        d.n = 2;
+        r = get().get();
+        r.n = 5;
+        sum = d.probe() + 100 * get().v() + 1000 * get().get().n
+            + 10000 * R::instance_of().get().v();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 55522))
