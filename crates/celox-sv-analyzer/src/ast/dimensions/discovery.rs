@@ -832,23 +832,27 @@ fn publish_signature(
         .iter()
         .map(|(argument, _)| argument.clone())
         .collect::<Arc<[_]>>();
-    Arc::make_mut(&mut context.subroutine_param_shapes).insert(
-        n.clone(),
-        formals
-            .iter()
-            .map(|(_, ty)| procedural::dimensions_from_type(ty))
-            .collect(),
-    );
-    Arc::make_mut(&mut context.subroutine_param_names).insert(
-        n.clone(),
-        formals
-            .iter()
-            .map(|(argument, _)| argument.name.clone())
-            .collect(),
-    );
+    // Each pass of a discovery publishes every signature again: an
+    // unchanged one leaves the tables, which snapshots may share, alone.
+    let shapes = formals
+        .iter()
+        .map(|(_, ty)| procedural::dimensions_from_type(ty))
+        .collect::<Vec<_>>();
+    if context.subroutine_param_shapes.get(&n) != Some(&shapes) {
+        Arc::make_mut(&mut context.subroutine_param_shapes).insert(n.clone(), shapes);
+    }
+    let names = formals
+        .iter()
+        .map(|(argument, _)| argument.name.clone())
+        .collect::<Vec<_>>();
+    if context.subroutine_param_names.get(&n) != Some(&names) {
+        Arc::make_mut(&mut context.subroutine_param_names).insert(n.clone(), names);
+    }
     if let Some(ty) = result {
         let metadata = return_metadata(&tree.state, ty.as_ref(), arguments, context);
-        context.function_return_types.insert(n, metadata);
+        if context.function_return_types.get(&n) != Some(&metadata) {
+            context.function_return_types.insert(n, metadata);
+        }
     }
 }
 fn local_declaration(
