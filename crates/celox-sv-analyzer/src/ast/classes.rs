@@ -639,12 +639,16 @@ pub(super) fn base_arguments<'a>(
     declaration(tree, name)?.base.as_ref()?.arguments.as_deref()
 }
 
+/// Whether class `name` is a built-in class whose objects the scheduler owns:
+/// `process` (IEEE 1800-2023 9.7) or the type of named events (15.5).
+pub(super) fn builtin(name: &str) -> bool {
+    name == super::processes::CLASS || name == super::events::CLASS
+}
+
 /// The handle type of class `name`, if it is a class.
 pub(super) fn handle_type(tree: &AnalysisContext<'_>, name: &str) -> Option<Type> {
-    (name == super::processes::CLASS
-        || declaration(tree, name).is_some()
-        || imported(tree, name).is_some())
-    .then(|| handle(name))
+    (builtin(name) || declaration(tree, name).is_some() || imported(tree, name).is_some())
+        .then(|| handle(name))
 }
 
 /// Class `name` as the scope that declares it laid it out, when the current
@@ -675,6 +679,8 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>) -> Vec<String> {
 pub(super) fn handle(name: &str) -> Type {
     let mut ty = Type::new(if name == super::processes::CLASS {
         TypeKind::Process
+    } else if name == super::events::CLASS {
+        TypeKind::Event
     } else {
         TypeKind::Object
     });
@@ -1242,7 +1248,7 @@ pub(super) fn field(
         _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
-        TypeKind::Process => (HANDLE_WIDTH, false, None),
+        TypeKind::Process | TypeKind::Event => (HANDLE_WIDTH, false, None),
         TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
             let shape = casts::expr_type_from_type(state, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;

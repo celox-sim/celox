@@ -107,6 +107,11 @@ pub(super) fn with_dimensions(
     if record.is_none() && (shape.width == 0 || shape.width > 64) {
         return Err(unsupported("dynamic container elements wider than 64 bits"));
     }
+    // Allocating elements would need a synchronization object for each
+    // (IEEE 1800-2023 15.5).
+    if base.kind() == TypeKind::Event && base.container.is_none() {
+        return Err(unsupported("array of named events"));
+    }
     let handle = match base.kind() {
         // An element in a record, or a nested container, is a handle.
         _ if record.is_some() || base.container.is_some() => Some(HandleProperty::Object),
@@ -122,7 +127,10 @@ pub(super) fn with_dimensions(
             shape.width as u32
         },
         signed: shape.signed && record.is_none(),
-        two_state: matches!(base.kind(), TypeKind::Bit | TypeKind::Process) || handle.is_some(),
+        two_state: matches!(
+            base.kind(),
+            TypeKind::Bit | TypeKind::Process | TypeKind::Event
+        ) || handle.is_some(),
         handle,
     };
     let mut ty = Type::new(TypeKind::Object);

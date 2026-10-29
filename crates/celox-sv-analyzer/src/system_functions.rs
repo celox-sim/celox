@@ -246,6 +246,11 @@ impl SystemFunction {
                 celox_design::ProcessOp::GetRandstate => "process.get_randstate",
                 celox_design::ProcessOp::SetRandstate => "process.set_randstate",
                 celox_design::ProcessOp::Observe => "process observation",
+                celox_design::ProcessOp::Trigger => "->",
+                celox_design::ProcessOp::TriggerNonblocking => "->>",
+                celox_design::ProcessOp::WaitEvent => "event control",
+                celox_design::ProcessOp::Triggered => "event.triggered",
+                celox_design::ProcessOp::WaitTriggered => "wait(event.triggered)",
             },
             Self::Ln => "$ln",
             Self::Log10 => "$log10",
@@ -449,6 +454,7 @@ impl SystemFunction {
     pub fn result_type(self) -> Option<(usize, bool)> {
         match self {
             Self::Process(celox_design::ProcessOp::Status) => Some((32, true)),
+            Self::Process(celox_design::ProcessOp::Triggered) => Some((1, false)),
             Self::Process(_) => Some((32, false)),
             Self::Ln
             | Self::Log10
@@ -1137,6 +1143,8 @@ pub enum ObjectOp {
     Unbox(Record),
     /// An array locator method, see [`Locator`].
     Locator(Locator),
+    /// A new synchronization object of a named event (15.5).
+    NewEvent,
 }
 
 impl ObjectOp {
@@ -1174,7 +1182,8 @@ impl ObjectOp {
             | Self::Store(_)
             | Self::Copy
             | Self::Box(_)
-            | Self::Locator(_) => (32, false),
+            | Self::Locator(_)
+            | Self::NewEvent => (32, false),
         }
     }
 }
@@ -1204,6 +1213,7 @@ impl fmt::Display for ObjectOp {
             Self::Copy => "shallow copy",
             Self::Box(_) => "structure record",
             Self::Unbox(_) => "structure record read",
+            Self::NewEvent => "new event",
         })
     }
 }

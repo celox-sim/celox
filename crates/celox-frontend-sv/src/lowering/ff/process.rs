@@ -94,6 +94,15 @@ impl Ff<'_, '_> {
         });
         self.with_kernel(|k| k.host_request(HostRequestKind::Process, index))
             .map_err(kernel_error)?;
+        // `triggered` is a one-bit value in its expression (IEEE 1800-2023
+        // 15.5.3), whatever the width of the result the scheduler writes.
+        if op == ProcessOp::Triggered {
+            return Ok(sv::ir::Expr::Resize {
+                expr: Box::new(sv::ir::Expr::Ident(name)),
+                width: 1,
+                signed: false,
+            });
+        }
         Ok(sv::ir::Expr::Ident(name))
     }
 }

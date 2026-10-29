@@ -17,6 +17,9 @@ pub struct ProcessControl {
     pub awaiting: Option<usize>,
     pub observes: Vec<usize>,
     pub level_wait: bool,
+    /// The named events the process is blocked on.
+    #[serde(default)]
+    pub events: Vec<u32>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SuspendedProcess {
