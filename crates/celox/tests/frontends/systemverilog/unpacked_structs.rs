@@ -341,6 +341,68 @@ sv_backends! {
         let value = sim.signal("value");
         assert_eq!(sim.get(value), BigUint::from(1231u16));
     }
+    fn structure_defaults_descend_to_members_of_their_type(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { int n; string s; } A;
+                typedef struct { A x; A z; } B;
+                typedef struct { B b; A y; } C;
+                initial begin
+                    A a;
+                    C c;
+                    a = '{3, "abc"};
+                    c = '{default: a};
+                    value = c.b.x.n * 1000 + c.b.z.s.len() * 100 + c.y.n * 10;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(3330u16));
+    }
+    fn queue_pops_without_parentheses_are_whole_elements(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                typedef struct { int a; string s; } row_t;
+                initial begin
+                    row_t q[$];
+                    row_t r;
+                    q = '{'{1, "a"}, '{2, "bb"}, '{3, "ccc"}};
+                    r = q.pop_front;
+                    value = r.a * 10 + r.s.len();
+                    r = q.pop_back;
+                    value = value * 100 + r.a * 10 + r.s.len() + q.size() * 1000;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(2133u16));
+    }
+    fn equal_four_state_record_updates_preserve_event_waits(sim) {
+        @setup {
+            let source = r#"`timescale 1ns/1ns
+            module Top(output bit done);
+                typedef struct { string name; logic flag; } row_t;
+                row_t d[];
+                int count, before_count;
+                initial begin
+                    d = new[1];
+                    #1 before_count = count;
+                    d[0] = d[0];
+                    #1 done = count == before_count && $isunknown(d[0].flag);
+                end
+                always @(d) count = count + 1;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top")
+            .four_state(true);
+        sim.run_until(3).unwrap();
+        let done = sim.signal("done");
+        assert_eq!(sim.get(done), BigUint::from(1u8));
+    }
     fn unpacked_struct_module_variables(sim) {
         @case "unpacked_structs::module_variables";
     }

@@ -252,8 +252,13 @@ pub(in crate::ast) fn native_struct(
                 ty.unpacked_struct().cloned()
             }
             // A class property of unpacked structure type.
-            None => expression_binding::object_aggregate_property(tree, id, native, dims)?
-                .and_then(|(aggregate, _, _)| aggregate.r#type.unpacked_struct().cloned()),
+            None if let Some((aggregate, _, _)) =
+                expression_binding::object_aggregate_property(tree, id, native, dims)? =>
+            {
+                aggregate.r#type.unpacked_struct().cloned()
+            }
+            // An element popped by `q.pop_front` without parentheses.
+            None => containers::native_struct_element(id, native, tree, dims)?,
         },
         ExprKind::Conditional {
             then_expression,
