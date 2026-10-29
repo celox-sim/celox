@@ -629,6 +629,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_associative_index_cast` | execute | verilator | 1 | Verilator 5.052 evaluates an associative index `x + 32'd1` at 32 bits and stores key 0; IEEE 1800-2023 7.8.4 evaluates it as a cast to the `bit [63:0]` index type (6.24.1), giving `64'h100000000`. xezim 0.11.3 also stores key 0 (`sv_associative_index_cast` in its review). [Evidence](verification/repros/sv_associative_index_cast.json). |
 | `sv_icarus_unpacked_structs` | compile | icarus | 21 | Icarus 13.0 does not support unpacked structures ("sorry: Unpacked structs not supported."), which IEEE 1800-2023 7.2 defines; the standalone source reproduces the diagnostic. Verilator passes all but the nested default pattern, see sv_verilator_nested_struct_default. |
 | `sv_icarus_nested_containers` | compile | icarus | 4 | Icarus 13.0 rejects an associative array whose index type is a type name ("Type names are not valid expressions here."), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays ("Sorry: Dynamic array of type `dynamic array of ...` is not yet supported."), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases. |
+| `sv_icarus_container_formals` | compile | icarus | 10 | Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation ("draw_eval_function_argument: Assertion `0' failed."), a function's output or inout gives "Function arguments must be input ports", and a task's "elaborate.cc:4342: failed assertion 0"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument. |
+| `sv_verilator_empty_concatenation_argument` | compile | verilator | 1 | Verilator 5.052 rejects {} passed to an input queue formal ("%Error-UNSUPPORTED: ... Unsupported/Illegal: empty queue ('{}') in this context"). Passing a value to an input argument is an assignment-like context (IEEE 1800-2023 10.8), where {} is an empty queue (10.10); xezim 0.11.3 passes the case. |
 | `sv_verilator_nested_struct_default` | execute | verilator | 1 | Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 ("5 0000 1" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101. |
 | `sv_verilator_pattern_format` | execute | verilator | 2 | Verilator 5.052 prints `%p` of integral container elements and integral associative keys in hexadecimal (`'h1`, and `'hfffffffe` for the `int` key -2) and a string literal as its packed value. IEEE 1800-2023 21.2.1.6 prints singular values as unformatted `$display` prints them, in decimal, and a string literal in quotes; xezim 0.11.3 prints the queue and dynamic array case as expected. |
 | `sv_icarus_pattern_format` | execute | icarus | 1 | Icarus 13.0 compiles `%p` of queues and dynamic arrays, then `vvp` stops: "$display does not support argument type (116)." IEEE 1800-2023 21.2.1.6 prints them as assignment patterns. |
@@ -1313,4 +1315,23 @@ the pinned xezim 0.11.3 pass. Icarus 13.0 does not support `automatic` on a
 variable of an `initial` block and rejects the module's `C::queue_t`
 declaration; its exact compile diagnostic remains an
 executed failure in [the Icarus class report](verification/sv/icarus/class.json).
+No assertions or exclusions are weakened.
+
+### Container formals
+
+The `container_formals` cases pass dynamic arrays, queues and associative arrays
+to formals that hold copies (13.5.1): inputs from variables, properties,
+elements of containers, patterns, `{}` and defaults; outputs and inouts copied
+back, also after a task waits; class handle and string elements; virtual
+methods, static subroutines and typedef formals. Celox passes all of them on
+every backend. Verilator 5.052 passes all but the `{}` argument
+(`sv_verilator_empty_concatenation_argument`), and Icarus 13.0 cannot pass these
+containers by copy at all (`sv_icarus_container_formals`). xezim 0.11.3 does not
+copy back an output of a container typedef declared in an instantiated module
+(`sv_container_typedef_output`) and gives a one-element queue for an element of
+an associative array of queues passed to an input (`sv_container_element_input`);
+the [typedef](verification/repros/sv_xezim_container_typedef_output.sv) and
+[element](verification/repros/sv_xezim_container_element_input.sv) sources
+reproduce them, and they remain executed mismatches in
+[the report](verification/sv/xezim/container_formals.json).
 No assertions or exclusions are weakened.

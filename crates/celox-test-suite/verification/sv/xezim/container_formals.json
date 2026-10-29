@@ -1,0 +1,114 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "container_formals::container_formals_forwarded_and_read_from_properties at 315:2: assert_eq read: expected 0xb7bb5d, got 0xb7944d",
+      "expectation": "Simulation",
+      "name": "container_formals::container_formals_forwarded_and_read_from_properties",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "container_formals::container_formals_of_class_handles_copy_the_container",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "container_formals::container_formals_of_class_methods at 235:2: assert_eq names: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "container_formals::container_formals_of_class_methods",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "container_formals::inout_container_is_copied_in_and_back",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "container_formals::input_container_changes_are_not_seen_by_the_caller",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "container_formals::input_container_from_an_empty_concatenation",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "container_formals::input_container_from_container_values",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "container_formals::output_container_starts_empty_and_is_copied_back",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "container_formals::static_subroutine_container_formals",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "container_formals::task_copies_containers_back_when_it_returns",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

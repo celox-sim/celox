@@ -201,14 +201,12 @@ pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) ->
     classes::object_call(ObjectOp::Container { op, layout }, args)
 }
 
-/// Container assignment is value assignment, whereas object elements are handles.
-pub(super) fn assignment(
+/// `new[size]` or `new[size](init)`, which only an assignment or a
+/// declaration initializer may use (IEEE 1800-2023 7.5.1).
+pub(super) fn dynamic_array_new(
     root: ExprId,
-    tree: &AnalysisContext<'_>,
-    dims: &PackedDimensions,
-    target: &ContainerType,
-) -> Converted<Expr> {
-    let native = tree.declarations();
+    native: &celox_sv_syntax::Declarations,
+) -> Option<(&Dimension, Option<ExprId>)> {
     let root = expression_binding::ungroup(root, native);
     let (construct, initializer) = match &native.expression(root).kind {
         ExprKind::Call {
@@ -219,12 +217,27 @@ pub(super) fn assignment(
         }
         _ => (root, None),
     };
-    if let ExprKind::Select {
-        expression,
-        dimension,
-    } = &native.expression(construct).kind
-        && matches!(&native.expression(*expression).kind, ExprKind::Name(n) if n.spelling == "new")
-    {
+    match &native.expression(construct).kind {
+        ExprKind::Select {
+            expression,
+            dimension,
+        } if matches!(&native.expression(*expression).kind, ExprKind::Name(n) if n.spelling == "new") => {
+            Some((dimension, initializer))
+        }
+        _ => None,
+    }
+}
+
+/// Container assignment is value assignment, whereas object elements are handles.
+pub(super) fn assignment(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> Converted<Expr> {
+    let native = tree.declarations();
+    let root = expression_binding::ungroup(root, native);
+    if let Some((dimension, initializer)) = dynamic_array_new(root, native) {
         if target.layout.kind != ContainerKind::Dynamic {
             return Err(unsupported("new[] requires a dynamic array"));
         }
@@ -268,6 +281,33 @@ pub(super) fn assignment(
         vec![expression_binding::value(root, native, tree, dims)?],
     ))
 }
+/// An output or inout container formal is copied back to its actual, and an
+/// inout one is copied in from it, as the handle of its value: the actual is
+/// a container whose assignment from the formal, and for an inout to it,
+/// keeps every element (IEEE 1800-2023 13.5.1, 7.6, 7.10).
+pub(super) fn check_written_actual(
+    id: ExprId,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+    formal: &ContainerType,
+    inout: bool,
+) -> Converted<()> {
+    let native = tree.declarations();
+    check_compatible(id, native, tree, dims, formal)?;
+    let actual = native_type(id, native, tree, dims)?.expect("checked by `check_compatible`");
+    let bound = |kind| match kind {
+        ContainerKind::Queue { capacity } => capacity,
+        _ => 0,
+    };
+    let (actual, formal) = (bound(actual.layout.kind), bound(formal.layout.kind));
+    if actual != 0 && actual != formal || inout && formal != 0 && formal != actual {
+        return Err(unsupported(
+            "output or inout container argument of another queue bound",
+        ));
+    }
+    Ok(())
+}
+
 fn check_compatible(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
