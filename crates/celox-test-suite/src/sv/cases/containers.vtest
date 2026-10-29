@@ -1158,3 +1158,43 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 3724))
+(case array_items_in_concatenations
+  (source "top.sv" #"
+module Top(output int sum, output int text);
+    class O;
+        int id;
+        function new(int i);
+            id = i;
+        endfunction
+    endclass
+    class F;
+        O a[$], b[$];
+        function int run();
+            O all[$], o;
+            o = new(1);
+            a.push_back(o);
+            o = new(2);
+            a.push_back(o);
+            o = new(3);
+            b.push_back(o);
+            all = {a, b};
+            return all.size() * 100 + all[0].id * 10 + all[2].id;
+        endfunction
+    endclass
+    int q[$], r[$], d[], t[$];
+    string s[$], u[$];
+    initial begin
+        automatic F f = new();
+        q = {1, 2};
+        r = {3};
+        d = {q, 9, r};
+        t = {r, q, r};
+        s = {"x"};
+        u = {s, "y", s};
+        sum = f.run() + 1000 * d.size() + 10000 * d[2] + 100000 * d[3] + 1000000 * t.size()
+            + 10000000 * t[1];
+        text = (u.size() == 3 && u[0] == "x" && u[1] == "y" && u[2] == "x") ? 1 : 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 14394313) (assert_eq text 1))

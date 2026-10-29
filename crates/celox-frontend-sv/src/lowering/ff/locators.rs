@@ -391,4 +391,52 @@ impl Ff<'_, '_> {
         );
         Ok(copy_name)
     }
+
+    /// The container that unpacked array concatenation `concat` builds: a
+    /// queue that takes each run of element items, as a literal, and each
+    /// array item in turn, converted to the result (IEEE 1800-2023 10.10).
+    /// Each step concatenates whole sequences, so the queue is copied once
+    /// per item rather than once per element.
+    pub(super) fn container_concat(
+        &mut self,
+        concat: &sv::ir::ContainerConcat,
+        args: &[Option<Expr>],
+    ) -> Result<Expr, sv::AnalyzerError> {
+        if args.len() != concat.parts.len() || args.iter().any(Option::is_none) {
+            return Err(unsupported("invalid unpacked array concatenation"));
+        }
+        let queue = ContainerLayout {
+            kind: ContainerKind::Queue { capacity: 0 },
+            ..concat.result
+        };
+        let mut result: Option<Expr> = None;
+        let mut elements = Vec::new();
+        let append = |result: Option<Expr>, item: Expr| match result {
+            None => item,
+            Some(result) => container(ContainerOp::Concat, queue, vec![result, item]),
+        };
+        for (part, arg) in concat.parts.iter().zip(args) {
+            let value = arg.clone().expect("checked above");
+            if part.is_none() {
+                elements.push(value);
+                continue;
+            }
+            if !elements.is_empty() {
+                let run = container(ContainerOp::Literal, queue, std::mem::take(&mut elements));
+                result = Some(append(result, run));
+            }
+            result = Some(append(result, value));
+        }
+        if !elements.is_empty() {
+            let run = container(ContainerOp::Literal, queue, elements);
+            result = Some(append(result, run));
+        }
+        let result = result.unwrap_or_else(|| container(ContainerOp::Literal, queue, Vec::new()));
+        // The conversion makes a new container, also of a lone array item.
+        self.hoist(&container(
+            ContainerOp::Convert,
+            concat.result,
+            vec![result],
+        ))
+    }
 }

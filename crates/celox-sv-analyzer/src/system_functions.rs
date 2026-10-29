@@ -926,6 +926,16 @@ pub enum ContainerKind {
         object: bool,
     },
 }
+/// An unpacked array concatenation whose items include arrays (IEEE
+/// 1800-2023 10.10): a new container of layout `result` holding, in order,
+/// each item that is an element and every element of each item that is an
+/// array. The arguments are the items; `parts` gives, for each, the layout of
+/// an array item or `None` for an element.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ContainerConcat {
+    pub result: ContainerLayout,
+    pub parts: Vec<Option<ContainerLayout>>,
+}
 /// An array locator method (IEEE 1800-2023 7.12.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LocatorMethod {
@@ -1024,6 +1034,9 @@ pub enum ContainerOp {
     New,
     Literal,
     Convert,
+    /// A new sequence of the elements of the sequence in the first argument
+    /// and then those of the one in the second.
+    Concat,
     Size,
     Get,
     Set,
@@ -1143,6 +1156,9 @@ pub enum ObjectOp {
     Unbox(Record),
     /// An array locator method, see [`Locator`].
     Locator(Locator),
+    /// An unpacked array concatenation with a container item, see
+    /// [`ContainerConcat`].
+    Concat(Box<ContainerConcat>),
     /// A new synchronization object of a named event (15.5).
     NewEvent,
     /// A streaming concatenation of dynamically sized data, see [`StreamOp`].
@@ -1286,6 +1302,7 @@ impl ObjectOp {
             | Self::Copy
             | Self::Box(_)
             | Self::Locator(_)
+            | Self::Concat(_)
             | Self::NewEvent => (32, false),
         }
     }
@@ -1296,6 +1313,7 @@ impl fmt::Display for ObjectOp {
         f.write_str(match self {
             Self::Container { .. } => "container operation",
             Self::Locator(_) => "array locator method",
+            Self::Concat(_) => "unpacked array concatenation",
             Self::Stream(_) => "streaming concatenation",
             Self::New { .. } => "new",
             Self::Load(_) => "property read",

@@ -1702,6 +1702,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     self.container_call(*op, *layout, args)?
                 }
                 sv::ir::ObjectOp::Locator(locator) => self.locator(*locator, args)?,
+                sv::ir::ObjectOp::Concat(concat) => self.container_concat(concat, args)?,
                 sv::ir::ObjectOp::Stream(op) => self.stream_call(op, args)?,
                 _ => self.object_call(op, args)?,
             },
