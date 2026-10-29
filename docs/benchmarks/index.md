@@ -22,6 +22,10 @@ acceptance checks and the planned SystemVerilog frontend comparisons.
 as diagnostics. Compilation and execution are reported separately; a faster
 compile does not imply faster generated code.
 
+The [Taxi / cocotb comparison](./taxi.md) runs daily at 03:17 UTC and publishes
+Celox/Verilator results for five fixed configurations (472 tests per sample).
+Its tab separates test-body, whole-process and HDL compilation time.
+
 ## Reading results
 
 The regular Benchmark workflow runs daily at 01:47 UTC (10:47 JST) and can also
@@ -41,9 +45,9 @@ group share a CPU.
 Benchmark measurements run on the daily schedule or by manual dispatch. PRs
 exercise the benchmark tooling when it changes. Each measurement workflow keeps
 its running sample and at most one pending run, replacing an older pending run
-with the latest request. The regular benchmark and Heliodor use independent
+with the latest request. The regular benchmark, Heliodor and Taxi use independent
 queues; their publishers retry against the latest `gh-pages` history so concurrent
-publication preserves both sets of results. Only `master` publishes history.
+publication preserves every history. Only `master` publishes history.
 
 - Compare the same workload, backend, revision, and host environment.
 - Treat small changes on shared CI runners as noise until repeated.

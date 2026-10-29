@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount, onMounted } from "vue";
 import { Line } from "vue-chartjs";
+import { withBase } from "vitepress";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -56,6 +57,8 @@ interface Series {
     | "collection-celox-veryl-native"
     | "collection-celox-tiered"
     | "collection-veryl-tiered"
+    | "taxi-celox"
+    | "taxi-verilator"
     | "rust"
     | "rust-dse"
     | "native-tb"
@@ -191,6 +194,7 @@ const microbenchmarkTabs: TabDef[] = [
 ];
 
 const overviewTabs: TabDef[] = [
+  { key: "taxi", label: "Taxi / cocotb", match: (n) => n.startsWith("taxi_"), sections: singleSection },
   {
     key: "heliodor",
     label: "Heliodor Linux",
@@ -257,6 +261,8 @@ function classifySeries(benchName: string): string {
 // --- Color palette ---
 
 const RUNTIME_COLORS: Record<string, string> = {
+  "taxi-celox": "#2563eb",
+  "taxi-verilator": "#f97316",
   "collection-celox-veryl-native": "#2563eb",
   "collection-celox-tiered": "#2563eb",
   "collection-veryl-tiered": "#e87924",
@@ -279,6 +285,8 @@ const RUNTIME_COLORS: Record<string, string> = {
 };
 
 const RUNTIME_LABELS: Record<string, string> = {
+  "taxi-celox": "Celox native O1 · SV / cocotb",
+  "taxi-verilator": "Verilator · SV / cocotb",
   "collection-celox-veryl-native": "Celox native · Veryl frontend / Veryl TB",
   "collection-celox-tiered": "Celox tiered · Veryl TB",
   "collection-veryl-tiered": "Veryl simulator tiered · Veryl TB",
@@ -311,7 +319,7 @@ const activeTab = ref("heliodor");
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(collection-celox-tiered|collection-veryl-tiered|collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(taxi-celox|taxi-verilator|collection-celox-tiered|collection-veryl-tiered|collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -344,6 +352,8 @@ function normalizeBenchName(benchName: string): string {
 }
 
 function runtime(name: string): Series["runtime"] | null {
+  if (name.startsWith("taxi-celox/")) return "taxi-celox";
+  if (name.startsWith("taxi-verilator/")) return "taxi-verilator";
   if (name.startsWith("collection-celox-tiered/")) return "collection-celox-tiered";
   if (name.startsWith("collection-veryl-tiered/")) return "collection-veryl-tiered";
   if (name.startsWith("collection-celox-veryl-native/")) return "collection-celox-veryl-native";
@@ -392,6 +402,14 @@ function shortDate(epoch: number): string {
 /** Format chart title from benchName */
 function formatChartTitle(benchName: string): string {
   let s = benchName;
+  const taxi = s.match(/^taxi_(lfsr64|phy64|rx16|rx8|rx32)_v1_x64_(body|process|compilation)$/);
+  if (taxi) {
+    const phases: Record<string, string> = {
+      body: "test body (median of 3)", process: "whole process (median of 3)",
+      compilation: "HDL compilation (single cold build)",
+    };
+    return `Taxi ${taxi[1]} · ${phases[taxi[2]]} · x86-64 · v1`;
+  }
 
   // Strip module identifiers for stdlib
   s = s.replace(/^linear_sec_p6_/, "");
@@ -563,7 +581,8 @@ function isPrimaryBench(benchName: string): boolean {
     || PRIMARY_STDLIB_BENCHES.has(benchName)
     || benchName.startsWith("heliodor_linux_boot_")
     || benchName.startsWith("heliodor_suite_")
-    || benchName.startsWith("collection_");
+    || benchName.startsWith("collection_")
+    || benchName.startsWith("taxi_");
 }
 
 // --- Computed: tabs with chart cards ---
@@ -829,6 +848,16 @@ onBeforeUnmount(() => {
         start before design analysis. Each Veryl-CC run uses an empty C compilation
         cache. Building the benchmark executables is excluded.
         Execution time includes the testbench for both simulators.
+      </p>
+
+      <p v-if="activeTab === 'taxi'" class="bench-methodology">
+        Unmodified pinned Taxi tests, paired on one VM and CPU with the same seed.
+        Each runtime point is the median of three fresh processes in alternating
+        simulator order. Test body includes Python stimulus and assertions; whole
+        process includes startup. HDL compilation is a separate single cold build.
+        Celox uses native O1, two-state; Verilator uses the standard cocotb VPI
+        adapter and default C++ -Os. Failed, skipped or incomplete tests are excluded
+        from publication. <a :href="withBase('/benchmarks/taxi.html')">Measurement details</a>.
       </p>
 
       <p v-if="activeTab === 'circuits'" class="bench-methodology">

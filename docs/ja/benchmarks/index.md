@@ -22,6 +22,10 @@ SV frontend比較方針は[回路コレクション](../../benchmarks/collection
 [API・カウンタ・標準ライブラリの測定](./diagnostics.md)は診断用として残しています。
 コンパイル時間と実行時間は分けて表示します。
 
+[Taxi / cocotb 比較](../../benchmarks/taxi.md)は毎日 03:17 UTC（12:17 JST）に
+5構成・合計472テストを Celox と Verilator で実行します。専用タブでテスト本体、
+起動込み、HDLコンパイル時間を分けて公開します。
+
 ## 結果の読み方
 
 通常の Benchmark workflow は Rust・Verilator・TypeScript を一つのジョブで順番に
