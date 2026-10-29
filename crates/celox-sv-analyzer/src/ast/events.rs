@@ -108,6 +108,9 @@ pub(super) fn blocks(stmt: &Stmt) -> bool {
                     | ProcessOp::WaitTriggered
                     | ProcessOp::Await
                     | ProcessOp::SemaphoreGet
+                    | ProcessOp::MailboxPut
+                    | ProcessOp::MailboxGet
+                    | ProcessOp::MailboxPeek
             )),
             ..
         })

@@ -1481,3 +1481,18 @@ remain executed evidence in the [Icarus report](verification/sv/icarus/semaphore
 That the waiting processes obtain keys in arrival order (15.3.3), so a later
 small request waits behind an earlier large one, is tested on Celox only:
 Verilator and xezim unblock any waiting process whose request the keys meet.
+
+### Mailboxes
+
+The 4 `mailboxes::*` cases check parameterized mailboxes (IEEE 1800-2023 15.4):
+messages come out in put order, `get` and a `put` into a full bounded mailbox
+block, the `try_*` methods return 0 instead of blocking, and mailboxes of strings
+and of class handles inside a parameterized class, as `uvm_tlm_fifo` uses them.
+Celox, Verilator 5.052 and xezim pass all of them on every backend. Icarus 13.0
+compiles none: it does not know the `mailbox` type ("Invalid module
+instantiation", "Invalid module item"). The failures remain executed evidence in
+the [Icarus report](verification/sv/icarus/mailboxes.json).
+
+That peeks and gets are woken in arrival order, that four-state messages keep
+their unknown bits, and that a message keeps its object alive across heap
+collections are tested on Celox only.

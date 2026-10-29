@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\n<case>/source_0.sv:2: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "mailboxes::get_and_bounded_put_block",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\n<case>/source_0.sv:2: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "mailboxes::messages_come_out_in_put_order",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 15; see <case>/build.log\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: I give up on this function definition.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name T.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name T.\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:12: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "mailboxes::strings_and_class_handles",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\n<case>/source_0.sv:2: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "mailboxes::try_methods_do_not_block",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

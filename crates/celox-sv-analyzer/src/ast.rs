@@ -145,6 +145,7 @@ mod casts;
 mod classes;
 mod comb_process;
 mod events;
+mod mailboxes;
 mod processes;
 mod semaphores;
 pub use bound_patterns::BoundPattern;

@@ -1082,7 +1082,7 @@ fn declaration_scope(
 
 /// The type that argument `id` of a type parameter names, or `None` while a
 /// bound of it needs a constant that `context` does not know yet.
-fn type_argument(
+pub(in crate::ast) fn type_argument(
     tree: &AnalysisContext<'_>,
     id: celox_sv_syntax::ExprId,
     context: &PackedDimensions,
@@ -1095,6 +1095,8 @@ fn type_argument(
             match context.type_aliases.get(&name) {
                 Some(ty) => Some(ty.clone()),
                 None => match super::resolve(tree, &name) {
+                    // A built-in class such as `process` has no declaration.
+                    Some(name) if super::builtin(&name) => Some(super::handle(&name)),
                     Some(name) => {
                         let name = specialize(tree, &name, &[], context)?;
                         Some(super::handle(&name))
@@ -1103,9 +1105,34 @@ fn type_argument(
                 },
             }
         }
-        ExprKind::Parameterized { .. } => {
-            expression_binding::named_class(tree, id, native, context)?
-                .map(|name| super::handle(&name))
+        ExprKind::Parameterized {
+            expression,
+            arguments,
+        } => {
+            // `mailbox #(T)` is a built-in type, not a class declaration.
+            let segment = |name: &celox_sv_syntax::Name, arguments| celox_sv_syntax::TypeSegment {
+                name: name.clone(),
+                arguments,
+            };
+            let path = match &native.expression(*expression).kind {
+                ExprKind::Name(name) => vec![segment(name, Some(arguments.clone()))],
+                ExprKind::Member {
+                    expression: scope,
+                    separator,
+                    name,
+                } if separator == "::" => match &native.expression(*scope).kind {
+                    ExprKind::Name(scope) => {
+                        vec![segment(scope, None), segment(name, Some(arguments.clone()))]
+                    }
+                    _ => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+            match super::super::mailboxes::named_type(&path, tree, context)? {
+                Some(ty) => Some(*ty),
+                None => expression_binding::named_class(tree, id, native, context)?
+                    .map(|name| super::handle(&name)),
+            }
         }
         ExprKind::Member { separator, .. } if separator == "::" => scoped_type(tree, id, context)?,
         _ => None,
@@ -1243,7 +1270,7 @@ fn value_argument(
 
 /// A spelling of type `ty` that tells it apart from other types, for the
 /// name of a specialization.
-fn spelling(ty: &Type) -> String {
+pub(in crate::ast) fn spelling(ty: &Type) -> String {
     // A virtual interface type is its interface and modport (IEEE 1800-2023
     // 25.9), not the number that holds its value.
     if let Some(interface) = ty.virtual_interface()

@@ -1283,6 +1283,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             return Ok(Some(stmt));
         }
+        if let Some(mut call) = mailboxes::value(self.tree, root, native, &self.dims, true)? {
+            self.rename_expr(&mut call);
+            let stmt = Stmt::Eval(call);
+            if events::blocks(&stmt) {
+                self.allow_timing("mailbox put, get or peek")?;
+            }
+            return Ok(Some(stmt));
+        }
         if let Some(mut call) = expression_binding::object_constraint_mode_call(
             self.tree, root, native, &self.dims, true,
         )?
