@@ -1087,3 +1087,38 @@ endmodule
   (top Top)
   (run_until 6000)
   (expect_output "3000 [2999] 2999\n"))
+(case compound_element_assignments
+  (source "top.sv" #"
+module Top(output int sum);
+    class C;
+        int unsigned m[C];
+        int q[$];
+    endclass
+    int m[string];
+    byte unsigned b[];
+    int q[$];
+    C c;
+    initial begin
+        c = new();
+        c.m[c] = 1;
+        c.m[c] += 5;
+        c.m[c] -= 2;
+        m["a"] = 6;
+        m["a"] *= 7;
+        m["a"] >>= 1;
+        m["a"] |= 'h100;
+        b = new[2];
+        b[1] = 250;
+        b[1] += 10;
+        q.push_back(5);
+        q.push_back(9);
+        q[$] += 1;
+        q[0] <<= 2;
+        c.q.push_back(2);
+        c.q[0] ^= 3;
+        sum = c.m[c] + 10 * m["a"] + 10000 * b[1] + 100000 * q[0] + 10000000 * q[1]
+            + 1000000000 * c.q[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 1102042774))

@@ -1430,3 +1430,16 @@ is 55522. Verilator 5.052 and the pinned xezim 0.11.3 pass. Icarus 13.0 does
 not parse a method call on a call result; its exact compile diagnostic remains
 an executed failure in [the Icarus class report](verification/sv/icarus/class.json).
 No assertions or exclusions are weakened.
+
+### Compound element assignments
+
+`containers::compound_element_assignments` applies compound assignment
+operators to elements of associative arrays (string and class keys, including
+a class property), a dynamic array, queues (also the `$` element) and a queue
+property, as UVM's objection counters do with `m_total_count[obj] += count`
+(IEEE 1800-2023 11.4.1); the sum is 1102042774, with the byte element wrapping
+modulo 256. Verilator 5.052 and the pinned xezim 0.11.3 pass. Icarus 13.0
+rejects the class-keyed associative array declaration (`int unsigned m[C]`)
+and stops with an internal error; its exact compile diagnostic remains an
+executed failure in [the Icarus containers report](verification/sv/icarus/containers.json).
+No assertions or exclusions are weakened.
