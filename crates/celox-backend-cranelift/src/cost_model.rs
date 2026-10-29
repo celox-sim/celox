@@ -174,6 +174,10 @@ pub fn estimate_clif_cost(
             let s_w = reg_width(register_map, src);
             let width = d_w.max(s_w);
 
+            // Plane conversions move each word once.
+            if matches!(op, UnaryOp::ToPlanes | UnaryOp::FromPlanes) {
+                return num_chunks(width) + 2;
+            }
             if matches!(
                 op,
                 UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros
@@ -210,6 +214,7 @@ pub fn estimate_clif_cost(
                     UnaryOp::Ident | UnaryOp::BitNot | UnaryOp::ToTwoState => 4 * nc + 12,
                     UnaryOp::PopCount => 8 * nc + 20,
                     UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => 10 * nc + 20,
+                    UnaryOp::ToPlanes | UnaryOp::FromPlanes => unreachable!("costed above"),
                 };
             }
 
