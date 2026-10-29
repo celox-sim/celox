@@ -447,6 +447,13 @@ fn random_property(
             };
         }
         value
+    } else if property.field.width > 64 && !property.randc {
+        // Each draw gives 64 random bits.
+        Expr::Concat(
+            (0..property.field.width.div_ceil(64))
+                .map(|_| random())
+                .collect(),
+        )
     } else {
         random()
     };

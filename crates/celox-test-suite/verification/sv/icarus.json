@@ -35,7 +35,8 @@
     "icarus/types.json",
     "icarus/unions.json",
     "icarus/unpacked_structs.json",
-    "icarus/virtual_interfaces.json"
+    "icarus/virtual_interfaces.json",
+    "icarus/wide_class_properties.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

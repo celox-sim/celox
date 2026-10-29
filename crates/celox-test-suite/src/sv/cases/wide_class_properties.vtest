@@ -1,0 +1,138 @@
+(group wide_class_properties (category types))
+
+; IEEE 1800-2023 8.4, 6.3.1, 10.7: class properties of packed integral types
+; wider than 64 bits hold every bit; a 4-state property starts as X and keeps
+; X and Z; assignments truncate or extend by the source's signedness.
+
+(case wide_properties_keep_every_bit
+  (source "wide_properties.sv" #"
+module Top(output bit done);
+    class C;
+        bit [199:0] b;
+        logic signed [129:0] l;
+        bit [99:0] preset = 100'h1_2345_6789_abcd_ef01_2345_6789;
+        static bit [127:0] s;
+        function bit [199:0] get(); return b; endfunction
+        function void set(bit [199:0] v); b = v; endfunction
+    endclass
+    function automatic void bump(ref bit [99:0] r); r = r + 100'd1; endfunction
+    C c, d;
+    byte minus_one = -1;
+    initial begin
+        c = new;
+        $display("preset %h", c.preset);
+        c.b = {64'h0123456789abcdef, 64'hfedcba9876543210, 64'h1111222233334444, 8'h5a};
+        $display("b %h", c.b);
+        c.set(~c.get());
+        $display("nb %h", c.b);
+        c.l = -130'sd3;
+        $display("l %0d %h", c.l, c.l);
+        c.l = 130'(minus_one);
+        $display("ext %h", c.l);
+        c.l = 130'(200'h1_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0000_0005);
+        $display("trunc %h", c.l);
+        bump(c.preset);
+        $display("ref %h", c.preset);
+        d = new c;
+        $display("copy %0d %0d", d.b == c.b, d.preset == c.preset);
+        c.s = 128'hdeadbeef_00000000_cafebabe_12345678;
+        $display("s %h", C::s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "preset 123456789abcdef0123456789\nb 0123456789abcdeffedcba987654321011112222333344445a\nnb fedcba98765432100123456789abcdefeeeeddddccccbbbba5\nl -3 3fffffffffffffffffffffffffffffffd\next 3ffffffffffffffffffffffffffffffff\ntrunc 000000000000000000000000000000005\nref 123456789abcdef012345678a\ncopy 1 1\ns deadbeef00000000cafebabe12345678\n"))
+
+(case wide_four_state_properties_keep_x_and_z
+  (four_state)
+  (source "wide_four_state_properties.sv" #"
+module Top(output bit done);
+    class C;
+        logic [129:0] l;
+        logic signed [1023:0] stream;
+    endclass
+    C c;
+    logic [129:0] t, r;
+    logic signed [1023:0] w;
+    initial begin
+        c = new;
+        $display("preset %0d %0d", $isunknown(c.l), c.stream === 'x);
+        t = 130'b0;
+        t[129] = 1'bx;
+        t[70] = 1'bz;
+        t[3:0] = 4'b10xz;
+        c.l = t;
+        r = c.l;
+        $display("xz %0d %b %b %b", c.l === t, r[129], r[70], r[3:0]);
+        w = '1;
+        w[1000] = 1'bz;
+        c.stream = w;
+        $display("stream %0d", c.stream === {{23{1'b1}}, 1'bz, {1000{1'b1}}});
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "preset 1 1\nxz 1 x z 10xz\nstream 1\n"))
+
+(case wide_type_parameters_and_records
+  (source "wide_type_parameters.sv" #"
+module Top(output bit done);
+    typedef logic signed [4095:0] stream_t;
+    typedef struct { bit [99:0] a; int b; } s_t;
+    class P #(type T = bit [7:0]);
+        T val;
+        function new(T v); val = v; endfunction
+        function T get(); return val; endfunction
+    endclass
+    class S;
+        s_t s;
+    endclass
+    P #(stream_t) p;
+    P #(bit [129:0]) q;
+    S h;
+    s_t list[$];
+    s_t e;
+    initial begin
+        p = new(-7);
+        $display("param %0d", p.get());
+        q = new(130'h2_0000_0000_0000_0000_0000_0000_0000_0001);
+        $display("param2 %h", q.get());
+        h = new;
+        h.s.a = 100'h5_0000_0000_0000_0000_0000_0003;
+        h.s.b = 3;
+        $display("member %h %0d", h.s.a, h.s.b);
+        e.a = 100'h1_0000_0000_0000_0000_0000_00ff;
+        e.b = 7;
+        list.push_back(e);
+        $display("element %h %0d", list[0].a, list[0].b);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "param -7\nparam2 200000000000000000000000000000001\nmember 5000000000000000000000003 3\nelement 10000000000000000000000ff 7\n"))
+
+(case wide_random_properties_fill_every_word
+  (source "wide_random_properties.sv" #"
+module Top(output bit done);
+    class R;
+        rand bit [191:0] r;
+    endclass
+    R x;
+    int high, middle;
+    initial begin
+        x = new;
+        repeat (16) begin
+            void'(x.randomize());
+            if (|(x.r >> 128)) high++;
+            if (|(x.r & {64'd0, {64{1'b1}}, 64'd0})) middle++;
+        end
+        $display("%0d %0d", high > 8, middle > 8);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 1\n"))
