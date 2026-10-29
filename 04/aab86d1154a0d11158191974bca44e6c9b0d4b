@@ -1,0 +1,1 @@
+Rebased onto master (#2508 container formals: chandle argument checks run beside check_written_container; container-input defaults keep their shape after the chandle default check).
