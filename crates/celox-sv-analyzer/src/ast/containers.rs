@@ -869,11 +869,10 @@ pub(super) fn set(
     let Some(target) = native_type(*expression, native, tree, dims)? else {
         return Ok(None);
     };
-    if op != "=" || nonblocking {
-        return Err(unsupported(
-            "compound or nonblocking dynamic element assignment",
-        ));
+    if nonblocking {
+        return Err(unsupported("nonblocking dynamic element assignment"));
     }
+    let container = expression_binding::value(*expression, native, tree, dims)?;
     let index = match dimension.kind {
         DimensionKind::Index(index) => index_value(index, *expression, tree, dims, &target)?,
         DimensionKind::Queue(None) if matches!(target.layout.kind, ContainerKind::Queue { .. }) => {
@@ -889,15 +888,79 @@ pub(super) fn set(
         }
         _ => return Err(unsupported("dynamic element slice assignment")),
     };
+    let value = if op == "=" {
+        element_value(right, tree, dims, &target)?
+    } else {
+        compound_value(op, right, &container, &index, tree, dims, &target)?
+    };
     Ok(Some(Stmt::Eval(call(
         ContainerOp::Set,
         target.layout,
-        vec![
-            expression_binding::value(*expression, native, tree, dims)?,
-            index,
-            element_value(right, tree, dims, &target)?,
-        ],
+        vec![container, index, value],
     ))))
+}
+
+/// The value that `c[k] op= right` stores: the element combined with
+/// `right` by the operator of `op`. The container and the index are
+/// evaluated once, as the left operand is (IEEE 1800-2023 11.4.1), so here
+/// they must have no side effects.
+fn compound_value(
+    op: &str,
+    right: ExprId,
+    container: &Expr,
+    index: &Expr,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+    target: &ContainerType,
+) -> Converted<Expr> {
+    if inlining::effectful(container) || inlining::effectful(index) {
+        return Err(unsupported(
+            "compound assignment to a dynamic element selected with a side effect",
+        ));
+    }
+    let element = &target.element;
+    if element.container.is_some()
+        || element.class.is_some()
+        || target.layout.handle.is_some()
+        || target.record.is_some()
+    {
+        return Err(unsupported(format!(
+            "assignment operator `{op}` on a dynamic element that is not a number"
+        )));
+    }
+    let real = matches!(element.kind(), TypeKind::Real | TypeKind::Shortreal);
+    let operator = match op.strip_suffix('=') {
+        Some("+") => BinaryOp::Add,
+        Some("-") => BinaryOp::Sub,
+        Some("*") => BinaryOp::Mul,
+        Some("/") => BinaryOp::Div,
+        Some("%") if !real => BinaryOp::Mod,
+        Some("&") if !real => BinaryOp::BitAnd,
+        Some("|") if !real => BinaryOp::BitOr,
+        Some("^") if !real => BinaryOp::BitXor,
+        Some("<<" | "<<<") if !real => BinaryOp::Shl,
+        Some(">>") if !real => BinaryOp::Shr,
+        Some(">>>") if !real => BinaryOp::Sar,
+        _ => return Err(unsupported(format!("assignment operator `{op}`"))),
+    };
+    let current = element_read(
+        target,
+        call(
+            ContainerOp::Get,
+            target.layout,
+            vec![container.clone(), index.clone()],
+        ),
+    );
+    Ok(Expr::Binary {
+        left: Box::new(current),
+        op: operator,
+        right: Box::new(expression_binding::value(
+            right,
+            tree.declarations(),
+            tree,
+            dims,
+        )?),
+    })
 }
 
 #[cfg(test)]
@@ -943,6 +1006,14 @@ mod tests {
         for (source, expected) in [
             ("module Top; bit[127:0] a[]; endmodule", "wider than 64"),
             (
+                "module Top; int a[int], n; function int k(); n++; return n; endfunction initial a[k()] += 1; endmodule",
+                "compound assignment to a dynamic element selected with a side effect",
+            ),
+            (
+                "module Top; string a[$]; initial begin a.push_back(\"x\"); a[0] += \"y\"; end endmodule",
+                "on a dynamic element that is not a number",
+            ),
+            (
                 "module Top; int a[][2]; endmodule",
                 "dynamic container of fixed-size unpacked arrays",
             ),
@@ -974,10 +1045,6 @@ mod tests {
             (
                 "module Top; int a[]; initial a[0] <= 7; endmodule",
                 "nonblocking",
-            ),
-            (
-                "module Top; int a[]; initial a[0] += 7; endmodule",
-                "compound",
             ),
         ] {
             let tree = crate::source_tree::parse_source(source, Path::new("rejected_container.sv"))

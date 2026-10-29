@@ -573,8 +573,9 @@ as discarded statements.
 
 Multidimensional containers, elements wider than 64 bits, real elements,
 wildcard or class keys, slices, keyed patterns,
-container operands within concatenations, compound or nonblocking element
-assignments, container ports and
+container operands within concatenations, nonblocking element assignments,
+compound element assignments whose container or index has a side effect or
+whose element is a string, handle or container, container ports and
 const containers remain unsupported. A `new[]` initializer currently requires
 another compatible dynamic array or queue; fixed-size arrays are unsupported.
 Static local initializers retain the existing constant-initializer restriction.
