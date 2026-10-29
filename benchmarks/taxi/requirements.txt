@@ -5,7 +5,7 @@ cocotbext-axi==0.1.28
 cocotbext-eth==0.1.28
 find_libpython==0.5.1
 pytest==8.3.4
-scapy==2.6.1
+scapy==2.8.0
 iniconfig==2.3.1
 packaging==26.3
 pluggy==1.7.0
