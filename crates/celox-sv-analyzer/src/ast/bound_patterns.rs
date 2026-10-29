@@ -214,6 +214,7 @@ impl BoundPattern {
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
                 VariableDimensions {
+                    declared: type_names::Declared::default(),
                     container: None,
                     real: false,
                     string: false,
@@ -241,6 +242,7 @@ impl BoundPattern {
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
                 VariableDimensions {
+                    declared: type_names::Declared::default(),
                     container: None,
                     real: false,
                     string: false,
@@ -289,6 +291,7 @@ impl BoundPattern {
                 .ok_or_else(|| unsupported("pattern target width"))?;
             shapes = vec![
                 VariableDimensions {
+                    declared: type_names::Declared::default(),
                     container: None,
                     real: false,
                     string: false,

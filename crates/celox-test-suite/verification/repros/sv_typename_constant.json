@@ -1,0 +1,29 @@
+{
+  "case": "system_functions::typename_elaboration_constant",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 20.6.1: the default signing is removed but another one is kept (b), so `byte unsigned` keeps `unsigned`; `$typename` is a constant function usable as an elaboration-time constant, such as a parameter value.",
+  "method": "The reduced source runs without the suite adapters: verilator --binary -Wno-fatal --top Top and the built model, iverilog -g2012 -s Top and vvp -n, xezim -s Top, and the Celox sv_tests driver in simulation mode. The output of each tool is compared with the 20.6.1 spelling, which Celox prints.",
+  "reduced_source": "module Top;\n    localparam string P = $typename(byte unsigned);\n    initial $display(\"%s\", P);\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "byte\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "constant.sv:2: error: Type names are not valid expressions here.\nconstant.sv:2: internal error: I do not know how to elaborate this expression. \nconstant.sv:2:               : Expression is: <type>\nconstant.sv:2:               : Expression type: 10PETypename\n2 error(s) during elaboration.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "byte unsigned\n"
+    }
+  ]
+}

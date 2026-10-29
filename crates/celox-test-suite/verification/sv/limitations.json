@@ -3216,5 +3216,70 @@
         "array_locators::array_locator_fixed"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_typename_spelling",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_typename_vectors.json",
+      "verification/repros/sv_typename_aggregates.json",
+      "verification/repros/sv_typename_classes.json",
+      "verification/repros/sv_typename_constant.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::typename_aggregates",
+        "system_functions::typename_class_parameters",
+        "system_functions::typename_elaboration_constant",
+        "system_functions::typename_vectors_and_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_typename_operands",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_typename_vectors.json",
+      "verification/repros/sv_typename_aggregates.json",
+      "verification/repros/sv_typename_classes.json",
+      "verification/repros/sv_typename_constant.json",
+      "verification/repros/sv_typename_scopes.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::typename_aggregates",
+        "system_functions::typename_class_parameters",
+        "system_functions::typename_elaboration_constant",
+        "system_functions::typename_scopes_and_string_operands",
+        "system_functions::typename_vectors_and_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_typename_method_call",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects a string method called on the result of $typename ($typename(int).len(): \"Syntax error: Not expecting BASICDTYPE under a ATTROF in dotted expression\"). IEEE 1800-2023 20.6.1 returns a string, 6.16.1 defines len() on strings and A.8.2 permits a system function call as the root of a method call; xezim 0.11.3 compiles the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_typename_scopes.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::typename_scopes_and_string_operands"
+      ]
+    }
   }
 ]

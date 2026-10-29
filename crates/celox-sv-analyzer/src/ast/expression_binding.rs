@@ -30,7 +30,8 @@ pub(super) use objects::{
     method as object_method, method_result as object_method_result, named_class,
     native_class as object_native_class, property as object_property,
     rand_mode_call as object_rand_mode_call, receiver as object_receiver,
-    static_property as object_static_property, this as object_this,
+    static_property as object_static_property,
+    static_property_declaration as object_static_property_declaration, this as object_this,
 };
 pub(super) use strings::{
     call as string_call, method as string_method, native_string, string_value,

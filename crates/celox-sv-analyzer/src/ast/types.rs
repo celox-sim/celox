@@ -180,18 +180,21 @@ fn type_aliases_in_scope(
 }
 
 /// The name of typedef `alias`, qualified by the module, interface, program
-/// or package that declares it and by its generate scope.
-fn declaration_name(
+/// or package that declares it and by its generate scope, and that name as
+/// `$typename` writes it.
+pub(super) fn declaration_name(
     tree: &AnalysisContext<'_>,
     alias: &celox_sv_syntax::TypeAlias,
     generate_scope: Option<&str>,
-) -> String {
+) -> (String, type_names::TypedefName) {
     let name = instances::normalize_identifier(&alias.name.spelling);
     let name = match generate_scope {
         Some(path) => format!("{path}.{name}"),
         None => name,
     };
-    match classes::enclosing_unit(tree.declarations(), alias.tokens) {
+    let unit = classes::enclosing_unit(tree.declarations(), alias.tokens);
+    let typename = type_names::TypedefName::Scope(type_names::scoped_name(unit, &name).into());
+    let identity = match unit {
         Some(unit) => format!(
             "{}::{name}",
             instances::normalize_identifier(&unit.name.spelling)
@@ -204,7 +207,8 @@ fn declaration_name(
             tree.compilation_path().hash(&mut hasher);
             format!("{}::{name}@{:016x}", packages::UNIT, hasher.finish())
         }
-    }
+    };
+    (identity, typename)
 }
 
 fn bound_literal(value: i128) -> ConstExpr {

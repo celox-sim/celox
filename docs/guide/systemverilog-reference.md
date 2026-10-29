@@ -313,7 +313,7 @@ waits zero.
 
 | Area | Supported |
 | --- | --- |
-| System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System functions | `$timeunit`, `$timeprecision`, `$typename` (see [Type names](#type-names)), `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | Sampled values | `$sampled` in processes, combinational logic and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes whose clock they infer and the subroutines those call; see [Sampled values](#sampled-values) |
@@ -982,6 +982,33 @@ progress reports a runtime error naming its loop variable.
 ### Unbounded parameters
 
 `$isunbounded(P)` returns a one-bit unsigned result: 1 for a value parameter assigned `$`, otherwise 0. The symbolic value survives parameter aliases and instance overrides (IEEE 1800-2023 6.20.7, 20.6.3).
+
+### Type names {#type-names}
+
+`$typename` returns, as a `string`, what IEEE 1800-2023 20.6.1 defines for a
+data type (also `p::t`, `C::T` and a typedef with packed dimensions such as
+`t [3:0]`) or for a variable, generate-local variable (`g.v`), function local,
+port or class property named by its argument,
+as a constant wherever elaboration needs one (a parameter, a generate
+condition). Typedefs are resolved, a signing equal to the default is not
+written, ranges are decimal `[left:right]` numbers and `$` stands for the name
+of an unpacked array, so `logic [W-1:0] m [4]` is `logic[3:0]$[0:3]`. The
+integer types with predefined widths keep their keyword (`int`,
+`integer unsigned`), `reg` is `logic` and `realtime` is `real`. Dynamic arrays,
+queues and associative arrays are `int$[]`, `int$[$:5]` and `int$[string]`.
+An enumeration is written with its constants and values and a struct or packed
+union with its members, followed by its typedef name prefixed with its package
+or module: `enum logic[1:0]{R=2'd0,G=2'd2}p::color_t`,
+`struct packed{bit a;bit b;}top.ab_t`, `struct{bit A;bit B;}top.AB_t`. A class is named by its package or
+module, with the parameter values of a parameterized class:
+`p::resource#(int)`; a parameterized class named alone is its default
+specialization. Types without one exact spelling are rejected:
+anonymous enumerations, structs and unions (whose names the standard leaves to
+the implementation), soft and tagged unions, unpacked structures with unpacked array members, packed arrays of enumerations or
+of signed typedefs, classes with non-integral value parameters, and operands
+other than names and data types, such as `$typename(a + b)`. Simulators
+differ in this spelling; Verilator, Icarus and xezim each deviate from 20.6.1
+(see the [suite limitations](https://github.com/celox-sim/celox/blob/master/crates/celox-test-suite/LIMITATIONS.md)).
 
 ### System functions called as statements
 

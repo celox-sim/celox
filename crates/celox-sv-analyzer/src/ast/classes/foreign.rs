@@ -55,6 +55,7 @@ pub(in crate::ast) struct Registry {
     states: RefCell<HashMap<String, crate::ir::Module>>,
     revision: Cell<u64>,
     generics: RefCell<HashMap<String, String>>,
+    specializations: RefCell<HashMap<String, Rc<specializations::Specialization>>>,
     declarations: RefCell<HashMap<String, Rc<DeclarationScope>>>,
 }
 
@@ -67,6 +68,10 @@ impl Registry {
     }
     pub fn generic(&self, name: &str) -> Option<String> {
         self.generics.borrow().get(name).cloned()
+    }
+    /// The specialization `name` that the scope of its class made.
+    pub fn specialization(&self, name: &str) -> Option<Rc<specializations::Specialization>> {
+        self.specializations.borrow().get(name).cloned()
     }
     pub fn parameter(&self, name: &str, parameter: &str) -> Option<Expr> {
         self.declarations
@@ -398,6 +403,9 @@ impl Registry {
             self.generics
                 .borrow_mut()
                 .insert(class.clone(), specialization.generic.clone());
+            self.specializations
+                .borrow_mut()
+                .insert(class.clone(), specialization.clone());
         }
         let declarations =
             specializations::export_declarations(&context, &symbols.class_member_types);

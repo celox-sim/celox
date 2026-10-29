@@ -729,10 +729,10 @@ chapter-20/20.6--bits_type.sv	2state	pass
 chapter-20/20.6--bits_type.sv	4state	pass
 chapter-20/20.6--isunbounded.sv	2state	fail
 chapter-20/20.6--isunbounded.sv	4state	fail
-chapter-20/20.6--typename.sv	2state	fail
-chapter-20/20.6--typename.sv	4state	fail
-chapter-20/20.6--typename_type.sv	2state	fail
-chapter-20/20.6--typename_type.sv	4state	fail
+chapter-20/20.6--typename.sv	2state	pass
+chapter-20/20.6--typename.sv	4state	pass
+chapter-20/20.6--typename_type.sv	2state	pass
+chapter-20/20.6--typename_type.sv	4state	pass
 chapter-20/20.7--array-queries-multi-dim.sv	2state	pass
 chapter-20/20.7--array-queries-multi-dim.sv	4state	pass
 chapter-20/20.7--array-queries.sv	2state	pass

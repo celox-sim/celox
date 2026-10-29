@@ -360,7 +360,7 @@ impl Class {
 
 /// The declaration of class `name`, or of the class it specializes, if one
 /// exists.
-fn declaration<'a>(
+pub(super) fn declaration<'a>(
     tree: &'a AnalysisContext<'_>,
     name: &str,
 ) -> Option<&'a celox_sv_syntax::ClassDeclaration> {

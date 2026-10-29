@@ -414,7 +414,7 @@ fn bind_in_mode(
                     .zip(voids)
                     .map(|((name, ty), is_void)| (name, ty, is_void))
                     .collect();
-                let Some(ty) = packed_structs::native_type(
+                let Some(mut ty) = packed_structs::native_type(
                     &tree.state,
                     if tagged {
                         packed_structs::AggregateKind::TaggedUnion
@@ -433,6 +433,10 @@ fn bind_in_mode(
                 ) else {
                     return Ok(None);
                 };
+                if !soft && !tagged {
+                    ty.spelling =
+                        type_names::Spelling::aggregate(if union { "union" } else { "struct" });
+                }
                 values.push(ty);
             }
         }

@@ -326,6 +326,20 @@ pub(in crate::ast) fn static_property(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
+    Ok(
+        static_property_declaration(tree, id, native, dimensions)?
+            .map(|property| property.variable),
+    )
+}
+
+/// The static property that native expression `id` names, `h.p` or `C::p`,
+/// as its class declares it.
+pub(in crate::ast) fn static_property_declaration(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<classes::StaticProperty>> {
     let ExprKind::Member {
         expression,
         separator,
@@ -358,7 +372,7 @@ pub(in crate::ast) fn static_property(
         property.local,
         property.protected,
     )?;
-    Ok(Some(property.variable.clone()))
+    Ok(Some(property.clone()))
 }
 
 /// The class of the handle that the static property native expression `id`

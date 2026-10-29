@@ -1,0 +1,29 @@
+{
+  "case": "system_functions::typename_class_parameters",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 20.6.1: `$typename` returns the resolved type of its argument, here a variable of a class type parameter (8.25) whose actual is the class `p::item`, so the result is the class name prefixed with its package (f); a specialization of a parameterized class is a type of its own (8.25), which the parameter values tell apart.",
+  "method": "The reduced source runs without the suite adapters: verilator --binary -Wno-fatal --top Top and the built model, iverilog -g2012 -s Top and vvp -n, xezim -s Top, and the Celox sv_tests driver in simulation mode. The output of each tool is compared with the 20.6.1 spelling, which Celox prints.",
+  "reduced_source": "package p;\n    class item;\n    endclass\n    class resource #(type T = int);\n        T val;\n        function string value_type_name();\n            T foo;\n            return $typename(foo);\n        endfunction\n    endclass\nendpackage\nmodule Top;\n    import p::*;\n    resource #(item) r;\n    initial begin\n        r = new;\n        $display(\"%s|%s\", r.value_type_name(), $typename(r));\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "PARAMTYPEDTYPE 'T'|class{}resource__Tz1\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "classes.sv:4: syntax error\nI give up.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "class p::item|class p::resource #(class p::item)\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "p::item|p::resource#(p::item)\n"
+    }
+  ]
+}

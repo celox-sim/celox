@@ -278,11 +278,14 @@ fn parameter(
     publish(&tree.state.dimensions, key, context);
     Ok(())
 }
+/// Discover declaration `id`, which `top` says is an item of the unit
+/// rather than of a generate block.
 fn declaration(
     id: BodyItemId,
     tree: &AnalysisContext<'_>,
     context: &mut PackedDimensions,
     key: &Key,
+    top: bool,
 ) -> Converted<()> {
     let native = tree.declarations();
     match &native.body_item(id).kind {
@@ -313,7 +316,13 @@ fn declaration(
             if let TypeAliasTarget::DataType(id) = alias.target
                 && let Some(base) = type_binding::bind(id, tree, context)?
             {
-                let ty = type_with_dimensions(base, &alias.dimensions, tree, context)?;
+                let mut ty = type_with_dimensions(base, &alias.dimensions, tree, context)?;
+                // The typedef names its type, as when the scope's typedefs
+                // are bound; that of a generate block is named by the path
+                // of its elaborated scope.
+                if top {
+                    ty.name_declaration(|| types::declaration_name(tree, alias, None));
+                }
                 context.type_aliases.insert(name(&alias.name), ty);
                 publish(&tree.state.dimensions, key, context);
             }
@@ -801,9 +810,9 @@ fn settle(
                 }
             }
         }
-        for frame in frames {
+        for (depth, frame) in frames.iter().enumerate() {
             for id in frame {
-                let _ = declaration(*id, tree, context, key);
+                let _ = declaration(*id, tree, context, key, depth == 0);
             }
         }
         if *context == before {

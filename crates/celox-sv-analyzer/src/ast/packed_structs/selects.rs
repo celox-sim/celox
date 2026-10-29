@@ -74,6 +74,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
     result.insert(
         name.to_string(),
         VariableDimensions {
+            declared: type_names::Declared::default(),
             container: None,
             randomizable: true,
             enum_domain: None,
