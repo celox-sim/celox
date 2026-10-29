@@ -1122,3 +1122,39 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 1102042774))
+(case string_indices_from_calls
+  (source "package.sv" #"
+package p;
+    class Obj;
+        string nm;
+        function new(string n);
+            nm = n;
+        endfunction
+        virtual function string get_type_name();
+            return {"T_", nm};
+        endfunction
+        static function string kind();
+            return "k";
+        endfunction
+    endclass
+    function string pre();
+        return "p";
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    int counts[string];
+    initial begin
+        automatic Obj obj = new("a");
+        counts[obj.get_type_name()] = 3;
+        counts[Obj::kind()] = 2;
+        counts[pre()] = 7;
+        if (counts.exists(obj.get_type_name()))
+            counts[obj.get_type_name()] = counts[obj.get_type_name()] + 1;
+        sum = counts["T_a"] + 10 * counts["k"] + 100 * counts["p"] + 1000 * counts.num();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 3724))
