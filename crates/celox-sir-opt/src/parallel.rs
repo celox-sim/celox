@@ -73,8 +73,9 @@ pub enum ParallelPlanError {
 pub enum CodegenFootprint {
     /// x86-64 and AArch64 native code. A static field of `n` bytes is
     /// written in parts of at most eight bytes; the last part is rounded up
-    /// to 1, 2, 4, or 8 bytes. Element-strided arrays are written per
-    /// element, and a part may run past the end of its element slot.
+    /// to 1, 2, 4, or 8 bytes. Element-strided arrays with padding are
+    /// written per element, and a part may run past the end of its element
+    /// slot; arrays without padding are written like any other field.
     Native,
     /// Cranelift code. A static field written from a register of at most 64
     /// bits within one 64-bit word is rounded up to 1, 2, 4, or 8 bytes;
@@ -212,7 +213,14 @@ impl<'a> UnitEffects<'a> {
         }
         let bit_offset = offset.constant_bit_offset()?;
         let width = width.max(1);
-        let Some(array) = self.layout.unpacked_arrays.get(&address.absolute_addr()) else {
+        // Without padding the elements are contiguous, and code generators
+        // write the access as one field, rounding only its last part.
+        let Some(array) = self
+            .layout
+            .unpacked_arrays
+            .get(&address.absolute_addr())
+            .filter(|array| array.element_stride * 8 != array.element_width)
+        else {
             return Some(vec![StaticPart {
                 byte: bit_offset / 8,
                 shift: bit_offset % 8,
@@ -952,6 +960,60 @@ mod tests {
         );
         assert!(dependencies[1].is_empty());
         assert_eq!(dependencies[2], vec![0]);
+    }
+
+    #[test]
+    fn unpadded_strided_array_writes_round_across_elements() {
+        // Four 16-bit elements with a 2-byte stride: a 48-bit store of
+        // elements 0..3 is one 6-byte field written as an 8-byte access,
+        // which reads and writes back element 3.
+        let strided = |element_width, element_stride| {
+            let mut layout = layout_with_width(Vec::new(), 64);
+            layout.unpacked_arrays.insert(
+                address(0),
+                celox_state_layout::UnpackedArrayLayout {
+                    element_width,
+                    element_count: 4,
+                    element_stride,
+                    plane_size: 4 * element_stride,
+                },
+            );
+            layout
+        };
+        let packed = |bit, width, element_width| {
+            SIRInstruction::Store(
+                stable(0),
+                SIROffset::PackedElements {
+                    bit_offset: bit,
+                    element_width,
+                },
+                width,
+                RegisterId(0),
+                Vec::new(),
+                Vec::new(),
+            )
+        };
+        let units = [
+            unit(0, vec![packed(0, 48, 16)]),
+            unit(1, vec![packed(48, 16, 16)]),
+        ];
+        let dependencies = unit_dependencies(
+            &units.iter().collect::<Vec<_>>(),
+            &strided(16, 2),
+            CodegenFootprint::Native,
+        );
+        assert_eq!(dependencies[1], vec![0]);
+        // Padded 12-bit elements are written one slot at a time.
+        let units = [
+            unit(0, vec![packed(0, 36, 12)]),
+            unit(1, vec![packed(36, 12, 12)]),
+        ];
+        let dependencies = unit_dependencies(
+            &units.iter().collect::<Vec<_>>(),
+            &strided(12, 2),
+            CodegenFootprint::Native,
+        );
+        assert!(dependencies[1].is_empty());
     }
 
     #[test]
