@@ -115,8 +115,8 @@ mod host_api {
     #[cfg(feature = "cranelift")]
     pub use crate::backend::{EventRef, JitBackend, SharedJitCode};
     pub use crate::backend::{
-        InterpBackend, TieredBackend, TieredExecutionStats, TieredExecutionTier,
-        TieredExecutionTiming, TieredPromotionStatus,
+        InterpBackend, TierTransition, TieredBackend, TieredCompileKind, TieredCompileStage,
+        TieredExecutionStats, TieredExecutionTier, TieredExecutionTiming, TieredPromotionStatus,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;

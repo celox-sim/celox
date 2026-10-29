@@ -36,8 +36,8 @@ mod host {
     #[cfg(feature = "cranelift")]
     pub use super::runtime::{EventRef, JitBackend, SharedJitCode};
     pub use super::tiered::{
-        TieredBackend, TieredExecutionStats, TieredExecutionTier, TieredExecutionTiming,
-        TieredPromotionStatus,
+        TierTransition, TieredBackend, TieredCompileKind, TieredCompileStage, TieredExecutionStats,
+        TieredExecutionTier, TieredExecutionTiming, TieredPromotionStatus,
     };
     pub use celox_backend_common::cranelift_options::{
         CraneliftDiagnostics, CraneliftOptLevel, CraneliftOptions, RegallocAlgorithm,
