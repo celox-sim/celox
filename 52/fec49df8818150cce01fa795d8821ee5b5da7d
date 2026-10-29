@@ -1,0 +1,6 @@
+Revision history for #2573:
+
+rev 2 (content) 2026-10-29 15:51 UTC — Rebase onto master after #2575 merged; keep both new containers cases and retained Icarus entries
+rev 1 (initial) 2026-10-29 15:51 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2573,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"29aa60b2d07c8efa5a0b3916afd8e7098cfa01a9","timestamp_iso":"2026-10-29T15:51:35Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"29aa60b2d07c8efa5a0b3916afd8e7098cfa01a9","new_sha":"7ec6ae0e32fa4fbc21a9f35bfd689e126017eff8","timestamp_iso":"2026-10-29T15:51:35Z","reason":"Rebase onto master after #2575 merged; keep both new containers cases and retained Icarus entries","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/29aa60b2d07c8efa5a0b3916afd8e7098cfa01a9...7ec6ae0e32fa4fbc21a9f35bfd689e126017eff8"}]} -->
