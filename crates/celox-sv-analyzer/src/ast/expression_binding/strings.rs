@@ -185,6 +185,7 @@ pub(in crate::ast) fn native_string(
                 || method(tree, *expression, native, dimensions)
                     .is_some_and(|(op, _)| op.returns_string())
                 || enum_name(tree, *expression, native, dimensions)
+                || returns_string(tree, *expression, native, dimensions)
         }
         // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
         ExprKind::Member { .. } if enum_name(tree, id, native, dimensions) => true,
@@ -217,6 +218,32 @@ pub(in crate::ast) fn native_string(
                 property.field.handle == Some(crate::system_functions::HandleProperty::String)
             }),
     }
+}
+
+/// Whether native callee expression `id` is a function or method that
+/// returns a `string`.
+fn returns_string(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    let name = match objects::method(tree, id, native, dimensions) {
+        Ok(Some((name, ..))) => name,
+        Ok(None) => match super::direct::callable_name(&tree.state, id, native) {
+            Some(name) => name,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    dimensions
+        .functions
+        .get(&name)
+        .is_some_and(|function| function.return_string)
+        || dimensions
+            .function_return_types
+            .get(&name)
+            .is_some_and(|metadata| metadata.string)
 }
 
 /// Whether native callee expression `id` names the `name` method of an
