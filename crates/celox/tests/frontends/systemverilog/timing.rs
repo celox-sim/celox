@@ -56,6 +56,15 @@ macro_rules! timed_cases {
     };
 }
 
+// Static locals of tasks (IEEE 1800-2023 6.21, 13.3.1).
+timed_cases! {
+    fn timed_task_static_locals_are_shared = "timing::timed_task_static_locals_are_shared";
+    fn timed_task_declared_static_locals_are_shared = "timing::timed_task_declared_static_locals_are_shared";
+    fn timed_task_static_locals_take_nonblocking_updates_and_waits = "timing::timed_task_static_locals_take_nonblocking_updates_and_waits";
+    fn timed_task_static_locals_follow_their_scope = "timing::timed_task_static_locals_follow_their_scope";
+    fn timed_task_static_locals_in_forked_children = "timing::timed_task_static_locals_in_forked_children";
+}
+
 // Program blocks (IEEE 1800-2023 Clause 24) and the reactive region set.
 timed_cases! {
     fn program_reads_design_after_nonblocking_updates_settle = "program::program_reads_design_after_nonblocking_updates_settle";
@@ -511,11 +520,6 @@ fn unimplemented_timing_features_are_rejected() {
         (
             "bit a; function automatic bit f(); a = ~a; return a; endfunction initial @(f());",
             "impure call `f` in an event expression",
-            88,
-        ),
-        (
-            "bit q; task t(); int s = 1; #1 q = s; endtask initial t();",
-            "static local in a timed task",
             88,
         ),
         (

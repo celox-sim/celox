@@ -8,8 +8,7 @@
 //! entry is never read gives the same results that way. Any other static
 //! local of a procedural block keeps its value instead: its declaration no
 //! longer initializes it, and its initializer runs once at time zero. Static
-//! locals of functions use the same storage; task locals that retain state
-//! remain unsupported.
+//! locals of subroutines use the same storage.
 
 use super::*;
 mod bit_result;
@@ -34,12 +33,15 @@ enum Entry {
 /// For the bodies of processes, `explicit` gives the statics declared with
 /// the `static` keyword, and each body tells whether its process runs once;
 /// see [`initialized_at_time_zero`].
+/// With `concurrent`, the bodies may run in overlapping activations, and
+/// every static local keeps its value.
 pub(super) fn keep_static_locals<'b, T>(
     state: &AnalysisState,
     statics: &HashMap<String, T>,
     directions: &Directions,
     bodies: impl IntoIterator<Item = (&'b mut Vec<Stmt>, bool)>,
     explicit: Option<&HashSet<String>>,
+    concurrent: bool,
 ) -> Result<(Vec<String>, Vec<Stmt>), AnalyzerError> {
     let mut kept = Vec::new();
     let mut initializers = Vec::new();
@@ -52,7 +54,7 @@ pub(super) fn keep_static_locals<'b, T>(
         None => HashSet::default(),
     };
     for (body, _) in &mut bodies {
-        let mut concurrent = false;
+        let mut concurrent = concurrent;
         for stmt in body.iter() {
             stmt.walk(&mut |stmt| concurrent |= matches!(stmt, Stmt::Fork { .. }));
         }
@@ -429,6 +431,45 @@ fn source_name(name: &str) -> &str {
     name.rsplit_once('@').map_or(name, |(source, _)| source)
 }
 
+/// Reject a static local of `body` whose initializer is not constant, as
+/// [`entry`] does for a local whose entry value it examines.
+pub(super) fn check_constant_initializers(
+    state: &AnalysisState,
+    body: &[Stmt],
+    statics: &HashSet<String>,
+) -> Result<(), AnalyzerError> {
+    let mut result = Ok(());
+    for stmt in body {
+        stmt.walk(&mut |stmt| {
+            if let Stmt::Local {
+                name,
+                init: Some(init),
+            } = stmt
+                && statics.contains(name)
+                && result.is_ok()
+            {
+                result = constant_initializer(state, name, init);
+            }
+        });
+    }
+    result
+}
+
+fn constant_initializer(
+    state: &AnalysisState,
+    name: &str,
+    init: &Expr,
+) -> Result<(), AnalyzerError> {
+    if expr_is_constant(state, init) {
+        return Ok(());
+    }
+    Err(AnalyzerError::Unsupported(format!(
+        "static variable `{}` with an initializer that is not constant (declare it \
+         `automatic`)",
+        source_name(name)
+    )))
+}
+
 /// Whether the statements after the declaration of the static local `name`
 /// read the value it holds on entry.
 fn entry(
@@ -441,12 +482,8 @@ fn entry(
 ) -> Result<Entry, AnalyzerError> {
     // A static initializer runs once, before simulation starts; one that is
     // not constant could only run on every entry instead.
-    if init.is_some_and(|init| !expr_is_constant(state, init)) {
-        return Err(AnalyzerError::Unsupported(format!(
-            "static variable `{}` with an initializer that is not constant (declare it \
-             `automatic`)",
-            source_name(name)
-        )));
+    if let Some(init) = init {
+        constant_initializer(state, name, init)?;
     }
     let flow = Flow {
         name,

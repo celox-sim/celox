@@ -255,8 +255,8 @@ chapter-13/13.3--task.sv	2state	pass
 chapter-13/13.3--task.sv	4state	pass
 chapter-13/13.3.1--task-automatic.sv	2state	pass
 chapter-13/13.3.1--task-automatic.sv	4state	pass
-chapter-13/13.3.1--task-static.sv	2state	fail
-chapter-13/13.3.1--task-static.sv	4state	fail
+chapter-13/13.3.1--task-static.sv	2state	pass
+chapter-13/13.3.1--task-static.sv	4state	pass
 chapter-13/13.4--function-label.sv	2state	pass
 chapter-13/13.4--function-label.sv	4state	pass
 chapter-13/13.4--function.sv	2state	pass
