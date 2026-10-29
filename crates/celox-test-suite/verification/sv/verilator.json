@@ -31,7 +31,8 @@
     "verilator/tagged_unions.json",
     "verilator/timing.json",
     "verilator/types.json",
-    "verilator/unpacked_structs.json"
+    "verilator/unpacked_structs.json",
+    "verilator/virtual_interfaces.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

@@ -1018,6 +1018,7 @@ mod tests {
                 pattern_type: None,
                 enum_domain: None,
                 class: None,
+                virtual_interface: None,
             },
         );
         for declaration in &tree.declarations().data_declarations {

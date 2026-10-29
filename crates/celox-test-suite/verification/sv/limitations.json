@@ -3334,5 +3334,43 @@
         "increment_decrement::increment_decrement_implication"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_virtual_interfaces",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 does not parse virtual interface declarations (\"syntax error\", \"Invalid module item\" or \"Invalid class item\" at `virtual bus_if v;`), which IEEE 1800-2023 25.9 defines. Verilator 5.052 and xezim 0.11.3 run the simulation cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_virtual_interfaces_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "virtual_interfaces::class_call_arguments_and_package_results",
+        "virtual_interfaces::four_state_members",
+        "virtual_interfaces::function_results",
+        "virtual_interfaces::increments_arrays_and_package_variables",
+        "virtual_interfaces::increments_in_expressions",
+        "virtual_interfaces::interface_ports_and_array_elements",
+        "virtual_interfaces::member_selects",
+        "virtual_interfaces::modport_ports_and_constant_sized_members",
+        "virtual_interfaces::multidimensional_and_package_arrays",
+        "virtual_interfaces::null_equality_and_assignment",
+        "virtual_interfaces::properties_arguments_and_member_writes",
+        "virtual_interfaces::queue_pops_and_output_arguments",
+        "virtual_interfaces::rejects_another_interface",
+        "virtual_interfaces::rejects_call_results_of_other_types",
+        "virtual_interfaces::rejects_integers_as_class_call_arguments",
+        "virtual_interfaces::rejects_integers_as_constructor_arguments",
+        "virtual_interfaces::rejects_integers_in_arrays_of_virtual_interfaces",
+        "virtual_interfaces::rejects_integers_in_conditional_array_elements",
+        "virtual_interfaces::rejects_modport_ports_to_full_interface",
+        "virtual_interfaces::rejects_modport_to_full_interface",
+        "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
+        "virtual_interfaces::writes_from_instances_of_one_module"
+      ]
+    }
   }
 ]

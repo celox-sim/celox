@@ -862,6 +862,18 @@
     "sv_repeat_count_evaluated_twice": {
       "title": "A repeat loop evaluates the side effects of its count expression twice",
       "standard": "IEEE 1800-2023 12.7.2"
+    },
+    "sv_vif-X1": {
+      "title": "Virtual interface assignments between incompatible types are accepted",
+      "standard": "IEEE 1800-2023 25.9"
+    },
+    "sv_vif-X3": {
+      "title": "A virtual interface returned by a function compares unequal to one denoting the same instance",
+      "standard": "IEEE 1800-2023 25.9, 11.4.5"
+    },
+    "sv_vif-X4": {
+      "title": "A write through an element of a multidimensional array of virtual interfaces is lost",
+      "standard": "IEEE 1800-2023 25.9"
     }
   },
   "cases": [
@@ -4919,6 +4931,102 @@
       "classification": "xezim_bug",
       "bug": "sv_repeat_count_evaluated_twice",
       "note": "With i == 1, xezim 0.11.3 runs repeat (i++ + 2) four times and leaves i at 3: the count expression and its increment run twice. 12.7.2 evaluates the expression once, so the loop runs 3 times and i is 2, as Verilator 5.052 and Icarus 13.0 report. See verification/repros/sv_increment_decrement_repeat_count.json."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_another_interface",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface, and one without a modport to one with it, not the reverse. xezim 0.11.3 elaborates the assignment without a diagnostic ([standalone probe](verification/repros/sv_virtual_interface_assignment_xezim.json)); Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_modport_to_full_interface",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface, and one without a modport to one with it, not the reverse. xezim 0.11.3 elaborates the assignment without a diagnostic ([standalone probe](verification/repros/sv_virtual_interface_assignment_xezim.json)); Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_call_results_of_other_types",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface; an `int` function result is not one. xezim 0.11.3 elaborates `v = number()` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::function_results",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X3",
+      "note": "The function returns `second`, and the write through `v` reaches second.data, but xezim 0.11.3 prints `v == pick(1)` as 0 ([standalone probe](verification/repros/sv_virtual_interface_function_xezim.json)). Verilator 5.052 and Celox print 66 1 0."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_modport_ports_to_full_interface",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface with a modport, here a port declared `bus_if.mon`, only to one with the same modport. xezim 0.11.3 elaborates `v = p` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_integers_in_arrays_of_virtual_interfaces",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows assigning a virtual interface only from one of the same interface; an integer is not one. xezim 0.11.3 elaborates `handles[0] = 1` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_integers_in_conditional_array_elements",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "An integer and `null` are not equivalent conditional operands (11.4.11), and an integer is not assignment compatible with a virtual interface (25.9). xezim 0.11.3 elaborates `handles[0] = flag ? 1 : null` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::multidimensional_and_package_arrays",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X4",
+      "note": "`grid[0][1]` and `grid[1][0]` of a two-dimensional array of virtual interfaces denote a and b, so the writes through them reach a.data and b.data (25.9). xezim 0.11.3 prints a.data as xx and the reads through the elements as 0 ([standalone probe](verification/repros/sv_virtual_interface_array_xezim.json)). Verilator 5.052 and Celox print 12 35 12 35."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_integers_as_class_call_arguments",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows passing to a virtual interface formal only a virtual interface of the same interface; an integer is not one. xezim 0.11.3 elaborates the method call `d.set(1)` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_integers_as_constructor_arguments",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "25.9 allows passing to a virtual interface formal only a virtual interface of the same interface; an integer is not one. xezim 0.11.3 elaborates the constructor call `new(1)` without a diagnostic; Verilator 5.052 and Celox reject it."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::class_call_arguments_and_package_results",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X3",
+      "note": "`handles_pkg::get()` returns the virtual interface `shared`, which denotes `a` as `v` does, but xezim 0.11.3 prints `v == handles_pkg::get()` as 0 (sv_vif-X3, [standalone probe](verification/repros/sv_virtual_interface_function_xezim.json)). The other values agree; Verilator 5.052 and Celox print 12 22 1 1."
+    },
+    {
+      "suite": "sv",
+      "name": "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
+      "status": "unexpected_accept",
+      "classification": "xezim_bug",
+      "bug": "sv_vif-X1",
+      "note": "A ref formal requires an actual of an equivalent type (13.5.2, 6.22.2), and `bit [31:0]` is not equivalent to a virtual interface (25.9). xezim 0.11.3 elaborates `forge(v)` without a diagnostic; Verilator 5.052 and Celox reject it."
     }
   ]
 }

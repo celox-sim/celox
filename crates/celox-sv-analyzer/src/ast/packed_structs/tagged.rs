@@ -141,7 +141,11 @@ pub(in crate::ast) fn checked_value(
     let signed = dimensions::expression_signedness(&value, dims, &dims.const_env).unwrap_or(false);
     for guard in guards.into_iter().rev() {
         value = Expr::Call {
-            callee: Callee::Checked { width, signed },
+            callee: Callee::Checked {
+                width,
+                signed,
+                check: crate::system_functions::AccessCheck::TaggedMember,
+            },
             args: vec![Some(guard), Some(value)],
             arg_order: Vec::new(),
         };

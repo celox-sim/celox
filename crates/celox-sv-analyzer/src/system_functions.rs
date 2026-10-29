@@ -1208,14 +1208,33 @@ impl fmt::Display for ObjectOp {
     }
 }
 
+/// What a [`Callee::Checked`] access checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AccessCheck {
+    /// A tagged union member is the active one (IEEE 1800-2023 11.9).
+    TaggedMember,
+    /// A virtual interface is not `null` (IEEE 1800-2023 25.9).
+    VirtualInterface,
+}
+
+impl AccessCheck {
+    /// The error a failed check reports.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::TaggedMember => "tagged union member does not match the active tag",
+            Self::VirtualInterface => "null virtual interface accessed",
+        }
+    }
+}
+
 /// The subroutine a call expression calls.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Callee {
     /// Check the first argument at runtime before evaluating/returning the second.
-    /// Used for tagged union member access (IEEE 1800-2023 11.9).
     Checked {
         width: usize,
         signed: bool,
+        check: AccessCheck,
     },
     /// A table lookup with the arguments `selector, key, value, ...,
     /// default`: the value of the first key the selector matches with case
@@ -1265,7 +1284,7 @@ impl Callee {
     /// lowered as an integral operation; see [`SystemFunction::result_type`].
     pub fn result_type(&self) -> Option<(usize, bool)> {
         match self {
-            Self::Checked { width, signed } | Self::Lookup { width, signed } => {
+            Self::Checked { width, signed, .. } | Self::Lookup { width, signed } => {
                 Some((*width, *signed))
             }
             Self::String(op) => Some(op.result_type()),

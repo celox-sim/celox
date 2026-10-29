@@ -89,7 +89,7 @@ pub fn interface_prototypes_with_options(
                 .zip(sources)
                 .map(|(file, (_, path))| (&file.syntax_tree, *path))
                 .collect::<Vec<_>>(),
-            options,
+            options.clone(),
         )?)
     };
     let trees = files
@@ -3080,6 +3080,8 @@ pub struct NativePortPlan {
     pub all_members: Vec<String>,
     pub name: String,
     pub interface: String,
+    /// The modport the port is declared with.
+    pub modport: Option<String>,
     pub members: Vec<(String, PortDirection)>,
     pub parameters: Vec<String>,
     pub type_parameters: Vec<String>,
@@ -3325,6 +3327,7 @@ pub fn plan_interfaces_with_member_paths(
                     .collect(),
                 name: port.name.clone(),
                 interface: interface.clone(),
+                modport: declared.modport.clone(),
                 members: expansion
                     .members
                     .iter()

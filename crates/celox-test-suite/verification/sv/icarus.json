@@ -32,7 +32,8 @@
     "icarus/timing.json",
     "icarus/types.json",
     "icarus/unions.json",
-    "icarus/unpacked_structs.json"
+    "icarus/unpacked_structs.json",
+    "icarus/virtual_interfaces.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

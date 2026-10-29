@@ -1984,6 +1984,7 @@ pub fn lower_frontend_artifact(
             .collect(),
         root_id: module_id,
         packages: Vec::new(),
+        instance_values: Vec::new(),
     };
     let external = ExternalHierarchy {
         modules: [(

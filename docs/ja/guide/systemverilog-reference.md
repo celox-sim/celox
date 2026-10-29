@@ -223,7 +223,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 ロードマップ [#88](https://github.com/celox-sim/celox/issues/88) を指します。
 
 - [対応範囲](#classes)外のクラスの機能：クラスハンドル以外の変数への `$cast`、クラスパラメータの値としての名前のない列挙型・構造体型・共用体型と名前付きの 4 値・文字列定数、package のクラスをモジュール内クラス型で特殊化する機能、`real`・配列・64 ビットを超えるプロパティ、プロパティ（unpacked 構造体型のプロパティのメンバを含む）のビット選択・部分選択と packed 構造体メンバ、`output` / `inout` 引数としてのプロパティ、4 値プロパティの乱数化と制約。時間待ちを含む task の static ローカル宣言、再帰呼び出し。
-- `inout` / `ref` / 式を使う modport、virtual interface など。
+- `inout` / `ref` / 式を使う modport など。virtual interface は[対応範囲](#virtual-interfaces)内で使えます。
   ANSI ヘッダーのポートは、クロック入力やパラメータ依存の幅も含めて modport 経由で渡せます。
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
@@ -286,6 +286,20 @@ package やコンパイル単位で宣言したクラスは、宣言スコープ
 package 内で具体化したクラスの typedef と型パラメータは、`Small::element_t` のように import した別名を通して参照できます。継承した型と package の再 export にも対応します。型の次元は宣言元の特殊化で確定するため、利用するモジュールの同名パラメータでは変化しません。別のモジュールや package のクラスも、これらの確定したメンバー型を継承できます（6.18、8.13、8.23）。値パラメータや localparam の文字列も基底の特殊化の値を継承し、派生側の package に同名の定数があっても変わりません（8.13、8.25）。
 
 チェックポイントはオブジェクトを保持します。状態ファイルは文字列を記録しますがオブジェクトは記録しないため、オブジェクトを持つ変数があると状態ファイルの保存は失敗します。
+
+### virtual interface {#virtual-interfaces}
+
+virtual interface（IEEE 1800-2023 25.9）は、変数、クラスのプロパティ、サブルーチンの引数・戻り値、
+配列やコンテナの要素として使えます。`null`、interface インスタンス（インスタンス配列の要素を含む）、
+interface ポートに接続されたインスタンス、同じ interface の virtual interface を代入でき、modport なしから
+modport 付きへの代入はできますが、その逆はできません。メンバは virtual interface を通じて読み書きでき、
+ブロッキング・ノンブロッキング・複合代入に対応します。net への書き込みと、選んだ modport にないメンバは拒否します。
+`null` を通じたアクセスはエラーになり、シミュレーションを終了します。
+
+値は interface インスタンスの番号で、メンバアクセスはその interface のインスタンスから選びます。この処理が
+入るのは virtual interface 型を宣言した設計だけで、その設計は 2 回解析します（2 回目はエラボレーション後の
+インスタンスを使います）。パラメータ付き interface の virtual interface と、virtual interface を通じた
+interface の task / function、clocking block、入れ子の interface インスタンスは未対応です。
 
 ### インスタンス配列の要素
 

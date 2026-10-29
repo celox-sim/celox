@@ -41,7 +41,8 @@
     "xezim/timing.json",
     "xezim/types.json",
     "xezim/unions.json",
-    "xezim/unpacked_structs.json"
+    "xezim/unpacked_structs.json",
+    "xezim/virtual_interfaces.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

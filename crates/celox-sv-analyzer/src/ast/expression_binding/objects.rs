@@ -997,10 +997,20 @@ pub(in crate::ast) fn constructor(
     }
     let mut args = vec![Some(class.allocation())];
     let (actuals, order) = class.constructor_arguments(arguments)?;
-    for actual in actuals {
+    // A virtual interface formal receives only a virtual interface of its
+    // type (IEEE 1800-2023 25.9); the object is the first formal.
+    let name = Class::subroutine_name(&class_name, "new");
+    let shapes = dimensions.subroutine_param_shapes.get(&name);
+    for (position, actual) in actuals.into_iter().enumerate() {
+        let target = shapes
+            .and_then(|shapes| shapes.get(position + 1))
+            .filter(|shape| {
+                shape.virtual_interface.is_some()
+                    && super::direct::copied_in(dimensions, &name, position + 1)
+            });
         args.push(
             actual
-                .map(|value| bind_value(value, native, tree, dimensions, None))
+                .map(|value| bind_value(value, native, tree, dimensions, target))
                 .transpose()?,
         );
     }

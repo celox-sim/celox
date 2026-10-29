@@ -1604,7 +1604,12 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.process_call(*op, args)?,
             Expr::Call {
-                callee: sv::ir::Callee::Checked { width, signed },
+                callee:
+                    sv::ir::Callee::Checked {
+                        width,
+                        signed,
+                        check,
+                    },
                 args,
                 ..
             } => {
@@ -1615,9 +1620,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     sv::ir::SystemTask::Assert,
                     &[
                         sv::ir::SystemTaskArg::Expr(condition.clone()),
-                        sv::ir::SystemTaskArg::Str(
-                            "tagged union member does not match the active tag".into(),
-                        ),
+                        sv::ir::SystemTaskArg::Str(check.message().into()),
                     ],
                     None,
                     None,

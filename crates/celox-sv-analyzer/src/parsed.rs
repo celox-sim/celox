@@ -54,6 +54,20 @@ impl ParsedSource {
         self.tree.declarations()
     }
 
+    /// The interfaces that virtual interface types of the source name (IEEE
+    /// 1800-2023 25.9).
+    pub fn virtual_interface_names(&self) -> fxhash::FxHashSet<String> {
+        self.declarations()
+            .type_nodes()
+            .filter_map(|(_, data)| match &data.kind {
+                celox_sv_syntax::DataTypeKind::VirtualInterface { name, .. } => {
+                    Some(ast::instances::normalize_identifier(&name.spelling))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Module and interface declarations share the SV design-element namespace.
     pub fn component_names(&self) -> fxhash::FxHashSet<String> {
         self.declarations()

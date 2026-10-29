@@ -288,6 +288,18 @@ pub struct SymbolicRtl {
     /// [`SimModule::package_bindings`] of other modules refer to its
     /// variables.
     pub packages: Vec<(String, ModuleId)>,
+    /// Initial values that differ between the instances of a module, such as
+    /// the id of an interface instance for virtual interfaces.
+    pub instance_values: Vec<InstanceValue>,
+}
+
+/// The initial value of a variable of one instance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstanceValue {
+    /// The instance, as in [`crate::InstancePath`].
+    pub path: Vec<(String, usize)>,
+    pub variable: SourceVarId,
+    pub value: num_bigint::BigUint,
 }
 
 #[derive(Clone)]

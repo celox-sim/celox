@@ -395,7 +395,9 @@ Interfaces are supported within the limits below:
 - **Declarations:** ANSI header ports can be passed through module interface
   ports and modports, including clock inputs and parameter-dependent widths.
   Tasks, implicit nets,
-  enums and module instances inside an interface, and virtual interfaces are unsupported.
+  enums and module instances inside an interface are unsupported. Virtual
+  interfaces are supported within the limits of
+  [virtual interfaces](#virtual-interfaces).
   Macros and compiler directives inside an interface are also unsupported.
 - **Modports and connections:** `inout`, `ref`, expression ports, `export` and
   clocking modports are unsupported. A connection cannot name a modport if the
@@ -757,6 +759,26 @@ interface it is connected to, as `M$I`.
 Interface type parameters are specialized per instance and forwarded through
 modport ports. Nested interface instances retain their own members and
 parameters; recursive specializations and nesting beyond 64 levels are rejected.
+
+### Virtual interfaces {#virtual-interfaces}
+
+A virtual interface (IEEE 1800-2023 25.9) may be a variable, a class
+property, a subroutine argument or result, or an element of an array or a
+container. It holds `null`, an interface instance (also an element of an
+array of instances), the instance connected to an interface port, or another
+virtual interface of the same interface; one without a modport may be
+assigned to one with a modport, not the reverse. Members are read and written
+through it, with blocking, nonblocking and compound assignments; nets are
+not written through it, and a member outside the selected modport is
+rejected. An access through `null` is an error that ends the simulation.
+
+A virtual interface value is the number of an interface instance, and a
+member access selects among the instances of its interface. Only designs that
+declare virtual interface types pay for this: they are analyzed twice, the
+second time with the instances of the elaborated design. Virtual interfaces
+of parameterized interfaces, and interface tasks, functions, clocking blocks
+and nested interface instances reached through a virtual interface, are
+unsupported.
 
 ### Block-local variables
 

@@ -501,8 +501,22 @@ fn incompatible_class_handle_assignments_are_rejected() {
     }
 }
 
+/// The SV frontend is recursive, and one case nests class specializations
+/// 64 deep, so the cases build on a thread with room on its stack (like
+/// suite cases in `suite::run_case`).
 #[test]
 fn misused_parameterized_classes_are_rejected() {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(scope, misused_parameterized_classes)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    });
+}
+
+fn misused_parameterized_classes() {
     for (items, want) in [
         (
             "Box #(2) two; Box #(3) three; initial begin three = new; two = three; end",

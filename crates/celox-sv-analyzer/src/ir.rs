@@ -8,9 +8,9 @@ pub use crate::procedural::{
     SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, HandleProperty, Locator,
-    LocatorKey, LocatorMethod, LocatorSource, MemoryFormat, ObjectField, ObjectOp, Radix, Record,
-    Severity, StringOp, SystemFunction, SystemTask, VcdTask,
+    AccessCheck, ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, HandleProperty,
+    Locator, LocatorKey, LocatorMethod, LocatorSource, MemoryFormat, ObjectField, ObjectOp, Radix,
+    Record, Severity, StringOp, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -74,7 +74,21 @@ pub struct Module {
     dpi_imports: Vec<DpiImport>,
     imported_parameters: Vec<Parameter>,
     interface_scope_names: Vec<String>,
+    interface_handles: Vec<InterfaceHandle>,
     program: bool,
+}
+
+/// An interface instance or interface port of a module that a virtual
+/// interface may denote (IEEE 1800-2023 25.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceHandle {
+    /// The instance or port, as the module's flattened names spell it.
+    pub handle: String,
+    pub interface: String,
+    /// A port of the module, which denotes the instance connected to it.
+    pub port: bool,
+    /// The signal or port of the module that holds each member.
+    pub members: Vec<(String, String)>,
 }
 
 impl Module {
@@ -200,6 +214,7 @@ impl Module {
             imported_parameters: Vec::new(),
             program: false,
             interface_scope_names: Vec::new(),
+            interface_handles: Vec::new(),
         }
     }
 
@@ -210,6 +225,16 @@ impl Module {
 
     pub(crate) fn with_interface_scope_names(mut self, names: Vec<String>) -> Self {
         self.interface_scope_names = names;
+        self
+    }
+
+    /// The interface instances and ports a virtual interface may denote.
+    pub fn interface_handles(&self) -> &[InterfaceHandle] {
+        &self.interface_handles
+    }
+
+    pub(crate) fn with_interface_handles(mut self, handles: Vec<InterfaceHandle>) -> Self {
+        self.interface_handles = handles;
         self
     }
 

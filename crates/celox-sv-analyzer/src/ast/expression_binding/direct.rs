@@ -288,6 +288,8 @@ enum Finish {
     },
     /// A read of property `property` of the object handle child.
     ObjectLoad(Box<crate::ast::classes::Property>),
+    /// A read of a member through the virtual interface child.
+    VirtualMember(Box<(crate::ast::virtual_interfaces::VirtualInterface, String)>),
     MethodCall(Box<MethodCall>),
 }
 
@@ -316,7 +318,7 @@ enum Job {
 
 /// Whether the call copies actual `position` of `name` into its formal and
 /// never back: an input, not a reference (IEEE 1800-2023 13.5.1).
-fn copied_in(dimensions: &PackedDimensions, name: &str, position: usize) -> bool {
+pub(super) fn copied_in(dimensions: &PackedDimensions, name: &str, position: usize) -> bool {
     dimensions
         .subroutine_directions
         .get(name)
@@ -391,6 +393,22 @@ pub(in crate::ast) fn bind_value(
                     return Err(unsupported(
                         "unpacked structure value received by a destination that is not of its type",
                     ));
+                }
+                if let Some(ty) = target.as_deref().and_then(|shape| {
+                    shape
+                        .virtual_interface
+                        .as_deref()
+                        .filter(|_| shape.unpacked.is_empty() && shape.container.is_none())
+                }) {
+                    virtual_interfaces::check_assignment(tree, id, native, dimensions, ty)?;
+                }
+                if let Some(ty) = target.as_deref().and_then(|shape| {
+                    shape
+                        .virtual_interface
+                        .as_deref()
+                        .filter(|_| !shape.unpacked.is_empty() && shape.container.is_none())
+                }) {
+                    virtual_interfaces::check_array_assignment(id, native, dimensions, ty)?;
                 }
                 if let Some(shape) = target.as_deref()
                     && shape
@@ -619,6 +637,11 @@ pub(in crate::ast) fn bind_value(
                             values.push(value);
                             continue;
                         }
+                        if let Some(value) = virtual_interfaces::identity(tree, &name, dimensions)?
+                        {
+                            values.push(value);
+                            continue;
+                        }
                         values.push(expressions::identifier_expression(
                             &tree.state,
                             name,
@@ -637,10 +660,17 @@ pub(in crate::ast) fn bind_value(
                         left,
                         operator,
                         right,
-                    } if operator != "inside" => (
-                        Finish::Binary(operator.clone()),
-                        vec![(*left, None), (*right, None)],
-                    ),
+                    } if operator != "inside" => {
+                        if matches!(operator.as_str(), "==" | "!=" | "===" | "!==") {
+                            virtual_interfaces::check_equality(
+                                tree, *left, *right, native, dimensions,
+                            )?;
+                        }
+                        (
+                            Finish::Binary(operator.clone()),
+                            vec![(*left, None), (*right, None)],
+                        )
+                    }
                     ExprKind::Conditional {
                         condition,
                         then_expression,
@@ -725,12 +755,23 @@ pub(in crate::ast) fn bind_value(
                                 tree,
                                 dimensions,
                             )?;
-                            let shape = shapes
-                                .and_then(|shapes| shapes.get(first + position))
+                            let shape = shapes.and_then(|shapes| shapes.get(first + position));
+                            let copied_in = copied_in(dimensions, &name, first + position);
+                            // The formal is copied out to the actual.
+                            if let Some(formal) = shape
+                                .filter(|shape| !copied_in && shape.unpacked.is_empty())
+                                .and_then(|shape| shape.virtual_interface.as_deref())
+                            {
+                                virtual_interfaces::check_copy_out(
+                                    tree, value, native, dimensions, formal,
+                                )?;
+                            }
+                            let shape = shape
                                 .filter(|shape| {
                                     shape.unpacked_struct.is_some()
-                                        || shape.container.is_some()
-                                            && copied_in(dimensions, &name, first + position)
+                                        || (shape.container.is_some()
+                                            || shape.virtual_interface.is_some())
+                                            && copied_in
                                 })
                                 .cloned()
                                 .map(Rc::new);
@@ -1027,6 +1068,16 @@ pub(in crate::ast) fn bind_value(
                                         .is_some_and(|direction| direction.is_written())
                                     {
                                         check_tagged_copyout(*id, Some(shape), tree, dimensions)?;
+                                        // The formal is copied out to the actual.
+                                        if let Some(formal) = shape
+                                            .virtual_interface
+                                            .as_deref()
+                                            .filter(|_| shape.unpacked.is_empty())
+                                        {
+                                            virtual_interfaces::check_copy_out(
+                                                tree, *id, native, dimensions, formal,
+                                            )?;
+                                        }
                                     }
                                     array_compatibility::check_native_unpacked_assignment(
                                         &tree.state,
@@ -1043,6 +1094,13 @@ pub(in crate::ast) fn bind_value(
                                 .enumerate()
                                 .filter_map(|(position, id)| {
                                     id.map(|id| {
+                                        let output = dimensions
+                                            .subroutine_directions
+                                            .get(&name)
+                                            .and_then(|directions| directions.get(position))
+                                            .is_some_and(|direction| {
+                                                matches!(direction, ParamDirection::Output)
+                                            });
                                         (
                                             id,
                                             dimensions
@@ -1054,6 +1112,14 @@ pub(in crate::ast) fn bind_value(
                                                         || copied_in(dimensions, &name, position)
                                                 })
                                                 .cloned()
+                                                // An output actual is not a value
+                                                // assigned to the formal.
+                                                .map(|mut shape| {
+                                                    if output {
+                                                        shape.virtual_interface = None;
+                                                    }
+                                                    shape
+                                                })
                                                 .map(Rc::new),
                                         )
                                     })
@@ -1105,6 +1171,18 @@ pub(in crate::ast) fn bind_value(
                         continue;
                     }
                     ExprKind::Member { .. }
+                        if virtual_interfaces::native_member(tree, id, native, dimensions)
+                            .is_some() =>
+                    {
+                        let (handle, ty, member) =
+                            virtual_interfaces::native_member(tree, id, native, dimensions)
+                                .expect("checked by the guard");
+                        (
+                            Finish::VirtualMember(Box::new((ty.as_ref().clone(), member))),
+                            vec![(handle, None)],
+                        )
+                    }
+                    ExprKind::Member { .. }
                         if containers::element_member(id, native, tree, dimensions)?.is_some() =>
                     {
                         let (_, value) = containers::element_member(id, native, tree, dimensions)?
@@ -1137,6 +1215,33 @@ pub(in crate::ast) fn bind_value(
                                 continue;
                             }
                         }
+                    }
+                    ExprKind::Member { .. } | ExprKind::Select { .. }
+                        if virtual_interfaces::native_identity(tree, id, dimensions).is_some() =>
+                    {
+                        values.push(
+                            virtual_interfaces::native_identity(tree, id, dimensions)
+                                .expect("checked by the guard"),
+                        );
+                        continue;
+                    }
+                    ExprKind::Select { .. }
+                        if let Some((handle, ty, member)) =
+                            virtual_interfaces::native_selected_member(
+                                tree, id, native, dimensions,
+                            ) =>
+                    {
+                        let selected = selected_value(id, native, tree, dimensions)?;
+                        let handle = bind_value(handle, native, tree, dimensions, None)?;
+                        values.push(virtual_interfaces::selected_read(
+                            &tree.state,
+                            handle,
+                            &ty,
+                            &member,
+                            selected,
+                            dimensions,
+                        )?);
+                        continue;
                     }
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
                         values.push(selected_value(id, native, tree, dimensions)?);
@@ -1433,6 +1538,11 @@ pub(in crate::ast) fn bind_value(
                     Finish::ObjectLoad(property) => {
                         let handle = operands.pop().ok_or_else(disagreement)?;
                         objects::load(&property, handle)
+                    }
+                    Finish::VirtualMember(access) => {
+                        let (ty, member) = *access;
+                        let handle = operands.pop().ok_or_else(disagreement)?;
+                        virtual_interfaces::read(&tree.state, handle, &ty, &member, dimensions, Ok)?
                     }
                     Finish::MethodCall(call) => {
                         let MethodCall {
@@ -1785,6 +1895,16 @@ pub(super) fn path(
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<String>, Option<String>)> {
     let authored = root;
+    // A member through a virtual interface is selected in its template,
+    // which the caller applies to the member of each instance.
+    if let Some((_, ty, member)) = virtual_interfaces::native_member(tree, root, native, dimensions)
+    {
+        virtual_interfaces::member(&tree.state, &ty, &member)?;
+        return Ok((
+            vec![virtual_interfaces::template(&ty.interface, &member)],
+            None,
+        ));
+    }
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, root, native, dimensions)? {
         return Ok((vec![variable], None));
