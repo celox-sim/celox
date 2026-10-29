@@ -1,0 +1,52 @@
+{
+  "tool": "icarus",
+  "version": "Icarus Verilog 13.0",
+  "source": "src/sv/cases/streaming.vtest",
+  "method": "Each unchanged shared case fails in a verify-sv-icarus run with --include-ignored. The reduced source below, run with iverilog -g2012 -s Top, reproduces the failure without the adapter: Icarus reports that streaming concatenation is not supported, also as an assignment target.",
+  "reduced_source": "module Top;\n    logic [10:0] up [3:0];\n    logic [11:1] p1, p2, p3, p4;\n    initial begin\n        up[3] = 11'd3; up[2] = 11'd2; up[1] = 11'd1; up[0] = 11'd0;\n        {>>{p1, p2, p3, p4}} = up;\n        $display(\"p1=%0d p2=%0d p3=%0d p4=%0d\", p1, p2, p3, p4);\n    end\nendmodule\n",
+  "reduced_stderr": "r.sv:6: sorry: Streaming concatenation not supported.\nr.sv:6: sorry: Streaming concatenation not supported in l-values.\n",
+  "cases": [
+    {
+      "case": "streaming::streaming_arrays",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:12: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:14: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Malformed statement\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed statement\n<case>/source_0.sv:21: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Malformed statement\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n"
+    },
+    {
+      "case": "streaming::streaming_combinational",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Syntax error in continuous assignment\n<case>/source_0.sv:5: sorry: Streaming concatenation not supported.\n"
+    },
+    {
+      "case": "streaming::streaming_contexts",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:5: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:14: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Malformed statement\n"
+    },
+    {
+      "case": "streaming::streaming_operand_types",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:7: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:9: sorry: Streaming concatenation not supported.\n"
+    },
+    {
+      "case": "streaming::streaming_pack_alignment",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:9: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:11: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:18: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Malformed statement\n"
+    },
+    {
+      "case": "streaming::streaming_reorder",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:9: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n<case>/source_0.sv:15: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n"
+    },
+    {
+      "case": "streaming::streaming_unpack",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:9: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:9: sorry: Streaming concatenation not supported in l-values.\n<case>/source_0.sv:11: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:11: sorry: Streaming concatenation not supported in l-values.\n<case>/source_0.sv:14: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:14: sorry: Streaming concatenation not supported in l-values.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: Syntax in assignment statement l-value.\n<case>/source_0.sv:18: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:18: sorry: Streaming concatenation not supported in l-values.\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: Syntax in assignment statement l-value.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n"
+    }
+  ]
+}

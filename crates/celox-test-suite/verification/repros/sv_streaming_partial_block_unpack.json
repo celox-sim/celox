@@ -1,0 +1,29 @@
+{
+  "case": "streaming::streaming_unpack",
+  "source": "src/sv/cases/streaming.vtest",
+  "standard": "IEEE 1800-2023 11.4.14.2: << slices the stream into blocks starting with the right-most bit, the last (left-most) block keeps the remaining bits, and reverses the order of the blocks; 11.4.14.3: as an assignment target the streaming operators perform the reverse operation and unpack the stream into the variables, so packing the targets again gives the source.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters.",
+  "reduced_source": "module Top;\n    logic [3:0] x, z;\n    logic [7:0] r;\n    initial begin\n        {<< 3 {x, z}} = 8'b1101_0011;\n        r = {<< 3 {x, z}};\n        $display(\"x=%b z=%b repacked=%b\", x, z, r);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "x=0110 z=1011 repacked=01110101\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:5: syntax error\nrepro.sv:5: Syntax in assignment statement l-value.\nrepro.sv:6: syntax error\nrepro.sv:6: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "x=0110 z=1011 repacked=01110101\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "x=1110 z=0110 repacked=11010011\n"
+    }
+  ]
+}

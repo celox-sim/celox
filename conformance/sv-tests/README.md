@@ -228,6 +228,18 @@ to pass. Each was simulated in both modes and leaves `a` and `b` at 1. Full
 official runs at the pinned revision report 1283 passing cases in 2state and
 1294 in 4state, and change only these 4 verdicts.
 
+Streaming concatenations of fixed-size data (11.4.14) update 22 more rows:
+both state modes of the `chapter-11/11.4.14.1` to `11.4.14.3` pack, re-order,
+unpack and padding cases and of `simple/11.4.14.3--simple_unpack_stream-sim.sv`
+change from fail to pass. Each was simulated in both modes: the `-sim` cases
+assert their values, and the bit-reversed `{<<{a, b, c}}` of the other
+`unpack_stream` cases was checked against 11.4.14.2 in 96 and, left-aligned,
+128 bits. `11.4.14.3--unpack_stream_inv.sv` still fails to compile, as it must:
+its 96-bit stream is wider than the 32-bit target. The `11.4.14.4` cases stream
+dynamic arrays and queues, which remain unsupported. Full official runs at the
+pinned revision report 1294 passing cases in 2state and 1305 in 4state, and
+change only these 22 verdicts.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

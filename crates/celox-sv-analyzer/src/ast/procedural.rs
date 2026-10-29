@@ -84,6 +84,9 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     automatic: bool,
     task_timing: bool,
     return_shape: Option<VariableDimensions>,
+    /// The shape of any return type, which a returned stream is aligned to
+    /// (IEEE 1800-2023 11.4.14).
+    stream_return_shape: Option<VariableDimensions>,
     pub(super) sensitivity_body: Vec<Stmt>,
 }
 
@@ -339,6 +342,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             automatic,
             task_timing: false,
             return_shape: None,
+            stream_return_shape: None,
             sensitivity_body: Vec::new(),
             tree,
             dims,
@@ -675,6 +679,28 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.rename_expr(expr);
             }
             return Ok(stmt);
+        }
+        if let Some((mut parts, mut rhs)) = expression_binding::stream_unpack(
+            left,
+            right,
+            self.tree.declarations(),
+            self.tree,
+            &self.dims,
+        )? {
+            if op != "=" {
+                return Err(unsupported(
+                    "compound assignment to a streaming concatenation",
+                ));
+            }
+            for part in &mut parts {
+                self.rename_lvalue(part);
+            }
+            self.rename_expr(&mut rhs);
+            return Ok(Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking,
+            });
         }
         if let Some(parts) = self.concat_lvalue(left)? {
             if op != "=" {
@@ -3185,6 +3211,7 @@ pub(super) fn lower_subroutine(
     if let (Some(name), Some(ty)) = (&return_var, &return_type) {
         formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
     }
+    builder.stream_return_shape = return_type.as_ref().map(dimensions_from_type);
     builder.return_shape = return_type
         .as_ref()
         .filter(|ty| ty.tagged_identity().is_some() || ty.unpacked_struct().is_some())

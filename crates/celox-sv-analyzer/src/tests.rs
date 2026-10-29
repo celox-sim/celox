@@ -7917,3 +7917,92 @@ fn container_formals_copy_only_what_container_assignment_represents() {
         assert!(matches!(error, AnalyzerError::Parse(_)), "{call}: {error}");
     }
 }
+
+#[test]
+fn streaming_concatenations_follow_the_lrm_constraints() {
+    // IEEE 1800-2023 11.4.14: a stream is an assignment source or target, a
+    // bit-stream cast operand or a stream operand; it is never wider than a
+    // fixed-size target, an unpack source has enough bits, and a slice size
+    // is positive.
+    for (body, expected) in [
+        (
+            "initial i = {<<{a, b, c}};",
+            "96-bit stream is wider than its 32-bit target",
+        ),
+        ("initial if ({<<{a}}) i = 0;", "shall first be cast"),
+        ("initial i = {<<{a}} + 1;", "shall first be cast"),
+        ("initial i = {<< 0 {a}};", "slice size 0 is not positive"),
+        (
+            "initial {>>{a, b, c}} = 23'b1;",
+            "23-bit source has fewer bits than the 96-bit stream",
+        ),
+        (
+            "initial i = {>>{a with [0]}};",
+            "with applies to a one-dimensional unpacked array",
+        ),
+        (
+            "initial i = {>>{r}};",
+            "real value is not of bit-stream type",
+        ),
+    ] {
+        let source = format!("module Top; int a, b, c, i; real r; {body} endmodule");
+        let error = analyze_source(&source, Path::new("streams.sv"))
+            .expect_err(body)
+            .to_string();
+        assert!(error.contains(expected), "{body}: {error}");
+    }
+}
+
+#[test]
+fn constant_streams_evaluate_like_the_lrm_examples() {
+    use crate::system_functions::{Stream, StreamArg};
+    let pack = |slice, widths: &[usize], width| Stream {
+        args: widths
+            .iter()
+            .map(|&width| StreamArg::packed(width))
+            .collect(),
+        slice,
+        unpack: false,
+        targets: vec![StreamArg::packed(width)],
+    };
+    // 11.4.14.2
+    assert_eq!(
+        pack(Some(8), &[32], 32).evaluate(&[0x41424344]),
+        Some(0x44434241)
+    );
+    assert_eq!(
+        pack(Some(16), &[32], 32).evaluate(&[0x41424344]),
+        Some(0x43444142)
+    );
+    assert_eq!(
+        pack(Some(4), &[6], 6).evaluate(&[0b11_0101]),
+        Some(0b01_0111)
+    );
+    assert_eq!(pack(None, &[6], 6).evaluate(&[0b11_0101]), Some(0b11_0101));
+    // 11.4.14.3: a narrower stream is aligned to the left.
+    assert_eq!(pack(None, &[4, 4], 12).evaluate(&[1, 2]), Some(0x120));
+    let unpack = Stream {
+        args: vec![StreamArg::packed(8)],
+        slice: Some(3),
+        unpack: true,
+        targets: vec![StreamArg::packed(4), StreamArg::packed(4)],
+    };
+    let unpacked = unpack.evaluate(&[0b1101_0011]).unwrap();
+    assert_eq!(
+        pack(Some(3), &[8], 8).evaluate(&[unpacked]),
+        Some(0b1101_0011)
+    );
+    // An array argument streams its first element, in its least significant
+    // bits, first.
+    let array = Stream {
+        args: vec![StreamArg {
+            width: 16,
+            bits: None,
+            element: Some(8),
+        }],
+        slice: None,
+        unpack: false,
+        targets: vec![StreamArg::packed(16)],
+    };
+    assert_eq!(array.evaluate(&[0x2211]), Some(0x1122));
+}

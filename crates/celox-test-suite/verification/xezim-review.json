@@ -882,6 +882,18 @@
     "sv_vif-X5": {
       "title": "An edge-sensitive always on a member through a virtual interface is dropped",
       "standard": "IEEE 1800-2023 9.4.2, 25.9"
+    },
+    "sv_streaming_unpack_order": {
+      "title": "Unpacking into a streaming concatenation target distributes the source bits in the wrong order: an unpacked array source is unpacked from its right index, and a << target whose last block is partial gets the re-ordering of the pack instead of its reverse",
+      "standard": "IEEE 1800-2023 11.4.14.2, 11.4.14.3"
+    },
+    "sv_streaming_with_range": {
+      "title": "A with range on a fixed-size array in a streaming concatenation is ignored, and the whole array is packed instead of the specified items and nonexistent entries",
+      "standard": "IEEE 1800-2023 11.4.14.4"
+    },
+    "sv_streaming_subarray_target": {
+      "title": "A streaming concatenation assigned to an unpacked subarray, such as sub[0] of a two-dimensional array, leaves the subarray unwritten",
+      "standard": "IEEE 1800-2023 11.4.14, 6.24.3"
     }
   },
   "cases": [
@@ -5075,6 +5087,30 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X29",
       "note": "`a.pulse = 1; a.pulse = 0;` in one activation is a positive edge of the member `vif` selects (9.4.2), but xezim 0.11.3 does not resume the wait on a pulse of one activation (sv_rest-X29); it prints nothing, also for `@(posedge a.pulse)` without the virtual interface. Celox prints pulse 2."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_arrays",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_with_range",
+      "note": "xezim 0.11.3 ignores with ranges and streams the whole array: with byte up [0:3] and byte down [3:0] both '{8'h11, 8'h22, 8'h33, 8'h44}, it assigns 32'h11223344 to bit [31:0] v for {>>{up with [1 +: 2]}}, {>>{down with [4]}} and {>>{down with [4:2]}}. 11.4.14.4 packs only the specified items, and the nonexistent-entry value of Table 7-1 (0 for byte) for an index outside the array, and 11.4.14 pads the stream with zero bits on the right, giving 32'h22330000, 0 and 32'h00112200. Verilator 5.052 rejects the with range (sv_verilator_streaming_with_range). See verification/repros/sv_streaming_with_range.json."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_unpack",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_unpack_order",
+      "note": "xezim 0.11.3 unpacks the LRM example {>>{p1, p2, p3, p4}} = up, with logic [10:0] up [3:0] and up[i] = i, into p1 = 0, p2 = 1, p3 = 2, p4 = 3; 11.4.14.3 gives p1 = up[3], p2 = up[2], p3 = up[1] and p4 = up[0], as Verilator 5.052 does (verification/repros/sv_streaming_unpack_array_order_xezim.json). It also unpacks {<< 3 {x, z}} = 8'b1101_0011 into x = 4'b0110 and z = 4'b1011, which pack back to 8'b0111_0101 instead of the source: 11.4.14.3 reverses the pack of 11.4.14.2, giving x = 4'b1110 and z = 4'b0110. Verilator 5.052 shares this partial-block error (sv_verilator_streaming_partial_block_unpack; verification/repros/sv_streaming_partial_block_unpack.json)."
+    },
+    {
+      "suite": "sv",
+      "name": "streaming::streaming_operand_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_streaming_subarray_target",
+      "note": "With bit [7:0] sub [0:1][0:1], xezim 0.11.3 leaves sub[0][0] and sub[0][1] at 0 after sub[0] = {>>{16'h1122}}; 11.4.14 casts the stream to the type of the target and 6.24.3 fills the unpacked array in element order, giving 8'h11 and 8'h22, as Verilator 5.052 does. The self-determined operand {>>{a >>> 1}} passes. See verification/repros/sv_streaming_subarray_target_xezim.json."
     }
   ]
 }

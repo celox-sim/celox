@@ -483,7 +483,11 @@ impl BodyBuilder<'_, '_, '_> {
                                     native,
                                     self.tree,
                                     &self.dims,
-                                    self.return_shape.as_ref(),
+                                    if expression_binding::is_stream(id, native) {
+                                        self.stream_return_shape.as_ref()
+                                    } else {
+                                        self.return_shape.as_ref()
+                                    },
                                 )?;
                                 self.rename_expr(&mut value);
                                 Ok(value)

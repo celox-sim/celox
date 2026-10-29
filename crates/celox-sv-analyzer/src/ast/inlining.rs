@@ -132,6 +132,10 @@ pub(super) fn expr_signedness_with_return_types(
             ..
         } => Some(op.result_type().1),
         Expr::Call {
+            callee: Callee::Stream(_),
+            ..
+        } => Some(false),
+        Expr::Call {
             callee: Callee::Subroutine(name),
             ..
         } => functions
@@ -150,7 +154,7 @@ pub(super) fn expr_signedness_with_return_types(
 /// lookup.
 fn reads_only(callee: &Callee) -> bool {
     match callee {
-        Callee::String(_) | Callee::Lookup { .. } => true,
+        Callee::String(_) | Callee::Lookup { .. } | Callee::Stream(_) => true,
         Callee::Object(op) => matches!(
             **op,
             ObjectOp::Load(_)
