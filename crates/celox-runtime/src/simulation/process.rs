@@ -405,6 +405,7 @@ impl<B: SimBackend> SimulationState<B> {
                 activation.control.suspended = None;
                 activation.control.awaiting = None;
                 activation.control.observes.clear();
+                activation.control.observed_events.clear();
                 activation.control.level_wait = false;
                 activation.pending.clear();
                 activation.join = None;
