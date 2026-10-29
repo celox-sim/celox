@@ -1442,4 +1442,15 @@ modulo 256. Verilator 5.052 and the pinned xezim 0.11.3 pass. Icarus 13.0
 rejects the class-keyed associative array declaration (`int unsigned m[C]`)
 and stops with an internal error; its exact compile diagnostic remains an
 executed failure in [the Icarus containers report](verification/sv/icarus/containers.json).
+
+### String indices from calls
+
+`containers::string_indices_from_calls` indexes a string-keyed associative
+array with the results of a virtual method, a static method and a package
+function that return `string`, as UVM's factory does with
+`obj.get_type_name()` (IEEE 1800-2023 7.8.2); the sum is 3724. Verilator 5.052
+and the pinned xezim 0.11.3 pass. Icarus 13.0 does not support `automatic` on
+a variable of an `initial` block and rejects the indexed assignment that
+follows; its exact compile diagnostic remains an executed failure in
+[the Icarus containers report](verification/sv/icarus/containers.json).
 No assertions or exclusions are weakened.
