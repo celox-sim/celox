@@ -34,6 +34,14 @@ impl<V> From<HashMap<String, V>> for ScopedMap<V> {
 }
 
 impl<V> ScopedMap<V> {
+    /// Identity of an immutable snapshot, valid while a borrower retains it.
+    pub fn identity(&self) -> (usize, usize) {
+        (
+            Arc::as_ptr(&self.base) as usize,
+            Arc::as_ptr(&self.overlay) as usize,
+        )
+    }
+
     pub fn get(&self, name: &str) -> Option<&V> {
         match self.overlay.get(name) {
             Some(value) => value.as_ref(),

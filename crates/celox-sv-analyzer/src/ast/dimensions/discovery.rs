@@ -21,6 +21,37 @@ pub(in crate::ast) struct State {
     /// scope, by arena and scope.
     class_signatures:
         RefCell<HashMap<(usize, crate::source_tree::ScopeHandle), std::rc::Rc<ClassSignatures>>>,
+    /// The declarations a query discovered in each scope, before the parts
+    /// that depend on its operand, while the query's input and the set of
+    /// specializations stay the same.
+    settled: RefCell<HashMap<Key, Settled>>,
+}
+
+/// A settled discovery of [`State::settled`]. `input` is held so that the
+/// identities of its tables stay unique.
+struct Settled {
+    input: PackedDimensions,
+    specializations: usize,
+    context: PackedDimensions,
+}
+
+/// Whether `a` and `b` hold the same tables: one is a clone of the other.
+fn same_tables(a: &PackedDimensions, b: &PackedDimensions) -> bool {
+    a.variables.identity() == b.variables.identity()
+        && a.const_env.identity() == b.const_env.identity()
+        && a.type_aliases.identity() == b.type_aliases.identity()
+        && a.function_return_types.identity() == b.function_return_types.identity()
+        && Arc::ptr_eq(&a.functions, &b.functions)
+        && a.parameter_values.identity() == b.parameter_values.identity()
+        && a.array_parameter_values.identity() == b.array_parameter_values.identity()
+        && a.expression_signedness.identity() == b.expression_signedness.identity()
+        && a.constant_indexed_base == b.constant_indexed_base
+        && a.scope_types_complete == b.scope_types_complete
+        && a.type_query == b.type_query
+        && Arc::ptr_eq(&a.subroutine_param_shapes, &b.subroutine_param_shapes)
+        && Arc::ptr_eq(&a.subroutine_directions, &b.subroutine_directions)
+        && Arc::ptr_eq(&a.subroutine_param_names, &b.subroutine_param_names)
+        && a.class_scope == b.class_scope
 }
 
 /// The signature entries that discovering a scope's own declarations added
@@ -476,6 +507,7 @@ fn class_signatures(
         handle.clone(),
     );
     let mut constructor = false;
+    let mut signatures = Vec::new();
     for method in &class.methods {
         let subroutine = tree.declarations().subroutine(method.subroutine);
         let mut formals = formal_types(subroutine, tree, &scope)?;
@@ -490,21 +522,23 @@ fn class_signatures(
         };
         // A method that may be virtual also has a dispatcher (8.20).
         if !method.qualifiers.is_static && subroutine.kind != SubroutineKind::Constructor {
-            publish_signature(
+            signatures.push((
                 classes::Class::dispatcher_name(class_name, &name(&subroutine.name)),
                 formals.clone(),
                 result.clone(),
-                tree,
-                context,
-            );
+            ));
         }
-        publish_signature(
+        signatures.push((
             classes::Class::subroutine_name(class_name, &name(&subroutine.name)),
             formals,
             result,
-            tree,
-            context,
-        );
+        ));
+    }
+    // `scope` shares the maps of `context` that publishing writes: while it
+    // lives, each signature would copy them whole.
+    drop(scope);
+    for (name, formals, result) in signatures {
+        publish_signature(name, formals, result, tree, context);
     }
     for method in ["randomize", "srandom", "rand_mode"] {
         let mut formals = vec![(
@@ -955,6 +989,51 @@ fn finish(mut context: PackedDimensions) -> PackedDimensions {
     context.type_query = true;
     context
 }
+/// The declarations of the scope of a query with owners `owners`, discovered
+/// from `input`, before the parts that depend on the query's operand.
+fn settle_scope(
+    tree: &AnalysisContext<'_>,
+    owners: &Owners,
+    key: &Key,
+    input: &PackedDimensions,
+) -> Converted<PackedDimensions> {
+    #[cfg(test)]
+    super::SCOPE_SETTLES.with(|count| count.set(count.get() + 1));
+    let mut context = input.clone();
+    for (name, metadata) in &scope::imported(&tree.state).function_return_types {
+        context
+            .function_return_types
+            .entry(name.clone())
+            .or_insert_with(|| metadata.clone());
+    }
+    extend_interface_dimensions(&tree.state, &mut context);
+    extend_variable_dimensions_from_const_env(&mut context, &input.const_env);
+    publish(&tree.state.dimensions, key, &context);
+    let _guard = Guard(&tree.state.dimensions, key.clone());
+    let frames = owners
+        .frames
+        .iter()
+        .map(|items| direct(items, tree))
+        .collect::<Converted<Vec<_>>>()?;
+    // A class's signatures are bound in the scope that declares it, from
+    // that scope's declarations alone, once for all of its queries.
+    let base = context.clone();
+    // Without classes of its own, the scope has no signatures to bind once.
+    if classes::scope_declarations(tree).next().is_none() {
+        settle(&frames, tree, key, &mut context, Classes::Bind)?;
+    } else {
+        let classes = scope_class_signatures(tree, &frames[0], key, &base)?;
+        settle(
+            &frames,
+            tree,
+            key,
+            &mut context,
+            Classes::Published(&classes),
+        )?;
+    }
+    Ok(context)
+}
+
 /// Preliminary array/function query context for one authored native expression.
 pub(in crate::ast) fn query_operand_dimensions_id(
     root: ExprId,
@@ -972,44 +1051,44 @@ pub(in crate::ast) fn query_operand_dimensions_id(
     let key = Key {
         arena: native as *const _ as usize,
         scope: tree.scope_handle(),
-        path: owners.path,
+        path: owners.path.clone(),
     };
     if let Some(mut partial) = tree.state.dimensions.partial.borrow().get(&key).cloned() {
         overlay(&mut partial, input);
         return Ok(finish(partial));
     }
-    let mut context = input.clone();
-    for (name, metadata) in &scope::imported(&tree.state).function_return_types {
-        context
-            .function_return_types
-            .entry(name.clone())
-            .or_insert_with(|| metadata.clone());
-    }
-    extend_interface_dimensions(&tree.state, &mut context);
-    extend_variable_dimensions_from_const_env(&mut context, &input.const_env);
+    // Every query of a scope with the same input discovers the same
+    // declarations: a scope's queries settle them once.
+    let specializations = tree.state.class_specializations.borrow().len();
+    let settled = tree
+        .state
+        .dimensions
+        .settled
+        .borrow()
+        .get(&key)
+        .filter(|settled| {
+            !unshared_discovery()
+                && settled.specializations == specializations
+                && same_tables(&settled.input, input)
+        })
+        .map(|settled| settled.context.clone());
+    let mut context = match settled {
+        Some(context) => context,
+        None => {
+            let context = settle_scope(tree, &owners, &key, input)?;
+            tree.state.dimensions.settled.borrow_mut().insert(
+                key.clone(),
+                Settled {
+                    input: input.clone(),
+                    specializations: tree.state.class_specializations.borrow().len(),
+                    context: context.clone(),
+                },
+            );
+            context
+        }
+    };
     publish(&tree.state.dimensions, &key, &context);
     let _guard = Guard(&tree.state.dimensions, key.clone());
-    let frames = owners
-        .frames
-        .iter()
-        .map(|items| direct(items, tree))
-        .collect::<Converted<Vec<_>>>()?;
-    // A class's signatures are bound in the scope that declares it, from
-    // that scope's declarations alone, once for all of its queries.
-    let base = context.clone();
-    // Without classes of its own, the scope has no signatures to bind once.
-    if classes::scope_declarations(tree).next().is_none() {
-        settle(&frames, tree, &key, &mut context, Classes::Bind)?;
-    } else {
-        let classes = scope_class_signatures(tree, &frames[0], &key, &base)?;
-        settle(
-            &frames,
-            tree,
-            &key,
-            &mut context,
-            Classes::Published(&classes),
-        )?;
-    }
     overlay(&mut context, input);
     if let Some(id) = owners.subroutine {
         let subroutine = native.subroutine(id);
