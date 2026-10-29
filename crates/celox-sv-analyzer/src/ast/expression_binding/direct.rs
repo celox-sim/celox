@@ -433,6 +433,14 @@ pub(in crate::ast) fn bind_value(
                     values.push(containers::assignment(id, tree, dimensions, container)?);
                     continue;
                 }
+                if let Some(value) = locators::index(id, native, tree, dimensions)? {
+                    values.push(value);
+                    continue;
+                }
+                if let Some(value) = locators::bind(id, native, tree, dimensions)? {
+                    values.push(value);
+                    continue;
+                }
                 let enum_method = match &native.expression(id).kind {
                     ExprKind::Call {
                         expression,

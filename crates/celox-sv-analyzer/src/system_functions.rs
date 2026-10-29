@@ -910,6 +910,87 @@ pub enum ContainerKind {
         object: bool,
     },
 }
+/// An array locator method (IEEE 1800-2023 7.12.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocatorMethod {
+    Find,
+    FindIndex,
+    FindFirst,
+    FindFirstIndex,
+    FindLast,
+    FindLastIndex,
+    Min,
+    Max,
+    Unique,
+    UniqueIndex,
+}
+impl LocatorMethod {
+    pub fn from_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "find" => Self::Find,
+            "find_index" => Self::FindIndex,
+            "find_first" => Self::FindFirst,
+            "find_first_index" => Self::FindFirstIndex,
+            "find_last" => Self::FindLast,
+            "find_last_index" => Self::FindLastIndex,
+            "min" => Self::Min,
+            "max" => Self::Max,
+            "unique" => Self::Unique,
+            "unique_index" => Self::UniqueIndex,
+            _ => return None,
+        })
+    }
+    /// Whether the result holds indices rather than elements.
+    pub fn returns_index(self) -> bool {
+        matches!(
+            self,
+            Self::FindIndex | Self::FindFirstIndex | Self::FindLastIndex | Self::UniqueIndex
+        )
+    }
+    /// Whether the method selects by a Boolean `with` expression, which is
+    /// then mandatory, rather than by comparing its values.
+    pub fn finds(self) -> bool {
+        !matches!(
+            self,
+            Self::Min | Self::Max | Self::Unique | Self::UniqueIndex
+        )
+    }
+    /// Whether the search stops at the first match from the left.
+    pub fn first(self) -> bool {
+        matches!(self, Self::FindFirst | Self::FindFirstIndex)
+    }
+    /// Whether the search goes from the right and stops at the first match.
+    pub fn last(self) -> bool {
+        matches!(self, Self::FindLast | Self::FindLastIndex)
+    }
+}
+/// The array a locator method searches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocatorSource {
+    /// A dynamic array, queue or associative array, in the first argument.
+    Container(ContainerLayout),
+    /// A fixed-size unpacked array, from its left to its right bound; the
+    /// first argument reads the element at the index local.
+    Fixed { left: i64, right: i64 },
+}
+/// How `min`, `max` and `unique` compare the values of the `with` expression.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LocatorKey {
+    Integral { width: u32, signed: bool },
+    String,
+}
+/// An array locator method call (IEEE 1800-2023 7.12.1). The arguments are
+/// the array (see [`LocatorSource`]), the `with` expression, and the locals
+/// through which it reads the element and its index (7.12.4). The result is
+/// a queue with the `result` layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Locator {
+    pub method: LocatorMethod,
+    pub source: LocatorSource,
+    pub result: ContainerLayout,
+    /// The type of the compared values; `None` for the find methods.
+    pub key: Option<LocatorKey>,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerOp {
     Reverse,
@@ -1044,6 +1125,8 @@ pub enum ObjectOp {
     /// The flat structure value of the record in the argument; `null` is
     /// the default value.
     Unbox(Record),
+    /// An array locator method, see [`Locator`].
+    Locator(Locator),
 }
 
 impl ObjectOp {
@@ -1076,9 +1159,12 @@ impl ObjectOp {
             Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
             Self::Unbox(record) => (record.width(), false),
-            Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy | Self::Box(_) => {
-                (32, false)
-            }
+            Self::New { .. }
+            | Self::ClassOf
+            | Self::Store(_)
+            | Self::Copy
+            | Self::Box(_)
+            | Self::Locator(_) => (32, false),
         }
     }
 }
@@ -1087,6 +1173,7 @@ impl fmt::Display for ObjectOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Self::Container { .. } => "container operation",
+            Self::Locator(_) => "array locator method",
             Self::New { .. } => "new",
             Self::Load(_) => "property read",
             Self::Store(_) => "property write",

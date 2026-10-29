@@ -1,0 +1,29 @@
+{
+  "case": "array_locators::array_locator_struct_elements",
+  "source": "src/sv/cases/array_locators.vtest",
+  "standard": "IEEE 1800-2023 7.12.1: the with expression of find_index is evaluated for each element; 11.2.2: unpacked structures can be compared with the equality operators, so the element equal to second is found at index 1.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters.",
+  "reduced_source": "module Top;\n    typedef struct { string name; int id; } alias_t;\n    alias_t aliases[$], second, found[$];\n    alias_t e;\n    int r[$];\n    initial begin\n        e.name = \"a\"; e.id = 1; aliases.push_back(e);\n        e.name = \"b\"; e.id = 3; aliases.push_back(e);\n        e.name = \"c\"; e.id = 2; aliases.push_back(e);\n        second = aliases[1];\n        r = aliases.find_index with (item == second);\n        $display(\"whole equality: size=%0d first=%0d\", r.size(), r[0]);\n        found = aliases.max with (item.id);\n        $display(\"max by member: size=%0d id=%0d\", found.size(), found[0].id);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "whole equality: size=1 first=1\nmax by member: size=1 id=3\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:2: sorry: Unpacked structs not supported.\nrepro.sv:11: syntax error\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "whole equality: size=0 first=0\nmax by member: size=1 id=3\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "whole equality: size=1 first=1\nmax by member: size=1 id=3\n"
+    }
+  ]
+}

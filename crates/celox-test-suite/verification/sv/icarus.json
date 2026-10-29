@@ -2,6 +2,7 @@
   "case_files": [
     "icarus/aggregate_regressions.json",
     "icarus/always_comb.json",
+    "icarus/array_locators.json",
     "icarus/class.json",
     "icarus/concurrent_assertions.json",
     "icarus/container_formals.json",

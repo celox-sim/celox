@@ -503,7 +503,7 @@ supports class handles. Element X/Z bits and class identity are preserved.
 For module variables, `@(a[i])` observes changes to the selected element,
 including changes caused by ordering methods (9.4.2).
 Associative arrays cannot use ordering methods. Fixed-array ordering, `shuffle`,
-`with` expressions and iterator arguments remain unsupported.
+and ordering `with` expressions and iterator arguments remain unsupported.
 
 Elements may be packed integral values up to 64 bits, strings, class
 handles or [unpacked structures](#unpacked-structures); a missing
@@ -545,8 +545,26 @@ Fixed arrays may have elements wider than 64 bits. These methods currently
 require a one-dimensional array variable or dynamic-container class property;
 `with` expressions and iterator arguments remain unsupported.
 
+Dynamic arrays, queues, associative arrays and one-dimensional fixed-size
+arrays support the locator methods `find`, `find_index`, `find_first`,
+`find_first_index`, `find_last` and `find_last_index`, which require a `with`
+clause, and `min`, `max`, `unique` and `unique_index`, with or without one
+(IEEE 1800-2023 7.12.1). Each returns a queue of elements, or of indices: `int`,
+or the index type of an associative array. The `with` expression reads the
+element through `item` or a named iterator and its index through
+`item.index`, `item.index()` or a named index method (7.12.4). It may read
+class properties of handle elements, call functions and read the locals and
+arguments of the enclosing subroutine; it runs once per element when the
+call is evaluated, so a call in a short-circuited operand or a loop condition
+runs only when reached. Searches visit elements from the left index of a fixed
+array, in index order for an associative array, and in reverse for
+`find_last` and `find_last_index`. `min`, `max` and `unique` compare integral
+values up to 64 bits or strings. Locator methods are not available in
+continuous assignments, on multidimensional fixed arrays or real elements, or
+as discarded statements.
+
 Multidimensional containers, elements wider than 64 bits, real elements,
-wildcard or class keys, slices, array locator methods, keyed patterns,
+wildcard or class keys, slices, keyed patterns,
 container operands within concatenations, compound or nonblocking element
 assignments, container ports and
 const containers remain unsupported. A `new[]` initializer currently requires

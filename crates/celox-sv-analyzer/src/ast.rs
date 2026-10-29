@@ -174,6 +174,7 @@ mod type_binding;
 pub(crate) use parameters::unbounded_parameter_marker;
 mod array_reductions;
 mod containers;
+mod locators;
 mod patterns;
 mod procedural;
 mod scope;
@@ -3176,6 +3177,11 @@ struct PackedDimensions {
     subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
     /// The class whose method is being bound.
     class_scope: Option<String>,
+    /// Where array locator methods declare their iterator locals; `None`
+    /// outside a procedural body.
+    locator_locals: Option<locators::LocalSink>,
+    /// The iterators of the enclosing `with` expressions, innermost last.
+    locator_iterators: Arc<Vec<locators::Iterator>>,
 }
 
 impl PackedDimensions {
@@ -3200,6 +3206,8 @@ impl PackedDimensions {
             subroutine_directions: Arc::default(),
             subroutine_param_names: Arc::default(),
             class_scope: None,
+            locator_locals: None,
+            locator_iterators: Arc::default(),
         }
     }
 }

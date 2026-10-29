@@ -13,6 +13,7 @@ mod containers;
 mod file_io;
 mod format;
 mod fread;
+mod locators;
 mod objects;
 mod process;
 mod references;
@@ -1695,6 +1696,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::ObjectOp::Container { op, layout } => {
                     self.container_call(*op, *layout, args)?
                 }
+                sv::ir::ObjectOp::Locator(locator) => self.locator(*locator, args)?,
                 _ => self.object_call(op, args)?,
             },
             Expr::Call {

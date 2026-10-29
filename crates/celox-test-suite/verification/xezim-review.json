@@ -822,6 +822,34 @@
     "sv_container_element_input": {
       "title": "an element of an associative array of queues passed to an input queue formal is a one-element queue and truncates the element",
       "standard": "IEEE 1800-2023 13.5.1"
+    },
+    "sv_array_locator_operand": {
+      "title": "An array locator call used as an operand, such as q.find with (...).size() or an equality with the result, evaluates to an empty queue",
+      "standard": "IEEE 1800-2023 7.12, 7.12.1"
+    },
+    "sv_array_locator_associative": {
+      "title": "Array locator methods of an associative array return an empty queue",
+      "standard": "IEEE 1800-2023 7.12.1, 7.8.4"
+    },
+    "sv_array_locator_fixed_indices": {
+      "title": "Array locator methods of a fixed-size array use element positions instead of the declared indices",
+      "standard": "IEEE 1800-2023 7.12.1, 7.12.4"
+    },
+    "sv_array_locator_iterator_enum_method": {
+      "title": "An enumerated type method of a locator iterator is called as a method of a null class handle",
+      "standard": "IEEE 1800-2023 7.12, 6.19.5"
+    },
+    "sv_array_locator_index_argument": {
+      "title": "A locator method with an index argument finds no element",
+      "standard": "IEEE 1800-2023 7.12, 7.12.4"
+    },
+    "sv_array_locator_struct_equality": {
+      "title": "A locator with expression comparing the iterator with an unpacked structure value finds no element",
+      "standard": "IEEE 1800-2023 7.12.1, 11.2.2"
+    },
+    "sv_array_locator_unique_four_state": {
+      "title": "unique treats four-state values that differ only in X versus Z bits as one value",
+      "standard": "IEEE 1800-2023 7.12.1, 6.3.1"
     }
   },
   "cases": [
@@ -4751,6 +4779,78 @@
       "classification": "xezim_bug",
       "bug": "sv_container_element_input",
       "note": "total(m[\"a\"]) with m[\"a\"] = '{5} returns 105 instead of 1105: the input formal starts as one element 0 and its push_back is lost, and the call truncates m[\"a\"] (read = 0xb7944d, expected 0xb7bb5d). Reproduced by verification/repros/sv_xezim_container_element_input.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_associative",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_associative",
+      "note": "With int by_key[int] holding 10:1, -5:2 and 3:2, by_key.find_index with (item == 2) and by_key.max with (item.index) return empty queues in xezim 0.11.3, and so do the locators of the string-indexed array; 7.12.1 returns the matching indices -5 and 3 and the element at 10. See verification/repros/sv_array_locator_associative_order.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_class_predicates",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_operand",
+      "note": "xezim 0.11.3 evaluates aliases.find with (item.id > i).size() in a while condition as 0, so the loop ends at i == 0 instead of 2, and the nested aliases.find(x) with (...).size() in a with expression as 0, so find_index returns no index; 7.12 lets a locator call be an operand and a method follow its with clause. See verification/repros/sv_array_locator_operands_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_find",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_operand",
+      "note": "xezim 0.11.3 gives r.min() == lowest as 0 although r.min() assigned to a queue equals lowest, and d.find with (item == 3).size() as 0 instead of 2; 7.12 lets a locator call be an operand and a method follow its with clause. See verification/repros/sv_array_locator_operands_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_fixed",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_fixed_indices",
+      "note": "For int down[3:0], xezim 0.11.3 gives down.find_first_index with (item == 5) as 1 instead of 2, the element closest to the left index; for byte bytes[2:5] = '{1, -2, 3, -4} it returns 3 and 0 instead of the indices 3 and 5, min returns -2 instead of -4 and item.index never equals 4; arrays at the bounds of int find no element or the wrong one. 7.12.1 and 7.12.4 use the declared indices. See verification/repros/sv_array_locator_fixed_indices.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_fixed_struct_enum",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_iterator_enum_method",
+      "note": "colors.find_first with (item.next() == BLUE) reports in xezim 0.11.3 that method next is called on a null class handle and returns an empty queue; item is an element of the enumerated type, whose next() 6.19.5 defines, so the result is GREEN. See verification/repros/sv_array_locator_operands_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_index_argument",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_index_argument",
+      "note": "q.find(e, pos) with (e.pos > 3 && e.pos() < 6) and q.find_index(, at) with (item.at == item) return empty queues in xezim 0.11.3; 7.12 (Syntax 7-5) names the index method through the index argument (7.12.4), giving {9, 2} and {1, 6}. See verification/repros/sv_array_locator_index_argument.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_min_max_unique",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_operand",
+      "note": "xezim 0.11.3 gives q.min() == lowest and q.max(v) with (v % 7) == q.find with (item == 6) as 0 although the assigned results are equal, and names.min returns \"bob\" instead of \"alice\" (7.12.1, 6.16 lexicographic order). See verification/repros/sv_array_locator_operands_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_struct_elements",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_struct_equality",
+      "note": "With a queue of unpacked structures and second = aliases[1], aliases.find_index with (item == second) returns an empty queue in xezim 0.11.3; 11.2.2 compares the structures by equality, so the result is {1}. The member predicates of the UVM factory shape pass. See verification/repros/sv_array_locator_struct_equality.json."
+    },
+    {
+      "suite": "sv",
+      "name": "array_locators::array_locator_four_state",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_array_locator_unique_four_state",
+      "note": "For logic [3:0] q[$] = '{4'b1x00, 4'd3, 4'b1x00, 4'bzzzz, 4'd3, 4'bzzzz, 4'b1z00}, q.unique and q.unique_index return three entries in xezim 0.11.3, merging 4'b1x00 with 4'b1z00; 7.12.1 keeps one entry for each of the four values. The case also reads r.find with (...).size() as an operand (sv_array_locator_operand). See verification/repros/sv_array_locator_unique_four_state.json."
     }
   ]
 }

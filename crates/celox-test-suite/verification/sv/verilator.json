@@ -1,6 +1,7 @@
 {
   "case_files": [
     "verilator/always_comb.json",
+    "verilator/array_locators.json",
     "verilator/class.json",
     "verilator/concurrent_assertions.json",
     "verilator/container_formals.json",
