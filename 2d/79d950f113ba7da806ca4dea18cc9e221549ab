@@ -1,0 +1,1 @@
+Codex review: functions returning an event and event ports are rejected, since an event control cannot tell such a call from a value and ports would get no object.
