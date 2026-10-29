@@ -1,4 +1,4 @@
-cocotb==2.0.1
+cocotb==2.1.0
 cocotb-test==0.3.0
 cocotb-bus==0.3.0
 cocotbext-axi==0.1.28
