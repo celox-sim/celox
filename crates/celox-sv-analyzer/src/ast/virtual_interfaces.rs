@@ -1141,6 +1141,224 @@ pub(super) fn check_equality(
     Ok(())
 }
 
+/// An error if virtual interface `handle` is `null`.
+pub(super) fn null_check(handle: &Expr) -> Expr {
+    null_access(handle, 1, false)
+}
+
+/// Member `member` of the interface instance that virtual interface
+/// `handle` of type `ty` denotes, as an event expression watches it: a
+/// selection among the instances, which changes when `handle` does, and
+/// zero for `null`.
+pub(super) fn watched(
+    state: &AnalysisState,
+    handle: Expr,
+    ty: &VirtualInterface,
+    member: &str,
+) -> Converted<Expr> {
+    let (found, signals) = self::member(state, ty, member)?;
+    let width = casts::expr_type_from_type(state, &found.r#type, &HashMap::default())
+        .map(|shape| shape.width)
+        .ok_or_else(|| unsupported(format!("width of virtual interface member `{member}`")))?;
+    let mut value = Expr::Literal(format!("{width}'d0"));
+    for (id, signal) in signals.into_iter().rev() {
+        value = Expr::Mux {
+            condition: Box::new(denotes(&handle, id)),
+            then_expr: Box::new(Expr::Ident(signal)),
+            else_expr: Box::new(value),
+        };
+    }
+    Ok(value)
+}
+
+/// The member signals that a watched member `handle.member` may be, each
+/// with the condition that `handle` denotes its instance. An event item on
+/// one counts each write of the member, which the settled selection
+/// ([`watched`]) misses when a process pulses it.
+pub(super) fn watched_writes(
+    state: &AnalysisState,
+    handle: &Expr,
+    ty: &VirtualInterface,
+    member: &str,
+) -> Converted<Vec<(Expr, Expr)>> {
+    let (_, signals) = self::member(state, ty, member)?;
+    Ok(signals
+        .into_iter()
+        .map(|(id, signal)| (Expr::Ident(signal), denotes(handle, id)))
+        .collect())
+}
+
+/// Whether virtual interface `handle` is `null`.
+pub(super) fn is_null(handle: &Expr) -> Expr {
+    Expr::Binary {
+        left: Box::new(handle.clone()),
+        op: BinaryOp::Eq,
+        right: Box::new(Expr::Literal(format!("{WIDTH}'d0"))),
+    }
+}
+
+/// `stmts`, the statements of an event control through virtual interfaces,
+/// as one statement that [`without_event_blocks`] recognizes: a loop that
+/// runs them once, starting with the `null` checks of the handles.
+pub(super) fn event_block(mut stmts: Vec<Stmt>) -> Stmt {
+    stmts.push(Stmt::Break);
+    Stmt::Loop {
+        kind: crate::procedural::LoopKind::Forever,
+        init: Vec::new(),
+        condition: None,
+        step: Vec::new(),
+        body: stmts,
+    }
+}
+
+/// Whether `stmt` is an [`event_block`].
+fn is_event_block(stmt: &Stmt) -> bool {
+    matches!(stmt, Stmt::Loop {
+        kind: crate::procedural::LoopKind::Forever,
+        body,
+        ..
+    } if matches!(body.first(), Some(Stmt::Eval(Expr::Call {
+        callee: Callee::Checked {
+            check: system_functions::AccessCheck::VirtualInterface,
+            ..
+        },
+        ..
+    }))))
+}
+
+/// `stmt` without the [`event_block`]s it contains, whose reads are those
+/// of its timing controls, for the reads of `@*` (IEEE 1800-2023 9.4.2.2).
+pub(super) fn without_event_blocks(stmt: &Stmt) -> Stmt {
+    let all = |stmts: &[Stmt]| {
+        stmts
+            .iter()
+            .filter(|stmt| !is_event_block(stmt))
+            .map(without_event_blocks)
+            .collect::<Vec<_>>()
+    };
+    match stmt {
+        stmt if is_event_block(stmt) => Stmt::If {
+            condition: Expr::Literal("1'b0".into()),
+            then_body: Vec::new(),
+            else_body: Vec::new(),
+        },
+        Stmt::If {
+            condition,
+            then_body,
+            else_body,
+        } => Stmt::If {
+            condition: condition.clone(),
+            then_body: all(then_body),
+            else_body: all(else_body),
+        },
+        Stmt::Case {
+            kind,
+            selector,
+            items,
+            default,
+        } => Stmt::Case {
+            kind: *kind,
+            selector: selector.clone(),
+            items: items
+                .iter()
+                .map(|item| crate::procedural::CaseItemBase {
+                    labels: item.labels.clone(),
+                    body: all(&item.body),
+                })
+                .collect(),
+            default: default.as_deref().map(all),
+        },
+        Stmt::Loop {
+            kind,
+            init,
+            condition,
+            step,
+            body,
+        } => Stmt::Loop {
+            kind: kind.clone(),
+            init: all(init),
+            condition: condition.clone(),
+            step: all(step),
+            body: all(body),
+        },
+        Stmt::Fork { join, branches } => Stmt::Fork {
+            join: *join,
+            branches: branches.iter().map(|branch| all(branch)).collect(),
+        },
+        stmt => stmt.clone(),
+    }
+}
+
+/// The handle and the arms of `expr` when it is a member read of
+/// [`read`]: a selection by id that ends in the `null` check.
+fn read_chain(expr: &Expr) -> Option<(&Expr, Vec<(u32, &Expr)>)> {
+    let mut arms = Vec::new();
+    let mut handle = None;
+    let mut current = expr;
+    loop {
+        match current {
+            Expr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                let Expr::Binary {
+                    left,
+                    op: BinaryOp::Eq,
+                    right,
+                } = &**condition
+                else {
+                    return None;
+                };
+                let Expr::Literal(literal) = &**right else {
+                    return None;
+                };
+                let id = literal.strip_prefix(&format!("{WIDTH}'d"))?.parse().ok()?;
+                if handle.is_some_and(|handle| handle != &**left) {
+                    return None;
+                }
+                handle = Some(&**left);
+                arms.push((id, &**then_expr));
+                current = else_expr;
+            }
+            Expr::Call {
+                callee:
+                    Callee::Checked {
+                        check: system_functions::AccessCheck::VirtualInterface,
+                        ..
+                    },
+                args,
+                ..
+            } => {
+                let Some(Some(Expr::Binary { left, .. })) = args.first() else {
+                    return None;
+                };
+                if handle.is_some_and(|handle| handle != &**left) {
+                    return None;
+                }
+                return Some((&**left, arms));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The handles that `expr` reads members through, each once.
+pub(super) fn read_handles(expr: &Expr, handles: &mut Vec<Expr>) {
+    if let Some((handle, arms)) = read_chain(expr) {
+        if !handles.contains(handle) {
+            handles.push(handle.clone());
+        }
+        for (_, arm) in arms {
+            read_handles(arm, handles);
+        }
+        return;
+    }
+    for child in children(expr) {
+        read_handles(child, handles);
+    }
+}
+
 /// The operands of `expr` (not those of its constant selects).
 fn children(expr: &Expr) -> Vec<&Expr> {
     match expr {

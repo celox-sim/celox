@@ -3348,13 +3348,16 @@
     ],
     "cases": {
       "icarus": [
+        "virtual_interfaces::always_on_member_edges",
         "virtual_interfaces::class_call_arguments_and_package_results",
         "virtual_interfaces::four_state_members",
         "virtual_interfaces::function_results",
         "virtual_interfaces::increments_arrays_and_package_variables",
         "virtual_interfaces::increments_in_expressions",
         "virtual_interfaces::interface_ports_and_array_elements",
+        "virtual_interfaces::member_pulses_within_one_activation",
         "virtual_interfaces::member_selects",
+        "virtual_interfaces::mixed_event_controls",
         "virtual_interfaces::modport_ports_and_constant_sized_members",
         "virtual_interfaces::multidimensional_and_package_arrays",
         "virtual_interfaces::null_equality_and_assignment",
@@ -3369,7 +3372,34 @@
         "virtual_interfaces::rejects_modport_ports_to_full_interface",
         "virtual_interfaces::rejects_modport_to_full_interface",
         "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
+        "virtual_interfaces::retargets_with_ordinary_events",
+        "virtual_interfaces::waits_on_member_edges",
+        "virtual_interfaces::waits_on_member_levels",
+        "virtual_interfaces::waits_with_guards_signed_members_and_automatic_tasks",
         "virtual_interfaces::writes_from_instances_of_one_module"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_virtual_interface_wait",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_virtual_interface_event_verilator.json",
+      "verification/repros/sv_virtual_interface_wait_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "virtual_interfaces::member_pulses_within_one_activation",
+        "virtual_interfaces::mixed_event_controls",
+        "virtual_interfaces::retargets_with_ordinary_events",
+        "virtual_interfaces::waits_on_member_edges",
+        "virtual_interfaces::waits_on_member_levels",
+        "virtual_interfaces::waits_with_guards_signed_members_and_automatic_tasks"
       ]
     }
   }

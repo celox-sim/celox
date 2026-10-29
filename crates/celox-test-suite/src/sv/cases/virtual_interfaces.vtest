@@ -594,3 +594,248 @@ endmodule
 "#)
   (top Top)
   (expect reject))
+
+(case waits_on_member_edges
+  ; Processes wait on the clocks of the instances that static virtual
+  ; interface variables denote (IEEE 1800-2023 25.9). The variable is an
+  ; operand of the event expression: retargeting it from an instance whose
+  ; clock is 0 to one whose clock is 1 is a positive edge (9.4.2).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+module Top;
+    logic fast = 0;
+    logic slow = 0;
+    always #1 fast = ~fast;
+    always #4 slow = ~slow;
+    logic low = 0;
+    logic high = 1;
+    bus_if a(fast);
+    bus_if b(slow);
+    bus_if lo(low);
+    bus_if hi(high);
+    virtual bus_if va;
+    virtual bus_if vb;
+    virtual bus_if moved;
+    task run(logic [7:0] value, int cycles);
+        repeat (cycles) @(posedge va.clk);
+        va.data <= value;
+    endtask
+    initial begin
+        va = a;
+        vb = b;
+        moved = lo;
+        a.data = 0;
+        b.data = 0;
+        fork
+            begin run(8'h11, 2); $display("a %0d %h", $time, a.data); end
+            begin repeat (2) @(posedge vb.clk); vb.data <= 8'h22; $display("b %0d %h", $time, b.data); end
+            begin @(posedge moved.clk); $display("moved %0d", $time); end
+            begin #2 moved = hi; #1 moved = lo; end
+        join
+        #1 $display("%h %h", a.data, b.data);
+    end
+endmodule
+"#)
+  (top Top) (run_until 20)
+  (expect_output "moved 2\na 3 00\nb 12 00\n11 22\n"))
+
+(case waits_on_member_levels
+  ; A static virtual interface variable is watched: changing it during the
+  ; wait re-evaluates the condition (IEEE 1800-2023 9.4.2, 9.4.3).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic ready;
+    logic [7:0] data;
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if watched;
+    virtual bus_if other;
+    initial begin
+        a.ready = 0;
+        b.ready = 0;
+        a.data = 0;
+        b.data = 0;
+        other = b;
+        watched = a;
+        fork
+            begin wait (other.ready && other.data == 8'h42); $display("other %0d", $time); end
+            begin wait (watched.ready); $display("module %0d", $time); end
+            begin #3 watched = b; end
+            begin #5 b.ready = 1; #5 b.data = 8'h42; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 20)
+  (expect_output "module 5\nother 10\n"))
+
+(case waits_with_guards_signed_members_and_automatic_tasks
+  ; The process evaluates a wait condition, so a read through a null
+  ; handle that the condition guards against is not an error; a signed
+  ; member compares as signed; and an automatic task waits on a static
+  ; virtual interface variable as any process does (IEEE 1800-2023 9.4.3,
+  ; 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic ready;
+    logic signed [7:0] data;
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    virtual bus_if vif;
+    virtual bus_if other;
+    task automatic run();
+        @(posedge vif.clk);
+        $display("auto %0d", $time);
+    endtask
+    initial begin
+        a.ready = 0;
+        a.data = 0;
+        other = a;
+        fork
+            begin wait (vif == null ? 1'b0 : vif.ready); $display("guard %0d", $time); end
+            begin wait (other.data < 0); $display("signed %0d", $time); end
+            begin #1 vif = a; run(); end
+            begin #2 clk = 1; #1 a.ready = 1; #1 a.data = -3; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (expect_output "auto 2\nguard 3\nsigned 4\n"))
+
+(case mixed_event_controls
+  ; Items through virtual interfaces mix with ordinary items, which keep
+  ; their counted edges, write-time iff conditions, local and real operands;
+  ; and an enclosing @* reads only the statements, not the nested control's
+  ; handles and members (IEEE 1800-2023 9.4.2, 9.4.2.2, 9.4.2.3, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk); endinterface
+module Top;
+    logic low = 0;
+    logic tick = 0;
+    always #1 tick = ~tick;
+    bus_if quiet(low);
+    bus_if ticking(tick);
+    virtual bus_if vif;
+    virtual bus_if clocked;
+    logic pulse = 0;
+    logic clk = 0;
+    logic en = 1;
+    real r = 0.0;
+    logic [7:0] data = 0;
+    task automatic on_reset(input bit reset);
+        @(posedge vif.clk or posedge reset);
+        $display("reset %0d", $time);
+    endtask
+    always @* begin
+        @(posedge clocked.clk);
+        $display("out %0d %h", $time, data);
+    end
+    initial begin
+        vif = quiet;
+        clocked = ticking;
+        fork
+            begin @(posedge vif.clk or posedge pulse); $display("pulse %0d", $time); end
+            begin @(posedge clk iff en or posedge vif.clk); $display("iff %0d", $time); end
+            begin @(vif.clk or r); $display("real %0d", $time); end
+            on_reset(1'b0);
+            begin #1 pulse = 1; pulse = 0; #1 clk = 1; en = 0; #1 r = 0.5; #1 data = 8'haa; end
+        join_none
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (expect_output "pulse 1\niff 2\nreal 3\nout 5 aa\n"))
+
+(case member_pulses_within_one_activation
+  ; A pulse that one activation writes to the member a virtual interface
+  ; selects is an event, and one written to another instance is none
+  ; (IEEE 1800-2023 9.4.2, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic pulse = 0;
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if vif;
+    initial begin
+        vif = a;
+        @(posedge vif.pulse);
+        $display("pulse %0d", $time);
+    end
+    initial begin
+        #1 b.pulse = 1;
+        b.pulse = 0;
+        #1 a.pulse = 1;
+        a.pulse = 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 5)
+  (expect_output "pulse 2\n"))
+
+(case always_on_member_edges
+  ; An edge-sensitive always may wait on a member through a virtual
+  ; interface; it runs as a process. The handle's initializer runs before
+  ; any process starts (IEEE 1800-2023 6.8, 9.2.2, 9.4.2, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk); endinterface
+module Top;
+    logic tick = 0;
+    always #2 tick = ~tick;
+    bus_if ticking(tick);
+    virtual bus_if vif = ticking;
+    int rises = 0;
+    int edges = 0;
+    always @(posedge vif.clk) rises++;
+    always @(negedge vif.clk or posedge vif.clk) edges++;
+    initial #7 $display("%0d %0d", rises, edges);
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (expect_output "2 3\n"))
+
+(case retargets_with_ordinary_events
+  ; Retargeting a handle to an instance whose clock is high after the old
+  ; instance's clock fell is a positive edge of the selection, and an
+  ; ordinary item's event in the same activation as a retarget is kept
+  ; (IEEE 1800-2023 9.4.2, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk); endinterface
+module Top;
+    logic ca = 1;
+    logic cb = 1;
+    logic lo1 = 0;
+    logic lo2 = 0;
+    bus_if a(ca);
+    bus_if b(cb);
+    bus_if c(lo1);
+    bus_if d(lo2);
+    virtual bus_if vif;
+    virtual bus_if wif;
+    logic pulse = 0;
+    initial begin
+        // After time 0, whose interface port connections race with the
+        // processes (IEEE 1800-2023 4.7).
+        #1 vif = a;
+        wif = c;
+        fork
+            begin @(posedge vif.clk); $display("retarget %0d", $time); end
+            begin @(posedge wif.clk or posedge pulse); $display("pulse %0d", $time); end
+            begin #1 ca = 0; #1 vif = b; end
+            begin #1 pulse = 1; wif = d; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 6)
+  (expect_output "pulse 2\nretarget 3\n"))

@@ -341,7 +341,7 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Wait { condition, body } => {
                         self.allow_timing("wait statement")?;
                         let condition = self.native_value(*condition)?;
-                        output.push(Stmt::Wait(condition));
+                        output.extend(self.wait_statements(condition)?);
                         jobs.push(Job::Enter(*body));
                     }
                     StatementKind::Timing { control, body } => {
@@ -350,6 +350,8 @@ impl BodyBuilder<'_, '_, '_> {
                                 start: output.len(),
                                 sensitivity: self.sensitivity_body.len(),
                             });
+                        } else if let Some(stmts) = self.virtual_event_control(*control)? {
+                            output.extend(stmts);
                         } else {
                             let timing = self.native_timing_control(*control)?;
                             output.push(timing);

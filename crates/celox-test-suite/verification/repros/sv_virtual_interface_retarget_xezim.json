@@ -1,0 +1,23 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source": "sv_virtual_interface_retarget_xezim.sv",
+  "standard": "IEEE 1800-2023 9.4.2, 25.9",
+  "command": "xezim sv_virtual_interface_retarget_xezim.sv",
+  "expected_output": "moved 2",
+  "observations": [
+    {
+      "exit_code": 0,
+      "output": "timeout\nSimulation finished at time 10 ($finish called)\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "build_exit_code": 0,
+      "exit_code": 1,
+      "output": "%Error: sv_virtual_interface_retarget_xezim.sv:11: Null pointer dereferenced\nAborting...\n"
+    }
+  ],
+  "note": "The virtual interface variable `moved` is an operand of the event expression `posedge moved.clk`. Retargeting it at time 2 from `lo` (clk 0) to `hi` (clk 1) changes the expression from 0 to 1, a positive edge (9.4.2, as in its example where `p = q` during `@(p.status)` waits on the new packet and fires if the value already differs). xezim 0.11.3 ignores the retarget and the wait never completes; Celox prints moved 2."
+}
