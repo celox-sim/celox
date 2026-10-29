@@ -251,6 +251,10 @@ impl SystemFunction {
                 celox_design::ProcessOp::WaitEvent => "event control",
                 celox_design::ProcessOp::Triggered => "event.triggered",
                 celox_design::ProcessOp::WaitTriggered => "wait(event.triggered)",
+                celox_design::ProcessOp::SemaphoreNew => "semaphore::new",
+                celox_design::ProcessOp::SemaphorePut => "semaphore.put",
+                celox_design::ProcessOp::SemaphoreGet => "semaphore.get",
+                celox_design::ProcessOp::SemaphoreTryGet => "semaphore.try_get",
             },
             Self::Ln => "$ln",
             Self::Log10 => "$log10",
@@ -455,6 +459,7 @@ impl SystemFunction {
         match self {
             Self::Process(celox_design::ProcessOp::Status) => Some((32, true)),
             Self::Process(celox_design::ProcessOp::Triggered) => Some((1, false)),
+            Self::Process(celox_design::ProcessOp::SemaphoreTryGet) => Some((32, true)),
             Self::Process(_) => Some((32, false)),
             Self::Ln
             | Self::Log10

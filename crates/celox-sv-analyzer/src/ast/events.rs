@@ -104,7 +104,10 @@ pub(super) fn blocks(stmt: &Stmt) -> bool {
         stmt,
         Stmt::Eval(Expr::Call {
             callee: Callee::System(SystemFunction::Process(
-                ProcessOp::WaitEvent | ProcessOp::WaitTriggered | ProcessOp::Await
+                ProcessOp::WaitEvent
+                    | ProcessOp::WaitTriggered
+                    | ProcessOp::Await
+                    | ProcessOp::SemaphoreGet
             )),
             ..
         })

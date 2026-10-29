@@ -274,6 +274,9 @@ mod container_formals;
 #[path = "frontends/systemverilog/events.rs"]
 mod events;
 
+#[path = "frontends/systemverilog/semaphores.rs"]
+mod semaphores;
+
 #[path = "frontends/systemverilog/containers.rs"]
 mod containers;
 

@@ -1153,10 +1153,13 @@ pub(in crate::ast) fn scoped_type(
                 }
             } else {
                 let qualified = scope::qualified_name(&tree.state, &scope, &member);
-                return Ok(context.type_aliases.get(&qualified).cloned().or_else(|| {
-                    (qualified == "std::process")
-                        .then(|| super::handle(super::super::processes::CLASS))
-                }));
+                return Ok(context.type_aliases.get(&qualified).cloned().or_else(
+                    || match qualified.as_str() {
+                        "std::process" => Some(super::handle(super::super::processes::CLASS)),
+                        "std::semaphore" => Some(super::handle(super::super::semaphores::CLASS)),
+                        _ => None,
+                    },
+                ));
             }
         }
         // A class of a package, `p::C::T`, or a specialization.

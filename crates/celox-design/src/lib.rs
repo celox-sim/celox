@@ -612,6 +612,17 @@ pub enum ProcessOp {
     /// `wait(e.triggered)`: block unless `e` was triggered in the current time
     /// step, until it is.
     WaitTriggered,
+    /// `new(keyCount)` of a semaphore: its handle (IEEE 1800-2023 15.3.1).
+    SemaphoreNew,
+    /// `s.put(keyCount)`: return keys, unblocking the waiting processes they
+    /// suffice for in arrival order (15.3.2).
+    SemaphorePut,
+    /// `s.get(keyCount)`: obtain keys if they are available, or else wait
+    /// for them behind the processes already waiting (15.3.3).
+    SemaphoreGet,
+    /// `s.try_get(keyCount)`: obtain keys if they are available; 1 if so, 0
+    /// otherwise (15.3.4).
+    SemaphoreTryGet,
 }
 impl ProcessOp {
     pub fn from_code(code: u32) -> Option<Self> {
@@ -631,6 +642,10 @@ impl ProcessOp {
             12 => Self::WaitEvent,
             13 => Self::Triggered,
             14 => Self::WaitTriggered,
+            15 => Self::SemaphoreNew,
+            16 => Self::SemaphorePut,
+            17 => Self::SemaphoreGet,
+            18 => Self::SemaphoreTryGet,
             _ => return None,
         })
     }

@@ -1036,6 +1036,8 @@ impl<B: SimBackend> Simulator<B> {
                 events: Default::default(),
                 nba_events: Vec::new(),
                 event_time: 0,
+                semaphores: Default::default(),
+                semaphore_limit: 0,
             },
         ))
     }
