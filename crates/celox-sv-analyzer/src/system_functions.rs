@@ -740,6 +740,9 @@ pub enum StringOp {
     /// the calling scope, of which `ticks_per_unit` simulation time units
     /// make one.
     Format { ticks_per_unit: u64 },
+    /// The text `%p` prints for a class handle, or with a layout for a
+    /// container (21.2.1.6).
+    Pattern(Option<ContainerLayout>),
 }
 
 impl StringOp {
@@ -756,6 +759,7 @@ impl StringOp {
                 | Self::ToLower
                 | Self::Itoa(_)
                 | Self::Format { .. }
+                | Self::Pattern(_)
         )
     }
 
@@ -823,6 +827,7 @@ impl fmt::Display for StringOp {
             Self::Itoa(Radix::Octal) => "octtoa",
             Self::Itoa(Radix::Binary) => "bintoa",
             Self::Format { .. } => "$sformatf",
+            Self::Pattern(_) => "%p",
         };
         f.write_str(name)
     }

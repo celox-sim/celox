@@ -840,6 +840,37 @@ mod host {
                     out.extend_from_slice(&runtime_event_format_arg(arg, 'd', site.sizing, field));
                     arg_idx += 1;
                 }
+                // The analyzer rewrites each `%p` of a literal format; one of a
+                // format read at run time prints a string in quotes and any
+                // other value as `%0d` does (IEEE 1800-2023 21.2.1.6).
+                'p' | 'P' if site.sizing == DisplaySizing::Ieee => {
+                    let Some(arg) = args.get(arg_idx) else {
+                        arg_idx += 1;
+                        continue;
+                    };
+                    if arg.is_string {
+                        out.push(b'"');
+                        out.extend_from_slice(&runtime_event_format_arg(
+                            arg,
+                            's',
+                            site.sizing,
+                            FieldSpec::default(),
+                        ));
+                        out.push(b'"');
+                    } else {
+                        let field = FieldSpec {
+                            width: Some(0),
+                            ..FieldSpec::default()
+                        };
+                        out.extend_from_slice(&runtime_event_format_arg(
+                            arg,
+                            'd',
+                            site.sizing,
+                            field,
+                        ));
+                    }
+                    arg_idx += 1;
+                }
                 't' | 'T' | 'm' | 'M' => {
                     let text = if matches!(spec, 't' | 'T') {
                         ctx.tb_time.unwrap_or(0).to_string()

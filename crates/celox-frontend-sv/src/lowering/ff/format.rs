@@ -193,7 +193,7 @@ fn format_conversions(template: &str) -> Vec<char> {
             while chars.next_if(char::is_ascii_digit).is_some() {}
         }
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsStTeEfFgG".contains(spec)
+            && "bBoOhHxXdDiIcCsStTeEfFgGpP".contains(spec)
         {
             conversions.push(spec);
         }

@@ -806,6 +806,10 @@
     "sv_rest-X90": {
       "title": "An update of an element of a nested container evaluates the outer index expression again, and $unpacked_dimensions/$dimensions of a dynamic array of dynamic arrays count one level",
       "standard": "IEEE 1800-2023 7.4.5, 11.4.1, 20.7"
+    },
+    "sv_pattern_handles_and_literals": {
+      "title": "%p prints null class handles in a queue as 0 and a string literal as a number",
+      "standard": "IEEE 1800-2023 21.2.1.6"
     }
   },
   "cases": [
@@ -4703,6 +4707,14 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X84",
       "note": "h.p.m_type_name, the string member of a class property written through a ref formal, prints as a space-padded wide value and h.p.m_type.text prints empty; xezim does the same for a direct write of the property (h.p = '{...}). Reproduced by verification/repros/sv_xezim_unpacked_struct_properties.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::pattern_format_keys_and_handles",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_pattern_handles_and_literals",
+      "note": "xezim 0.11.3 prints '{0, 0} for a queue of two null class handles 7104884 for the string literal \"lit\", and the packed bytes of a string-valued conditional (7566450 for \"str\"); 21.2.1.6 prints a null handle as null and a string literal in quotes. It also prints the bit [7:0] elements of an associative array as 'h41 and 'h0, where unformatted $display prints decimal. See verification/sv/limitations/pattern-format.json."
     }
   ]
 }

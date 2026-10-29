@@ -7,7 +7,7 @@
 //! that build a string fill a heap buffer and intern it at the end.
 
 use super::*;
-use celox_heap::ops;
+use celox_heap::{containers as heap, ops};
 use sv::ir::{Radix, StringOp};
 
 impl Ff<'_, '_> {
@@ -44,6 +44,23 @@ impl Ff<'_, '_> {
         }
         let result = match op {
             StringOp::Format { .. } => unreachable!("formatted above"),
+            StringOp::Pattern(layout) => {
+                let handle = self.handle(&args[0])?;
+                let code = match layout {
+                    Some(layout) => ops::encode(
+                        heap::PATTERN,
+                        self.container_parameter(layout)
+                            | if layout.signed {
+                                heap::SIGNED_ELEMENTS
+                            } else {
+                                0
+                            },
+                    ),
+                    None => heap::HANDLE_PATTERN,
+                };
+                let buffer = self.heap_call(code, &[handle]);
+                self.heap_call(ops::FREEZE, &[buffer])
+            }
             StringOp::FromBits => {
                 let buffer = self.heap_call(ops::NEW, &[]);
                 let buffer = self.append_bits(buffer, &args[0])?;

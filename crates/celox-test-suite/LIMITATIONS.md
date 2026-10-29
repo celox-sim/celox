@@ -630,13 +630,18 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_unpacked_structs` | compile | icarus | 21 | Icarus 13.0 does not support unpacked structures ("sorry: Unpacked structs not supported."), which IEEE 1800-2023 7.2 defines; the standalone source reproduces the diagnostic. Verilator passes all but the nested default pattern, see sv_verilator_nested_struct_default. |
 | `sv_icarus_nested_containers` | compile | icarus | 4 | Icarus 13.0 rejects an associative array whose index type is a type name ("Type names are not valid expressions here."), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays ("Sorry: Dynamic array of type `dynamic array of ...` is not yet supported."), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases. |
 | `sv_verilator_nested_struct_default` | execute | verilator | 1 | Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 ("5 0000 1" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101. |
+| `sv_verilator_pattern_format` | execute | verilator | 2 | Verilator 5.052 prints `%p` of integral container elements and integral associative keys in hexadecimal (`'h1`, and `'hfffffffe` for the `int` key -2) and a string literal as its packed value. IEEE 1800-2023 21.2.1.6 prints singular values as unformatted `$display` prints them, in decimal, and a string literal in quotes; xezim 0.11.3 prints the queue and dynamic array case as expected. |
+| `sv_icarus_pattern_format` | execute | icarus | 1 | Icarus 13.0 compiles `%p` of queues and dynamic arrays, then `vvp` stops: "$display does not support argument type (116)." IEEE 1800-2023 21.2.1.6 prints them as assignment patterns. |
+| `sv_icarus_associative_arrays_and_class_queues` | compile | icarus | 1 | Icarus 13.0 rejects associative arrays with `int` and `string` indices ("Type names are not valid expressions here") and queues of class handles, which IEEE 1800-2023 7.8 and 7.10 define. |
 
 The `string_format` cases compare `$sformatf`, `$sformat` and `$swrite` with
 `$display` / `$write` of the same format and arguments. The [Icarus observations](verification/sv/limitations/string-format-icarus.json)
 retain the three failing runs with reduced adapter-free sources; the remaining
 cases pass in all three tools, except that Verilator 5.052 does not run the
 four-state case. `%m` is checked only in Celox, as each adapter wraps the
-design in its own testbench hierarchy.
+design in its own testbench hierarchy. The `pattern_format` cases print `%p`
+of containers, strings and class handles; the [observations](verification/sv/limitations/pattern-format.json)
+retain the standalone Verilator, Icarus and xezim outputs.
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable

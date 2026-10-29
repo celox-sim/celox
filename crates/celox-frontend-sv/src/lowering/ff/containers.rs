@@ -4,6 +4,34 @@ use celox_heap::{containers as heap, ops::encode};
 use sv::ir::{ContainerKind, ContainerLayout, ContainerOp, HandleProperty};
 
 impl Ff<'_, '_> {
+    /// The heap's parameter for a container of `layout`.
+    pub(super) fn container_parameter(&self, layout: ContainerLayout) -> u64 {
+        let (kind, capacity, signed_key, string_key, object_key) = match layout.kind {
+            ContainerKind::Dynamic => (0, 0, false, false, false),
+            ContainerKind::Queue { capacity } => (1, capacity, false, false, false),
+            ContainerKind::Associative {
+                signed,
+                string,
+                object,
+                ..
+            } => (2, 0, signed, string, object),
+        };
+        heap::parameter(
+            layout.width,
+            layout.two_state || !self.m.four_state,
+            match layout.handle {
+                None => 0,
+                Some(HandleProperty::String) => 1,
+                Some(HandleProperty::Object) => 2,
+            },
+            kind,
+            capacity,
+            signed_key,
+            string_key,
+            object_key,
+        )
+    }
+
     pub(super) fn container_call(
         &mut self,
         op: ContainerOp,
@@ -94,30 +122,11 @@ impl Ff<'_, '_> {
                 *arg = self.heap_operand(arg, context, kind)?;
             }
         }
-        let (kind, capacity, signed_key, string_key, object_key) = match layout.kind {
-            ContainerKind::Dynamic => (0, 0, false, false, false),
-            ContainerKind::Queue { capacity } => (1, capacity, false, false, false),
-            ContainerKind::Associative {
-                signed,
-                string,
-                object,
-                ..
-            } => (2, 0, signed, string, object),
+        let (signed_key, string_key) = match layout.kind {
+            ContainerKind::Associative { signed, string, .. } => (signed, string),
+            ContainerKind::Dynamic | ContainerKind::Queue { .. } => (false, false),
         };
-        let parameter = heap::parameter(
-            layout.width,
-            layout.two_state || !self.m.four_state,
-            match layout.handle {
-                None => 0,
-                Some(HandleProperty::String) => 1,
-                Some(HandleProperty::Object) => 2,
-            },
-            kind,
-            capacity,
-            signed_key,
-            string_key,
-            object_key,
-        );
+        let parameter = self.container_parameter(layout);
         let code = |opcode| encode(opcode, parameter);
         if op.reduction().is_some() {
             return self.container_reduction(op, layout, &args[0], parameter);

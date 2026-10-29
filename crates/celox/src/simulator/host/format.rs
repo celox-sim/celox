@@ -172,7 +172,7 @@ fn scale_time_arguments(template: &str, args: &mut [RuntimeEventArgValue], ticks
         let Some(spec) = chars.next() else {
             break;
         };
-        if !"bBoOhHxXdDiIcCsStTeEfFgG".contains(spec) {
+        if !"bBoOhHxXdDiIcCsStTeEfFgGpP".contains(spec) {
             continue;
         }
         if matches!(spec, 't' | 'T')
