@@ -221,6 +221,13 @@ against 7.12.1, including the first occurrence that `unique_index` keeps.
 Full official runs at the pinned revision report 1277 passing cases in 2state
 and 1288 in 4state, and change only these 22 verdicts.
 
+Increment and decrement operators in expressions (11.4.2) update 4 more rows:
+both state modes of `chapter-11/11.3.6--assign_in_expression.sv` and
+`11.3.6--assign_in_expression-sim.sv`, which assign `(++a)`, change from fail
+to pass. Each was simulated in both modes and leaves `a` and `b` at 1. Full
+official runs at the pinned revision report 1283 passing cases in 2state and
+1294 in 4state, and change only these 4 verdicts.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

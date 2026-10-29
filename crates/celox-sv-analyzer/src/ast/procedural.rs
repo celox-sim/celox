@@ -9,6 +9,7 @@
 use super::*;
 mod assertions;
 mod control;
+mod effects;
 mod final_procedures;
 mod foreach;
 use foreach::ForeachLoop;
@@ -56,6 +57,16 @@ pub(super) struct BodyState<'a> {
     pub static_initializers: Vec<Stmt>,
     /// Constant calls get a fresh frame, even for static declarations (13.4.3).
     pub constant_evaluation: bool,
+}
+
+/// The statements and condition of a `for` loop header. A condition with
+/// increment or decrement operators is the `prologue` of each iteration
+/// instead (see [`BodyBuilder::loop_condition`]).
+struct ForHeader {
+    init: Vec<Stmt>,
+    condition: Option<Expr>,
+    prologue: Vec<Stmt>,
+    steps: Vec<Stmt>,
 }
 
 /// Converts the statements of one procedural body.
@@ -1259,63 +1270,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         Ok(())
     }
 
-    fn inc_or_dec(&self, root: celox_sv_syntax::ExprId) -> Result<Stmt, AnalyzerError> {
+    /// The statements of `id` used as a statement, when it is an increment
+    /// or decrement.
+    fn update_statement(&mut self, id: celox_sv_syntax::ExprId) -> Converted<Option<Vec<Stmt>>> {
         let celox_sv_syntax::ExprKind::Unary {
             operator,
             expression,
             ..
-        } = &self.tree.declarations().expression(root).kind
+        } = &self.tree.declarations().expression(id).kind
         else {
-            return Err(unsupported("increment or decrement expression"));
+            return Ok(None);
         };
-        let op = match operator.as_str() {
-            "++" => "+=",
-            "--" => "-=",
-            _ => return Err(unsupported("increment or decrement operator")),
-        };
-        let native = self.tree.declarations();
-        if containers::element_member(*expression, native, self.tree, &self.dims)?.is_some() {
-            return Err(unsupported(
-                "assignment to a member of a dynamic container element",
-            ));
+        if !matches!(operator.as_str(), "++" | "--") {
+            return Ok(None);
         }
-        if let Some((property, receiver)) =
-            expression_binding::object_property(self.tree, *expression, native, &self.dims)?
-        {
-            if property.field.handle.is_some() {
-                return Err(unsupported(format!("operator `{operator}` on a handle")));
-            }
-            let handle =
-                expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
-            return self.property_store(&property, handle, op, Expr::Literal("1".into()));
-        }
-        self.reject_tagged_integral_target(*expression)?;
-        let (written, lhs) = self.native_lvalue(*expression)?;
-        let mut rhs = assignment_op_expr(
-            &self.tree.state,
-            &written,
-            op,
-            Expr::Literal("1".into()),
-            &self.dims,
-        )?;
-        if let Some((guards, _)) =
-            expression_binding::member_context(*expression, native, self.tree, &self.dims)?
-        {
-            rhs = packed_structs::checked_value(guards, rhs, &self.tree.state, &self.dims)?;
-        }
-        self.rename_expr(&mut rhs);
-        Ok(Stmt::Assign {
-            lhs,
-            rhs,
-            nonblocking: false,
-        })
+        let increment = operator == "++";
+        let mut stmts = self.effects(&[*expression])?;
+        self.update(id, *expression, None, increment, &mut stmts)?;
+        Ok(Some(stmts))
     }
 
     fn native_statement_leaf(
         &mut self,
         statement: &celox_sv_syntax::StatementKind,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
-        use celox_sv_syntax::{ExprKind, StatementKind};
+        use celox_sv_syntax::StatementKind;
         match statement {
             StatementKind::Assignment {
                 left,
@@ -1333,23 +1312,28 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         "native assignment operator mode disagrees".into(),
                     ));
                 }
-                if let Some(stmts) =
+                let mut stmts = self.effects(&[*left, *right])?;
+                if let Some(assignment) =
                     self.aggregate_property_assignment(operator, *nonblocking, *left, *right)?
                 {
+                    stmts.extend(assignment);
                     return Ok(stmts);
                 }
-                Ok(vec![self.assignment_value(
+                stmts.push(self.assignment_value(
                     if *nonblocking { "=" } else { operator },
                     *nonblocking,
                     (*left, *right),
-                )?])
+                )?);
+                Ok(stmts)
             }
-            StatementKind::Expression(id) => match &self.tree.declarations().expression(*id).kind {
-                ExprKind::Unary { operator, .. } if matches!(operator.as_str(), "++" | "--") => {
-                    Ok(vec![self.inc_or_dec(*id)?])
+            StatementKind::Expression(id) => {
+                if let Some(stmts) = self.update_statement(*id)? {
+                    return Ok(stmts);
                 }
-                _ => self.subroutine_call_statement(*id),
-            },
+                let mut stmts = self.effects(&[*id])?;
+                stmts.extend(self.subroutine_call_statement(*id)?);
+                Ok(stmts)
+            }
             StatementKind::Assertion { .. } => Err(unsupported("concurrent assertion")),
             StatementKind::WaitFork => {
                 self.allow_timing("wait fork statement")?;
@@ -1455,8 +1439,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     signal.name()
                 )));
             }
+            let automatic = match native.lifetime.as_deref() {
+                Some("automatic") => true,
+                Some("static") => false,
+                _ => self.automatic,
+            };
             let init = match assignment.value {
                 Some(root) => {
+                    let effects = self.effects(&[root])?;
+                    // A static variable is initialized once, before any
+                    // process starts (IEEE 1800-2023 6.21).
+                    if !automatic && !effects.is_empty() {
+                        return Err(unsupported(
+                            "increment or decrement in a static variable initializer",
+                        ));
+                    }
+                    stmts.extend(effects);
                     let target = LValue::Ident(signal.name().to_string());
                     let mut scoped = self.dims.clone();
                     scoped.insert(
@@ -1474,11 +1472,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     Some(init)
                 }
                 None => None,
-            };
-            let automatic = match native.lifetime.as_deref() {
-                Some("automatic") => true,
-                Some("static") => false,
-                _ => self.automatic,
             };
             if signal.r#type().unpacked_struct().is_some() {
                 let explicit = native.lifetime.as_deref() == Some("static");
@@ -2159,7 +2152,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn for_header(
         &mut self,
         header: &celox_sv_syntax::ForHeader,
-    ) -> Result<(Vec<Stmt>, Option<Expr>, Vec<Stmt>), AnalyzerError> {
+    ) -> Result<ForHeader, AnalyzerError> {
         use celox_sv_syntax::{ForInitialization, ForStep};
         let mut init = Vec::new();
         match &header.initialization {
@@ -2175,6 +2168,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     )?
                     .ok_or_else(|| unsupported("for-loop variable type"))?;
                     for variable in &group.variables {
+                        init.extend(self.effects(&[variable.value])?);
                         let source = instances::normalize_identifier(&variable.name.spelling);
                         let target = LValue::Ident(source.clone());
                         let mut scoped = self.dims.clone();
@@ -2197,6 +2191,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             Some(ForInitialization::Assignments(values)) => {
                 for value in values {
+                    init.extend(self.effects(&[value.left, value.right])?);
                     match self.aggregate_property_assignment("=", false, value.left, value.right)? {
                         Some(stmts) => init.extend(stmts),
                         None => init.push(self.assignment_value(
@@ -2208,36 +2203,42 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 }
             }
         }
-        let condition = header
-            .condition
-            .map(|id| self.native_value(id))
-            .transpose()?;
+        let (condition, prologue) = match header.condition {
+            None => (None, Vec::new()),
+            Some(id) => match self.loop_condition(id)? {
+                Some(prologue) => (None, prologue),
+                None => (Some(self.native_value(id)?), Vec::new()),
+            },
+        };
         let mut steps = Vec::new();
         for step in &header.steps {
-            if let ForStep::Assignment {
-                left,
-                operator,
-                right,
-                ..
-            } = step
-                && let Some(stmts) =
-                    self.aggregate_property_assignment(operator, false, *left, *right)?
-            {
-                steps.extend(stmts);
-                continue;
-            }
-            steps.push(match step {
-                ForStep::Assignment { left, operator, right, .. } => self.assignment_value(operator, false, (*left, *right))?,
-                ForStep::Expression(id) => {
-                    if !matches!(&self.tree.declarations().expression(*id).kind,
-                        celox_sv_syntax::ExprKind::Unary { operator, .. } if matches!(operator.as_str(), "++" | "--")) {
-                        return Err(unsupported("subroutine call as a for-loop step"));
+            match step {
+                ForStep::Assignment {
+                    left,
+                    operator,
+                    right,
+                    ..
+                } => {
+                    steps.extend(self.effects(&[*left, *right])?);
+                    match self.aggregate_property_assignment(operator, false, *left, *right)? {
+                        Some(stmts) => steps.extend(stmts),
+                        None => {
+                            steps.push(self.assignment_value(operator, false, (*left, *right))?)
+                        }
                     }
-                    self.inc_or_dec(*id)?
                 }
-            });
+                ForStep::Expression(id) => steps.extend(
+                    self.update_statement(*id)?
+                        .ok_or_else(|| unsupported("subroutine call as a for-loop step"))?,
+                ),
+            }
         }
-        Ok((init, condition, steps))
+        Ok(ForHeader {
+            init,
+            condition,
+            prologue,
+            steps,
+        })
     }
 
     fn foreach_bound_indices(

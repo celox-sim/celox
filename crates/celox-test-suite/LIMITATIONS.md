@@ -642,6 +642,9 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_typename_spelling` | execute | verilator | 4 | Verilator 5.052 spells `$typename` differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (`logic signed [0:7]` gives `logic[0:7]`, `int unsigned` gives `int`), writes `shortreal` as `real` and `bit [3:0][1:0]` as `bit[1:0][3:0]`, writes enumeration values in hex separated by semicolons without the base type (`enum{R=2'h0;G=2'h2;}`), drops `packed` and `signed` from structs, and writes a variable of a class type parameter as `PARAMTYPEDTYPE 'T'`. xezim 0.11.3 deviates too (`sv_typename` in its review). Reduced sources: [vectors](verification/repros/sv_typename_vectors.json), [aggregates](verification/repros/sv_typename_aggregates.json), [classes](verification/repros/sv_typename_classes.json), [constants](verification/repros/sv_typename_constant.json). |
 | `sv_icarus_typename_operands` | compile | icarus | 5 | Icarus 13.0 rejects a data type operand of `$typename` ("Type names are not valid expressions here."), a class-scoped type operand such as `$typename(Holder::T)` and the class parameter port lists `#(type T = int)` and `#(typename_scope_pkg::count_t N = 3)` (syntax errors), and an unpacked structure ("sorry: Unpacked structs not supported."), which IEEE 1800-2023 20.6.1, 8.23, 8.25 and 7.2 define; the same reduced sources and the [scoped-operand source](verification/repros/sv_typename_scopes.json) record them. |
 | `sv_verilator_typename_method_call` | compile | verilator | 1 | Verilator 5.052 rejects a string method on the result of `$typename` (`$typename(int).len()`: "Not expecting BASICDTYPE under a ATTROF in dotted expression"). IEEE 1800-2023 20.6.1 returns a string, 6.16.1 defines `len()` and A.8.2 permits a system function call as a method call root; xezim 0.11.3 compiles the case but deviates (`sv_typename` in its review). [Reduced source](verification/repros/sv_typename_scopes.json). |
+| `sv_verilator_increment_in_conditional_operand` | compile | verilator | 2 | Verilator 5.052 rejects `++` and `--` in an arm of `?:` and in the right operand of `->` ("Unsupported: Pre/post increment/decrement operator within a logical expression"). IEEE 1800-2023 11.4.2 allows them in any expression; Icarus 13.0 and xezim 0.11.3 compile both cases. [Standalone probe](verification/repros/sv_increment_decrement_conditional_operands.json). |
+| `sv_icarus_increment_operands` | compile | icarus | 2 | Icarus 13.0 rejects `++` used as a value of a vector narrower than `int`, an array element or a packed structure member ("sorry: ++ operation is not yet supported on vector slice."), lacks queues and associative arrays in classes, and aborts on `++` of a class property in an expression. IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable. The [pre-exclusion diagnostics](verification/sv/limitations/increment-decrement-icarus.json) retain a reduced source. |
+| `sv_icarus_implication_short_circuit` | execute | icarus | 1 | Icarus 13.0 evaluates the right operand of `->` when the left one is false, so `(i == 0) -> (j++ > 0)` increments `j`; IEEE 1800-2023 11.4.7 skips it. xezim 0.11.3 shares the error. [Standalone probe](verification/repros/sv_increment_decrement_conditional_operands.json). |
 
 The `string_format` cases compare `$sformatf`, `$sformat` and `$swrite` with
 `$display` / `$write` of the same format and arguments. The [Icarus observations](verification/sv/limitations/string-format-icarus.json)
@@ -661,6 +664,13 @@ whole-structure comparisons of the iterator, `unique` of X and Z values and
 the index argument (`sv_array_locator_*` in the xezim review), as the
 [standalone probe](verification/repros/sv_array_locator_operands_xezim.json)
 shows.
+
+The `increment_decrement` cases use `++` and `--` as statements and inside
+expressions (IEEE 1800-2023 11.4.2). xezim 0.11.3 evaluates the right operand
+of `->` when the left one is false and runs the side effects of a `repeat`
+count twice (`sv_implication_short_circuit` and
+`sv_repeat_count_evaluated_twice` in the xezim review, see the
+[repeat probe](verification/repros/sv_increment_decrement_repeat_count.json)).
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable

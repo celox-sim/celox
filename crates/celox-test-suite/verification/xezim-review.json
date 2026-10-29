@@ -854,6 +854,14 @@
     "sv_typename": {
       "title": "`$typename` drops the constants of enumerations, the members of structs and unions, signings, queue bounds and packed dimensions, and writes logic as reg",
       "standard": "IEEE 1800-2023 20.6.1"
+    },
+    "sv_implication_short_circuit": {
+      "title": "The right operand of -> is evaluated when the left operand is false",
+      "standard": "IEEE 1800-2023 11.4.7"
+    },
+    "sv_repeat_count_evaluated_twice": {
+      "title": "A repeat loop evaluates the side effects of its count expression twice",
+      "standard": "IEEE 1800-2023 12.7.2"
     }
   },
   "cases": [
@@ -4895,6 +4903,22 @@
       "classification": "xezim_bug",
       "bug": "sv_typename",
       "note": "local_int is 0 in xezim 0.11.3 (expected 1): the generate-local $typename(v) of int v is not \"int\". A standalone run prints an empty string for $typename(Holder::T), a byte typedef of a class (8.23), and 0 for $typename(integer) < $typename(logic), which compares the strings \"integer\" and \"logic\" (11.4.4, 6.16). See verification/repros/sv_typename_scopes.json."
+    },
+    {
+      "suite": "sv",
+      "name": "increment_decrement::increment_decrement_implication",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_implication_short_circuit",
+      "note": "With i == 1, xezim 0.11.3 increments j in (i == 0) -> (j++ > 0); 11.4.7 skips the second operand of -> when the first one is false, so j stays 0 and the later j-- gives -1. Icarus 13.0 shares the error. See verification/repros/sv_increment_decrement_conditional_operands.json."
+    },
+    {
+      "suite": "sv",
+      "name": "increment_decrement::increment_decrement_repeat_count",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_repeat_count_evaluated_twice",
+      "note": "With i == 1, xezim 0.11.3 runs repeat (i++ + 2) four times and leaves i at 3: the count expression and its increment run twice. 12.7.2 evaluates the expression once, so the loop runs 3 times and i is 2, as Verilator 5.052 and Icarus 13.0 report. See verification/repros/sv_increment_decrement_repeat_count.json."
     }
   ]
 }

@@ -3281,5 +3281,58 @@
         "system_functions::typename_scopes_and_string_operands"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_increment_in_conditional_operand",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects an increment or decrement operator in an arm of the conditional operator and in the right operand of -> (\"Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\"). IEEE 1800-2023 11.4.2 allows the operators in any expression, and 11.4.7 and 11.4.11 decide when such an operand is evaluated; Icarus 13.0 and xezim 0.11.3 compile both cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_increment_decrement_conditional_operands.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "increment_decrement::increment_decrement_conditional_arms",
+        "increment_decrement::increment_decrement_implication"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_increment_operands",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects an increment or decrement used as a value of a vector narrower than int, an array element or a packed structure member (\"sorry: ++ operation is not yet supported on vector slice.\"), does not support queues and associative arrays in classes, and aborts on ++ of a class property in an expression (\"draw_unary_inc_dec: Assertion `0' failed\"). IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable; Verilator 5.052 and xezim 0.11.3 pass both cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/increment-decrement-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "increment_decrement::increment_decrement_class_members",
+        "increment_decrement::increment_decrement_vectors"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_implication_short_circuit",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 evaluates the right operand of -> when the left one is false, so (i == 0) -> (j++ > 0) increments j. IEEE 1800-2023 11.4.7 does not evaluate the second operand of -> when the first one is logically false; xezim 0.11.3 shares the error and Verilator 5.052 rejects the operator there.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_increment_decrement_conditional_operands.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "increment_decrement::increment_decrement_implication"
+      ]
+    }
   }
 ]

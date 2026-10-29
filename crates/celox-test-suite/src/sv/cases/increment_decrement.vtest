@@ -1,0 +1,284 @@
+(group increment_decrement (category operators))
+
+(case increment_decrement_values
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    class Counter;
+        static int created;
+        int id;
+        function new();
+            id = created++;
+        endfunction
+    endclass
+    Counter c0, c1;
+    int i, s, ss, pos, pred[4];
+    byte b;
+    int unsigned u;
+    real r;
+    initial begin
+        c0 = new;
+        c1 = new;
+        $display("ids %0d %0d created %0d", c0.id, c1.id, c0.created);
+        c1.created--;
+        $display("static %0d", c0.created);
+        i = 0;
+        pred[i++] = 7;
+        pred[i++] = 8;
+        pos = 2;
+        s = pred[--pos];
+        $display("pred %0d %0d i=%0d s=%0d pos=%0d", pred[0], pred[1], i, s, pos);
+        ss = 5;
+        s = ss++;
+        $display("post %0d %0d", s, ss);
+        s = --ss;
+        $display("pre %0d %0d", s, ss);
+        b = 127;
+        $display("byte %0d %0d", b++, b);
+        u = 0;
+        $display("unsigned %0d %0d", u--, u);
+        r = 1.5;
+        $display("real %0.1f %0.1f", r++, --r);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "ids 0 1 created 2\nstatic 1\npred 7 8 i=2 s=8 pos=1\npost 5 6\npre 5 5\nbyte 127 -128\nunsigned 0 4294967295\nreal 1.5 1.5\n"))
+
+(case increment_decrement_vectors
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    typedef struct packed { int a; bit [3:0] b; } pair_t;
+    bit [3:0] nibble;
+    bit [7:0] arr[4];
+    pair_t p;
+    int s, a[2];
+    initial begin
+        nibble = 4'hf;
+        s = nibble++;
+        $display("wrap %0d %0d", s, nibble);
+        arr[1] = 255;
+        $display("element %0d %0d", arr[1]++, arr[1]);
+        p.a = 1;
+        p.b = 4'hf;
+        p.a++;
+        $display("member %0d %0d %0d", p.a, p.b++, p.b);
+        a[0] = 0;
+        a[1] = 42;
+        s = ++a[a[0]];
+        $display("select %0d %0d %0d", s, a[0], a[1]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "wrap 15 0\nelement 255 0\nmember 2 15 0\nselect 1 1 42\n"))
+
+(case increment_decrement_class_members
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    class Table;
+        int id = 1;
+        int q[$];
+        int unsigned count[string];
+        function int next();
+            return ++id;
+        endfunction
+    endclass
+    Table t;
+    int m[int];
+    int i;
+    initial begin
+        t = new;
+        $display("next %0d %0d", t.next(), t.id);
+        t.q.push_back(3);
+        i = 0;
+        $display("queue %0d %0d", t.q[i]++, t.q[0]);
+        t.count["x"] = 1;
+        t.count["x"]++;
+        $display("assoc %0d %0d", ++t.count["x"], t.count["x"]);
+        m[3] = 1;
+        --m[3];
+        $display("map %0d %0d", m[3]--, m[3]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "next 2 2\nqueue 3 4\nassoc 3 3\nmap 0 -1\n"))
+
+(case increment_decrement_conditional_operands
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    int calls;
+    function automatic int side(int v);
+        calls++;
+        return v;
+    endfunction
+    function automatic int pair(int a, int b);
+        return a * 10 + b;
+    endfunction
+    int i, j, k;
+    initial begin
+        i = 0;
+        j = 0;
+        k = (i != 0) && (j++ > 0);
+        $display("and skipped %0d %0d", k, j);
+        i = 1;
+        k = (i != 0) && (j++ >= 0);
+        $display("and evaluated %0d %0d", k, j);
+        k = (i != 0) || (j++ >= 0);
+        $display("or skipped %0d %0d", k, j);
+        k = (i == 0) || (++j > 0);
+        $display("or evaluated %0d %0d", k, j);
+        k = pair(i++, i++);
+        $display("arguments %0d %0d", k, i);
+        i = 0;
+        k = (side(0) != 0) && (i++ > 0);
+        $display("call decides %0d %0d", calls, i);
+        $display("display %0d %0d", i++, i);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "and skipped 0 0\nand evaluated 1 1\nor skipped 1 1\nor evaluated 1 2\narguments 12 3\ncall decides 1 0\ndisplay 0 1\n"))
+
+(case increment_decrement_statement_contexts
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    function automatic int counted(int from);
+        int n = from;
+        int steps = 0;
+        while (n-- > 0) steps++;
+        return steps * 100 + n;
+    endfunction
+    int i, j, k;
+    task automatic declared();
+        int t = i--;
+        $display("declaration %0d %0d", t, i);
+    endtask
+    initial begin
+        i = 0;
+        j = 1;
+        while (i++ < 3) j = j + 10;
+        $display("while %0d %0d", i, j);
+        i = 0;
+        k = 0;
+        while (i++ < 5) begin
+            if (i == 2) continue;
+            k += i;
+        end
+        $display("continue %0d %0d", i, k);
+        i = 0;
+        k = 0;
+        do begin
+            k++;
+            if (k == 2) continue;
+        end while (i++ < 3);
+        $display("do %0d %0d", i, k);
+        k = 0;
+        for (i = 0; i++ < 4; ) k += i;
+        $display("for %0d %0d", i, k);
+        j = 0;
+        k = 0;
+        for (i = 0; i < 3; j += k++) i = i + 1;
+        $display("steps %0d %0d %0d", i, j, k);
+        i = 0;
+        if (i++ == 0) $display("if %0d", i);
+        i = 0;
+        if (i == 5) $display("no");
+        else if (i++ == 0) $display("else if %0d", i);
+        i = 5;
+        if (i == 5) $display("first %0d", i);
+        else if (i++ == 0) $display("no");
+        $display("after %0d", i);
+        i = 0;
+        case (i++)
+            0: $display("case %0d", i);
+            default: $display("no");
+        endcase
+        declared();
+        $display("return %0d", counted(3));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "while 4 31\ncontinue 6 13\ndo 4 4\nfor 5 10\nsteps 3 3 3\nif 1\nelse if 1\nfirst 5\nafter 5\ncase 1\ndeclaration 1 0\nreturn 299\n"))
+
+(case increment_decrement_conditional_arms
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    int i, j, k;
+    initial begin
+        i = 1;
+        j = 1;
+        k = i ? j++ : j--;
+        $display("then %0d %0d", k, j);
+        k = (i == 0) ? j++ : j--;
+        $display("else %0d %0d", k, j);
+        k = (i == 0) ? 5 : ++j;
+        $display("pre %0d %0d", k, j);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "then 1 2\nelse 2 1\npre 2 2\n"))
+
+(case increment_decrement_implication
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    int i, j;
+    bit k;
+    initial begin
+        i = 1;
+        j = 0;
+        k = (i == 0) -> (j++ > 0);
+        $display("skipped %0d %0d", k, j);
+        k = (i != 0) -> (j-- > 100);
+        $display("evaluated %0d %0d", k, j);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "skipped 1 0\nevaluated 0 -1\n"))
+
+(case increment_decrement_repeat_count
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    int i, k;
+    initial begin
+        i = 1;
+        k = 0;
+        repeat (i++ + 2) k++;
+        $display("repeat %0d %0d", i, k);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "repeat 2 3\n"))
+
+(case increment_decrement_four_state
+  (four_state)
+  (source "increment_decrement.sv" #"
+module Top(output bit done);
+    logic [3:0] l;
+    integer n;
+    initial begin
+        l = 4'b10x1;
+        $display("%b", l++);
+        $display("%b", l);
+        l = 4'b0111;
+        $display("%b %b", ++l, l);
+        n = 'x;
+        $display("%0d", n--);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "10x1\nxxxx\n1000 1000\nx\n"))
