@@ -1037,6 +1037,13 @@ impl TieredBackend {
         let background_laid_out = laid_out.clone();
         // The baseline image runs derived edges by walking their plans.
         let baseline_laid_out = crate::derived_edge::without_units(laid_out);
+        // It settles before each domain rather than compiling a fused copy
+        // of the settle per domain into the scheduler.
+        let first_tier_laid_out = crate::scheduler::without_fused_domains(
+            baseline_laid_out.clone(),
+            !baseline_options.native_force_support
+                && baseline_options.signal_access.force_signals.is_empty(),
+        );
         let worker_baseline_options = baseline_options.clone();
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the single-stage background-failure policy.
@@ -1046,8 +1053,13 @@ impl TieredBackend {
                 let span = tracing::info_span!("celox.tiered.compile", target = "native");
                 span.in_scope(|| {
                     let result = logged(&worker_log, TieredCompileKind::Baseline, || {
-                        compile(&baseline_laid_out, &worker_baseline_options, &worker_cancel)
+                        compile(
+                            &first_tier_laid_out,
+                            &worker_baseline_options,
+                            &worker_cancel,
+                        )
                     });
+                    drop(first_tier_laid_out);
                     let ready = result.is_ok();
                     let delivered = baseline_sender.send(result).is_ok();
                     // A failed baseline leaves nothing to replace; the

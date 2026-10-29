@@ -4855,6 +4855,45 @@ endmodule"#;
         assert!(!by_loads, "the fixture must load stale bits it discards");
     }
 
+    /// A first tier settles before a domain instead of compiling a fused
+    /// copy of the settle into the scheduler for it.
+    #[test]
+    fn first_tier_scheduler_settles_instead_of_fusing() {
+        let source = r#"
+            module Top (clk: input clock, d: input bit<8>, q: output bit<8>) {
+                var next: bit<8>;
+                assign next = d + 1;
+                always_ff (clk) { q = next; }
+            }
+        "#;
+        let (program, _, _, _, _) = crate::Simulation::builder(source, "Top")
+            .emit_triggers()
+            .four_state(false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .unwrap();
+        let unit = program
+            .runtime
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .unwrap()
+            .unit
+            .unwrap();
+        let size = |program: &crate::ir::LaidOutProgram| {
+            program.sir.processes[unit]
+                .blocks
+                .values()
+                .map(|block| block.instructions.len())
+                .sum::<usize>()
+        };
+        assert!(
+            !program.sir.eval_comb_apply_ffs.is_empty(),
+            "the fixture fuses its domain"
+        );
+        let first_tier = crate::scheduler::without_fused_domains(program.clone(), true);
+        assert!(size(&first_tier) < size(&program));
+    }
+
     #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
     fn count_clean_clock_batch(clock_data: bool, alias: bool, dirty: bool) -> (u64, usize) {
         use crate::SimBackend;
