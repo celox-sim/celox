@@ -1,6 +1,1 @@
-Revision history for #2497:
-
-rev 2 (rebase) 2026-10-28 23:58 UTC
-rev 1 (initial) 2026-10-28 23:58 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2497,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"03c08929ee8938a360ca31d143a707feb203864b","timestamp_iso":"2026-10-28T23:58:33Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"03c08929ee8938a360ca31d143a707feb203864b","new_sha":"18070c2fb1b274e30f44e17dbe96c140251dffaf","timestamp_iso":"2026-10-28T23:58:33Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/03c08929ee8938a360ca31d143a707feb203864b...18070c2fb1b274e30f44e17dbe96c140251dffaf"}]} -->
+Settle before evaluating destination selections (review 4407366153)
