@@ -406,8 +406,13 @@ pub fn bind_testbench_program<B: SimBackend>(
                     celox_testbench::KernelRequest::Statement(site) => {
                         celox_testbench::KernelRequest::Statement(*site)
                     }
-                    celox_testbench::KernelRequest::Settle => {
-                        celox_testbench::KernelRequest::Settle
+                    celox_testbench::KernelRequest::Settle { reads } => {
+                        celox_testbench::KernelRequest::Settle {
+                            reads: reads
+                                .iter()
+                                .map(|address| backend.resolve_signal(address))
+                                .collect(),
+                        }
                     }
                     celox_testbench::KernelRequest::Written { address, width } => {
                         celox_testbench::KernelRequest::Written {

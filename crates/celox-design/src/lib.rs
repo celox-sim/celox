@@ -1361,6 +1361,11 @@ pub struct SchedulerSlots<A> {
     /// last settle. The caller initializes this before every scheduler run;
     /// timed runs set it even after a checkpoint restore or partial-slot exit.
     pub dirty: A,
+    /// Set by a caller that observes the design itself (the compiled
+    /// testbench) while it runs the scheduler: a run that reaches its limit
+    /// then leaves a deferred settle pending instead of settling for the
+    /// host.
+    pub defer_limit_settle: A,
     /// The number of time slots the run ran.
     pub count: A,
     /// The kernel running when the run returned, `u64::MAX` for none.
@@ -1399,6 +1404,7 @@ impl<A> SchedulerSlots<A> {
             finish: map(self.finish),
             cont: map(self.cont),
             dirty: map(self.dirty),
+            defer_limit_settle: map(self.defer_limit_settle),
             count: map(self.count),
             current: map(self.current),
             levels: map(self.levels),
@@ -1423,6 +1429,7 @@ impl<A> SchedulerSlots<A> {
             &self.finish,
             &self.cont,
             &self.dirty,
+            &self.defer_limit_settle,
             &self.count,
             &self.current,
             &self.levels,

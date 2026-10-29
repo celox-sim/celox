@@ -10,8 +10,8 @@ use std::{
 use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
-// Images retain generated TB scheduler continuations and clock state.
-const CONTAINER_VERSION: u16 = 55;
+// Images retain the scheduler's slots and the reads of TB settle requests.
+const CONTAINER_VERSION: u16 = 56;
 const TRAILER_SIZE: usize = 32;
 // This optional prefix descriptor does not change the Postcard payload. Older
 // readers ignore framing flags and continue to locate the payload at EOF.

@@ -131,7 +131,13 @@ pub(super) fn run<B: SimBackend>(
             c.set((runs + 1, edges));
         });
         if let Err(e) = sim.backend.run_process(entry) {
-            return Some(ExecResult::Fail(e.to_string()));
+            // A fatal assertion in a domain the unit ran ends it with an
+            // error; its message is in the runtime events.
+            let drained = drain_runtime_assertions(sim, ctx, None);
+            if let Some(message) = drained.fatal_message {
+                return Some(ExecResult::Fail(message_diagnostic(&message)));
+            }
+            return Some(ExecResult::Fail(sim.decorate_runtime_error(e).to_string()));
         }
         sim.dirty = sim.backend.get_as::<u8>(dirty) != 0;
         if sim.dirty {
@@ -285,7 +291,7 @@ pub(super) fn run<B: SimBackend>(
                             }
                         }
                     }
-                    KernelRequest::Settle => {
+                    KernelRequest::Settle { .. } => {
                         if let Err(e) = settle_testbench(sim) {
                             return Some(ExecResult::Fail(e.to_string()));
                         }
