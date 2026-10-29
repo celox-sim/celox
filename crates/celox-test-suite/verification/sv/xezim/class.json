@@ -123,6 +123,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::enumeration_constants_of_classes at 3237:27: assert_eq sum: expected 0xa4a0184, got 0xa331e24",
+      "expectation": "Simulation",
+      "name": "class::enumeration_constants_of_classes",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "class::extern_methods_and_tasks at 116:46: assert_eq result: expected 0x6d, got 0x64",
       "expectation": "Simulation",
       "name": "class::extern_methods_and_tasks",

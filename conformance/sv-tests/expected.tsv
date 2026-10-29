@@ -1553,8 +1553,8 @@ chapter-8/8.5--parameters.sv	2state	pass
 chapter-8/8.5--parameters.sv	4state	pass
 chapter-8/8.5--properties.sv	2state	pass
 chapter-8/8.5--properties.sv	4state	pass
-chapter-8/8.5--properties_enum.sv	2state	fail
-chapter-8/8.5--properties_enum.sv	4state	fail
+chapter-8/8.5--properties_enum.sv	2state	pass
+chapter-8/8.5--properties_enum.sv	4state	pass
 chapter-8/8.6--methods.sv	2state	pass
 chapter-8/8.6--methods.sv	4state	pass
 chapter-8/8.7--constructor.sv	2state	pass

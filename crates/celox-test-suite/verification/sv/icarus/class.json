@@ -711,6 +711,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n<case>/source_0.sv:15: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::enumeration_constants_of_classes",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not support extern methods (\"sorry: External methods are not yet supported\") or string methods called on a class property (\"Can't find task itoa in class Named\") or comparisons of class handles (\"SORRY: Compare class handles not implemented\"), aborts on a failed assertion in dup_expr.cc while compiling objects_referring_to_objects, and crashes with a segmentation fault while compiling implicit_constructors_and_this. IEEE 1800-2023 8.4, 8.7, 8.8 and 8.24 define these constructs. Verilator passes all but the string-method case, see sv_verilator_class_property_string_methods.",
       "expectation": "Simulation",
       "known_issue": {
