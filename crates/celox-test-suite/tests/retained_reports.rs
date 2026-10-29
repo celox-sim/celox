@@ -474,6 +474,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Unsupported: tristate in top-level IO",
                         ),
+                        ("icarus", "events::events_of_class_objects") => {
+                            ("compile_error", "compile", "Invalid class item")
+                        }
+                        ("icarus", "events::triggered_state_lasts_until_time_advances") => (
+                            "compile_error",
+                            "compile",
+                            "Event name blast can't have member names (triggered)",
+                        ),
                         ("verilator", "references::ref_actual_of_an_equivalent_type") => (
                             "compile_error",
                             "compile",

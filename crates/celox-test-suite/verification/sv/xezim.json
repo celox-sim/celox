@@ -10,6 +10,7 @@
     "xezim/containers.json",
     "xezim/distributions.json",
     "xezim/edges.json",
+    "xezim/events.json",
     "xezim/file_core.json",
     "xezim/file_io.json",
     "xezim/floating_point.json",

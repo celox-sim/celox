@@ -1199,7 +1199,12 @@ pub enum StatementKind {
         failure: Option<StatementId>,
     },
     Disable(TokenRange),
-    EventTrigger(TokenRange),
+    /// `-> e;` or `->> [control] e;` (IEEE 1800-2023 15.5.1).
+    EventTrigger {
+        nonblocking: bool,
+        control: Option<TimingControlId>,
+        target: ExprId,
+    },
     ProceduralRelease(TokenRange),
     Unconverted {
         category: String,

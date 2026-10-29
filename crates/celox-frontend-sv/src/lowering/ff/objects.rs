@@ -99,6 +99,9 @@ impl Ff<'_, '_> {
             }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::Locator(_) => unreachable!("handled by locator"),
+            // Each declaration of an event creates a synchronization object
+            // (IEEE 1800-2023 15.5).
+            ObjectOp::NewEvent => self.heap_call(ops::EVENT_NEW, &[]),
             ObjectOp::New {
                 class,
                 size,
@@ -303,7 +306,8 @@ impl Ff<'_, '_> {
             | ObjectOp::ModePop
             | ObjectOp::ModeSelect(..)
             | ObjectOp::ModeSelected(_)
-            | ObjectOp::ModeSet(_) => None,
+            | ObjectOp::ModeSet(_)
+            | ObjectOp::NewEvent => None,
         };
         if let Some(kind) = kind {
             self.m.variables.get_mut(&temp).unwrap().value_kind = kind;

@@ -32,6 +32,40 @@ impl BodyBuilder<'_, '_, '_> {
             TimingControlKind::Event(event) => {
                 self.allow_timing("event control")?;
                 match event {
+                    EventControl::Items(items)
+                        if items.iter().any(|item| {
+                            events::is_handle(
+                                self.tree,
+                                item.expression,
+                                self.tree.declarations(),
+                                &self.dims,
+                            )
+                        }) =>
+                    {
+                        // `@(e1 or e2)` waits for a trigger of either event
+                        // (IEEE 1800-2023 15.5.2).
+                        let mut handles = Vec::with_capacity(items.len());
+                        for item in items {
+                            if item.edge != TimingEdge::Any
+                                || item.iff.is_some()
+                                || !events::is_handle(
+                                    self.tree,
+                                    item.expression,
+                                    self.tree.declarations(),
+                                    &self.dims,
+                                )
+                            {
+                                return Err(unsupported(
+                                    "event control mixing named events with other events",
+                                ));
+                            }
+                            handles.push(self.native_value(item.expression)?);
+                        }
+                        Ok(Stmt::Eval(events::call(
+                            celox_design::ProcessOp::WaitEvent,
+                            handles,
+                        )))
+                    }
                     EventControl::Items(items) => {
                         let mut result = Vec::with_capacity(items.len());
                         for item in items {
@@ -49,7 +83,26 @@ impl BodyBuilder<'_, '_, '_> {
                         }
                         Ok(Stmt::WaitEvent(result))
                     }
-                    EventControl::Named(_) => Err(unsupported("named event")),
+                    EventControl::Named(id)
+                        if events::is_handle(
+                            self.tree,
+                            *id,
+                            self.tree.declarations(),
+                            &self.dims,
+                        ) =>
+                    {
+                        let event = self.native_value(*id)?;
+                        Ok(Stmt::Eval(events::call(
+                            celox_design::ProcessOp::WaitEvent,
+                            vec![event],
+                        )))
+                    }
+                    // `@c` is `@(c)` (9.4.2).
+                    EventControl::Named(id) => Ok(Stmt::WaitEvent(vec![EventItemBase {
+                        edge: EventEdge::Any,
+                        expr: self.native_value(*id)?,
+                        iff: None,
+                    }])),
                     // The statement it controls gives its event expression.
                     EventControl::Wildcard => Err(crate::ast::timing::disagreement()),
                 }

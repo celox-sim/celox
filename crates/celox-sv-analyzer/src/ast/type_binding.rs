@@ -89,13 +89,6 @@ pub(super) fn local_signals(
 ) -> Converted<Vec<Signal>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     let Some(base) = bind(declaration.data_type, tree, &context)? else {
-        // A named event (IEEE 1800-2023 6.17) is a data type of its own.
-        if matches!(
-            &tree.declarations().data_type(declaration.data_type).kind,
-            celox_sv_syntax::DataTypeKind::Builtin(name) if name == "event"
-        ) {
-            return Err(unsupported("named event"));
-        }
         return Err(unsupported("unsupported internal data type"));
     };
     let mut signals = Vec::new();
@@ -273,6 +266,8 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
         "longint" => (TypeKind::Bit, Some(64), true),
         "integer" => (TypeKind::Logic, Some(32), true),
         "time" => (TypeKind::Logic, Some(64), false),
+        // A named event is a handle (IEEE 1800-2023 15.5).
+        "event" => return Some(super::classes::handle(super::events::CLASS)),
         _ => return None,
     };
     let mut ty = Type::new(kind);

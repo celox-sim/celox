@@ -25,6 +25,59 @@ pub(in crate::ast) fn classify<'a>(
             break;
         }
     }
+    // Subroutines that use the scheduler, as an event trigger does, without
+    // necessarily blocking.
+    let mut scheduled = HashSet::default();
+    loop {
+        let previous = scheduled.len();
+        for subroutine in &subroutines {
+            if uses_scheduler(&subroutine.body, &scheduled, &definitions) {
+                scheduled.insert(subroutine.name.clone());
+            }
+        }
+        if previous == scheduled.len() {
+            break;
+        }
+    }
+    // A wait condition only registers the events it reads `triggered` of
+    // itself; one read in a called function would miss its wakeup.
+    let mut triggered_readers = HashSet::default();
+    loop {
+        let previous = triggered_readers.len();
+        for subroutine in &subroutines {
+            if reads_triggered(&subroutine.body, &triggered_readers) {
+                triggered_readers.insert(subroutine.name.clone());
+            }
+        }
+        if previous == triggered_readers.len() {
+            break;
+        }
+    }
+    if !triggered_readers.is_empty() {
+        let bodies = subroutines
+            .iter()
+            .map(|subroutine| &subroutine.body)
+            .chain(comb.iter().map(|process| &process.body))
+            .chain(ff.iter().map(|process| &process.body))
+            .chain(processes.iter().map(|process| &process.body));
+        for body in bodies {
+            let mut found = false;
+            for statement in body {
+                statement.walk(&mut |statement| {
+                    if let Stmt::Wait(condition) = statement {
+                        const_functions::visit_expr_calls(condition, &mut |callee, _| {
+                            found |= matches!(callee, Callee::Subroutine(name) if triggered_readers.contains(name));
+                        });
+                    }
+                });
+            }
+            if found {
+                return Err(unsupported(
+                    "`triggered` read by a function called in a wait condition",
+                ));
+            }
+        }
+    }
     for subroutine in &subroutines {
         let is_timed = timed.contains(&subroutine.name);
         if !subroutine.is_task {
@@ -115,7 +168,8 @@ pub(in crate::ast) fn classify<'a>(
     let initial_count = processes.len();
     let mut retained = Vec::new();
     for process in std::mem::take(comb) {
-        if !requires_process(&process.body, &timed, &definitions) {
+        let blocks = requires_process(&process.body, &timed, &definitions);
+        if !blocks && !uses_scheduler(&process.body, &scheduled, &definitions) {
             if process.kind == CombProcessKind::AlwaysStar && assigns_nonblocking(&process.body) {
                 return Err(unsupported("nonblocking assignment inside always_comb"));
             }
@@ -134,6 +188,11 @@ pub(in crate::ast) fn classify<'a>(
             }
         };
         if let Some(context) = context {
+            if !blocks {
+                return Err(unsupported(format!(
+                    "event trigger or process method in {context}"
+                )));
+            }
             return Err(AnalyzerError::TimingControlOutsideProcess {
                 construct: "timed task call",
                 context,
@@ -167,11 +226,14 @@ pub(in crate::ast) fn classify<'a>(
     *comb = retained;
     let mut retained = Vec::new();
     for process in std::mem::take(ff) {
-        if !requires_process(&process.body, &timed, &definitions) {
+        let blocks = requires_process(&process.body, &timed, &definitions);
+        if !blocks && !uses_scheduler(&process.body, &scheduled, &definitions) {
             retained.push(process);
             continue;
         }
-        if !process.suspendable {
+        // An `always_ff` that triggers an event runs in a process kernel too;
+        // it only may not suspend.
+        if blocks && !process.suspendable {
             return Err(unsupported("timed task call in always_ff"));
         }
         let mut body = vec![Stmt::WaitEvent(
@@ -221,20 +283,62 @@ fn requires_process(
     let mut result = false;
     for statement in body {
         statement.walk(&mut |statement| {
-            result |= matches!(
-                statement,
-                Stmt::Delay { .. }
-                    | Stmt::WaitEvent(_)
-                    | Stmt::WaitImplicit(_)
-                    | Stmt::Wait(_)
-                    | Stmt::AssertionRegion { .. }
-                    | Stmt::WaitFork
-                    | Stmt::Fork { .. }
-            );
+            result |= events::blocks(statement)
+                || matches!(
+                    statement,
+                    Stmt::Delay { .. }
+                        | Stmt::WaitEvent(_)
+                        | Stmt::WaitImplicit(_)
+                        | Stmt::Wait(_)
+                        | Stmt::AssertionRegion { .. }
+                        | Stmt::WaitFork
+                        | Stmt::Fork { .. }
+                );
         });
     }
     let (_, _, calls) = super::final_procedures::effects(body.iter(), definitions);
     result || calls.iter().any(|name| timed.contains(name))
+}
+
+/// Whether `body` calls a scheduler operation, such as an event trigger,
+/// which only a process kernel can run, directly or through `scheduled`.
+fn uses_scheduler(
+    body: &[Stmt],
+    scheduled: &HashSet<String>,
+    definitions: &HashMap<&str, &Subroutine>,
+) -> bool {
+    let mut result = false;
+    for statement in body {
+        statement.walk(&mut |statement| {
+            for expr in lifetimes::stmt_exprs(statement) {
+                const_functions::visit_expr_calls(expr, &mut |callee, _| {
+                    result |= matches!(callee, Callee::System(SystemFunction::Process(_)));
+                });
+            }
+        });
+    }
+    let (_, _, calls) = super::final_procedures::effects(body.iter(), definitions);
+    result || calls.iter().any(|name| scheduled.contains(name))
+}
+
+/// Whether `body` reads the `triggered` state of an event, directly or
+/// through a call of one of `readers`.
+fn reads_triggered(body: &[Stmt], readers: &HashSet<String>) -> bool {
+    let mut result = false;
+    for statement in body {
+        statement.walk(&mut |statement| {
+            if let Stmt::Call { name, .. } = statement {
+                result |= readers.contains(name);
+            }
+            for expr in lifetimes::stmt_exprs(statement) {
+                result |= events::reads_triggered(expr);
+                const_functions::visit_expr_calls(expr, &mut |callee, _| {
+                    result |= matches!(callee, Callee::Subroutine(name) if readers.contains(name));
+                });
+            }
+        });
+    }
+    result
 }
 
 fn assigns_nonblocking(body: &[Stmt]) -> bool {

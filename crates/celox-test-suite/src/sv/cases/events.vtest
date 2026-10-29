@@ -1,0 +1,66 @@
+(group events (category sequential))
+
+; IEEE 1800-2023 15.5.1, 15.5.2: a trigger unblocks the processes already
+; waiting for the event, and only those.
+(case trigger_unblocks_processes_already_waiting
+ (source "trigger.sv" #"module Top(output int q);
+ event e;
+ initial begin @e; q = q + 1; end
+ initial begin @e; q = q + 10; @e; q = q + 100; end
+ initial begin #1 -> e; #1 -> e; #1 -> e; end
+endmodule"#)
+ (top Top) (run_until 1) (assert_eq q 11)
+ (run_until 3) (assert_eq q 111))
+
+; 15.5.3: the triggered state persists until time advances, so a wait for it
+; unblocks whether it runs before or after the trigger.
+(case triggered_state_lasts_until_time_advances
+ (source "triggered.sv" #"module Top(output bit [3:0] q);
+ event blast;
+ initial begin
+  fork
+   -> blast;
+   begin wait (blast.triggered); q[0] = 1; end
+  join
+  q[1] = blast.triggered;
+  #1 q[2] = !blast.triggered;
+  fork
+   begin wait (blast.triggered); q[3] = 1; end
+   #1 -> blast;
+  join
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 3)
+ (run_until 1) (assert_eq q 7)
+ (run_until 2) (assert_eq q 15))
+
+; 15.5.2, 9.4.2: an event control lists several events with `or`.
+(case event_controls_wait_for_any_listed_event
+ (source "event_or.sv" #"module Top(output int n, output int m);
+ event a, b;
+ always @(a or b) n = n + 1;
+ always @a m = m + 1;
+ initial begin #1 -> a; #1 -> b; #1 -> a; end
+endmodule"#)
+ (top Top) (run_until 3) (assert_eq n 3) (assert_eq m 2))
+
+; 15.5: each object has its own synchronization object for each event
+; property.
+(case events_of_class_objects
+ (source "class_events.sv" #"module Top(output int q);
+ class Channel;
+  event ready;
+  task notify(); -> ready; endtask
+ endclass
+ Channel c1, c2;
+ initial begin
+  c1 = new; c2 = new;
+  fork
+   begin @(c1.ready); q = q + 1; end
+   begin @(c2.ready); q = q + 10; end
+   begin #1 c1.notify(); #1 c2.notify(); end
+  join
+ end
+endmodule"#)
+ (top Top) (run_until 1) (assert_eq q 1)
+ (run_until 2) (assert_eq q 11))

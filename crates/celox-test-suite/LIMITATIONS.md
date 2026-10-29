@@ -1344,6 +1344,26 @@ the pinned xezim 0.11.3 pass. Icarus 13.0 does not support `automatic` on a
 variable of an `initial` block and rejects the module's `C::queue_t`
 declaration; its exact compile diagnostic remains an
 executed failure in [the Icarus class report](verification/sv/icarus/class.json).
+
+### Named events
+
+The 4 `events::*` cases check named events (IEEE 1800-2023 15.5): a trigger
+unblocks only the processes already waiting (15.5.2), the `triggered` state lasts
+until time advances (15.5.3), an event control lists several events with `or`, and
+each object has its own event for each event property. Celox, Verilator 5.052 and
+xezim pass all of them on every backend.
+
+Icarus 13.0 compiles 2. It rejects `blast.triggered` with "Event name blast can't
+have member names (triggered)" and an `event` class property with "Invalid class
+item". The two failures remain executed evidence in the
+[Icarus report](verification/sv/icarus/events.json).
+
+Aliasing by assignment (15.5.5.1), `null` events (15.5.5.2), events passed as
+task arguments and `->>` are tested on Celox only. Verilator rejects assigning an
+event outside a class, and neither Verilator nor xezim wakes a process waiting
+for an event passed as a task argument. They also disagree about `->>`: in
+Verilator a `->>` waiter misses a nonblocking assignment issued before the
+trigger, and in xezim a `->` waiter sees it. 15.5.1 orders both the other way.
 No assertions or exclusions are weakened.
 
 ### Container formals

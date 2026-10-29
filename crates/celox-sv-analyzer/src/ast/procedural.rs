@@ -109,6 +109,8 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
                 | TypeKind::Shortreal
                 | TypeKind::String
                 | TypeKind::Object
+                | TypeKind::Process
+                | TypeKind::Event
         ),
         members: r#type.members.clone(),
         signed_element_depth: r#type.signed_element_depth,
@@ -1457,7 +1459,27 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 Ok(vec![Stmt::WaitFork])
             }
             StatementKind::WaitOrder { .. } => Err(unsupported("wait order statement")),
-            StatementKind::EventTrigger(_) => Err(unsupported("event trigger")),
+            StatementKind::EventTrigger {
+                nonblocking,
+                control,
+                target,
+            } => {
+                if control.is_some() {
+                    return Err(unsupported("delayed nonblocking event trigger"));
+                }
+                if !events::is_handle(self.tree, *target, self.tree.declarations(), &self.dims) {
+                    return Err(unsupported(
+                        "event trigger of a value that is not a named event",
+                    ));
+                }
+                let event = self.native_value(*target)?;
+                let op = if *nonblocking {
+                    celox_design::ProcessOp::TriggerNonblocking
+                } else {
+                    celox_design::ProcessOp::Trigger
+                };
+                Ok(vec![Stmt::Eval(events::call(op, vec![event]))])
+            }
             StatementKind::ProceduralAssign(_) | StatementKind::ProceduralRelease(_) => {
                 Err(unsupported("procedural continuous assignment"))
             }
@@ -1588,8 +1610,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     self.rename_expr(&mut init);
                     Some(init)
                 }
+                // Each declaration of an event creates a synchronization
+                // object (IEEE 1800-2023 15.5).
+                None if events::is_event(signal.r#type()) => Some(events::new_event()),
+                None if signal.r#type().kind() == TypeKind::Event => {
+                    return Err(unsupported("array of named events"));
+                }
                 None => None,
             };
+            let implicit_event = assignment.value.is_none() && init.is_some();
             if signal.r#type().unpacked_struct().is_some() {
                 let explicit = native.lifetime.as_deref() == Some("static");
                 stmts.extend(self.aggregate_local(
@@ -1608,7 +1637,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.dims.insert(signal.name().to_string(), shape);
             }
             if !automatic {
-                if native.lifetime.as_deref() == Some("static") {
+                // A static event is created once, before any procedure runs,
+                // whatever the procedure that declares it.
+                if native.lifetime.as_deref() == Some("static") || implicit_event {
                     self.state.explicit_statics.insert(name.clone());
                 }
                 let r#type = scoped_type(signal.r#type().clone(), &self.dims.const_env);
@@ -3036,6 +3067,14 @@ pub(super) fn lower_subroutine(
         )?,
         None => None,
     };
+    // An event control could not tell a call of such a function from a
+    // value (IEEE 1800-2023 15.5).
+    if return_type
+        .as_ref()
+        .is_some_and(|ty| ty.kind() == TypeKind::Event)
+    {
+        return Err(unsupported("function returning an event"));
+    }
     let mut builder = BodyBuilder::new(
         tree,
         item_dimensions,
@@ -3603,6 +3642,14 @@ impl BodyBuilder<'_, '_, '_> {
         for (index, property) in own.clone().zip(class.own_properties()) {
             body.extend(self.aggregate_initializers(class, this, index)?);
             let Some(initializer) = property.initializer else {
+                // Each object has its own synchronization object for each
+                // event property (IEEE 1800-2023 15.5).
+                if events::is_event(&property.r#type) {
+                    body.push(Stmt::Eval(classes::object_call(
+                        system_functions::ObjectOp::Store(property.field),
+                        vec![Expr::Ident(this.to_owned()), events::new_event()],
+                    )));
+                }
                 continue;
             };
             if let Some(container) = property.r#type.container.as_deref() {
@@ -4095,12 +4142,19 @@ pub(super) fn initial_processes_from_scope(
                     tree.declarations(),
                 )
             }) {
+                // The type, possibly an alias of `event`, is checked below.
+                let event = matches!(
+                    &tree.declarations().data_type(declaration.data_type).kind,
+                    celox_sv_syntax::DataTypeKind::Builtin(name) if name == "event"
+                ) || matches!(
+                    &tree.declarations().data_type(declaration.data_type).kind,
+                    celox_sv_syntax::DataTypeKind::Named(_)
+                );
+                let name = instances::normalize_identifier(&variable.name.spelling);
                 if let Some(value) = variable.value {
-                    assignments.push((
-                        instances::normalize_identifier(&variable.name.spelling),
-                        value,
-                        None,
-                    ));
+                    assignments.push((name, Some(value), None));
+                } else if event {
+                    assignments.push((name, None, None));
                 }
             }
         }
@@ -4108,13 +4162,36 @@ pub(super) fn initial_processes_from_scope(
         // scope of the class that declares them (IEEE 1800-2023 8.9, 8.25).
         for property in classes::item_statics(item.id, tree, &item.env, &type_aliases) {
             if let Some(value) = property.initializer {
-                assignments.push((property.variable, value, Some(property.owner)));
+                assignments.push((property.variable, Some(value), Some(property.owner)));
+            } else if events::is_event(&property.r#type) {
+                assignments.push((property.variable, None, Some(property.owner)));
             }
         }
         if !assignments.is_empty() {
             let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
             for (name, native, owner) in assignments {
+                let Some(native) = native else {
+                    // Each declaration of an event creates a synchronization
+                    // object (IEEE 1800-2023 15.5).
+                    if owner.is_none() {
+                        let Some(shape) = item_dimensions
+                            .get(&name)
+                            .filter(|shape| shape.class.as_deref() == Some(events::CLASS))
+                        else {
+                            continue;
+                        };
+                        if !shape.unpacked.is_empty() || shape.container.is_some() {
+                            return Err(unsupported("array of named events"));
+                        }
+                    }
+                    body.push(Stmt::Assign {
+                        lhs: LValue::Ident(name),
+                        rhs: events::new_event(),
+                        nonblocking: false,
+                    });
+                    continue;
+                };
                 let scoped = owner.map(|owner| {
                     classes::specializations::body_scope(tree, &owner, item_dimensions, literals)
                 });

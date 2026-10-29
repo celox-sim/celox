@@ -3494,9 +3494,14 @@ fn rejects_unlowered_constructs() {
 #[test]
 fn rejects_unimplemented_timing_constructs() {
     for (body, construct) in [
-        // The `event` data type is rejected by name before its uses.
-        ("event e; initial @e;", "named event"),
-        ("event e; initial ->e;", "named event"),
+        (
+            "event e; initial ->> @(e) e;",
+            "delayed nonblocking event trigger",
+        ),
+        (
+            "event e; logic c; initial @(e or posedge c);",
+            "event control mixing named events with other events",
+        ),
         (
             "logic a, b; initial a = #1 b;",
             "intra-assignment timing control",

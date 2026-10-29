@@ -455,6 +455,28 @@ pub struct ProcessState {
     /// Counter values each counted domain last triggered on, by counted
     /// signal index and kind.
     pub domain_counters: Vec<[u32; 3]>,
+    /// The named events that were triggered or waited for, by handle (IEEE
+    /// 1800-2023 15.5).
+    #[serde(default)]
+    pub events: std::collections::BTreeMap<u32, NamedEvent>,
+    /// Events `->>` triggers in the nonblocking assignment region of the
+    /// current time (15.5.1), in issue order.
+    #[serde(default)]
+    pub nba_events: Vec<u32>,
+    /// The time [`Self::events`] was last cleared of expired events.
+    #[serde(default)]
+    pub event_time: u64,
+}
+
+/// The synchronization object of a named event (IEEE 1800-2023 15.5).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NamedEvent {
+    /// The time of its last trigger, which `triggered` compares with the
+    /// current time (15.5.3).
+    pub triggered: Option<u64>,
+    /// The processes blocked on it. An entry is stale once the process no
+    /// longer lists the event in [`crate::simulation::ProcessControl::events`].
+    pub waiters: Vec<usize>,
 }
 
 pub(crate) fn kind_index(kind: CounterKind) -> usize {

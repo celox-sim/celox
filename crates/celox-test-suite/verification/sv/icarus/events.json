@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "events::event_controls_wait_for_any_listed_event",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid class item.\n",
+      "expectation": "Simulation",
+      "name": "events::events_of_class_objects",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "events::trigger_unblocks_processes_already_waiting",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:6: error: Event name blast can't have member names (triggered)\n<case>/source_0.sv:6: internal error: incomprehensible wait expression width (0).\n<case>/source_0.sv:8: error: Event name blast can't have member names (triggered)\n<case>/source_0.sv:9: error: Event name blast can't have member names (triggered)\n<case>/source_0.sv:11: error: Event name blast can't have member names (triggered)\n<case>/source_0.sv:11: internal error: incomprehensible wait expression width (0).\n4 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "events::triggered_state_lasts_until_time_advances",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

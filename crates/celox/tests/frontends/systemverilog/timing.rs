@@ -478,7 +478,11 @@ fn event_expressions_with_effects_are_rejected() {
 #[test]
 fn unimplemented_timing_features_are_rejected() {
     for (body, construct, issue) in [
-        ("event e; initial -> e;", "named event", 88),
+        (
+            "event e; initial ->> #1 e;",
+            "delayed nonblocking event trigger",
+            88,
+        ),
         (
             "bit a, b; initial a = #1 b;",
             "intra-assignment timing control",
@@ -1588,6 +1592,13 @@ timed_cases! {
 }
 
 timed_cases! { fn fork_four_state_automatic_values_survive_fork_suspension = "fork::four_state_automatic_values_survive_fork_suspension"; }
+
+timed_cases! {
+    fn events_trigger_unblocks_processes_already_waiting = "events::trigger_unblocks_processes_already_waiting";
+    fn events_triggered_state_lasts_until_time_advances = "events::triggered_state_lasts_until_time_advances";
+    fn events_event_controls_wait_for_any_listed_event = "events::event_controls_wait_for_any_listed_event";
+    fn events_events_of_class_objects = "events::events_of_class_objects";
+}
 
 timed_cases! {
     fn fork_control_no_children_does_not_suspend = "fork_control::no_children_does_not_suspend";

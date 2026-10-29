@@ -340,8 +340,27 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                     StatementKind::Wait { condition, body } => {
                         self.allow_timing("wait statement")?;
-                        let condition = self.native_value(*condition)?;
-                        output.extend(self.wait_statements(condition)?);
+                        // `wait(e.triggered)` (IEEE 1800-2023 15.5.3).
+                        if let Some(event) = events::triggered(
+                            self.tree,
+                            *condition,
+                            self.tree.declarations(),
+                            &self.dims,
+                        )? {
+                            let event = self.native_value(event)?;
+                            output.push(Stmt::Eval(events::call(
+                                celox_design::ProcessOp::WaitTriggered,
+                                vec![event],
+                            )));
+                        } else {
+                            let condition = self.native_value(*condition)?;
+                            if events::reads_triggered(&condition) {
+                                return Err(unsupported(
+                                    "`triggered` in a wait condition with other operands",
+                                ));
+                            }
+                            output.extend(self.wait_statements(condition)?);
+                        }
                         jobs.push(Job::Enter(*body));
                     }
                     StatementKind::Timing { control, body } => {

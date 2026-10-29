@@ -549,6 +549,21 @@ impl<B: SimBackend> Simulator<B> {
         };
         let statuses = self.process_statuses();
         let state = &parts.process_state;
+        // Named events stay out of state files: refuse a save that a load
+        // could not resume, with a process waiting for an event, a pending
+        // `->>`, or a trigger that `triggered` still sees.
+        if !state.nba_events.is_empty()
+            || state
+                .events
+                .values()
+                .any(|event| event.triggered == Some(parts.time))
+            || state
+                .activations
+                .iter()
+                .any(|activation| activation.live && !activation.control.events.is_empty())
+        {
+            return Err(StateError::Objects("named events".into()));
+        }
         let process = |index: usize| {
             if state.activations.is_empty() {
                 ProcessRef::Kernel(path(statuses[index]))
@@ -1008,6 +1023,10 @@ impl<B: SimBackend> Simulator<B> {
                 re_inactive,
                 re_nba_queue,
                 domain_counters,
+                // Like process control, named events stay out of state files.
+                events: Default::default(),
+                nba_events: Vec::new(),
+                event_time: 0,
             },
         ))
     }
