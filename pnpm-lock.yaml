@@ -194,7 +194,7 @@ importers:
         version: 0.10.4
       chart.js:
         specifier: ^4.4.0
-        version: 4.5.1
+        version: 4.6.1
       emnapi:
         specifier: 2.0.0-beta.2
         version: 2.0.0-beta.2
@@ -218,7 +218,7 @@ importers:
         version: 1.6.4(@algolia/client-search@5.49.1)(@types/node@26.6.5)(lightningcss@1.33.0)(postcss@8.5.31)(search-insights@2.17.3)(typescript@6.0.3)
       vue-chartjs:
         specifier: ^5.3.0
-        version: 5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3))
+        version: 5.3.4(chart.js@4.6.1)(vue@3.5.29(typescript@6.0.3))
 
   crates/celox-napi:
     devDependencies:
@@ -1833,8 +1833,8 @@ packages:
   chardet@2.2.0:
     resolution: {integrity: sha512-rddelWYNPRrXq6PtNEN2S3f6t9ILzvqaN5pVgi4kqt9jHQaXIial9PznB5iSPVlQSLNaaH22ItWz3EJtQ10+OA==}
 
-  chart.js@4.5.1:
-    resolution: {integrity: sha512-GIjfiT9dbmHRiYi6Nl2yFCq7kkwdkp1W/lp2J99rX0yo9tgJGn3lKQATztIjb5tVtevcBtIdICNWqlq5+E8/Pw==}
+  chart.js@4.6.1:
+    resolution: {integrity: sha512-hJyniucsFmq//EvXYvJ6c6mahPoI3kaxdjVH8awTaJ/fDNWeSqqqArixMJWkWNN6fcYvPU3HneSANFNYtRi61g==}
     engines: {pnpm: '>=8'}
 
   cli-width@4.1.0:
@@ -3829,7 +3829,7 @@ snapshots:
 
   chardet@2.2.0: {}
 
-  chart.js@4.5.1:
+  chart.js@4.6.1:
     dependencies:
       '@kurkle/color': 0.3.4
 
@@ -4537,9 +4537,9 @@ snapshots:
     transitivePeerDependencies:
       - msw
 
-  vue-chartjs@5.3.4(chart.js@4.5.1)(vue@3.5.29(typescript@6.0.3)):
+  vue-chartjs@5.3.4(chart.js@4.6.1)(vue@3.5.29(typescript@6.0.3)):
     dependencies:
-      chart.js: 4.5.1
+      chart.js: 4.6.1
       vue: 3.5.29(typescript@6.0.3)
 
   vue@3.5.29(typescript@6.0.3):
