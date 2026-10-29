@@ -1467,3 +1467,17 @@ as UVM's factory does with `{m_type_overrides, m_inst_overrides}` (IEEE
 `initial` block; its exact compile diagnostic remains an executed failure in
 [the Icarus containers report](verification/sv/icarus/containers.json).
 No assertions or exclusions are weakened.
+
+### Semaphores
+
+The 3 `semaphores::*` cases check semaphores (IEEE 1800-2023 15.3): a semaphore
+of one key admits one process at a time, `try_get` takes keys only when enough
+are available, and `get` takes available keys at once and otherwise blocks until
+enough are put. Celox, Verilator 5.052 and xezim pass all of them on every
+backend. Icarus 13.0 compiles none: it does not know the `semaphore` type
+("semaphore doesn't name a type", "Invalid module instantiation"). The failures
+remain executed evidence in the [Icarus report](verification/sv/icarus/semaphores.json).
+
+That the waiting processes obtain keys in arrival order (15.3.3), so a later
+small request waits behind an earlier large one, is tested on Celox only:
+Verilator and xezim unblock any waiting process whose request the keys meet.

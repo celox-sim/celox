@@ -125,7 +125,7 @@ impl ScopeImports {
                 if package == "std"
                     && matches!(
                         normalize_identifier(&name.spelling).as_str(),
-                        "randomize" | "process"
+                        "randomize" | "process" | "semaphore"
                     )
                 {
                     continue;
@@ -163,7 +163,8 @@ impl ScopeImports {
                 && let celox_sv_syntax::DataTypeKind::Named(path) = &ty.kind
                 && let [package, name] = path.as_slice()
                 // `C::T` names a type of class `C` (IEEE 1800-2023 8.23).
-                && !(package.name.spelling == "std" && name.name.spelling == "process")
+                && !(package.name.spelling == "std"
+                    && matches!(name.name.spelling.as_str(), "process" | "semaphore"))
                 && !visible_class(tree, &normalize_identifier(&package.name.spelling))
                 && !aliases.iter().any(|(start, end, name)| {
                     (*start..*end).contains(&ty.tokens.start)

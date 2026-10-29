@@ -1601,6 +1601,12 @@ timed_cases! {
 }
 
 timed_cases! {
+    fn semaphores_one_key_admits_one_process_at_a_time = "semaphores::one_key_admits_one_process_at_a_time";
+    fn semaphores_try_get_takes_only_available_keys = "semaphores::try_get_takes_only_available_keys";
+    fn semaphores_get_waits_until_enough_keys_are_put = "semaphores::get_waits_until_enough_keys_are_put";
+}
+
+timed_cases! {
     fn fork_control_no_children_does_not_suspend = "fork_control::no_children_does_not_suspend";
     fn fork_control_wait_in_task_includes_earlier_forks = "fork_control::wait_in_task_includes_earlier_forks";
     fn fork_control_wait_excludes_descendants_of_completed_children = "fork_control::wait_excludes_descendants_of_completed_children";

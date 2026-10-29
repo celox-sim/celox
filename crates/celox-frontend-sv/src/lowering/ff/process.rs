@@ -29,11 +29,16 @@ impl Ff<'_, '_> {
                 arg.as_ref()
                     .ok_or_else(|| unsupported("missing process argument"))?,
             )?;
-            let arg = if op == ProcessOp::Srandom && index == 1 {
-                self.int_formal(arg)
-            } else {
-                arg
+            // Key counts are `int` formals (IEEE 1800-2023 15.3).
+            let int = match op {
+                ProcessOp::Srandom
+                | ProcessOp::SemaphorePut
+                | ProcessOp::SemaphoreGet
+                | ProcessOp::SemaphoreTryGet => index == 1,
+                ProcessOp::SemaphoreNew => true,
+                _ => false,
             };
+            let arg = if int { self.int_formal(arg) } else { arg };
             let string = op == ProcessOp::SetRandstate && index == 1;
             // A string formal converts packed values before the handle is
             // materialized, just like an ordinary subroutine string argument.
@@ -59,9 +64,8 @@ impl Ff<'_, '_> {
                 float_precision: None,
             });
         }
-        let (id, name) = self
-            .m
-            .temp("process_result", 32, op == ProcessOp::Status, false);
+        let signed = matches!(op, ProcessOp::Status | ProcessOp::SemaphoreTryGet);
+        let (id, name) = self.m.temp("process_result", 32, signed, false);
         let string = op == ProcessOp::GetRandstate;
         if string {
             self.m.variables.get_mut(&id).unwrap().value_kind = ValueKind::StrRef;
@@ -81,7 +85,7 @@ impl Ff<'_, '_> {
             results: vec![HostRequestValue {
                 id,
                 width: 32,
-                signed: op == ProcessOp::Status,
+                signed,
                 is_string: false,
                 value_kind: if string {
                     ValueKind::StrRef

@@ -523,6 +523,12 @@ pub(in crate::ast) fn bind_value(
                     values.push(call);
                     continue;
                 }
+                if let Some(call) =
+                    super::super::semaphores::value(tree, id, native, dimensions, false)?
+                {
+                    values.push(call);
+                    continue;
+                }
                 // `e.triggered` (IEEE 1800-2023 15.5.3).
                 if let Some(event) = super::super::events::triggered(tree, id, native, dimensions)?
                 {
