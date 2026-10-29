@@ -1,0 +1,84 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 orders the indices of an associative array with an int index as unsigned: foreach visits 3, 10, -5, find_index returns 3 before -5 and max with (item.index) selects the element at -5. IEEE 1800-2023 7.8.4 orders an integral index signed or unsigned by the signedness of the index type, so -5 comes first and the largest index is 10; xezim 0.11.3 returns empty queues for associative arrays.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_array_locator_associative_order.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_array_locator_associative_order",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 orders the indices of an associative array with an int index as unsigned: foreach visits 3, 10, -5, find_index returns 3 before -5 and max with (item.index) selects the element at -5. IEEE 1800-2023 7.8.4 orders an integral index signed or unsigned by the signedness of the index type, so -5 comes first and the largest index is 10; xezim 0.11.3 returns empty queues for associative arrays.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_associative",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 gives locator methods of a fixed-size array the positions of its elements from the right bound instead of their indices: find_first_index of int down[3:0] finds the element at index 1 before the one at 2, find_index of byte bytes[2:5] returns 1 and 3 for indices 3 and 5, and item.index never equals 4, and arrays at the bounds of int report index 0 or 1; min of {1, -2, 3, -4} also returns 1. IEEE 1800-2023 7.12.1 returns indices and takes the first element closest to the leftmost index, 7.12.4 makes item.index the index value, and 6.11 makes byte signed; xezim 0.11.3 shares the index errors.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_array_locator_fixed_indices.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_array_locator_fixed_indices",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 gives locator methods of a fixed-size array the positions of its elements from the right bound instead of their indices: find_first_index of int down[3:0] finds the element at index 1 before the one at 2, find_index of byte bytes[2:5] returns 1 and 3 for indices 3 and 5, and item.index never equals 4, and arrays at the bounds of int report index 0 or 1; min of {1, -2, 3, -4} also returns 1. IEEE 1800-2023 7.12.1 returns indices and takes the first element closest to the leftmost index, 7.12.4 makes item.index the index value, and 6.11 makes byte signed; xezim 0.11.3 shares the index errors.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_fixed",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_four_state",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 rejects the index argument of an array method call ('with' function expects only up to one argument) and an omitted iterator argument before it ('with' function expects simple variable name). IEEE 1800-2023 7.12 (Syntax 7-5) permits both and 7.12.4 renames the index querying method; xezim 0.11.3 compiles the case but finds no element.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_array_locator_index_argument.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_array_locator_index_argument",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects the index argument of an array method call ('with' function expects only up to one argument) and an omitted iterator argument before it ('with' function expects simple variable name). IEEE 1800-2023 7.12 (Syntax 7-5) permits both and 7.12.4 renames the index querying method; xezim 0.11.3 compiles the case but finds no element.",
+        "upstream": []
+      },
+      "name": "array_locators::array_locator_index_argument",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
