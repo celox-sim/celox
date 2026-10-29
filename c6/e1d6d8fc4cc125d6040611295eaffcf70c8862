@@ -1,0 +1,1 @@
+Also skip writing unchanged signatures, which copied the tables a partial snapshot shares (uvm_pkg 29 s -> 12 s).
