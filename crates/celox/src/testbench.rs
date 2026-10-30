@@ -2242,12 +2242,12 @@ mod tests {
                 .build_native()
                 .unwrap();
             let tb = compile_initial_testbench(&sim).unwrap();
-            compiled::take_counters();
+            compiled::take_counters(&mut sim);
             assert_eq!(
                 run_compiled_testbench_to_finish(&mut sim, &tb),
                 TestResult::Pass
             );
-            let counters = compiled::take_counters();
+            let counters = compiled::take_counters(&mut sim);
             results.push((
                 sim.get_as::<u32>(sim.signal("a")),
                 sim.get_as::<u32>(sim.signal("b")),
@@ -2279,9 +2279,9 @@ mod tests {
                 .build_native()
                 .unwrap();
             let tb = compile_initial_testbench(&sim).unwrap();
-            compiled::take_counters();
+            compiled::take_counters(&mut sim);
             let result = run_compiled_testbench(&mut sim, &tb);
-            let counters = compiled::take_counters();
+            let counters = compiled::take_counters(&mut sim);
             assert_eq!(
                 counters.0 != 0,
                 mode == crate::SchedulerMode::Compiled,
@@ -2866,12 +2866,12 @@ mod tests {
         ] {
             let mut sim = build(mode);
             let tb = compile_initial_testbench(&sim).unwrap();
-            compiled::take_counters();
+            compiled::take_counters(&mut sim);
             assert_eq!(
                 run_compiled_testbench_to_finish(&mut sim, &tb),
                 TestResult::Pass
             );
-            let counters = compiled::take_counters();
+            let counters = compiled::take_counters(&mut sim);
             let values: Vec<_> = names
                 .iter()
                 .map(|name| sim.get_four_state(sim.signal(name)))
@@ -3274,12 +3274,12 @@ mod tests {
                 .unwrap();
             assert!(!sim.program.runtime_schema.persistent_comb_state.is_empty());
             let tb = compile_initial_testbench(&sim).unwrap();
-            compiled::take_counters();
+            compiled::take_counters(&mut sim);
             assert_eq!(
                 run_compiled_testbench_to_finish(&mut sim, &tb),
                 TestResult::Pass
             );
-            let counters = compiled::take_counters();
+            let counters = compiled::take_counters(&mut sim);
             assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
         }
     }
@@ -3344,12 +3344,12 @@ mod tests {
         "#;
         let mut sim = Simulator::builder(source, "Top").build_native().unwrap();
         let tb = compile_initial_testbench(&sim).unwrap();
-        compiled::take_counters();
+        compiled::take_counters(&mut sim);
         assert_eq!(
             run_compiled_testbench_to_finish(&mut sim, &tb),
             TestResult::Pass
         );
-        let counters = compiled::take_counters();
+        let counters = compiled::take_counters(&mut sim);
         assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
     }
 
@@ -3389,12 +3389,12 @@ mod tests {
                 .build_native()
                 .unwrap();
             let tb = compile_initial_testbench(&sim).unwrap();
-            compiled::take_counters();
+            compiled::take_counters(&mut sim);
             assert_eq!(
                 run_compiled_testbench_to_finish(&mut sim, &tb),
                 TestResult::Pass
             );
-            let counters = compiled::take_counters();
+            let counters = compiled::take_counters(&mut sim);
             assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
             sim.flush_vcd().unwrap();
             let native = std::fs::read_to_string(&native_path).unwrap();
@@ -3447,9 +3447,9 @@ mod tests {
             let result = if native {
                 let mut sim = builder.build_native().unwrap();
                 let tb = compile_initial_testbench(&sim).unwrap();
-                compiled::take_counters();
+                compiled::take_counters(&mut sim);
                 let result = run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1000);
-                let counters = compiled::take_counters();
+                let counters = compiled::take_counters(&mut sim);
                 assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
                 sim.flush_vcd().unwrap();
                 // Publishing the step does not drop its tick.
@@ -3503,7 +3503,7 @@ mod tests {
             TestResult::Pass,
             "q={}, counters={:?}",
             sim.get_as::<u32>(sim.signal("q")),
-            compiled::take_counters()
+            compiled::take_counters(&mut sim)
         );
     }
 
