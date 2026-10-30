@@ -157,3 +157,75 @@ fn aggregates_of_each_generate_scope_are_types_of_their_own() {
         assert_eq!(first[index], again[index]);
     }
 }
+#[test]
+fn packed_types_of_the_same_bits_states_and_signing_are_equivalent() {
+    // IEEE 1800-2023 6.22.2 c; an enumeration is equivalent only to a type it
+    // matches.
+    let (table, ids) = typedefs(
+        "typedef byte b8; typedef struct packed signed {bit [3:0] a, b;} uint8;
+         typedef bit [7:0] u8; typedef logic signed [7:0] l8; typedef bit signed [1:0][3:0] n8;
+         typedef enum bit signed [7:0] {A, B} e_t; typedef e_t e2_t;
+         typedef struct packed {int A; int B;} AB_t; typedef bit [63:0] u64;
+         typedef e_t [1:0] ea_t; typedef bit [15:0] u16;",
+    );
+    for (a, b, expected) in [
+        ("b8", "uint8", true),
+        ("b8", "n8", true),
+        ("b8", "u8", false),
+        ("b8", "l8", false),
+        ("b8", "e_t", false),
+        ("e_t", "e2_t", true),
+        ("AB_t", "u64", true),
+        ("ea_t", "u16", true),
+    ] {
+        assert_eq!(table.equivalent(ids[a], ids[b]), expected, "{a} and {b}");
+    }
+}
+
+#[test]
+fn unpacked_arrays_of_equivalent_elements_and_equal_size_are_equivalent() {
+    // IEEE 1800-2023 6.22.2 d, e.
+    let (table, ids) = typedefs(
+        "typedef bit [9:0] A_t [0:5]; typedef bit [1:10] B_t [6]; typedef bit [10:1] uint10;
+         typedef uint10 C_t [6:1]; typedef int anint [0:0]; typedef int i_t;
+         typedef int q_t[$]; typedef bit signed [31:0] q2_t[$:3]; typedef int d_t[];
+         typedef int m_t[byte]; typedef int m2_t[bit signed [7:0]]; typedef int m3_t[string];",
+    );
+    for (a, b, expected) in [
+        ("A_t", "B_t", true),
+        ("A_t", "C_t", true),
+        ("anint", "i_t", false),
+        ("q_t", "q2_t", true),
+        ("q_t", "d_t", false),
+        ("m_t", "m2_t", true),
+        ("m_t", "m3_t", false),
+    ] {
+        assert_eq!(table.equivalent(ids[a], ids[b]), expected, "{a} and {b}");
+    }
+}
+
+#[test]
+fn unpacked_arrays_assign_by_element_type_and_size() {
+    // IEEE 1800-2023 7.6, 7.9.9.
+    let (table, ids) = typedefs(
+        "typedef int A_t [10:1]; typedef int B_t [0:9]; typedef int C_t [24:1];
+         typedef int d_t[]; typedef int q_t[$]; typedef byte b_t[$]; typedef int m_t[string];
+         typedef int m2_t[int]; typedef int i_t;",
+    );
+    let assign = |source: &str, target: &str| table.assignable_array(ids[source], ids[target]);
+    assert_eq!(assign("B_t", "A_t"), Ok(Assignable::Always));
+    assert_eq!(
+        assign("C_t", "A_t"),
+        Err(Mismatch::Size {
+            actual: 24,
+            target: 10
+        })
+    );
+    assert_eq!(assign("d_t", "A_t"), Ok(Assignable::WhenSized(10)));
+    assert_eq!(assign("A_t", "q_t"), Ok(Assignable::Always));
+    assert_eq!(assign("b_t", "q_t"), Err(Mismatch::ElementType));
+    assert_eq!(assign("m_t", "d_t"), Err(Mismatch::Associative));
+    assert_eq!(assign("m_t", "m2_t"), Err(Mismatch::IndexType));
+    assert_eq!(assign("m_t", "m_t"), Ok(Assignable::Always));
+    assert_eq!(assign("i_t", "q_t"), Err(Mismatch::NotArrays));
+}
