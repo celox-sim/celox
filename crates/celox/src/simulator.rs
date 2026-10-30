@@ -1645,6 +1645,75 @@ mod host {
                 .collect()
         }
 
+        /// Drain runtime events as [`Self::drain_runtime_events_deferred_with_context`]
+        /// does, with the site of each. A record of `marker` gives the events
+        /// recorded before it, since the previous marker, the simulation time
+        /// of its argument; later events have the time of `ctx`.
+        pub(crate) fn drain_marked_runtime_events(
+            &mut self,
+            ctx: RuntimeFormatContext<'_>,
+            marker: usize,
+        ) -> Vec<(Option<usize>, RuntimeEvent)> {
+            assert!(
+                !self.runtime_event_drain_active.load(Ordering::Acquire),
+                "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
+            );
+            if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
+                self.eval_comb_for_runtime_event_drain().unwrap();
+            }
+            let queue = Arc::clone(&self.pending_host_events);
+            let mut pending = queue.lock().unwrap();
+            if pending.events.is_empty()
+                && pending.missed == 0
+                && pending.deferred.waiting.is_empty()
+                && self.runtime_event_read_seq.load(Ordering::Acquire)
+                    == self.runtime_event_write_seq()
+            {
+                return Vec::new();
+            }
+            pending.extend(
+                self.collect_backend_runtime_events(),
+                self.backend.layout().runtime_event_capacity,
+            );
+            pending.resolve_deferred_handles(self.backend.heap());
+            let raw = pending.drain();
+            drop(pending);
+            let sites = &self.program.runtime_schema.runtime_event_sites;
+            let mut events = Vec::with_capacity(raw.len());
+            let mut unmarked = Vec::new();
+            for raw in raw {
+                let site = match &raw {
+                    RawRuntimeEvent::Event { site_id, args } if *site_id == marker => {
+                        let time = args
+                            .first()
+                            .and_then(|time| time.values.first().copied())
+                            .unwrap_or(0);
+                        let marked = RuntimeFormatContext {
+                            tb_time: Some(time),
+                            ..ctx
+                        };
+                        for (site, raw) in unmarked.drain(..) {
+                            events
+                                .extend(render_raw_runtime_event(raw, sites, marked).map(
+                                    |event| (site, untimed_report(event, self.timed, marked)),
+                                ));
+                        }
+                        continue;
+                    }
+                    RawRuntimeEvent::Event { site_id, .. } => Some(*site_id),
+                    _ => None,
+                };
+                unmarked.push((site, raw));
+            }
+            for (site, raw) in unmarked {
+                events.extend(
+                    render_raw_runtime_event(raw, sites, ctx)
+                        .map(|event| (site, untimed_report(event, self.timed, ctx))),
+                );
+            }
+            events
+        }
+
         fn queue_host_runtime_event(
             &mut self,
             site: RuntimeEventSite,

@@ -425,6 +425,7 @@ pub fn bind_testbench_program<B: SimBackend>(
                     }
                 })
                 .collect(),
+            display_sites: kernel.display_sites.clone(),
         })
         .collect();
     let lengths = program.process_lengths().to_vec();

@@ -654,7 +654,28 @@ pub(crate) fn lower(
             .processes
             .iter()
             .any(|p| p.kind != ProcessKind::Callable);
+    let marker_site = event_site(runtime, marker_event_site());
+    let mut display_sites = Vec::new();
     for body in program.processes() {
+        let mut statements = Vec::new();
+        statement_sites(body, &mut statements);
+        display_sites.push(
+            statements
+                .into_iter()
+                .enumerate()
+                .filter_map(|(site, statement)| {
+                    let SemanticStatement::Display { message, newline } = statement else {
+                        return None;
+                    };
+                    Some((
+                        site,
+                        event_site(runtime, display_event_site(message, *newline)?),
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    for (body, display_sites) in program.processes().zip(display_sites) {
         let slots = ProcessSlots {
             kind: ProcessKind::Callable,
             requires_timed_simulation: false,
@@ -697,14 +718,103 @@ pub(crate) fn lower(
             status: slots.status,
             request: slots.delay,
             requests: lower.requests,
+            display_sites,
         });
     }
     program.set_kernels(kernels);
-    allocate_scheduler(runtime, program);
+    allocate_scheduler(runtime, program, marker_site);
     Ok(())
 }
 
-fn allocate_scheduler(runtime: &mut RuntimeProgram, program: &mut TestbenchProgram<Addr>) {
+/// The statements of `body` in site order: each statement before the
+/// statements it contains.
+fn statement_sites<'a>(
+    body: &'a [SemanticStatement<Addr>],
+    out: &mut Vec<&'a SemanticStatement<Addr>>,
+) {
+    for statement in body {
+        out.push(statement);
+        match statement {
+            SemanticStatement::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                statement_sites(then_block, out);
+                statement_sites(else_block, out);
+            }
+            SemanticStatement::For { body, .. } => statement_sites(body, out),
+            _ => {}
+        }
+    }
+}
+
+fn event_site(runtime: &mut RuntimeProgram, site: celox_design::RuntimeEventSite) -> u32 {
+    let sites = &mut runtime.runtime_schema.runtime_event_sites;
+    sites.push(site);
+    (sites.len() - 1) as u32
+}
+
+/// A record that prints nothing and carries a simulation time.
+fn marker_event_site() -> celox_design::RuntimeEventSite {
+    celox_design::RuntimeEventSite {
+        kind: celox_design::RuntimeEventKind::Write,
+        template: Some(String::new()),
+        sizing: celox_design::DisplaySizing::Veryl,
+        scope: None,
+        location: None,
+        assertion: None,
+        deferred: None,
+        timestamp_arg: false,
+        arg_widths: vec![64],
+        arg_signed: vec![false],
+        arg_is_string: vec![false],
+        arg_float_precision: vec![None],
+        arg_is_handle: Vec::new(),
+    }
+}
+
+/// The site a `$display` records its message at, formatted as the host
+/// formats it. String arguments are heap handles in compiled code, which
+/// the host formats itself: `None` for those.
+pub(crate) fn display_event_site(
+    message: &Option<AssertMessage<SemanticArgument<Addr>>>,
+    newline: bool,
+) -> Option<celox_design::RuntimeEventSite> {
+    let (template, args) = match message {
+        None => (Some(String::new()), &[][..]),
+        Some(AssertMessage::Formatted { template, args }) => (Some(template.clone()), &args[..]),
+        Some(AssertMessage::DynamicArgs(args)) => (None, &args[..]),
+    };
+    if args.iter().any(|arg| arg.is_string) {
+        return None;
+    }
+    Some(celox_design::RuntimeEventSite {
+        kind: if newline {
+            celox_design::RuntimeEventKind::Display
+        } else {
+            celox_design::RuntimeEventKind::Write
+        },
+        template,
+        sizing: celox_design::DisplaySizing::Veryl,
+        scope: None,
+        location: None,
+        assertion: None,
+        deferred: None,
+        timestamp_arg: false,
+        arg_widths: args.iter().map(|arg| arg.width.max(1)).collect(),
+        arg_signed: args.iter().map(|arg| arg.signed).collect(),
+        arg_is_string: vec![false; args.len()],
+        arg_float_precision: args.iter().map(|arg| arg.float_precision).collect(),
+        arg_is_handle: Vec::new(),
+    })
+}
+
+fn allocate_scheduler(
+    runtime: &mut RuntimeProgram,
+    program: &mut TestbenchProgram<Addr>,
+    marker_site: u32,
+) {
     fn collect(body: &[SemanticStatement<Addr>], clocks: &mut Vec<(Addr, u64)>) {
         for statement in body {
             match statement {
@@ -805,5 +915,6 @@ fn allocate_scheduler(runtime: &mut RuntimeProgram, program: &mut TestbenchProgr
         declared,
         locals,
         baselines,
+        marker_site: Some(marker_site),
     });
 }
