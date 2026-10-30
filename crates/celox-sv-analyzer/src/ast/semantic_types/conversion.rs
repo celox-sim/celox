@@ -184,15 +184,23 @@ impl Parts<'_> {
             // `reg` is `logic` (6.11.2), as is an implicit type.
             TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => true,
         };
-        let element = if self.enumeration {
+        let anonymous = self
+            .enum_domain
+            .map(|domain| Decl::AnonymousEnum(domain.clone()));
+        let element = if self.enumeration
+            && let Some(decl) = self
+                .declaration
+                .map(|declaration| Decl::Named(declaration.into()))
+                .or(anonymous)
+        {
             PackedElement::Enum {
-                decl: match self.declaration {
-                    Some(declaration) => Decl::Named(declaration.into()),
-                    // A packed array of an enumeration keeps no members.
-                    None => Decl::AnonymousEnum(self.enum_domain?.clone()),
-                },
+                decl,
                 array: self.packed_enum,
             }
+        } else if self.enumeration {
+            // A packed array of an anonymous enumeration keeps neither its
+            // declaration nor its members, so only its bits tell it apart.
+            PackedElement::Bits
         } else if let Some(member) = self.members.first() {
             PackedElement::Aggregate(self.aggregate_decl(member.owner()))
         } else {
