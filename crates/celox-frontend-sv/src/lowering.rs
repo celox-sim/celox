@@ -6489,8 +6489,8 @@ fn check_unpacked_port_connection(
     }
     let error = sv::AnalyzerError::IncompatibleUnpackedArray {
         context: format!("connection of port `{}`", connection.formal),
-        actual: Box::new(actual_type),
-        target: Box::new(target),
+        actual: actual_type.to_string(),
+        target: target.to_string(),
     };
     Err(ParserError::illegal_context(
         "systemverilog port connection",

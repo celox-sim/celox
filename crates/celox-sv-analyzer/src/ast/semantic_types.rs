@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 mod conversion;
 mod relations;
+mod spelling;
 #[cfg(test)]
 mod tests;
 
@@ -28,6 +29,13 @@ pub(super) struct TyId(u32);
 pub(super) struct Range {
     pub left: i128,
     pub right: i128,
+}
+
+impl Range {
+    /// How many elements or bits the dimension has.
+    pub fn size(self) -> u128 {
+        self.left.abs_diff(self.right) + 1
+    }
 }
 
 /// The identity of the declaration of a named type.
@@ -71,6 +79,13 @@ pub(super) struct Packed {
     /// type, which `$typename` tells apart from a vector of its width
     /// (20.6.1) but type matching does not (6.22.1 e).
     pub keyword: Option<&'static str>,
+}
+
+impl Packed {
+    /// How many bits the type has.
+    pub fn bits(&self) -> u128 {
+        self.dims.iter().map(|range| range.size()).product()
+    }
 }
 
 /// The kind of the slowest-varying dimension of an unpacked array (7.4).
