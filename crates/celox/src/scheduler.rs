@@ -485,11 +485,30 @@ impl Plan {
                     })
                 && !nba_targets.contains_key(&signal)
         };
+        // The resets a compiled testbench writes: its unit applies those
+        // writes as edges of their slots, with its clocks'. A reset other
+        // events derive from combinationally keeps its writes in the host:
+        // a slot would make those derived events, which a run otherwise
+        // holds stable, cost every slot their waves.
+        let testbench_resets: HashSet<AbsoluteAddr> = program
+            .runtime
+            .testbench
+            .iter()
+            .flat_map(|tb| tb.statements())
+            .flat_map(testbench_resets)
+            .filter(|&reset| {
+                topology
+                    .combinational_derived
+                    .get(&reset)
+                    .is_none_or(|derived| derived.is_empty())
+            })
+            .map(storage)
+            .collect();
         let clocks: Vec<usize> = events
             .iter()
             .enumerate()
             .filter(|(index, event)| {
-                event.clock
+                (event.clock || testbench_resets.contains(&storage(event.signal)))
                     && event.width == 1
                     && !active_commits.contains(index)
                     && undriven(storage(event.signal))
@@ -2936,6 +2955,32 @@ fn fails(unit: &Unit) -> bool {
     unit.blocks
         .values()
         .any(|block| matches!(block.terminator, SIRTerminator::Error(_)))
+}
+
+/// The signals `statement` writes that may be reset events: those of
+/// `rst.assert` and of assignments.
+fn testbench_resets(
+    statement: &celox_testbench::SemanticStatement<AbsoluteAddr>,
+) -> Vec<AbsoluteAddr> {
+    use celox_testbench::SemanticStatement as S;
+    match statement {
+        S::ResetAssert {
+            reset_event: Some(event),
+            ..
+        } => vec![*event],
+        S::Assign { dst, .. } => vec![dst.signal.address],
+        S::If {
+            then_block,
+            else_block,
+            ..
+        } => then_block
+            .iter()
+            .chain(else_block)
+            .flat_map(testbench_resets)
+            .collect(),
+        S::For { body, .. } => body.iter().flat_map(testbench_resets).collect(),
+        _ => vec![],
+    }
 }
 
 /// Whether `unit` may record a `$finish`, one of `finish_sites`.
