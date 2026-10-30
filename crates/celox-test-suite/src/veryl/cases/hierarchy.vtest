@@ -98,6 +98,7 @@ y,
   (assert_eq y 0x55))
 
 (case test_instance_input_function_output_writeback
+  (expect reject)
   (source "test.veryl" #"
 module Child (
 i: input logic,
@@ -125,14 +126,10 @@ o: child_o
 assign seen_o = seen;
 }
 "#)
-  (top Top)
-  (modify (set a 1))
-  (assert_eq child_o 1)
-  (assert_eq seen_o 1))
+  (top Top))
 
 (case test_instance_input_function_output_concat_dynamic_writeback
-  ; veryl-simulator currently evaluates the connection value but does
-  ; not write the function output actual back to the parent variables.
+  (expect reject)
   (source "test.veryl" #"
 module Child (
 i: input logic,
@@ -164,15 +161,10 @@ assign mem_o = mem;
 assign tmp_o = tmp;
 }
 "#)
-  (top Top)
-  (modify
-    (set value 3)
-    (set index 1))
-  (assert_eq child_o 1)
-  (assert_eq mem_o 2)
-  (assert_eq tmp_o 1))
+  (top Top))
 
 (case test_inactive_instance_input_output_call_adds_no_parent_driver
+  (expect reject)
   (source "test.veryl" #"
 module Child (
 i: input logic,
@@ -201,10 +193,7 @@ assign seen = a;
 assign seen_o = seen;
 }
 "#)
-  (top Top)
-  (modify (set a 1))
-  (assert_eq child_o 1)
-  (assert_eq seen_o 1))
+  (top Top))
 
 (case test_instance_output_dynamic_index_function_output_writeback
   (expect reject)
