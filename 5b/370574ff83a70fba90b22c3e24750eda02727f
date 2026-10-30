@@ -1,1 +1,6 @@
-Fix runner extraction of same-repository actions: exclude dangling generated playground links from source archives
+Revision history for #2662:
+
+rev 2 (content) 2026-10-30 15:38 UTC — Fix runner extraction of same-repository actions: exclude dangling generated playground links from source archives
+rev 1 (initial) 2026-10-30 15:38 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2662,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"45e2b38eaadb49314c15516badd03c1a54cfe25a","timestamp_iso":"2026-10-30T15:38:25Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"45e2b38eaadb49314c15516badd03c1a54cfe25a","new_sha":"5b370574ff83a70fba90b22c3e24750eda02727f","timestamp_iso":"2026-10-30T15:38:25Z","reason":"Fix runner extraction of same-repository actions: exclude dangling generated playground links from source archives","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/45e2b38eaadb49314c15516badd03c1a54cfe25a...5b370574ff83a70fba90b22c3e24750eda02727f"}]} -->
