@@ -3216,6 +3216,10 @@ struct PackedDimensions {
     /// The values of the operands whose side effects a procedural body has
     /// already executed before their statement (see [`effects`]).
     effect_values: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
+    /// The class property expression whose select is being bound against
+    /// the property's template; every other property is read through its
+    /// object.
+    property_select_base: Option<celox_sv_syntax::ExprId>,
 }
 
 impl PackedDimensions {
@@ -3243,6 +3247,7 @@ impl PackedDimensions {
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),
+            property_select_base: None,
         }
     }
 }

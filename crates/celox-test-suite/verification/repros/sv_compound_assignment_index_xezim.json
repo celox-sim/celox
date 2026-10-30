@@ -1,0 +1,32 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source": "sv_compound_assignment_index_xezim.sv",
+  "standard": "IEEE 1800-2023 11.4.1",
+  "expected_output": "property 01\nvariable 01",
+  "observations": [
+    {
+      "top": "Top",
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nproperty 03\nvariable 03\nSimulation finished at time 0\n"
+    },
+    {
+      "top": "Wrapped",
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nproperty 03\nvariable 03\nSimulation finished at time 0\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "top": "Top",
+      "exit_code": 0,
+      "output": "property 01\nvariable 01\n"
+    },
+    {
+      "top": "Wrapped",
+      "exit_code": 0,
+      "output": "property 01\nvariable 01\n"
+    }
+  ]
+}

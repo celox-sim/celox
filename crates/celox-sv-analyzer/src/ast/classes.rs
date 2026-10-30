@@ -856,7 +856,7 @@ pub(super) fn class(
                         constant: false,
                         local: property.qualifiers.local,
                         protected: property.qualifiers.protected,
-                        r#type: leaf.r#type,
+                        r#type: procedural::scoped_type(leaf.r#type, env),
                         field,
                         rand: false,
                         randc: false,
@@ -888,7 +888,9 @@ pub(super) fn class(
                 constant: property.declaration.constant,
                 local: property.qualifiers.local,
                 protected: property.qualifiers.protected,
-                r#type: ty.clone(),
+                // Its ranges keep their meaning outside the class, which
+                // may name its parameters.
+                r#type: procedural::scoped_type(ty.clone(), env),
                 field,
                 rand: property.qualifiers.rand,
                 randc: property.qualifiers.randc,

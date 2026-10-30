@@ -614,6 +614,12 @@ pub(in crate::ast) fn receiver(
     }
 }
 
+/// The local a select of property `property` is written in: the property
+/// is read into it, the select assigned, and the local stored back.
+pub(in crate::ast) fn select_template(property: &classes::Property) -> String {
+    format!("$property_select${}${}", property.owner, property.name)
+}
+
 /// A read of property `property` of the object `handle`.
 pub(in crate::ast) fn load(property: &classes::Property, handle: Expr) -> Expr {
     classes::object_call(ObjectOp::Load(property.field), vec![handle])

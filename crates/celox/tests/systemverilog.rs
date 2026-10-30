@@ -268,6 +268,9 @@ mod virtual_interfaces;
 #[path = "frontends/systemverilog/wide_class_properties.rs"]
 mod wide_class_properties;
 
+#[path = "frontends/systemverilog/property_selects.rs"]
+mod property_selects;
+
 #[path = "frontends/systemverilog/container_formals.rs"]
 mod container_formals;
 
