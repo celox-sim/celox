@@ -17,14 +17,21 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 mod conversion;
+mod relations;
 #[cfg(test)]
 mod tests;
 
 #[cfg_attr(
     not(test),
-    expect(unused_imports, reason = "the type compatibility checks adopt it next")
+    expect(
+        unused_imports,
+        reason = "the type compatibility checks adopt them next"
+    )
 )]
-pub(super) use conversion::of_type;
+pub(super) use {
+    conversion::of_type,
+    relations::{Assignable, Mismatch},
+};
 
 /// An interned semantic type of a [`TyTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
