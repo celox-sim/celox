@@ -294,6 +294,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "icarus",
                             "fork_control::process_nested_calls_preserve_level_wait_resume",
                         ) => ("compile_error", "compile", "source_0.sv:4: syntax error"),
+                        ("icarus", "fork_control::process_handles_index_associative_arrays") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
                         (
                             "icarus",
                             "fork_control::process_ancestor_kill_preserves_caller_rng"

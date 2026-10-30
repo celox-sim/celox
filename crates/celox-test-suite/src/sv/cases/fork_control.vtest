@@ -333,6 +333,71 @@ module Top(output int checks, late);
 endmodule"#)
  (top Top) (run_until 8) (assert_eq checks 127) (assert_eq late 0))
 
+; An associative array may take process handles as indices, as UVM's
+; uvm_tlm_fifo does to track its blocked getters; an entry stays after its
+; process ends (IEEE 1800-2023 7.8, 9.7).
+(case process_handles_index_associative_arrays
+ (source "process.sv" #"
+module Top(output int checks, pending, left);
+ class Fifo;
+  protected bit m_pending[process];
+  mailbox #(int) m = new();
+  task get(output int t);
+   process pid;
+   pid = process::self();
+   m_pending[pid] = 1;
+   m.get(t);
+   m_pending.delete(pid);
+  endtask
+  function void clear_zombies();
+   process zombies[$];
+   foreach (m_pending[i]) begin
+    int status;
+    status = i.status();
+    if (status == process::KILLED) zombies.push_back(i);
+   end
+   foreach (zombies[i]) m_pending.delete(zombies[i]);
+  endfunction
+  function int blocked();
+   return m_pending.size();
+  endfunction
+ endclass
+ Fifo f = new();
+ process a, b, c, k;
+ bit seen[process];
+ int got, count, matched;
+ initial begin
+  checks = 0;
+  fork
+   begin a = process::self(); f.get(got); end
+   begin b = process::self(); f.get(got); end
+  join_none
+  #1;
+  pending = f.blocked();
+  b.kill();
+  f.clear_zombies();
+  left = f.blocked();
+  f.m.put(5);
+  #1;
+  checks += (got == 5 && a.status() == process::FINISHED);
+  checks += (f.blocked() == 0) * 2;
+  fork begin c = process::self(); seen[c] = 1; end join_none
+  #1;
+  seen[process::self()] = 0;
+  checks += (c.status() == process::FINISHED && seen.exists(c) && seen[c] == 1) * 4;
+  checks += (seen.num() == 2) * 8;
+  count = 0;
+  if (seen.first(k)) do count++; while (seen.next(k));
+  checks += (count == 2) * 16;
+  matched = 0;
+  foreach (seen[p]) if (p == c || p == process::self()) matched++;
+  checks += (matched == 2) * 32;
+  seen.delete(c);
+  checks += (!seen.exists(c) && seen.num() == 1) * 64;
+ end
+endmodule"#)
+ (top Top) (run_until 4) (assert_eq pending 2) (assert_eq left 1) (assert_eq checks 127))
+
 (case process_finished_parent_kills_descendants
  (source "process.sv" #"
 module Top(output int checks, late);

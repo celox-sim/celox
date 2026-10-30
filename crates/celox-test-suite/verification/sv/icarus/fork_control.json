@@ -79,6 +79,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 27; see <case>/build.log\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: mailbox doesn't name a type.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Malformed statement\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed conditional expression.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Invalid module instantiation\n<case>/source_0.sv:33: syntax error\n<case>/source_0.sv:33: error: Malformed statement\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n<case>/source_0.sv:43: syntax error\n<case>/source_0.sv:43: error: Malformed statement\n<case>/source_0.sv:45: syntax error\n<case>/source_0.sv:45: error: Malformed statement\n<case>/source_0.sv:47: syntax error\n<case>/source_0.sv:47: Syntax in assignment statement l-value.\n<case>/source_0.sv:48: syntax error\n<case>/source_0.sv:48: error: Malformed statement\n<case>/source_0.sv:54: syntax error\n<case>/source_0.sv:54: error: Malformed statement\n<case>/source_0.sv:54: error: Malformed conditional expression.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_handles_index_associative_arrays",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Icarus build exit status: 21; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:4: error: Invalid module instantiation\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "fork_control::process_identity_and_status",

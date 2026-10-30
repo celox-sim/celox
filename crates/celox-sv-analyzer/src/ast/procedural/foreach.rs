@@ -50,8 +50,16 @@ impl BodyBuilder<'_, '_, '_> {
                 object,
             } = container.layout.kind
             {
+                // A process key keeps its type, so the index is a handle
+                // whose methods the body may call.
+                let process = container
+                    .key
+                    .as_ref()
+                    .filter(|key| key.kind() == TypeKind::Process);
                 index_type = if object {
                     container.key.clone().expect("a class index type")
+                } else if let Some(process) = process {
+                    process.clone()
                 } else if string {
                     type_binding::builtin_type("string", None).expect("string is a builtin type")
                 } else {
