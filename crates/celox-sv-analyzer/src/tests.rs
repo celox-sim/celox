@@ -8075,3 +8075,48 @@ fn property_select_reads_require_a_zero_based_range() {
         }
     }
 }
+
+#[test]
+fn wide_container_elements_reject_whole_container_operations() {
+    // Elements wider than 64 bits are held in records, which these
+    // operations would compare or combine as handles.
+    for (statement, detail) in [
+        ("q.sort();", "sorting elements wider than 64 bits"),
+        (
+            "r = q.sum();",
+            "array reduction of elements wider than 64 bits",
+        ),
+        ("b = q == p;", "elements wider than 64 bits"),
+        (
+            "$display(\"%p\", q);",
+            "%p of a container of elements wider than 64 bits",
+        ),
+        (
+            "p = q.min();",
+            "elements wider than 64 bits requires a with",
+        ),
+        (
+            "p = q.unique();",
+            "elements wider than 64 bits requires a with",
+        ),
+        (
+            "ix = q.unique_index();",
+            "elements wider than 64 bits requires a with",
+        ),
+        ("b = q[0][99];", "container element wider than 64 bits"),
+        ("r = q[0][7:0];", "container element wider than 64 bits"),
+        ("ix[0] = $bits(q[0][99]);", "query selection"),
+        ("q[0][3] = 1'b1;", "requires a compatible container"),
+    ] {
+        let source = format!(
+            "module Top; logic [99:0] q[$], p[$]; logic [99:0] r; bit b; int ix[$]; \
+             initial begin {statement} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("wide_elements.sv"))
+            .expect_err("the operation must be rejected");
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(_)) && error.to_string().contains(detail),
+            "{statement}: {error}"
+        );
+    }
+}

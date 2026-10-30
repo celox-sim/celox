@@ -47,6 +47,11 @@ pub(super) fn bind(
                 "array reduction arguments require a with expression",
             ));
         }
+        if container.record.is_some() && container.element.unpacked_struct().is_none() {
+            return Err(unsupported(
+                "array reduction of elements wider than 64 bits",
+            ));
+        }
         if container.layout.handle.is_some() {
             return Err(unsupported("array reduction requires integral elements"));
         }

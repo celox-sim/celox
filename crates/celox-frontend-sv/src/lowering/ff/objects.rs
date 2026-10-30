@@ -27,7 +27,10 @@ impl Ff<'_, '_> {
             for (index, arg) in args.iter_mut().enumerate() {
                 // A record is built from a flat structure value, not a handle.
                 if let ObjectOp::Box(record) = op {
-                    *arg = self.heap_operand(arg, Some((record.width(), false)), None)?;
+                    // The value extends by its own signedness (IEEE
+                    // 1800-2023 10.7).
+                    let signed = self.expr_signed(arg);
+                    *arg = self.heap_operand(arg, Some((record.width(), signed)), None)?;
                     continue;
                 }
                 let (width, signed) = if index == 0 {
@@ -165,10 +168,11 @@ impl Ff<'_, '_> {
                 // the record's handle is only used after them.
                 let expr = self.hoist(&args[0])?;
                 let width = record.width();
+                let signed = self.expr_signed(&expr);
                 let mut arena = SLTNodeArena::new();
-                let node = self.expr_slt(&expr, Some((width, false)), &mut arena)?;
+                let node = self.expr_slt(&expr, Some((width, signed)), &mut arena)?;
                 let node =
-                    coerce_node_width(&mut arena, node, Some(width), false).map_err(slt_error)?;
+                    coerce_node_width(&mut arena, node, Some(width), signed).map_err(slt_error)?;
                 let value = self.lower_slt(&arena, node)?;
                 // A record is not seeded: it has no random state, and seeding
                 // would draw from the creating process's RNG.

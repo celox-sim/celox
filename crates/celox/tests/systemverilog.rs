@@ -271,6 +271,9 @@ mod wide_class_properties;
 #[path = "frontends/systemverilog/property_selects.rs"]
 mod property_selects;
 
+#[path = "frontends/systemverilog/wide_container_elements.rs"]
+mod wide_container_elements;
+
 #[path = "frontends/systemverilog/container_formals.rs"]
 mod container_formals;
 

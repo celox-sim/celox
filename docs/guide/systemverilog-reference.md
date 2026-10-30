@@ -514,10 +514,11 @@ including changes caused by ordering methods (9.4.2).
 Associative arrays cannot use ordering methods. Fixed-array ordering, `shuffle`,
 and ordering `with` expressions and iterator arguments remain unsupported.
 
-Elements may be packed integral values up to 64 bits, strings, class
+Elements may be packed integral values of any width, strings, class
 handles or [unpacked structures](#unpacked-structures); a missing
 associative entry or a new dynamic array element of structure type has the
-structure's default members. Containers of unpacked structures with a string
+structure's default members. Containers of elements wider than 64 bits are
+not compared with `==`, sorted, reduced or printed with `%p`. Containers of unpacked structures with a string
 or handle member, or wider than 64 bits, are not compared with `==` or sorted
 without `with`; a member of such an element is read, not written (assign
 the whole element). Positional assignment patterns and element concatenations construct
@@ -572,7 +573,7 @@ values up to 64 bits or strings. Locator methods are not available in
 continuous assignments, on multidimensional fixed arrays or real elements, or
 as discarded statements.
 
-Multidimensional containers, elements wider than 64 bits, real elements,
+Multidimensional containers, real elements,
 wildcard or class keys, slices, keyed patterns,
 associative arrays within concatenations, nonblocking element assignments,
 compound element assignments whose container or index has a side effect or
