@@ -1,1 +1,6 @@
-Keep the element declaration of array operands so arrays of the same enum stay compatible as arguments, results and defaults (Codex review)
+Revision history for #2638:
+
+rev 2 (content) 2026-10-30 11:38 UTC — Keep the element declaration of array operands so arrays of the same enum stay compatible as arguments, results and defaults (Codex review)
+rev 1 (initial) 2026-10-30 11:38 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2638,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5134f8d07dd0304e722f72ec62c5ad1959993138","timestamp_iso":"2026-10-30T11:38:45Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5134f8d07dd0304e722f72ec62c5ad1959993138","new_sha":"a53c27e70dc0768068fcccc9c1ff7518ddd3c7ba","timestamp_iso":"2026-10-30T11:38:45Z","reason":"Keep the element declaration of array operands so arrays of the same enum stay compatible as arguments, results and defaults (Codex review)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5134f8d07dd0304e722f72ec62c5ad1959993138...a53c27e70dc0768068fcccc9c1ff7518ddd3c7ba"}]} -->
