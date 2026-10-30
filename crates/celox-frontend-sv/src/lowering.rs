@@ -6328,6 +6328,9 @@ fn unpacked_array_type(variable: &SvVariable) -> Option<sv::typecheck::UnpackedA
         element_width,
         signed: variable.signed,
         four_state: variable.is_4state,
+        // Lowered variables keep only the bits of their elements, so a port
+        // connection compares the integral shape of the element types.
+        element: None,
     })
 }
 
@@ -6366,8 +6369,8 @@ fn check_unpacked_port_connection(
     }
     let error = sv::AnalyzerError::IncompatibleUnpackedArray {
         context: format!("connection of port `{}`", connection.formal),
-        actual: actual_type,
-        target,
+        actual: Box::new(actual_type),
+        target: Box::new(target),
     };
     Err(ParserError::illegal_context(
         "systemverilog port connection",

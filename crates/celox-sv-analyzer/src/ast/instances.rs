@@ -352,9 +352,7 @@ fn array_argument_shape(
                     jobs.push(Job::Enter(else_expression));
                     jobs.push(Job::Enter(then_expression));
                 } else {
-                    values.push(array_compatibility::native_unpacked_shape(
-                        id, native, dims,
-                    )?);
+                    values.push(array_compatibility::native_unpacked_shape(id, tree, dims)?);
                 }
             }
             Job::Conditional => {

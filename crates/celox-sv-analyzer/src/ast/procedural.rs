@@ -699,16 +699,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             });
         }
         if op == "="
-            && let Some(target) = array_compatibility::native_unpacked_shape(
-                left,
-                self.tree.declarations(),
-                &self.dims,
-            )
+            && let Some(target) =
+                array_compatibility::native_unpacked_shape(left, self.tree, &self.dims)
         {
             array_compatibility::check_native_unpacked_assignment(
-                &self.tree.state,
+                self.tree,
                 right,
-                self.tree.declarations(),
                 &target,
                 || "assignment".into(),
                 &self.dims,
@@ -3274,9 +3270,20 @@ pub(super) fn lower_subroutine(
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
         .iter()
-        .map(|(_, direction, ty, default)| {
+        .map(|(formal, direction, ty, default)| {
             default
                 .map(|root| {
+                    // A default of an unpacked array formal is assigned to
+                    // it like an actual (IEEE 1800-2023 7.6, 13.5.3).
+                    if !ty.unpacked_ranges.is_empty() {
+                        array_compatibility::check_native_unpacked_assignment(
+                            tree,
+                            root,
+                            &dimensions_from_type(ty),
+                            || format!("default of `{formal}`"),
+                            &builder.dims,
+                        )?;
+                    }
                     // The default of a container input is a container value.
                     let shape = (ty.tagged_identity().is_some()
                         || ty.unpacked_struct().is_some()
@@ -4752,9 +4759,8 @@ pub(super) fn initial_processes_from_scope(
                 if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
                     let id = native;
                     array_compatibility::check_native_unpacked_assignment(
-                        &tree.state,
+                        tree,
                         id,
-                        tree.declarations(),
                         &target,
                         || format!("initializer of `{name}`"),
                         item_dimensions,

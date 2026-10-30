@@ -622,6 +622,22 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "source_0.sv:4: error: Invalid class item.",
                         ),
+                        (
+                            "icarus",
+                            "types::unpacked_array_assignments_through_selects_and_calls",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Subroutine ports with unpacked dimensions are not yet supported",
+                        ),
+                        (
+                            "xezim",
+                            "types::unpacked_array_assignments_through_selects_and_calls",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq sum: expected 0x1179b59, got 0x117b2e7",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

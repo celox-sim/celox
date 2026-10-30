@@ -59,6 +59,11 @@ pub(in crate::ast) fn leaf_name(base: &str, path: &[String]) -> String {
 }
 
 impl UnpackedStruct {
+    /// The nominal identity of the type: its declaration.
+    pub(in crate::ast) fn identity(&self) -> &str {
+        &self.owner
+    }
+
     pub(in crate::ast) fn same_type(&self, other: &Self) -> bool {
         self.owner == other.owner
     }

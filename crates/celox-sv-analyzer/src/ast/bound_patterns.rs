@@ -191,8 +191,8 @@ impl BoundPattern {
             if !ty.is_assignment_compatible_with(&target) {
                 return Err(AnalyzerError::IncompatibleUnpackedArray {
                     context: "module parameter override".into(),
-                    actual: ty.clone(),
-                    target,
+                    actual: Box::new(ty.clone()),
+                    target: Box::new(target),
                 });
             }
             return Ok(value.clone());

@@ -486,6 +486,21 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Return(value) => {
                         if let Some(id) = value {
                             output.extend(self.effects(&[*id])?);
+                            // A result of an unpacked array type is assigned
+                            // like any array (IEEE 1800-2023 7.6, 13.4.1).
+                            if let Some(target) = self
+                                .stream_return_shape
+                                .as_ref()
+                                .filter(|shape| !shape.unpacked.is_empty())
+                            {
+                                array_compatibility::check_native_unpacked_assignment(
+                                    self.tree,
+                                    *id,
+                                    target,
+                                    || "return value".into(),
+                                    &self.dims,
+                                )?;
+                            }
                         }
                         let value = value
                             .map(|id| {

@@ -121,6 +121,20 @@ pub(super) fn scoped_name(unit: Option<&celox_sv_syntax::Unit>, name: &str) -> S
     }
 }
 
+/// The typedef that names the declared enumeration, struct or union element
+/// type of `shape`.
+pub(super) fn declaration_of(shape: &VariableDimensions) -> Option<String> {
+    // The typedef names the element type, which selecting from an array
+    // or changing its dimensions does not change.
+    shape
+        .declared
+        .0
+        .as_deref()?
+        .spelling
+        .declaration()
+        .map(str::to_owned)
+}
+
 /// The declared type of a variable, for `$typename` of its name. Shape
 /// equality does not compare it.
 #[derive(Debug, Clone, Default)]

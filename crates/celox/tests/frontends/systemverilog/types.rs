@@ -88,6 +88,10 @@ sv_backends! {
     fn enum_methods_in_combinational_and_sequential_logic(sim) {
         @case "types::enum_methods_in_combinational_and_sequential_logic";
     }
+
+    fn unpacked_array_assignments_through_selects_and_calls(sim) {
+        @case "types::unpacked_array_assignments_through_selects_and_calls";
+    }
 }
 
 // Receivers, counts and contexts that the external simulators of the shared
