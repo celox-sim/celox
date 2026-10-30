@@ -330,6 +330,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "fork_control::process_final_kill_preserves_cleanup",
                 "fork_control::process_final_procedures_share_identity_and_rng",
                 "fork_control::process_finished_parent_kills_descendants",
+                "fork_control::process_handles_index_associative_arrays",
                 "fork_control::process_identity_and_status",
                 "fork_control::process_mutual_status_waits_advance_to_cancellation",
                 "fork_control::process_nested_calls_preserve_level_wait_resume",
