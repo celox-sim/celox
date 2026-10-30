@@ -248,24 +248,27 @@ pub(super) fn assignment_value(
             "assignment pattern with incompatible unpacked structure operand or target",
         ));
     }
-    let actual = value_type
-        .map(procedural::dimensions_from_type)
-        .and_then(|shape| array_compatibility::unpacked_array_type(state, &shape, dims));
+    let actual_shape = value_type.map(procedural::dimensions_from_type);
+    let actual = actual_shape
+        .as_ref()
+        .and_then(|actual| array_compatibility::unpacked_array_type(state, actual, dims));
     let target = array_compatibility::unpacked_array_type(state, shape, dims);
-    match (actual, target) {
-        (Some(actual), Some(target)) if !actual.is_assignment_compatible_with(&target) => {
+    match (actual, target, actual_shape) {
+        (Some(actual), Some(target), Some(actual_shape))
+            if !array_compatibility::compatible(state, &actual_shape, shape, dims) =>
+        {
             return Err(AnalyzerError::IncompatibleUnpackedArray {
                 context: "assignment pattern element".into(),
                 actual: Box::new(actual),
                 target: Box::new(target),
             });
         }
-        (Some(_), None) => {
+        (Some(_), None, _) => {
             return Err(unsupported(
                 "unpacked array assignment pattern item for scalar",
             ));
         }
-        (None, Some(_)) => {
+        (None, Some(_), _) => {
             return Err(unsupported(
                 "scalar assignment pattern item for unpacked array",
             ));

@@ -135,6 +135,12 @@ pub(super) fn declaration_of(shape: &VariableDimensions) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// The declared type of the variable of `shape`, whose element type it
+/// still names after the shape selects from it or changes its dimensions.
+pub(super) fn declared_type(shape: &VariableDimensions) -> Option<&Type> {
+    shape.declared.0.as_deref()
+}
+
 /// The declared type of a variable, for `$typename` of its name. Shape
 /// equality does not compare it.
 #[derive(Debug, Clone, Default)]
