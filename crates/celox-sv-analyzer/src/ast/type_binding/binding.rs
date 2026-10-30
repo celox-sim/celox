@@ -151,7 +151,7 @@ fn bind_in_mode(
                         }
                         if let [package, class, member] = path.as_slice() {
                             let name = scope::qualified_name(
-                                &tree.state,
+                                tree,
                                 &normalize_identifier(&package.name.spelling),
                                 &normalize_identifier(&class.name.spelling),
                             );
@@ -187,14 +187,14 @@ fn bind_in_mode(
                         if path.iter().any(|part| part.arguments.is_some()) {
                             // A specialization is made where the class is
                             // declared, from its declaration.
-                            let imported = scope::imported(&tree.state);
+                            let imported = scope::imported(tree);
                             let class = match path.as_slice() {
                                 [part] => imported
                                     .aliases
                                     .get(&normalize_identifier(&part.name.spelling))
                                     .cloned(),
                                 [package, member] => Some(scope::qualified_name(
-                                    &tree.state,
+                                    tree,
                                     &normalize_identifier(&package.name.spelling),
                                     &normalize_identifier(&member.name.spelling),
                                 )),
@@ -235,7 +235,7 @@ fn bind_in_mode(
                         let name = match path.as_slice() {
                             [part] => normalize_identifier(&part.name.spelling),
                             [package, member] => scope::qualified_name(
-                                &tree.state,
+                                tree,
                                 &normalize_identifier(&package.name.spelling),
                                 &normalize_identifier(&member.name.spelling),
                             ),
@@ -551,7 +551,7 @@ fn class_scope_named(
     // Resolve a user package before std's implicit class fallback for this
     // qualified type; explicit std::process remains unambiguous (26.7).
     if class == super::super::processes::CLASS
-        && scope::imported(&tree.state).package_scopes.contains(&name)
+        && scope::imported(tree).package_scopes.contains(&name)
     {
         return Ok(None);
     }

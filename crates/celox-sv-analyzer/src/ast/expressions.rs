@@ -107,11 +107,11 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
 }
 
 pub(super) fn identifier_expression(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: String,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    if scope::imported(state).interface_types.contains_key(&name) && dimensions.get(&name).is_none()
+    if scope::imported(tree).interface_types.contains_key(&name) && dimensions.get(&name).is_none()
     {
         return Err(unsupported(format!(
             "use of interface `{name}` other than as a port connection or through a member"

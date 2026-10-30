@@ -194,7 +194,7 @@ pub(super) fn parameters_from_scope(
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
     let mut environment = parameters::ParameterEnvironment::new(
-        &syntax_tree.state,
+        syntax_tree,
         &parameters,
         base_const_env,
         &parameters::ownership::scope_names(syntax_tree)?,
@@ -286,7 +286,7 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
     for mut item in generate::items(syntax_tree, const_env, type_aliases)? {
-        let _interface_scope = item.interface_scope();
+        let syntax_tree = &item.scoped(syntax_tree);
         if preserve_parameters {
             let names = item.env.keys().cloned().collect::<Vec<_>>();
             for name in names {

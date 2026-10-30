@@ -8,8 +8,6 @@
 //! that uses packages starts its own analysis from the symbols of those
 //! packages, plus an alias for each name its imports make visible.
 
-use std::cell::RefCell;
-
 use super::*;
 
 /// The symbols of a scope, independent of the syntax they came from.
@@ -75,79 +73,19 @@ pub(super) struct ScopeSymbols {
     pub inline_randomizations: Vec<classes::constraints::InlineRequest>,
 }
 
-#[derive(Default)]
-pub(super) struct State {
-    imported: RefCell<Arc<ScopeSymbols>>,
-    package: RefCell<Option<String>>,
-}
-
-/// Restores the previously analyzed package when dropped.
-pub(super) struct InPackage {
-    previous: Option<String>,
-    revision: u64,
-    state: std::rc::Rc<AnalysisState>,
-}
-
-impl Drop for InPackage {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-        *self.state.scope.package.borrow_mut() = previous;
-        self.state.revision.restore(self.revision);
-    }
-}
-
-/// Analyze the package `name` until the guard is dropped: inside it, `p::x`
-/// with `p` the package names its own item `x`.
-pub(super) fn enter_package(state: &std::rc::Rc<AnalysisState>, name: &str) -> InPackage {
-    let previous = state.scope.package.borrow_mut().replace(name.to_string());
-    InPackage {
-        previous,
-        revision: state.revision.change(),
-        state: state.clone(),
-    }
-}
-
 /// The name a reference to item `name` of `package` has in the scope being
 /// analyzed: `package::name`, or `name` inside the package itself.
-pub(super) fn qualified_name(state: &AnalysisState, package: &str, name: &str) -> String {
-    {
-        if state.scope.package.borrow().as_deref() == Some(package) {
-            name.to_string()
-        } else {
-            format!("{package}::{name}")
-        }
-    }
-}
-
-/// Restores the previously imported symbols when dropped.
-pub(super) struct Installed {
-    previous: Arc<ScopeSymbols>,
-    revision: u64,
-    state: std::rc::Rc<AnalysisState>,
-}
-
-impl Drop for Installed {
-    fn drop(&mut self) {
-        let previous = std::mem::take(&mut self.previous);
-        *self.state.scope.imported.borrow_mut() = previous;
-        self.state.revision.restore(self.revision);
-    }
-}
-
-/// Make `symbols` the symbols the scope being analyzed imports, until the
-/// guard is dropped.
-pub(super) fn install(state: &std::rc::Rc<AnalysisState>, symbols: Arc<ScopeSymbols>) -> Installed {
-    let previous = state.scope.imported.replace(symbols);
-    Installed {
-        previous,
-        revision: state.revision.change(),
-        state: state.clone(),
+pub(super) fn qualified_name(tree: &AnalysisContext<'_>, package: &str, name: &str) -> String {
+    if tree.package.as_deref() == Some(package) {
+        name.to_string()
+    } else {
+        format!("{package}::{name}")
     }
 }
 
 /// The symbols the scope being analyzed imports.
-pub(super) fn imported(state: &AnalysisState) -> Arc<ScopeSymbols> {
-    state.scope.imported.borrow().clone()
+pub(super) fn imported(tree: &AnalysisContext<'_>) -> Arc<ScopeSymbols> {
+    tree.imported.clone()
 }
 
 /// The name a constant-environment marker key describes, with the marker

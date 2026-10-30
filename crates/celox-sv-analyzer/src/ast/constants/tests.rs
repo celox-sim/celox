@@ -151,12 +151,8 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
         .expression_nodes()
         .find_map(|(id, expr)| match expr.kind {
             celox_sv_syntax::ExprKind::Call { expression, .. }
-                if expression_binding::native_name(
-                    &tree.state,
-                    expression,
-                    tree.declarations(),
-                )
-                .as_deref()
+                if expression_binding::native_name(&tree, expression, tree.declarations())
+                    .as_deref()
                     == Some("f") =>
             {
                 Some(id)

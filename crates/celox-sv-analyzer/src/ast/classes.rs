@@ -477,7 +477,7 @@ pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> 
         }
     }
     // A class an import makes visible (IEEE 1800-2023 26.3).
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     if let Some(alias) = imported.aliases.get(name) {
         let class = imported
             .type_aliases
@@ -662,7 +662,7 @@ pub(super) fn handle_type(tree: &AnalysisContext<'_>, name: &str) -> Option<Type
 /// Class `name` as the scope that declares it laid it out, when the current
 /// scope uses that scope (see `scope::ScopeSymbols::classes`).
 fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
-    scope::imported(&tree.state)
+    scope::imported(tree)
         .classes
         .iter()
         .find(|class| class.name == name)
@@ -675,7 +675,7 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>) -> Vec<String> {
     let mut names = scope_declarations(tree)
         .flat_map(|declaration| specializations_of(tree, declaration))
         .collect::<Vec<_>>();
-    for class in &scope::imported(&tree.state).classes {
+    for class in &scope::imported(tree).classes {
         if !names.contains(&class.name) {
             names.push(class.name.clone());
         }

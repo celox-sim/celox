@@ -2,9 +2,10 @@
 //!
 //! The collectors of a module each ask for the active items of the same
 //! scope. A window opened for the module keeps each elaboration, keyed by its
-//! arguments and by the revisions of the analysis state that elaboration
-//! reads (imported symbols, constant functions, active interface instances,
-//! time scopes), so a change of that state makes earlier results unreachable.
+//! arguments, the imports and package of its context, and the revisions of
+//! the analysis state that elaboration reads (constant functions, active
+//! interface instances, time scopes), so a change of that state makes
+//! earlier results unreachable.
 //! A repeated elaboration allocates as many call sites as the first one did,
 //! so later calls keep their sites.
 use super::*;
@@ -49,6 +50,9 @@ struct Window {
 
 struct Entry {
     revisions: [u64; 3],
+    /// The symbols the scope imported and the package it was in.
+    imported: Arc<scope::ScopeSymbols>,
+    package: Option<Arc<str>>,
     literal_use: LiteralUse,
     overrides: HashMap<String, ConstExpr>,
     env: HashMap<String, i128>,
@@ -126,6 +130,8 @@ pub(super) fn items(
         let current = revisions(state);
         if let Some(entry) = window.entries.iter().find(|entry| {
             entry.revisions == current
+                && Arc::ptr_eq(&entry.imported, &tree.imported)
+                && entry.package == tree.package
                 && entry.literal_use == literal_use
                 && entry.overrides == *tree.parameter_overrides
                 && entry.env == *env
@@ -153,6 +159,8 @@ pub(super) fn items(
     if let Some(window) = window.as_mut().filter(|window| applies(window)) {
         window.entries.push(Entry {
             revisions: current,
+            imported: tree.imported.clone(),
+            package: tree.package.clone(),
             literal_use,
             overrides: tree.parameter_overrides.clone().into_owned(),
             env: env.clone(),

@@ -232,7 +232,7 @@ fn bind_in_context(
                     let name = arguments
                         .first()
                         .and_then(|a| a.value)
-                        .and_then(|id| expression_binding::native_name(&tree.state, id, native))
+                        .and_then(|id| expression_binding::native_name(tree, id, native))
                         .ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
                             name: "$isunbounded".into(),
                             detail: "argument must name a value parameter".into(),

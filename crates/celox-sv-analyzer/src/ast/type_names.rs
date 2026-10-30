@@ -313,7 +313,7 @@ fn operand_type(
                 && let Some(r#type) = class_operand(
                     tree,
                     &scope::qualified_name(
-                        &tree.state,
+                        tree,
                         &instances::normalize_identifier(&package.spelling),
                         &instances::normalize_identifier(&name.spelling),
                     ),

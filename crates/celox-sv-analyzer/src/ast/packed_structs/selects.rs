@@ -5,7 +5,7 @@ use super::*;
 /// Collapse an interface handle/member prefix using its bound symbols. Any
 /// remaining path selects a packed-structure member of the interface signal.
 pub(super) fn bind_interface_path(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     path: &mut Vec<String>,
     dimensions: &PackedDimensions,
 ) -> bool {
@@ -17,7 +17,7 @@ pub(super) fn bind_interface_path(
     {
         return false;
     }
-    let imported = scope::imported(state);
+    let imported = scope::imported(tree);
     for length in (2..=path.len()).rev() {
         if let Some(name) = imported.interface_members.get(&path[..length].join(".")) {
             path.splice(..length, [name.clone()]);
@@ -132,12 +132,13 @@ fn finish_lvalue(
 /// A whole native member path uses the same interface shadowing, type/offset
 /// lookup and bounds kernel as the remaining authored-select adapters.
 pub(in crate::ast) fn whole_member(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     mut path: Vec<String>,
     base: Option<String>,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
-    let bound_interface = bind_interface_path(state, &mut path, dimensions);
+    let state = &*tree.state;
+    let bound_interface = bind_interface_path(tree, &mut path, dimensions);
     if !bound_interface && let Some(base) = base {
         path[0] = base;
     }
@@ -165,13 +166,14 @@ pub(in crate::ast) fn whole_member(
 /// Select already-bound native member coordinates in the member's own type
 /// context. Interface members retain ordinary target coordinate rules.
 pub(in crate::ast) fn select_member(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     mut path: Vec<String>,
     base: Option<String>,
     dimensions: &PackedDimensions,
     select: impl FnOnce(String, &PackedDimensions, bool) -> Converted<LValue>,
 ) -> Converted<LValue> {
-    let bound_interface = bind_interface_path(state, &mut path, dimensions);
+    let state = &*tree.state;
+    let bound_interface = bind_interface_path(tree, &mut path, dimensions);
     if !bound_interface && let Some(base) = base {
         path[0] = base;
     }

@@ -137,7 +137,7 @@ fn array_parameters_from_declaration(
 ) -> Result<Vec<ArrayParameter>, AnalyzerError> {
     let mut parameters = Vec::new();
     for &native in authored {
-        let bound = scope::imported(&tree.state)
+        let bound = scope::imported(tree)
             .pattern_parameter_bindings
             .get(&native.id)
             .cloned();
