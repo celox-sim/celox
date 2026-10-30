@@ -241,18 +241,24 @@ pub(super) fn analyze_module(
             } else {
                 format!("{}${ordinal}", port.name)
             };
-            let mut interface =
-                timescales::with_interface_instance(&tree.state.timescales, handle, || {
-                    interface_ast::analyze(
-                        &tree.child(definition_tree, &values),
-                        definition_path,
-                        packages,
-                        &values,
-                        &types,
-                        interfaces.extra,
-                        imported.declarations_only,
-                    )
-                })?;
+            let mut interface = {
+                let tree = &AnalysisContext {
+                    interface_instance: Some(timescales::interface_instance(
+                        tree.interface_instance.as_deref(),
+                        handle,
+                    )),
+                    ..tree.clone()
+                };
+                interface_ast::analyze(
+                    &tree.child(definition_tree, &values),
+                    definition_path,
+                    packages,
+                    &values,
+                    &types,
+                    interfaces.extra,
+                    imported.declarations_only,
+                )
+            }?;
             // Header ports are members of the interface view, just like body signals.
             for port in &interface.ports {
                 interface.symbols.as_mut().unwrap().signals.push(Signal {
@@ -533,18 +539,24 @@ pub(super) fn analyze_module(
                     &dimensions,
                     Some(&interface),
                 )?;
-                let mut module =
-                    timescales::with_interface_instance(&tree.state.timescales, &handle, || {
-                        interface_ast::analyze(
-                            &tree.child(definition_tree, &values),
-                            definition_path,
-                            packages,
-                            &values,
-                            &types,
-                            interfaces.extra,
-                            imported.declarations_only,
-                        )
-                    })?;
+                let mut module = {
+                    let tree = &AnalysisContext {
+                        interface_instance: Some(timescales::interface_instance(
+                            tree.interface_instance.as_deref(),
+                            &handle,
+                        )),
+                        ..tree.clone()
+                    };
+                    interface_ast::analyze(
+                        &tree.child(definition_tree, &values),
+                        definition_path,
+                        packages,
+                        &values,
+                        &types,
+                        interfaces.extra,
+                        imported.declarations_only,
+                    )
+                }?;
                 let port_syntax = SyntaxTree::empty();
                 let port_tree = module.constant_context(&port_syntax);
                 let port_symbols = module.symbols.as_ref().unwrap();
