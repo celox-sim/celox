@@ -579,11 +579,10 @@ fn misused_parameterized_classes() {
             ["class `C` declared in a loop generate block", ""],
         ),
         (
-            // The class parameter hides the module's `N`, whose value must
-            // not name `Four#(1)` (#1964 tracks four-state actuals).
-            "localparam int N = 1; class Four #(logic [1:0] N = 0); endclass
-             class Shadow #(logic [1:0] N = 2'bxx); function void make(); Four#(N) four; endfunction endclass
-             Shadow#() shadow;",
+            // A named four-state constant of the module is not yet an
+            // actual (#1964); a class passes its own such parameters on.
+            "localparam logic [1:0] X = 2'bxx; class Four #(logic [1:0] N = 0); endclass
+             Four#(X) four;",
             ["class parameter value that is not constant", ""],
         ),
     ] {
@@ -1481,4 +1480,34 @@ sv_backends! {
     fn class_foreign_generic_package_type_static_storage(sim) { @case "class::foreign_generic_package_type_static_storage"; }
     fn class_foreign_generic_template_of_the_named_package(sim) { @case "class::foreign_generic_template_of_the_named_package"; }
     fn class_foreign_generic_in_a_module_with_interface_instances(sim) { @case "class::foreign_generic_in_a_module_with_interface_instances"; }
+}
+
+sv_backends! {
+    fn class_scoped_typedef_handles(sim) { @case "class::scoped_typedef_handles"; }
+    fn class_parameter_strings_wider_than_a_constant(sim) { @case "class::parameter_strings_wider_than_a_constant"; }
+    fn class_new_initializers_of_scoped_and_alias_types(sim) { @case "class::new_initializers_of_scoped_and_alias_types"; }
+    fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
+}
+
+sv_backends! {
+    // A class parameter hides the module's constant of its name also in a
+    // static call that passes it on by name (8.25).
+    fn class_parameter_literals_hide_module_constants_in_static_calls(sim) {
+        @setup {
+            let source = r#"module Top(output int ok);
+                localparam string S = "module";
+                class Name #(string S = "x");
+                    static function string get(); return S; endfunction
+                endclass
+                class Shadow #(string S = "x");
+                    function string s(); return Name#(S)::get(); endfunction
+                endclass
+                Shadow #("a_name_longer_than_sixteen") shadow = new;
+                initial ok = shadow.s() == "a_name_longer_than_sixteen";
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("shadow.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), 1u32.into());
+    }
 }

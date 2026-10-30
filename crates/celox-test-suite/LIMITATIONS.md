@@ -396,6 +396,18 @@ static task while an explicit `static` one is shared
 (`sv_static_task_implicit_local` in the xezim review, see the
 [probe](verification/repros/sv_static_task_implicit_local_xezim.json)).
 
+Handles declared with a class-scoped typedef of a registry specialization
+(`typedef Registry #(C, "c") type_id;`, as `uvm_object_utils` declares it) and
+string class parameters passed on by name are checked against IEEE 1800-2023
+8.25. Icarus 13.0 does not parse parameterized classes or pure virtual methods
+and rejects those cases at compile time. xezim 0.11.3 gives specializations that
+typedefs of different classes name the value parameters of one of them
+(`sv_class_typedef_specialization_values`, see the
+[probe](verification/repros/sv_class_typedef_specialization_values_xezim.json)),
+and gives `Name #(S)` inside a class the default of `S` instead of its value
+(`sv_class_parameter_passed_by_name`, see the
+[probe](verification/repros/sv_class_parameter_passed_by_name_xezim.json)).
+
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
 seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
