@@ -53,7 +53,15 @@ def read_results(path, expected):
         if not test.get('name') or key in result:
             raise ValueError('Missing or duplicate test identity')
         elapsed = float(test.attrib['time'])
-        simulated = float(test.attrib['sim_time_ns'])
+        properties = {}
+        for item in test.findall('properties/property'):
+            name = item.get('name')
+            if name in properties:
+                raise ValueError('Duplicate test property')
+            properties[name] = item.get('value')
+        if properties.get('sim_time_unit') != 'ns':
+            raise ValueError('Missing or unsupported simulation time unit')
+        simulated = float(properties['sim_time_duration'])
         if not math.isfinite(elapsed) or elapsed <= 0 or not math.isfinite(simulated) or simulated <= 0:
             raise ValueError('Invalid test timing')
         body += elapsed
@@ -128,13 +136,16 @@ def build_commands(case, source, celox, directory, libs, share, verilator):
 def runtime_environment(case, source):
     import find_libpython
     import cocotb_tools.config as config
+    libpython = find_libpython.find_libpython()
+    if not libpython:
+        raise ValueError('Unable to find libpython for cocotb startup')
     env = {k: v for k, v in os.environ.items() if not k.startswith(('COCOTB_', 'CELOX_', 'PARAM_'))}
     for key in ('TESTCASE', 'MODULE', 'TOPLEVEL', 'TOPLEVEL_LANG', 'PYTHONHOME', 'PYTHONOPTIMIZE', 'GPI_EXTRA'):
         env.pop(key, None)
     env.update(COCOTB_LOG_LEVEL='INFO', COCOTB_REDUCED_LOG_FMT='1', COCOTB_RANDOM_SEED=str(MANIFEST['seed']),
                COCOTB_TRUST_INERTIAL_WRITES='1', COCOTB_RESOLVE_X='RANDOM', PYTHONDONTWRITEBYTECODE='1',
                MAKEFLAGS='', CCACHE_DISABLE='1', RUST_LOG='warn', PYGPI_PYTHON_BIN=sys.executable,
-               LIBPYTHON_LOC=find_libpython.find_libpython() or '',
+               LIBPYTHON_LOC=libpython, GPI_USERS=f'{libpython};{config.pygpi_entry_point()}',
                PYTHONPATH=os.pathsep.join([str(source / case['testDirectory']), str(ROOT / 'scripts'), *sys.path]),
                COCOTB_TOPLEVEL=case['top'], COCOTB_TEST_MODULES=case['module'], TOPLEVEL_LANG='verilog')
     env['PATH'] += os.pathsep + str(config.libs_dir)
@@ -142,7 +153,7 @@ def runtime_environment(case, source):
     env['PYGPI_USERS'] = ','.join([
         'cocotb_tools._coverage:start_cocotb_library_coverage',
         'cocotb.logging:_configure', 'cocotb._init:init_package_from_simulation',
-        'taxi_bench_clock:configure', 'cocotb._init:run_regression',
+        'taxi_bench_clock:configure', 'cocotb.regression:_run_regression',
     ])
     return env
 
@@ -161,7 +172,7 @@ def run_case(name, source, celox, output, samples=3, timeout=1800, verilator='ve
     hashes = source_hashes(source, case)
     env = runtime_environment(case, source)
     report = {'schemaVersion': 1, 'contract': MANIFEST['contract'], 'case': name,
-              'body_clock': 'cocotb-regression-perf_counter-v1',
+              'body_clock': 'cocotb-regression-monotonic-v2',
               'taxi_revision': MANIFEST['revision'], 'celox_commit': git(ROOT, 'rev-parse', 'HEAD'),
               'celox_binary_sha256': hashlib.sha256(celox.read_bytes()).hexdigest(),
               'verilator_version': subprocess.check_output([verilator, '--version'], text=True).strip(),
@@ -196,8 +207,8 @@ def run_case(name, source, celox, output, samples=3, timeout=1800, verilator='ve
                 print(f'RUN {name} {i + 1}/{samples} {engine}', flush=True)
                 elapsed = execute(command, source / case['testDirectory'], run_env, directory / 'runtime.log', timeout, cpu)
                 with (directory / 'runtime.log').open() as log:
-                    if 'TAXI_BENCH_CLOCK=perf_counter' not in log.read(65536).splitlines():
-                        raise ValueError('Monotonic cocotb timing hook did not run')
+                    if 'TAXI_BENCH_CLOCK=cocotb-2.1.0-monotonic' not in log.read(65536).splitlines():
+                        raise ValueError('Cocotb timing verification did not run')
                 pair[engine] = {**read_results(xml, case['tests']), 'wall_seconds': elapsed}
                 save()
             check_pair(pair)

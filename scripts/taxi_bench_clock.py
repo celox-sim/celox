@@ -1,16 +1,16 @@
-"""Use monotonic timing in the pinned cocotb regression manager only."""
+"""Verify the pinned cocotb manager uses its native monotonic clock."""
 import time
-from types import SimpleNamespace
+
+SUPPORTED_COCOTB = '2.1.0'
 
 
-def configure(_argv):
+def configure():
     import cocotb
     from cocotb import regression
 
-    if cocotb.__version__ != '2.0.1' or regression.time is not time:
-        raise RuntimeError('Taxi timing hook requires unmodified cocotb 2.0.1')
-    # The pinned manager only calls time.time() on this module global. Do not
-    # mutate the stdlib time module: stimulus and other libraries keep their
-    # original clocks. Start/end boundaries and XML generation stay in cocotb.
-    regression.time = SimpleNamespace(time=time.perf_counter)
-    print('TAXI_BENCH_CLOCK=perf_counter', flush=True)
+    if cocotb.__version__ != SUPPORTED_COCOTB or regression.time is not time:
+        raise RuntimeError(f'Taxi timing requires unmodified cocotb {SUPPORTED_COCOTB}')
+    # cocotb 2.1.0 measures test and regression durations with time.monotonic().
+    # Keep its clock and test boundaries intact; the runner requires this
+    # marker before accepting XML timings from either simulator.
+    print('TAXI_BENCH_CLOCK=cocotb-2.1.0-monotonic', flush=True)
