@@ -42,6 +42,9 @@ pub struct Packages {
     /// The virtual interfaces of the design, which the modules that use the
     /// packages are analyzed with.
     pub(crate) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The semantic types of the design, which every scope analyzed with
+    /// the packages shares.
+    pub(super) types: std::rc::Rc<semantic_types::TyTable>,
 }
 
 /// The compilation-unit scope of a source file.
@@ -379,6 +382,7 @@ impl Packages {
         if declarations.is_empty() {
             return Ok(Self {
                 foreign: state.foreign.clone(),
+                types: state.types.clone(),
                 timescales,
                 ..Self::default()
             });
@@ -406,6 +410,7 @@ impl Packages {
         // collected, before any module is analyzed.
         let mut packages = Self {
             foreign: state.foreign.clone(),
+            types: state.types.clone(),
             timescales,
             ..Self::default()
         };

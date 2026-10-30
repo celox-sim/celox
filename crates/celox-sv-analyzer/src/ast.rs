@@ -64,6 +64,9 @@ pub(super) struct AnalysisState {
     /// The virtual interfaces of the design, if it has any (IEEE 1800-2023
     /// 25.9).
     virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The semantic types of the design, shared with the sessions of its
+    /// other scopes.
+    types: std::rc::Rc<semantic_types::TyTable>,
 }
 
 /// Syntax and specialization bindings for one scope within an analysis session.
@@ -102,6 +105,7 @@ impl<'a> AnalysisContext<'a> {
                 next_call_site: packages.call_sites.clone(),
                 foreign: packages.foreign.clone(),
                 virtual_interfaces: packages.virtual_interfaces.clone(),
+                types: packages.types.clone(),
                 ..AnalysisState::default()
             }),
             parameter_overrides: Cow::Owned(HashMap::default()),

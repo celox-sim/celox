@@ -312,6 +312,33 @@ fn copies_of_arrays_of_another_interface_are_rejected() {
     assert!(error.contains("virtual other_if"), "{error}");
 }
 
+/// The modport of a virtual interface is part of its type (IEEE 1800-2023
+/// 25.9), so arrays whose elements select another modport, or none, are
+/// not of equivalent element types and are not assignment compatible (7.6),
+/// although a single virtual interface without a modport may be assigned to
+/// one with a modport.
+#[test]
+fn copies_of_arrays_of_another_modport_are_rejected() {
+    for (dst, src) in [("bus_if.mp", "bus_if"), ("bus_if", "bus_if.mp")] {
+        let source = format!(
+            "interface bus_if(input logic clk); logic data; modport mp(input data); endinterface
+            module Top;
+                virtual {dst} dst[2];
+                virtual {src} src[2];
+                initial dst = src;
+            endmodule"
+        );
+        let Err(error) =
+            celox::Simulation::from_sv_sources(vec![(source.as_str(), Path::new("vif.sv"))], "Top")
+                .build_interpreter()
+        else {
+            panic!("an array of virtual {src} must not be assigned to one of virtual {dst}");
+        };
+        let error = error.to_string();
+        assert!(error.contains(&format!("virtual {src} [2]")), "{error}");
+    }
+}
+
 /// An equality may compare a virtual interface with a conditional of
 /// virtual interfaces of the same interface (IEEE 1800-2023 11.4.11, 25.9).
 /// Not a shared case: Verilator 5.052 rejects a virtual interface operand of
