@@ -9072,3 +9072,12 @@ fn fixed_selector_bits_do_not_hide_incomplete_cases() {
         assert!(error.contains("latch inference"), "{error}");
     }
 }
+
+#[test]
+fn rejects_hierarchical_unpacked_arrays_of_nonequivalent_elements() {
+    // A hierarchical array is assigned like any other (IEEE 1800-2023 7.6).
+    let error = cranelift_build_error(
+        "module Sub; byte b[2]; endmodule module Top; Sub u(); int a[2]; initial a = u.b; endmodule",
+    );
+    assert!(error.contains("is not assignment compatible"), "{error}");
+}

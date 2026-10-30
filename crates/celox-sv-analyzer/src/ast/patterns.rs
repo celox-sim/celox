@@ -216,8 +216,8 @@ pub(super) fn assignment_value(
         (Some(actual), Some(target)) if !actual.is_assignment_compatible_with(&target) => {
             return Err(AnalyzerError::IncompatibleUnpackedArray {
                 context: "assignment pattern element".into(),
-                actual,
-                target,
+                actual: Box::new(actual),
+                target: Box::new(target),
             });
         }
         (Some(_), None) => {

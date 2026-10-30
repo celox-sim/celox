@@ -2943,15 +2943,82 @@ fn rejects_unpacked_arrays_of_nonequivalent_element_types() {
         element_width: 8,
         signed,
         four_state: true,
+        element: None,
     };
     assert_eq!(
         error,
         AnalyzerError::IncompatibleUnpackedArray {
             context: "assignment pattern item".to_string(),
-            actual: row(true),
-            target: row(false),
+            actual: Box::new(row(true)),
+            target: Box::new(row(false)),
         }
     );
+}
+
+#[test]
+fn rejects_unpacked_arrays_of_nonequivalent_named_elements_in_every_assignment() {
+    // A named element type is equivalent only to itself (IEEE 1800-2023
+    // 6.22.2), and every way an array value is assigned checks it (7.6):
+    // slices on either side, the operands of `?:`, results and defaults.
+    for (items, context) in [
+        (
+            "typedef enum {A, B} e_t; e_t a[2]; int b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "typedef enum {A, B} e_t; e_t a[2]; int b[2]; initial b = a;",
+            "assignment",
+        ),
+        (
+            "typedef enum {A, B} e_t; typedef enum {C, D} f_t; e_t a[2]; f_t b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "class X; endclass class Y; endclass X a[2]; Y b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "int a[4]; byte b[4]; initial a[0:1] = b[2:3];",
+            "assignment",
+        ),
+        ("int a[4]; byte b[2]; initial a[1+:2] = b;", "assignment"),
+        (
+            "int a[2]; byte b[2], c[2]; bit s; initial a = s ? b : c;",
+            "assignment",
+        ),
+        (
+            "byte d[2]; typedef int ia_t[2]; function ia_t f(); return d; endfunction",
+            "return value",
+        ),
+        (
+            "byte d[2]; function void f(int p[2] = d); endfunction initial f();",
+            "default of `p`",
+        ),
+    ] {
+        let source = format!("module Top; {items} endmodule");
+        let error = analyze_source(&source, Path::new("nonequivalent_named.sv")).expect_err(items);
+        assert!(
+            matches!(&error, AnalyzerError::IncompatibleUnpackedArray { context: c, .. } if c == context)
+                || matches!(&error, AnalyzerError::IncompatibleClassHandle { .. }),
+            "{items}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn accepts_unpacked_arrays_of_the_same_named_element_in_every_assignment() {
+    // Operands that name the same element type stay equivalent when they are
+    // passed, returned, defaulted or selected (IEEE 1800-2023 6.22.2, 7.6).
+    for items in [
+        "e_t a[2]; function void f(e_t p[2]); endfunction initial f(a);",
+        "e_t d[2]; typedef e_t ea_t[2]; function ea_t g(); return d; endfunction",
+        "e_t d[2]; function void h(e_t p[2] = d); endfunction initial h();",
+        "e_t m[2][2]; e_t r[2]; initial r = m[1];",
+        "e_t m[2][2]; function void f(e_t p[2]); endfunction initial f(m[0]);",
+    ] {
+        let source = format!("module Top; typedef enum {{A, B}} e_t; {items} endmodule");
+        analyze_source(&source, Path::new("same_named.sv")).expect(items);
+    }
 }
 
 #[test]

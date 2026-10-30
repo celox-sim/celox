@@ -1141,9 +1141,8 @@ pub(in crate::ast) fn bind_value(
                                         }
                                     }
                                     array_compatibility::check_native_unpacked_assignment(
-                                        &tree.state,
+                                        tree,
                                         *id,
-                                        native,
                                         shape,
                                         || format!("argument {} of `{name}`", position + 1),
                                         dimensions,
@@ -1819,7 +1818,7 @@ pub(in crate::ast) fn bind_value(
                                             .flatten()
                                             .and_then(|id| {
                                                 array_compatibility::native_unpacked_shape(
-                                                    id, native, dimensions,
+                                                    id, tree, dimensions,
                                                 )
                                             })
                                             .is_some()
