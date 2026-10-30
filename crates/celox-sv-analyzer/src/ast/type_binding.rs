@@ -22,8 +22,11 @@ pub(super) fn ordinary_variable(
     !variable.value.is_some_and(|id|matches!(&native.expression(id).kind,celox_sv_syntax::ExprKind::Name(name) if name.spelling=="new")) || names_class(data_type, native)
 }
 
-/// Whether `data_type` names a class declared in the source or a built-in
-/// class constructed with `new` (IEEE 1800-2023 15.3).
+/// Whether `data_type` may name a class rather than a covergroup: a class,
+/// typedef or type parameter of the name declared in the source, a built-in
+/// class constructed with `new` (IEEE 1800-2023 15.3), or a scoped name such
+/// as `C::T` or `p::C`. A covergroup that shares its name with a typedef or
+/// type parameter is taken for a class.
 pub(super) fn names_class(
     data_type: celox_sv_syntax::TypeId,
     native: &celox_sv_syntax::Declarations,
@@ -31,22 +34,33 @@ pub(super) fn names_class(
     let celox_sv_syntax::DataTypeKind::Named(segments) = &native.data_type(data_type).kind else {
         return false;
     };
-    let segment = match segments.as_slice() {
-        [segment] => segment,
-        [std, segment] if std.name.spelling == "std" => segment,
-        _ => return false,
+    let [segment] = segments.as_slice() else {
+        return segments.len() > 1;
     };
     let name = normalize_identifier(&segment.name.spelling);
-    if matches!(name.as_str(), "semaphore" | "mailbox") {
-        return true;
-    }
-    if segments.len() > 1 {
-        return false;
-    }
-    native
-        .classes
-        .iter()
-        .any(|class| normalize_identifier(&class.name.spelling) == name)
+    let named = |spelling: &str| normalize_identifier(spelling) == name;
+    matches!(name.as_str(), "semaphore" | "mailbox")
+        || native
+            .classes
+            .iter()
+            .any(|class| named(&class.name.spelling))
+        || native
+            .type_aliases
+            .iter()
+            .any(|alias| named(&alias.name.spelling))
+        || native
+            .parameter_declarations
+            .iter()
+            .flat_map(|declaration| &declaration.parameters)
+            .chain(
+                native
+                    .all_units()
+                    .flat_map(|unit| unit.parameters.iter().flatten()),
+            )
+            .any(|parameter| {
+                matches!(parameter.kind, celox_sv_syntax::ParameterKind::Type { .. })
+                    && named(&parameter.name.spelling)
+            })
 }
 
 pub(super) fn port_direction(direction: celox_sv_syntax::Direction) -> PortDirection {

@@ -259,9 +259,15 @@ pub(in crate::ast) fn body_scope(
             }
         }
         dimensions.const_env.extend(specialization.env.clone());
+        // The parameters hide constants of the scope around the class, also
+        // the literals of those without an integral value.
         for key in &specialization.hidden {
             dimensions.const_env.remove(key);
+            dimensions.parameter_values.remove(key);
         }
+        dimensions
+            .parameter_values
+            .extend(specialization.literals.clone());
         dimensions
             .type_aliases
             .extend(inherited(&own, &specialization));
@@ -781,11 +787,13 @@ fn finish_specialization(
                 let celox_sv_syntax::TypeAliasTarget::DataType(target) = alias.target else {
                     continue;
                 };
-                // The type is fixed in the scope of the parameters. A typedef
-                // that cannot be bound is left out; a use of it reports the
-                // type unknown.
-                let context = PackedDimensions::new(HashMap::default(), &env, &aliases);
-                let ty = type_binding::procedural_type(target, native, tree, &env, &aliases)
+                // The type is fixed in the scope of the parameters, whose
+                // string values without an integral one it reads as their
+                // literals. A typedef that cannot be bound is left out; a
+                // use of it reports the type unknown.
+                let mut context = PackedDimensions::new(HashMap::default(), &env, &aliases);
+                context.parameter_values = parameters.literals.clone().into();
+                let ty = type_binding::binding::bind_in(target, native, tree, &context)
                     .ok()
                     .flatten()
                     .and_then(|ty| {
@@ -1247,9 +1255,14 @@ fn value_argument(
     }
     let Some(value) = eval_ast_const_expr(&tree.state, &expr, &context.const_env) else {
         // A string or four-state value is its literal, and so is the value
-        // of a real expression.
+        // of a real expression, or of a parameter with such a value.
         return match expr {
             ConstExpr::Literal(_) => Ok(expr),
+            ConstExpr::Ident(name)
+                if let Some(literal) = literal_parameter(tree, &name, context) =>
+            {
+                Ok(ConstExpr::Literal(literal))
+            }
             _ => match parameters::real_literal(
                 &expr,
                 TypeKind::Real,
@@ -1266,6 +1279,36 @@ fn value_argument(
     Ok(ConstExpr::Literal(format_typed_parameter_literal(
         value, ty.width, ty.signed,
     )))
+}
+
+/// The literal of parameter `name` without an integral value, such as a
+/// string wider than a constant holds: a parameter of the scope, or of a
+/// specialization whose declarations the scope is in.
+fn literal_parameter(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    context: &PackedDimensions,
+) -> Option<String> {
+    if let Some(value) = context.parameter_values.get(name) {
+        return match value {
+            Expr::Literal(literal) => Some(literal.clone()),
+            _ => None,
+        };
+    }
+    context
+        .type_aliases
+        .iter()
+        .filter(|(key, _)| key.ends_with("::"))
+        .filter_map(|(_, ty)| lookup(tree, ty.class()?))
+        .find_map(|specialization| {
+            if !specialization.hidden.iter().any(|hidden| hidden == name) {
+                return None;
+            }
+            match specialization.literals.get(name)? {
+                Expr::Literal(literal) => Some(literal.clone()),
+                _ => None,
+            }
+        })
 }
 
 /// A spelling of type `ty` that tells it apart from other types, for the

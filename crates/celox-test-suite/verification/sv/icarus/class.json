@@ -1229,6 +1229,28 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 9; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: error: 's' has already been declared in this scope.\n<case>/source_0.sv:4:      : It was declared here as a function.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "class::parameter_literals_hide_module_constants",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::parameter_strings_wider_than_a_constant",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
       "expectation": "Simulation",
       "known_issue": {
@@ -1499,6 +1521,17 @@
       "name": "class::randomize_without_rand_members",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid class item.\n<case>/source_0.sv:7: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::scoped_typedef_handles",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

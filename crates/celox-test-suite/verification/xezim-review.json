@@ -918,6 +918,14 @@
     "sv_compound_assignment_index": {
       "title": "An assignment operator such as `+=` evaluates a left-hand index expression again after its value: `v[i] += f()` where f() changes i reads one bit and writes another",
       "standard": "IEEE 1800-2023 11.4.1"
+    },
+    "sv_class_typedef_specialization_values": {
+      "title": "Specializations of a package class that class-scoped typedefs of different classes name share the value parameters of one of them: `Registry #(UnitComp, \"unit\")` reports Tname \"pkg\" of `Registry #(PkgComp, \"pkg\")`",
+      "standard": "IEEE 1800-2023 8.25"
+    },
+    "sv_class_parameter_passed_by_name": {
+      "title": "A class that names a specialization with one of its own string parameters, `Name #(S)`, gets the default of Name's parameter instead of the value of S",
+      "standard": "IEEE 1800-2023 8.25"
     }
   },
   "cases": [
@@ -5191,6 +5199,22 @@
       "classification": "xezim_bug",
       "bug": "sv_compound_assignment_index",
       "note": "With a.p = 8'h01 and i = 0, a.p[i] += move_index(), where move_index() sets i = 1 and returns 0, must read and write bit 0 and leave a.p at 8'h01; 11.4.1 evaluates a left-hand index expression only once. xezim 0.11.3 prints 03: it reads bit 0 and writes the sum into bit 1, and does the same for a.p[a.i] += a.move_i() with a property index. The adapter-free source shows the same for a module variable, as Top and as Wrapped. See verification/repros/sv_compound_assignment_index_xezim.{sv,json}; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "class::scoped_typedef_handles",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_typedef_specialization_values",
+      "note": "Each `type_id` typedef names its own specialization of Registry (8.25), so get_type_name() returns \"unit\", \"pkg\" and \"local\" for the three handles and names is 15. xezim 0.11.3 returns \"pkg\" for all three, giving 10. The adapter-free source prints [pkg] for `UnitComp::type_id` once the package declares `typedef Registry #(PkgComp, \"pkg\") type_id;`. See verification/repros/sv_class_typedef_specialization_values_xezim.json; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "class::parameter_literals_hide_module_constants",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_parameter_passed_by_name",
+      "note": "In Shadow #(\"a_name_longer_than_sixteen\"), `Name #(S)` names the specialization whose S is Shadow's value (8.25), which also hides the module's localparam S, so ok is 1. xezim 0.11.3 gives Name the default \"x\"; the adapter-free source prints x instead of inner. See verification/repros/sv_class_parameter_passed_by_name_xezim.json; Verilator 5.052 passes the shared case."
     }
   ]
 }
