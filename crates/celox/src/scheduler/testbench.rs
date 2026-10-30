@@ -153,15 +153,6 @@ fn equals_slot(g: &mut Generator<'_>, a: AbsoluteAddr, value: u64) -> RegisterId
     let r = g.load(a, 64);
     g.equals(r, value)
 }
-fn equals_slot_width(
-    g: &mut Generator<'_>,
-    a: AbsoluteAddr,
-    width: usize,
-    value: u64,
-) -> RegisterId {
-    let r = g.load(a, width);
-    g.equals(r, value)
-}
 fn copy(g: &mut Generator<'_>, program: &LaidOutProgram, from: AbsoluteAddr, to: AbsoluteAddr) {
     let info = &program.design.state_objects[&from];
     let elements = info.array_dims.iter().product::<usize>().max(1);
@@ -555,11 +546,27 @@ fn generate(
             g.b.switch_to_block(judge);
             equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1)
         } else {
+            // Settle what the TB wrote here, as the host would before the
+            // edges, unless observers keep the edges in the host.
             let allowed = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1);
-            let clean = equals_slot_width(&mut g, slots.dirty, 8, 0);
-            g.binary(1, allowed, BinaryOp::And, clean)
+            let settle = g.b.new_block();
+            branch(&mut g, allowed, settle, host_edges);
+            g.b.switch_to_block(settle);
+            let judge = g.b.new_block();
+            settle_then(&mut g, m, judge);
+            g.b.switch_to_block(judge);
+            g.constant(1, 1)
         };
-        for &(source, saved) in &m.baselines {
+        // A TB write that moves an event shows in its own signal, derived
+        // clocks included. An alias, such as a port copying a clock, only
+        // follows it, and while a settle is pending its baseline was saved
+        // before the copy caught up.
+        let events = &program.design.events;
+        for &(source, saved) in m
+            .baselines
+            .iter()
+            .filter(|(source, _)| events.canonical(*source) == *source)
+        {
             let before = g.load(saved, 1);
             let current = g.load(source, 1);
             let same = g.binary(1, before, BinaryOp::Eq, current);
