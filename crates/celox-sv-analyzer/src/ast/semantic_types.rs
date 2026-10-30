@@ -7,10 +7,6 @@
 //! unions, classes, interfaces) carry the identity of their declaration; a
 //! simple typedef is not a type of its own (6.22.1 b), so it interns to the
 //! type it renames.
-#![cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the type compatibility checks adopt it next")
-)]
 
 use fxhash::FxHashMap as HashMap;
 use std::cell::RefCell;
@@ -21,17 +17,7 @@ mod relations;
 #[cfg(test)]
 mod tests;
 
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "the type compatibility checks adopt them next"
-    )
-)]
-pub(super) use {
-    conversion::of_type,
-    relations::{Assignable, Mismatch},
-};
+pub(super) use conversion::of_shape;
 
 /// An interned semantic type of a [`TyTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -167,6 +153,7 @@ impl TyTable {
     }
 
     /// How many types the table holds.
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.0.borrow().types.len()
     }
