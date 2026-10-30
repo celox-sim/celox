@@ -571,6 +571,8 @@ thread_local! {
     pub(in crate::ast) static CLASS_SCOPE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Scope discoveries that queries settle.
     pub(super) static SCOPE_SETTLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Class signature bindings of the discoveries that bind them.
+    pub(super) static SETTLE_CLASS_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Specializations made for the references of class scopes.
     pub(super) static CLASS_REFERENCE_SPECIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Discover without the settled scopes and repeated references that
