@@ -3,6 +3,47 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_struct_module_port_recursive_defaults(sim) {
+        @case "unpacked_structs::module_port_recursive_defaults";
+    }
+
+    fn unpacked_struct_module_port_patterns(sim) {
+        @case "unpacked_structs::module_port_patterns";
+    }
+    fn unpacked_struct_module_port_four_state_members(sim) {
+        @case "unpacked_structs::module_port_four_state_members";
+    }
+
+    fn unpacked_struct_module_ports(sim) {
+        @case "unpacked_structs::module_ports";
+    }
+    fn unpacked_struct_top_level_member_ports(sim) {
+        @setup {
+            let source = r#"
+                typedef struct { bit [7:0] a; bit [3:0] b; } pair_t;
+                module Top(input pair_t i, output pair_t o, output bit same);
+                    always_comb begin
+                        o = i;
+                        o.b = i.b + 1;
+                    end
+                    assign same = i == o;
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("struct_ports.sv"))], "Top");
+        let ia = sim.signal("i.a");
+        let ib = sim.signal("i.b");
+        let oa = sim.signal("o.a");
+        let ob = sim.signal("o.b");
+        let same = sim.signal("same");
+        for (a, b) in [(0x12u8, 3u8), (0xfe, 15)] {
+            sim.modify(|io| { io.set(ia, a); io.set(ib, b); }).unwrap();
+            assert_eq!(sim.get(oa), BigUint::from(a));
+            assert_eq!(sim.get(ob), BigUint::from((b + 1) & 15));
+            assert_eq!(sim.get(same), BigUint::from(0u8));
+        }
+    }
+
     fn unpacked_struct_members_whole_copies_and_equality(sim) {
         @case "unpacked_structs::members_whole_copies_and_equality";
     }
@@ -652,12 +693,39 @@ fn unsupported_and_illegal_uses_are_rejected() {
         let error = error.to_string();
         assert!(error.contains(want), "`{body}`: {error}");
     }
-    let source = "module Top(output i_t o); typedef struct { int a; } i_t; endmodule";
-    let Err(error) =
-        Simulator::from_sv_sources(vec![(source, Path::new("struct.sv"))], "Top").build_cranelift()
-    else {
-        panic!("an unpacked structure port is unsupported");
-    };
-    let error = error.to_string();
-    assert!(error.contains("port of unpacked structure type"), "{error}");
+}
+
+#[test]
+fn unpacked_struct_port_connections_check_nominal_types_and_expressions() {
+    for (actual, declarations) in [
+        (
+            "wrong",
+            "typedef struct { bit [7:0] a; } other_t; other_t wrong;",
+        ),
+        (
+            "'{default: wrong}",
+            "typedef struct { bit [7:0] a; } other_t; other_t wrong;",
+        ),
+        (
+            "'{a: wrong}",
+            "typedef struct { bit [7:0] a; } other_t; other_t wrong;",
+        ),
+        ("0", "row_t i;"),
+        ("i == i", "row_t i;"),
+        ("{i}", "row_t i;"),
+    ] {
+        let source = format!(
+            r#"
+            typedef struct {{ bit [7:0] a; }} row_t;
+            module Child(input row_t i); endmodule
+            module Top; {declarations} Child child(.i({actual})); endmodule
+        "#
+        );
+        let error =
+            Simulator::from_sv_sources(vec![(&source, Path::new("struct_ports.sv"))], "Top")
+                .build_native()
+                .expect_err("an incompatible structure connection must fail")
+                .to_string();
+        assert!(error.contains("unpacked structure"), "{actual}: {error}");
+    }
 }

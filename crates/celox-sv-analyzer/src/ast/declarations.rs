@@ -52,6 +52,17 @@ pub(super) fn ports_from_scope(
         if ty.kind() == TypeKind::Event {
             return Err(unsupported("event port"));
         }
+        if ty.unpacked_struct().is_some() {
+            if !ty.unpacked_ranges.is_empty() {
+                return Err(unsupported("array of unpacked structures on a port"));
+            }
+            if !matches!(direction, PortDirection::Input | PortDirection::Output) {
+                return Err(unsupported("unpacked structure inout or ref port"));
+            }
+            if native.default.is_some() {
+                return Err(unsupported("unpacked structure port default"));
+            }
+        }
         let default = native
             .default
             .map(|value| {

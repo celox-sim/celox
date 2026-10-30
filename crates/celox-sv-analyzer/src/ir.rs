@@ -523,6 +523,17 @@ impl Port {
         self
     }
 
+    /// Bind an aggregate pattern as independently typed values for the leaf ports.
+    pub fn bind_structure_pattern(
+        &self,
+        pattern: &crate::ast::BoundPattern,
+    ) -> Result<Vec<Expr>, crate::AnalyzerError> {
+        let target = self.pattern_target.as_ref().ok_or_else(|| {
+            crate::AnalyzerError::Unsupported("unpacked structure port pattern type".into())
+        })?;
+        pattern.bind_structure_port(target)
+    }
+
     /// Bind caller-owned pattern values in this specialized port's type.
     pub fn bind_pattern(
         &self,
@@ -753,6 +764,7 @@ impl From<ast::PortDirection> for PortDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Type {
+    structure: Option<std::sync::Arc<StructureType>>,
     tagged_identity: Option<String>,
     kind: TypeKind,
     is_signed: bool,
@@ -763,7 +775,29 @@ pub struct Type {
     class: Option<String>,
 }
 
+/// Shared metadata, allocated only for unpacked structure types. Ordinary
+/// scalar types and cloning their declarations do not copy a member layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructureType {
+    identity: String,
+    leaves: Vec<(String, Type)>,
+}
+
 impl Type {
+    /// Nominal identity of a non-storage unpacked structure declaration.
+    pub fn structure_identity(&self) -> Option<&str> {
+        self.structure
+            .as_ref()
+            .map(|structure| structure.identity.as_str())
+    }
+
+    /// Leaf member paths and types in declaration order. Each leaf has its own storage.
+    pub fn structure_leaves(&self) -> &[(String, Type)] {
+        self.structure
+            .as_ref()
+            .map_or(&[], |structure| structure.leaves.as_slice())
+    }
+
     /// How many leading packed dimensions select an element of a signed
     /// named type (IEEE 1800-2023 7.4.1).
     pub fn signed_element_depth(&self) -> Option<usize> {
@@ -859,6 +893,16 @@ impl Type {
         r#type: ast::Type,
         constants: &dyn typecheck::ConstantEnvironment,
     ) -> Self {
+        let structure = r#type.structure_identity().map(|identity| {
+            std::sync::Arc::new(StructureType {
+                identity: identity.to_owned(),
+                leaves: r#type
+                    .structure_leaves()
+                    .into_iter()
+                    .map(|(name, ty)| (name, Self::from_ast(ty, constants)))
+                    .collect(),
+            })
+        });
         let tagged_identity = r#type.tagged_identity().map(str::to_owned);
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
@@ -866,6 +910,7 @@ impl Type {
         let signed_element_depth = r#type.signed_element_depth();
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
+            structure,
             tagged_identity,
             kind,
             is_signed,
