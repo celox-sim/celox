@@ -14,7 +14,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-verilator
+      - uses: $/.github/actions/setup-verilator
         with:
           version: "5.052"
           revision: ea338be98e1e838d3518809ce8899f85a009963c
@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-verilator
+      - uses: $/.github/actions/setup-verilator
         id: verilator
         with:
           version: "5.052"
