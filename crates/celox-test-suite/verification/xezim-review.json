@@ -926,6 +926,10 @@
     "sv_class_parameter_passed_by_name": {
       "title": "A class that names a specialization with one of its own string parameters, `Name #(S)`, gets the default of Name's parameter instead of the value of S",
       "standard": "IEEE 1800-2023 8.25"
+    },
+    "sv_conditional_unpacked_arrays": {
+      "title": "A conditional operator whose operands are unpacked arrays yields an array of zeros instead of the selected operand: `h = s ? c : d` with s = 1 leaves h = '{0, 0}",
+      "standard": "IEEE 1800-2023 11.4.11"
     }
   },
   "cases": [
@@ -5215,6 +5219,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class_parameter_passed_by_name",
       "note": "In Shadow #(\"a_name_longer_than_sixteen\"), `Name #(S)` names the specialization whose S is Shadow's value (8.25), which also hides the module's localparam S, so ok is 1. xezim 0.11.3 gives Name the default \"x\"; the adapter-free source prints x instead of inner. See verification/repros/sv_class_parameter_passed_by_name_xezim.json; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "types::unpacked_array_assignments_through_selects_and_calls",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_conditional_unpacked_arrays",
+      "note": "h = s ? c : d with s = 1 and c = '{4, 3} must copy c (11.4.11), so h[0] = 4 and the sum is 18324313; the pinned xezim leaves h = '{0, 0} and returns 18330343. The other assignments of the case (slices, results, defaults, enum arrays, hierarchical names) agree; see verification/repros/sv_conditional_unpacked_arrays_xezim.sv. Verilator 5.052 and Celox print h='{4, 3}."
     }
   ]
 }

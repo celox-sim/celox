@@ -309,7 +309,7 @@ fn copies_of_arrays_of_another_interface_are_rejected() {
         panic!("an array of another interface must be rejected");
     };
     let error = error.to_string();
-    assert!(error.contains("an array of `virtual other_if`"), "{error}");
+    assert!(error.contains("virtual other_if"), "{error}");
 }
 
 /// An equality may compare a virtual interface with a conditional of

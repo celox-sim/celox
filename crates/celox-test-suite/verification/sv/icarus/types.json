@@ -179,6 +179,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:16: error: Array d needs an array index here.\n<case>/source_0.sv:16: error: Unable to evaluate d as a port default expression.\n<case>/source_0.sv:16: sorry: Subroutine ports with unpacked dimensions are not yet supported.\n<case>/source_0.sv:14: error: the type of the variable 'd' doesn't match the context type.\n<case>/source_0.sv:14:      : variable type=netvector_t:bool signed[31:0]\n<case>/source_0.sv:14:      : context type=11netuarray_t\n<case>/source_0.sv:22: error: cannot perform a part select on array a.\n<case>/source_0.sv:23: error: the type of the variable 'a['sd1+:'sd2]' doesn't match the context type.\n<case>/source_0.sv:23:      : variable type=netvector_t:bool signed[31:0]\n<case>/source_0.sv:23:      : context type=11netuarray_t\n<case>/source_0.sv:24: error: the type of the variable 'c' doesn't match the context type.\n<case>/source_0.sv:24:      : variable type=netvector_t:bool signed[31:0]\n<case>/source_0.sv:24:      : context type=11netuarray_t\n<case>/source_0.sv:26: error: Array c needs an array index here.\n<case>/source_0.sv:28: error: the type of the variable 'eb' doesn't match the context type.\n<case>/source_0.sv:28:      : variable type=9netenum_t\n<case>/source_0.sv:28:      : context type=11netuarray_t\n<case>/source_0.sv:31: error: The function g has been called with missing/empty parameters.\n<case>/source_0.sv:31:      : Verilog doesn't allow passing empty parameters to functions.\n10 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "types::unpacked_array_assignments_through_selects_and_calls",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

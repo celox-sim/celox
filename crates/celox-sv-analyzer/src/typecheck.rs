@@ -20,7 +20,7 @@ pub struct IntegralLiteral {
     pub mask: BigUint,
 }
 
-/// The type of a fixed-size unpacked array of an integral element type.
+/// The type of a fixed-size unpacked array.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnpackedArrayType {
     /// The element count of each unpacked dimension, slowest varying first.
@@ -29,6 +29,12 @@ pub struct UnpackedArrayType {
     pub element_width: usize,
     pub signed: bool,
     pub four_state: bool,
+    /// The element type when it is not an integral type that its width,
+    /// state count and signedness describe: an enumeration, an unpacked
+    /// structure, a class, a string, a real or a virtual interface type, as
+    /// it spells in a diagnostic. Such a type is equivalent only to itself
+    /// (IEEE 1800-2023 6.22.2).
+    pub element: Option<String>,
 }
 
 impl UnpackedArrayType {
@@ -44,6 +50,14 @@ impl UnpackedArrayType {
 
 impl std::fmt::Display for UnpackedArrayType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(element) = &self.element {
+            f.write_str(element)?;
+            f.write_str(" ")?;
+            for count in &self.dims {
+                write!(f, "[{count}]")?;
+            }
+            return Ok(());
+        }
         f.write_str(if self.four_state { "logic" } else { "bit" })?;
         if self.signed {
             f.write_str(" signed")?;

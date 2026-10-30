@@ -430,7 +430,7 @@ pub(in crate::ast) fn bind_native(
                     continue;
                 }
                 if check {
-                    check_native_array(&tree.state, id, native, &shape, dims)?;
+                    check_native_array(tree, id, &shape, dims)?;
                 }
                 // A typed pattern of a member must name the member's
                 // structure type (6.22.3).
@@ -651,16 +651,14 @@ fn native_rank(
     }
 }
 fn check_native_array(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     id: ExprId,
-    native: &celox_sv_syntax::Declarations,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     array_compatibility::check_native_unpacked_assignment(
-        state,
+        tree,
         id,
-        native,
         shape,
         || "assignment pattern item".into(),
         dims,

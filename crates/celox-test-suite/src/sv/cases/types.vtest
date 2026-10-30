@@ -525,3 +525,40 @@
   (assert_eq state 2)
   (tick clk)
   (assert_eq state 0))
+(case unpacked_array_assignments_through_selects_and_calls
+  (source "top.sv" #"
+module Sub;
+    int b[2] = '{7, 8};
+endmodule
+module Top(output int sum);
+    typedef enum {A, B} e_t;
+    typedef int ia_t[2];
+    Sub u();
+    int a[4], c[2], d[2], h[2];
+    e_t ea[2], eb[2];
+    bit signed [31:0] w[2];
+    bit s;
+    function ia_t f();
+        return d;
+    endfunction
+    function int g(int p[2] = d);
+        return p[0] + p[1];
+    endfunction
+    initial begin
+        d = '{1, 2};
+        a = '{1, 2, 3, 4};
+        a[0:1] = a[2:3];
+        c = a[1+:2];
+        w = c;
+        s = 1;
+        h = s ? c : d;
+        eb = '{B, A};
+        ea = eb;
+        c = f();
+        h[1] = u.b[1];
+        sum = a[0] + 10 * c[0] + 100 * w[1] + 1000 * h[0] + 10000 * c[1] + 100000 * g()
+            + 1000000 * h[1] + 10000000 * ea[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 18324313))

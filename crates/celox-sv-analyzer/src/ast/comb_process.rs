@@ -155,9 +155,8 @@ fn net_declaration_assignments(
         let name = instances::normalize_identifier(&variable.name.spelling);
         if let Some(target) = packed_dimensions.get(&name) {
             array_compatibility::check_native_unpacked_assignment(
-                &syntax_tree.state,
+                syntax_tree,
                 value,
-                syntax_tree.declarations(),
                 target,
                 || "net declaration assignment".to_string(),
                 packed_dimensions,
@@ -240,15 +239,12 @@ fn continuous_assignments(
                     }],
                 ));
             }
-            if let Some(shape) = array_compatibility::native_unpacked_shape(
-                assignment.left,
-                tree.declarations(),
-                dimensions,
-            ) {
+            if let Some(shape) =
+                array_compatibility::native_unpacked_shape(assignment.left, tree, dimensions)
+            {
                 array_compatibility::check_native_unpacked_assignment(
-                    &tree.state,
+                    tree,
                     assignment.right,
-                    tree.declarations(),
                     &shape,
                     || "continuous assignment".into(),
                     dimensions,

@@ -1583,3 +1583,18 @@ Icarus 13.0 does not accept a `bit` vector as the `$swrite` output and exits
 before `$finish`; that runtime failure is retained in
 [the Icarus string_format report](verification/sv/icarus/string_format.json).
 No assertions or exclusions are weakened.
+
+### Unpacked array assignments through selects and calls
+
+`types::unpacked_array_assignments_through_selects_and_calls` assigns unpacked
+arrays of equivalent element types through slices on both sides, a conditional
+operator, a function result, a formal default, an enumeration array and a
+hierarchical name (IEEE 1800-2023 6.22.2, 7.6); the sum is 18324313.
+Verilator 5.052 passes. The pinned xezim 0.11.3 yields an array of zeros for
+`h = s ? c : d` (18330343), recorded in [the review](verification/xezim-review.json)
+with an [adapter-free source](verification/repros/sv_conditional_unpacked_arrays_xezim.sv);
+its exact mismatch remains an executed failure in
+[the xezim types report](verification/sv/xezim/types.json). Icarus 13.0 does
+not support unpacked array formals; its exact compile diagnostic remains an
+executed failure in [the Icarus types report](verification/sv/icarus/types.json).
+No assertions or exclusions are weakened.

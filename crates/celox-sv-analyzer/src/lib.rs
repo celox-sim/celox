@@ -167,8 +167,8 @@ pub enum AnalyzerError {
     )]
     IncompatibleUnpackedArray {
         context: String,
-        actual: typecheck::UnpackedArrayType,
-        target: typecheck::UnpackedArrayType,
+        actual: Box<typecheck::UnpackedArrayType>,
+        target: Box<typecheck::UnpackedArrayType>,
     },
     /// A handle of class `actual` assigned to a variable of class `target`
     /// that `actual` neither derives from nor implements; only `$cast` may
