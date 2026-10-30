@@ -60,9 +60,13 @@ pub(in crate::ast) fn prepare_native(
                 if shape.is_some_and(|shape| {
                     shape.unpacked.is_empty()
                         && shape.packed.len() <= 1
-                        && shape.members.iter().any(|member| {
+                        && (shape.members.iter().any(|member| {
                             member.name() == instances::normalize_identifier(&name.spelling)
-                        })
+                        }) || shape.unpacked_struct.as_ref().is_some_and(|aggregate| {
+                            aggregate
+                                .member(&instances::normalize_identifier(&name.spelling))
+                                .is_some()
+                        }))
                 }) || !dims
                     .const_env
                     .contains_key(&instances::normalize_identifier(&name.spelling)) =>

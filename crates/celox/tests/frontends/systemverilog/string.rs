@@ -6,6 +6,7 @@ sv_backends! {
     fn string_concatenation_and_replication(sim) { @case "string::concatenation_and_replication"; }
     fn string_character_access(sim) { @case "string::character_access"; }
     fn string_methods(sim) { @case "string::methods"; }
+    fn string_characters_are_signed_bytes(sim) { @case "string::characters_are_signed_bytes"; }
     fn string_casts_from_integral_values(sim) { @case "string::casts_from_integral_values"; }
     fn strings_across_clock_edges(sim) { @case "string::strings_across_clock_edges"; }
 }

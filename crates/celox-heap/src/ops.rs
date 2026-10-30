@@ -91,6 +91,12 @@ pub const OBJECT_RANDOMIZE_INPUTS: u64 = 65;
 /// Constraint index is encoded in the parameter; set-all uses u32::MAX.
 pub const OBJECT_CONSTRAINT_MODE_GET: u64 = 66;
 pub const OBJECT_CONSTRAINT_MODE_SET: u64 = 67;
+/// `load(record, offset, count)` of a structure record: `null` reads as
+/// zero bytes without a fault.
+pub const OBJECT_LOAD_NULLABLE: u64 = 68;
+/// `finish(record)` of a structure record whose fields are all stored: the
+/// handle of the one record with its contents, which may replace `record`.
+pub const OBJECT_FINISH_RECORD: u64 = 69;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -114,6 +120,13 @@ impl Heap {
         match code & 0xff {
             op @ crate::containers::NEW..=crate::containers::RSORT => {
                 self.container_call(op, parameter, a, b, c)
+            }
+            crate::containers::PATTERN => {
+                let bytes = self.container_pattern(a as Handle, parameter);
+                self.new_buffer(bytes)
+            }
+            crate::containers::HANDLE_PATTERN => {
+                self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
             }
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
@@ -196,6 +209,9 @@ impl Heap {
                 0
             }
             OBJECT_LOAD => self.load(a as Handle, b as usize, c as usize),
+            OBJECT_LOAD_NULLABLE if a as Handle == crate::objects::NULL => 0,
+            OBJECT_LOAD_NULLABLE => self.load(a as Handle, b as usize, c as usize),
+            OBJECT_FINISH_RECORD => self.finish_record(a as Handle).into(),
             OBJECT_STORE => {
                 self.store(a as Handle, b as u32 as usize, (b >> 32) as usize, c);
                 0

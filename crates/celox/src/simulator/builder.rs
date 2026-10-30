@@ -1775,7 +1775,11 @@ mod host {
         program: &crate::ir::RuntimeProgram,
     ) -> Result<(), SimulatorError> {
         let schema = &program.runtime_schema;
-        if schema.processes.is_empty() {
+        if schema
+            .processes
+            .iter()
+            .all(|process| process.kind == celox_design::ProcessKind::Callable)
+        {
             return Ok(());
         }
         let origin = schema.process_origins.first().cloned().unwrap_or_default();
@@ -2327,6 +2331,16 @@ mod host {
             .with_parallel_lanes(lanes)
             .with_parallel_partition(partition)
             .with_settle_partition(settle);
+            self
+        }
+
+        /// Select the loop that runs time slots. A test option:
+        /// For timed simulations, [`crate::SchedulerMode::Differential`]
+        /// checks every step against a shadow simulation. Veryl TB execution
+        /// uses this option to select compiled or reference clock batches.
+        #[doc(hidden)]
+        pub fn scheduler_mode(mut self, mode: crate::SchedulerMode) -> Self {
+            self.options.scheduler = mode;
             self
         }
 
@@ -3014,10 +3028,14 @@ mod host {
             // A timed simulation runs the slots of kernels that only delay
             // in a compiled scheduler, generated from the final units.
             #[cfg(feature = "host-runtime")]
-            if self.options.emit_triggers
+            if (self.options.emit_triggers || laid_out.runtime.testbench.is_some())
                 && self.options.scheduler != crate::SchedulerMode::Reference
             {
-                crate::scheduler::attach(&mut laid_out);
+                crate::scheduler::attach(
+                    &mut laid_out,
+                    !self.options.native_force_support
+                        && self.options.signal_access.force_signals.is_empty(),
+                );
             }
             #[cfg(feature = "host-runtime")]
             if self
@@ -3867,15 +3885,6 @@ mod host {
             }
         }
 
-        /// Select the loop that runs time slots. A test option:
-        /// [`crate::SchedulerMode::Differential`] compiles the design twice
-        /// and checks every step against a shadow simulation.
-        #[doc(hidden)]
-        pub fn scheduler_mode(mut self, mode: crate::SchedulerMode) -> Self {
-            self.options.scheduler = mode;
-            self
-        }
-
         /// Compiles the design using the host's default backend.
         pub fn build(self) -> Result<crate::Simulation, SimulatorError> {
             #[cfg(any(
@@ -3968,8 +3977,8 @@ mod host {
         /// are not used, its runtime options (scheduler, DPI symbols,
         /// plusargs, VCD output) are.
         ///
-        /// An image from [`Simulator::builder`] has no compiled scheduler,
-        /// so every time slot runs in the reference loop.
+        /// An untimed RTL image without a native testbench has no compiled
+        /// scheduler, so its time slots run in the reference loop.
         #[cfg(any(
             target_arch = "x86_64",
             feature = "arm64-codegen",
@@ -4778,6 +4787,169 @@ endmodule"#;
             &externally_live,
             options.four_state,
         );
+    }
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn unchanged_clock_does_not_invalidate_compiled_settle() {
+        assert_eq!(
+            count_clean_clock_batch(true, false, false).0,
+            0,
+            "only a moved; the combinational input b did not change"
+        );
+    }
+
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn clean_clock_batch_does_not_repeat_fused_comb_evaluation() {
+        let (evaluations, fused_domains) = count_clean_clock_batch(false, false, false);
+        assert!(
+            fused_domains > 0,
+            "the regression must exercise a fused domain"
+        );
+        assert_eq!(
+            evaluations, 0,
+            "the FF's combinational inputs were already settled"
+        );
+    }
+
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn clock_alias_notifications_do_not_force_datapath_evaluation() {
+        assert_eq!(count_clean_clock_batch(false, true, false).0, 0);
+    }
+
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn dirty_clock_batch_evaluates_new_inputs_before_ff_update() {
+        assert!(count_clean_clock_batch(false, false, true).0 > 0);
+    }
+
+    /// A bit-level schedule may load a range before the bits it needs are
+    /// stored, and discard the stale ones: the settle is still a function of
+    /// its inputs, so it may be deferred.
+    #[test]
+    fn discarded_stale_bits_keep_settles_deferred() {
+        let source = r#"
+            module Child (
+                translate: input logic, frame: input logic<20>, pc: input logic<12>,
+                physical: output logic<12>,
+            ) {
+                var translated: logic<32>;
+                assign translated = {frame, pc};
+                assign physical = if translate ? translated[11:0] : pc;
+            }
+            module Top (
+                clk: input clock, rst: input reset, translate: input logic,
+                next_frame: input logic<20>, next_pc: input logic<12>,
+                physical: output logic<12>,
+            ) {
+                var frame_q: logic<20>;
+                var pc_q: logic<12>;
+                var frame: logic<20>;
+                always_ff {
+                    if_reset { frame_q = 0; pc_q = 0; } else { frame_q = next_frame; pc_q = next_pc; }
+                }
+                inst child: Child (translate, frame, pc: pc_q, physical);
+                assign frame = frame_q;
+            }
+        "#;
+        let (program, _, _, _, _) = crate::Simulation::builder(source, "Top")
+            .four_state(false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .unwrap();
+        assert_eq!(program.sir.eval_comb_stateful, Some(Vec::new()));
+        let (defers, by_loads) = crate::scheduler::defers_settles_for_test(&program);
+        assert!(defers);
+        assert!(!by_loads, "the fixture must load stale bits it discards");
+    }
+
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    fn count_clean_clock_batch(clock_data: bool, alias: bool, dirty: bool) -> (u64, usize) {
+        use crate::SimBackend;
+        let source = r#"
+            module Top (
+                a: input 'domain_a clock, b: input 'domain_b clock,
+                d: input bit<8>, q: output 'domain_a bit<8>, r: output 'domain_b bit<8>,
+                monitor: output bit<8>, evaluations: input bit<64>,
+            ) {
+                assign monitor = __COMB__;
+                unsafe (cdc) {
+                    always_ff (a) { q = __INPUT__; }
+                    always_ff (b) { r = d; }
+                }
+            }
+        "#;
+        let mut source = source
+            .replace("__COMB__", if clock_data { "b as u8" } else { "d + 1" })
+            .replace("__INPUT__", if clock_data { "d" } else { "monitor" });
+        if alias {
+            source = source.replace(
+                "always_ff (a) { q = monitor; }",
+                "inst child: Child (clk: a, d: monitor, q);",
+            );
+            source.push_str("module Child (clk: input clock, d: input bit<8>, q: output bit<8>) { always_ff { q = d; } }");
+        }
+        let (mut program, _, options, _, _) = crate::Simulation::builder(&source, "Top")
+            .emit_triggers()
+            .four_state(false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .unwrap();
+        if alias {
+            assert!(program.sir.eval_comb.iter().flat_map(|u| u.blocks.values())
+                .flat_map(|b| &b.instructions).any(|inst| matches!(inst,
+                    crate::ir::SIRInstruction::Store(_, _, _, _, triggers, _) if !triggers.is_empty()
+                )), "the fixture must retain clock notifications");
+        }
+        let counter = program.get_addr(&[], &["evaluations"]).unwrap();
+        let fused = crate::scheduler::count_test_settles(&mut program, counter, counter);
+        let scheduler = program.runtime.runtime_schema.scheduler.clone().unwrap();
+        let mut backend = crate::NativeBackend::new(&program, &options).unwrap();
+        let slots = scheduler
+            .slots
+            .map(|address| backend.resolve_signal(&address));
+        let count = backend.resolve_signal(&counter);
+        let a = program.get_addr(&[], &["a"]).unwrap();
+        let bit = scheduler
+            .clocks
+            .iter()
+            .position(|&clock| clock == a)
+            .unwrap();
+        let element = |mut signal: crate::SignalRef| {
+            signal.offset += bit * 8;
+            signal.width = 64;
+            signal
+        };
+        if alias {
+            // A falling edge only publishes the clock alias: no FF output
+            // needs a settle to propagate back through the child boundary.
+            let clock = backend.resolve_signal(&a);
+            backend.set(clock, 1u8);
+        }
+        backend.eval_comb().unwrap();
+        backend.set(count, 0u64);
+        backend.set(slots.limit, 0u64);
+        backend.set(slots.dirty, u8::from(dirty));
+        if dirty {
+            let d = backend.resolve_signal(&program.get_addr(&[], &["d"]).unwrap());
+            backend.set(d, 7u8);
+        }
+        backend.set(slots.clock_armed, 1u64 << bit);
+        backend.set(slots.clock_value, if alias { 0 } else { 1u64 << bit });
+        backend.set(element(slots.clock_next), 0u64);
+        backend.set(element(slots.clock_period), 2u64);
+        backend.run_process(scheduler.unit.unwrap()).unwrap();
+        let q = backend.resolve_signal(&program.get_addr(&[], &["q"]).unwrap());
+        assert_eq!(
+            backend.get_as::<u8>(q),
+            if clock_data || alias {
+                0
+            } else if dirty {
+                8
+            } else {
+                1
+            }
+        );
+        (backend.get_as::<u64>(count), fused)
     }
 }
 

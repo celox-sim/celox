@@ -32,7 +32,7 @@ use thiserror::Error;
 
 use crate::SourceVarId;
 
-type RegionedSourceAddr = RegionedVarAddrBase<SourceVarId>;
+type RegionedSourceAddr<A> = RegionedVarAddrBase<A>;
 
 /// Widest selector of a single `Switch`.
 const SWITCH_BITS: usize = 8;
@@ -55,22 +55,22 @@ pub enum ProcessKernelError {
 pub const NBA_POSITION_WIDTH: usize = 64;
 
 /// Builder of one process kernel.
-pub struct ProcessKernelBuilder {
-    builder: SIRBuilder<RegionedSourceAddr>,
-    slots: ProcessSlots<SourceVarId>,
+pub struct ProcessKernelBuilder<A = SourceVarId> {
+    builder: SIRBuilder<RegionedSourceAddr<A>>,
+    slots: ProcessSlots<A>,
     /// The block each resume point continues in; point 0 is the start.
     resume_blocks: Vec<BlockId>,
     /// The wait site and predicate entry resume point being lowered.
-    wait_site: Option<(u32, usize)>,
+    wait_site: Option<(u64, usize)>,
     /// The runtime event site the process reports at its flush points
     /// (see [`Self::flush_deferred_at`]).
     flush_site: Option<u32>,
 }
 
-impl ProcessKernelBuilder {
+impl<A: Copy> ProcessKernelBuilder<A> {
     /// Start a kernel. The builder is positioned at the start of the
     /// process body.
-    pub fn new(slots: ProcessSlots<SourceVarId>) -> Self {
+    pub fn new(slots: ProcessSlots<A>) -> Self {
         let builder = SIRBuilder::new();
         let start = builder.current_block();
         Self {
@@ -99,24 +99,24 @@ impl ProcessKernelBuilder {
 
     /// The kernel's control slots, with [`ProcessSlots::const_delays`] set
     /// for the delays lowered so far.
-    pub fn slots(&self) -> ProcessSlots<SourceVarId> {
+    pub fn slots(&self) -> ProcessSlots<A> {
         self.slots
     }
 
     /// The SIR builder positioned where the process continues. After
     /// [`Self::finish`] no block is open until the caller switches to one.
-    pub fn builder(&mut self) -> &mut SIRBuilder<RegionedSourceAddr> {
+    pub fn builder(&mut self) -> &mut SIRBuilder<RegionedSourceAddr<A>> {
         &mut self.builder
     }
 
-    fn store_constant(&mut self, slot: SourceVarId, width: usize, value: u64) {
+    fn store_constant(&mut self, slot: A, width: usize, value: u64) {
         let register = self.builder.alloc_bit(width, false);
         self.builder
             .emit(SIRInstruction::Imm(register, SIRValue::new(value)));
         self.store(slot, width, register);
     }
 
-    fn store(&mut self, slot: SourceVarId, width: usize, value: RegisterId) {
+    fn store(&mut self, slot: A, width: usize, value: RegisterId) {
         self.builder.emit(SIRInstruction::Store(
             stable(slot),
             SIROffset::Static(0),
@@ -208,6 +208,16 @@ impl ProcessKernelBuilder {
         self.suspend(ProcessStatus::InactiveDelay)
     }
 
+    /// A concurrent assertion's Observed predicate / Reactive action boundary.
+    pub fn assertion_region(&mut self, reactive: bool) -> Result<(), ProcessKernelError> {
+        self.slots.const_delays = false;
+        self.suspend(if reactive {
+            ProcessStatus::AssertionReactive
+        } else {
+            ProcessStatus::AssertionObserved
+        })
+    }
+
     fn note_delay(&mut self, constant: Option<u64>) {
         self.slots.const_delays &= constant.is_some_and(|amount| amount > 0);
     }
@@ -283,7 +293,15 @@ impl ProcessKernelBuilder {
     /// afterwards is the site's resume point: the caller lowers the wait's
     /// condition there and ends it with [`Self::wake_if`].
     pub fn suspend_wait(&mut self, site: u32) -> Result<(), ProcessKernelError> {
-        self.store_delay_constant(u64::from(site));
+        self.suspend_wait_word(u64::from(site))
+    }
+
+    pub fn suspend_level_wait(&mut self, site: u32) -> Result<(), ProcessKernelError> {
+        self.suspend_wait_word(u64::from(site) | celox_design::PROCESS_LEVEL_WAIT)
+    }
+
+    fn suspend_wait_word(&mut self, site: u64) -> Result<(), ProcessKernelError> {
+        self.store_delay_constant(site);
         self.suspend(ProcessStatus::Wait)?;
         self.wait_site = Some((site, self.resume_blocks.len() - 1));
         Ok(())
@@ -306,7 +324,7 @@ impl ProcessKernelBuilder {
         // Predicate evaluation may itself yield to the runtime (for example,
         // disable fork). A later wakeup must evaluate the whole predicate.
         self.store_constant(self.slots.resume, PROCESS_RESUME_WIDTH, resume as u64);
-        self.store_delay_constant(u64::from(site));
+        self.store_delay_constant(site);
         self.end(ProcessStatus::Pending);
         self.builder.switch_to_block(woken);
         if let Some(site_id) = self.flush_site {
@@ -325,7 +343,7 @@ impl ProcessKernelBuilder {
     pub fn wait_level(
         &mut self,
         site: u32,
-        mut predicate: impl FnMut(&mut SIRBuilder<RegionedSourceAddr>) -> RegisterId,
+        mut predicate: impl FnMut(&mut SIRBuilder<RegionedSourceAddr<A>>) -> RegisterId,
     ) -> Result<(), ProcessKernelError> {
         let holds = predicate(&mut self.builder);
         let join = self.builder.new_block();
@@ -361,9 +379,9 @@ impl ProcessKernelBuilder {
     pub fn nonblocking<E: From<ProcessKernelError>>(
         &mut self,
         index: u32,
-        site: &NbaSite<SourceVarId>,
+        site: &NbaSite<A>,
         lower: impl FnOnce(
-            &mut SIRBuilder<RegionedSourceAddr>,
+            &mut SIRBuilder<RegionedSourceAddr<A>>,
         ) -> Result<(RegisterId, Option<NbaPosition<RegisterId>>), E>,
     ) -> Result<(), E> {
         if let Some(pending) = site.pending {
@@ -414,10 +432,10 @@ impl ProcessKernelBuilder {
     pub fn nonblocking_switched<E: From<ProcessKernelError>>(
         &mut self,
         index: u32,
-        site: &NbaSite<SourceVarId>,
-        switch: SourceVarId,
+        site: &NbaSite<A>,
+        switch: A,
         lower: impl FnOnce(
-            &mut SIRBuilder<RegionedSourceAddr>,
+            &mut SIRBuilder<RegionedSourceAddr<A>>,
         ) -> Result<(RegisterId, Option<NbaPosition<RegisterId>>), E>,
     ) -> Result<(), E> {
         assert!(
@@ -471,7 +489,7 @@ impl ProcessKernelBuilder {
     }
 
     /// Complete the kernel. If a block is still open, the process ends there.
-    pub fn build(mut self) -> ExecutionUnit<RegionedSourceAddr> {
+    pub fn build(mut self) -> ExecutionUnit<RegionedSourceAddr<A>> {
         if self.builder.has_open_block() {
             self.end(ProcessStatus::Done);
         }
@@ -495,7 +513,7 @@ impl ProcessKernelBuilder {
             .chunks(1 << SWITCH_BITS)
             .map(<[BlockId]>::to_vec)
             .collect::<Vec<_>>();
-        let byte = |builder: &mut SIRBuilder<RegionedSourceAddr>, lsb: usize| {
+        let byte = |builder: &mut SIRBuilder<RegionedSourceAddr<A>>, lsb: usize| {
             let byte = builder.alloc_bit(SWITCH_BITS, false);
             builder.emit(SIRInstruction::Slice(byte, resume, lsb, SWITCH_BITS));
             byte
@@ -547,8 +565,8 @@ impl ProcessKernelBuilder {
     }
 }
 
-fn stable(var_id: SourceVarId) -> RegionedSourceAddr {
-    RegionedSourceAddr {
+fn stable<A>(var_id: A) -> RegionedSourceAddr<A> {
+    RegionedVarAddrBase {
         region: STABLE_REGION,
         var_id,
     }

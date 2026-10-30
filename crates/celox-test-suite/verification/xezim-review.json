@@ -671,6 +671,18 @@
       "title": "Imported class member typedefs sized by a value parameter lose their specialization dimensions for the default specialization and in a non-top module",
       "standard": "IEEE 1800-2023 6.18, 8.23, 8.25, 20.6.2"
     },
+    "sv_class-X15": {
+      "title": "An enumeration typedef declared in a loop generate block names one type for all iterations, so a class specialized with it shares static members across iterations",
+      "standard": "IEEE 1800-2023 6.22.1, 8.25, 27.4"
+    },
+    "sv_class-X16": {
+      "title": "`$bits` of a static class method call is 1 when the method's return range uses `$bits` of a module variable, also in a declaration range",
+      "standard": "IEEE 1800-2023 8.10, 20.6.2"
+    },
+    "sv_class-X17": {
+      "title": "A member of an enumeration declared in a parameterized class whose value uses a class parameter (`A = N`) evaluates the parameter as 0, so the following members are numbered from 0",
+      "standard": "IEEE 1800-2023 6.19, 8.25"
+    },
     "sv_iff_order": {
       "title": "iff conditions see writes after the event instead of the value at the triggering write",
       "standard": "IEEE 1800-2023 9.4.2.3, 10.4.2"
@@ -682,6 +694,126 @@
     "sv_iff_automatic_clock": {
       "title": "A wait on an automatic clock keeps an enabled iff gate after the gate was cleared",
       "standard": "IEEE 1800-2023 9.4.2.3"
+    },
+    "sv_concurrent_observed_reactive": {
+      "title": "A concurrent assertion action executes before another assertion finishes its Observed decision",
+      "standard": "IEEE 1800-2023 16.5, 16.14.1"
+    },
+    "sv_process-X1": {
+      "title": "kill() changes a finished parent to KILLED and leaves its live descendants running",
+      "standard": "IEEE 1800-2023 9.7"
+    },
+    "sv_process-X2": {
+      "title": "Self-suspend returns immediately; controls on a finished process change its terminal state",
+      "standard": "IEEE 1800-2023 9.7"
+    },
+    "sv_process-X3": {
+      "title": "Resuming an event wait consumes an edge that occurred while the process was suspended",
+      "standard": "IEEE 1800-2023 9.7"
+    },
+    "sv_process-X4": {
+      "title": "A user package process::self call resolves to the built-in process method",
+      "standard": "IEEE 1800-2023 26.7"
+    },
+    "sv_process-X5": {
+      "title": "Completion or cancellation of the last program initial does not implicitly finish simulation",
+      "standard": "IEEE 1800-2023 24.3, 9.2.3, 9.7"
+    },
+    "sv_process-X6": {
+      "title": "$exit terminates simulation while another program is still live",
+      "standard": "IEEE 1800-2023 24.7, 24.3"
+    },
+    "sv_process-X7": {
+      "title": "Killing an ancestor marks the calling child KILLED but continues executing it",
+      "standard": "IEEE 1800-2023 9.7"
+    },
+    "sv_process-X8": {
+      "title": "Final procedures expose different process identities and random streams",
+      "standard": "IEEE 1800-2023 9.2.3, 9.7, 18.13.3-18.13.5"
+    },
+    "sv_process-X9": {
+      "title": "A compound event on shared automatic operands wakes at time zero without a value change",
+      "standard": "IEEE 1800-2023 9.4.2, 6.21"
+    },
+    "sv_ref_copy_semantics": {
+      "title": "ref and const ref formals behave as copies of the actual",
+      "standard": "IEEE 1800-2023 13.5.2"
+    },
+    "sv_ref_subarray_element": {
+      "title": "A ref formal bound to a subarray element neither reads nor writes that element",
+      "standard": "IEEE 1800-2023 13.5.2, 7.4.6"
+    },
+    "sv_class_foreign_factory_constructor": {
+      "title": "A package factory reached through distinct caller-class type_id typedefs constructs the first caller type for both",
+      "standard": "IEEE 1800-2023 8.23, 8.25"
+    },
+    "sv_class_foreign_inherited_field_width": {
+      "title": "A derived class in another package sizes a field incorrectly when its bound uses an inherited local parameter",
+      "standard": "IEEE 1800-2023 8.13, 8.25"
+    },
+    "sv_class_foreign_constructor_default": {
+      "title": "A factory's call of a supplied class constructor loses the result of its call-valued default argument",
+      "standard": "IEEE 1800-2023 8.25, 13.5.3"
+    },
+    "sv_class_foreign_package_constructor": {
+      "title": "Constructing a package-class type argument through a generic in another package leaves initialized instance fields unknown",
+      "standard": "IEEE 1800-2023 8.7, 8.25"
+    },
+    "sv_integral_format_string": {
+      "title": "An integral format of $sformatf or $sformat is displayed as a value instead of being read as the format",
+      "standard": "IEEE 1800-2023 21.3.3"
+    },
+    "sv_associative_index_cast": {
+      "title": "An associative index is evaluated at its own width instead of as a cast to the index type",
+      "standard": "IEEE 1800-2023 7.8.4, 6.24.1"
+    },
+    "sv_rest-X80": {
+      "title": "A conditional operator whose operands are unpacked structures yields the false operand",
+      "standard": "IEEE 1800-2023 11.4.11, 7.2"
+    },
+    "sv_rest-X81": {
+      "title": "A structure assignment pattern item that is an unpacked structure value sets the member to its default",
+      "standard": "IEEE 1800-2023 10.9.2"
+    },
+    "sv_rest-X82": {
+      "title": "A whole unpacked-structure assignment in always_comb leaves the target members at their defaults",
+      "standard": "IEEE 1800-2023 7.2, 9.2.2.2"
+    },
+    "sv_rest-X83": {
+      "title": "An object constructed with `new(s)` in an always procedure keeps an empty string property",
+      "standard": "IEEE 1800-2023 8.7, 9.2.2.1"
+    },
+    "sv_rest-X85": {
+      "title": "A structure assignment pattern as the default of a subroutine argument loses its named members",
+      "standard": "IEEE 1800-2023 13.5.3, 10.9.2"
+    },
+    "sv_rest-X88": {
+      "title": "An automatic output argument of unpacked structure type that is not written is copied out as X for a 2-state member",
+      "standard": "IEEE 1800-2023 13.5.2, 6.8"
+    },
+    "sv_rest-X84": {
+      "title": "A string member of a class property of unpacked structure type prints with %s as a space-padded packed value, and a property of the object in a handle member reads empty",
+      "standard": "IEEE 1800-2023 7.2, 8.4, 21.2.1.7"
+    },
+    "sv_rest-X89": {
+      "title": "A whole class property of unpacked structure type is assigned member by member: a pattern reading the property sees members already written, and a receiver with a side-effecting index is evaluated per member",
+      "standard": "IEEE 1800-2023 7.2, 10.9.2, 11.4.1"
+    },
+    "sv_rest-X86": {
+      "title": "first() of a class property that is an associative array of associative arrays indexed by class handles reports an empty array",
+      "standard": "IEEE 1800-2023 7.8.5, 7.9.5"
+    },
+    "sv_rest-X87": {
+      "title": "new[] assigned to an element of a dynamic array of dynamic arrays is lost",
+      "standard": "IEEE 1800-2023 7.5.1, 7.4.5"
+    },
+    "sv_rest-X90": {
+      "title": "An update of an element of a nested container evaluates the outer index expression again, and $unpacked_dimensions/$dimensions of a dynamic array of dynamic arrays count one level",
+      "standard": "IEEE 1800-2023 7.4.5, 11.4.1, 20.7"
+    },
+    "sv_pattern_handles_and_literals": {
+      "title": "%p prints null class handles in a queue as 0 and a string literal as a number",
+      "standard": "IEEE 1800-2023 21.2.1.6"
     }
   },
   "cases": [
@@ -1685,6 +1817,14 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X4",
       "note": "The out-of-block Accumulator::add body does total += value; in a non-top module xezim's extern method body does not see the object's properties, so total stays 100 (expected 109). The same source run as the top module (-s M) gives 109."
+    },
+    {
+      "suite": "sv",
+      "name": "class::generate_scope_enum_type_arguments",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X15",
+      "note": "Each iteration of the loop generate block g declares its own typedef e_t, and a generate block is a separate scope (27.4), so g[0].e_t and g[1].e_t are different types: a typedef matches itself only within the scope of its identifier, unlike a package typedef (6.22.1 d, h). Box#(e_t) is therefore a separate specialization in each iteration (8.25), while alias_e renames the module-scope shared_e and is one specialization. Each iteration reads 10*1 + 2, so sum is 1212. The pinned xezim returns 2222: the adapter-free source prints counts=22 22 instead of 12 12 as both Top and Wrapped, so the per-iteration enums share one specialization. Verilator 5.052 shares them the same way. See verification/repros/sv_class_generate_enum_arguments.{sv,json}."
     },
     {
       "suite": "sv",
@@ -3927,6 +4067,22 @@
     },
     {
       "suite": "sv",
+      "name": "class::package_constant_class_defaults",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X5",
+      "note": "Package p declares WIDTH=5 and Box defaults N=WIDTH, M=N+2. Both Box and Box#() therefore use N=5,M=7; Box#(9) uses N=9,M=11. get() also reads the declaring package WIDTH, so read() returns 62+62+106=230. A caller module localparam WIDTH=29 cannot rebind those names (8.25,23.9). The pinned xezim prints 830 as both Top and Wrapped without the adapter, consistent with resolving WIDTH at the call site. See verification/repros/sv_class_constant_defaults_xezim.{sv,json}; Verilator passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "class::package_constant_type_arguments",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X2",
+      "note": "Package p declares W=6, word_t = bit signed [W-1:0] and the typedefs Utils#(word_t) word_utils and Utils#(bit [W:0]) wide_utils. Utils::width() returns $bits(T) and negative() whether T'('1) is negative, so read() returns 100*6 + 10*7 + 2*1 + 0 = 672 (8.25, 26.3); a caller module localparam W=29 cannot rebind W. The pinned xezim returns 923: it prints word=6,1 wide=32,1 as both Top and Wrapped without the adapter, so the inline packed type argument of wide_utils becomes the 32-bit signed default int, sv_class-X2. See verification/repros/sv_class_type_arguments_xezim.{sv,json}; Verilator passes the shared case."
+    },
+    {
+      "suite": "sv",
       "name": "class::parameter_defaults_bind_where_the_class_is_declared",
       "status": "mismatch",
       "classification": "xezim_bug",
@@ -4003,6 +4159,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class-X4",
       "note": "Derived is declared in generate block g, whose localparam K = 3 hides the module's K = 2; `typedef bit [K-1:0] T` must use K = 3 (23.9: names resolve from the declaration scope upward), so $bits = 3. xezim prints 1 (as top and non-top); in a reduction with another class it uses the module K (2). It does not depend on `extends`: a plain class in g behaves the same, while a static function in the same class returns K = 3. Repro: work/review5/xezim/r/c3c.sv, work/review5/xezim/r/c3_genscope.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "class::enumeration_constants_of_classes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X17",
+      "note": "Class C declares typedef enum mode_t {STRICT, HIGHEST, CHECK} with base typedef mode_t, localparam DEFAULT = CHECK and property m = HIGHEST; P #(N) declares typedef enum {A = N, B}. f() = DEFAULT + 10*m = 12, C::g() = C::CHECK = 2, C::DEFAULT = 2, P#(5)::b() = B = 6 and P#()::b() = 2 (6.19, 8.25); Q's localparam OTHER = 7 stays in place beside typedef other_e alias_e, and Derived's SECOND = FIRST of Base is 1 (8.13), so the sum is 172622212. The pinned xezim returns 171122212: the adapter-free source prints p5=1 p1=1 as both Top and Wrapped, numbering A from 0 regardless of N; Verilator 5.052 and Celox print p5=6 p1=2. See verification/repros/sv_class_enum_constants_xezim.{sv,json}."
     },
     {
       "suite": "sv",
@@ -4134,6 +4298,22 @@
     },
     {
       "suite": "sv",
+      "name": "class::method_ranges_of_scope_declarations",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X16",
+      "note": "C::f returns logic [$bits(data)-1:0] with the module variable logic [7:0] data, so $bits(C::f()) is 8, and so is $bits(y) for logic [$bits(C::f())-1:0] y (20.6.2). The pinned xezim gives 1 for both: the adapter-free source prints y=1 f=1 as both Top and Wrapped, where Verilator 5.052 and Celox print y=8 f=8. See verification/repros/sv_class_method_scope_ranges_xezim.{sv,json}."
+    },
+    {
+      "suite": "sv",
+      "name": "class::named_aggregate_type_arguments",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X6",
+      "note": "Package p declares the same-structure enums first_e and second_e, alias_e = first_e, and the same-structure packed structs s1_t and s2_t. Box#(alias_e) is the specialization Box#(first_e), since a typedef names the same type (6.18, 8.25), while each enum and struct declaration is a type of its own (6.19, 6.22.1). Constructing first, alias, second, s1, s2 and s2 again gives counts 2, 1, 1, 2 and $bits(s1_t)=4, so read() returns 21124. The pinned xezim returns 11124: it prints first=1 alias=1 second=1 s1=1 s2=2 as both Top and Wrapped without the adapter, so the typedef alias makes a separate specialization, sv_class-X6. See verification/repros/sv_class_named_aggregate_arguments_xezim.{sv,json}; Verilator passes the shared case."
+    },
+    {
+      "suite": "sv",
       "name": "timing::iff_conditions_are_judged_at_the_write",
       "status": "mismatch",
       "classification": "xezim_bug",
@@ -4179,6 +4359,374 @@
       "classification": "xezim_bug",
       "bug": "sv_iff_automatic_clock",
       "note": "The module gate enable is cleared between the rising and falling writes to the shared automatic clock. Standalone Top/Wrapped print accepted=1 rejected=1; 9.4.2.3 requires accepted=1 rejected=0. See verification/repros/sv_iff_hierarchy_automatic.json for exact installed-build provenance and source; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "concurrent_assertions::predicates_before_all_actions",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_concurrent_observed_reactive",
+      "note": "The first assertion action sets reset=1 in Reactive. The second assertion must already have decided with reset=0 in Observed, so both counters must be 1. Installed xezim produces first=1 second=0; Verilator gives 1/1. Reproduced without the suite harness in Top and Wrapped. Exact source, commands and installed-build limitation are in verification/repros/sv_concurrent_regions.json."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_finished_parent_kills_descendants",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X1",
+      "note": "At time 2 parent is FINISHED and leaf is WAITING. kill() must leave parent FINISHED, terminate leaf and let both awaits return immediately; checks=15 and late=0 at 12. xezim instead changes parent to KILLED, leaves leaf running (late=1), and reports checks=1. The adapter-free Top and Wrapped observations retain the state codes before and after kill. See verification/repros/sv_process_finished_parent_kills_descendants.sv and .json. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_self_suspend_and_await",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X2",
+      "note": "The child suspends itself at 0. Its parent resumes it at 2, so its following #3 ends at 5; status remains FINISHED after suspend/resume/kill on the finished child. xezim does not block self-suspend: finished_at=3, checks=2, terminal state KILLED. Adapter-free Top and Wrapped agree. See verification/repros/sv_process_self_suspend_and_await.sv and .json. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_suspend_and_resume_waits",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X3",
+      "note": "All three waits are suspended at 1 and resumed at 7. The delay expired at 5 and the level became true at 3, so both resume at 7. The event edge at 3 happened while desensitized: that waiter must wait until the new edge at 9. xezim consumes the old edge on resume, giving event_time=7 and checks=5, also without the adapter as Top/Wrapped. See verification/repros/sv_process_suspend_and_resume_waits.sv and .json. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_package_constants_keep_their_scope",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X4",
+      "note": "The five user package constants compare correctly, but process::self() does not call the user function returning 13: checks=31 instead of 63. IEEE 26.7 permits user declarations to shadow the implicit std wildcard import. The adapter-free Top/Wrapped source sv_process_package_scope.sv reproduces this; Verilator gives 63. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_self_kill_finishes_program",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X5",
+      "note": "The only program initial kills itself at 3. IEEE 24.3 requires implicit finish at 3 and its final output; the design clock continues until the fallback at 10 instead. Adapter-free Top/Wrapped observations in sv_process_program_self_kill.sv use a fallback at 11 and also show final at 11 instead of 3. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_external_kill_finishes_program",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X5",
+      "note": "A module kills the only live program initial at 3 through an imported process handle. The simulation must finish immediately at 3. It instead runs to the fallback. Adapter-free Top/Wrapped observations in sv_process_program_external_kill.sv reproduce final at 11 instead of 3. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::final_procedure_output_survives_program_completion",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X5",
+      "note": "The sole program initial returns normally at 3; the generated testbench times out instead of receiving the implicit finish required by 24.3. No auxiliary settler program is instantiated for a script beginning with run_to_finish. Adapter-free Top/Wrapped observations in sv_process_program_normal_completion.sv confirm final at fallback 11 instead of 3. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_program_exit_wakes_sibling_observers",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X6",
+      "note": "Producer calls $exit at 3; it must end only its own initial procedures and descendants. The Consumer program remains live through 23, and its await/status observers must resume at 3. xezim instead finishes the whole simulation at 3, before the shared script reaches its checks at 5. Adapter-free Top/Wrapped observations in sv_process_program_exit_observers.sv/.json confirm final at 3 instead of the expected checks=3, awaited_at=observed_at=3, late=0, final at 5. Verilator also finishes at 3. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_ancestor_kill_preserves_caller_rng",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X7",
+      "note": "The child draws once after srandom(42) then kills its ancestor without a host boundary in between. Both must be KILLED, no following statement may execute, and restoring its state into the surviving root must continue at the second draw. xezim preserves that draw but continues to late=1 despite reporting both handles KILLED (checks=15 instead of31). IEEE9.7 requires all descendants to terminate before kill returns. Adapter-free Top/Wrapped in sv_process_ancestor_kill_rng.sv/.json confirm this; Verilator also continues the child, reporting checks11/late1/childFINISHED. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_final_procedures_share_identity_and_rng",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X8",
+      "note": "All finals execute in one process (9.2.3), so their self handles and RNG continuation must match regardless of final ordering. The saved handle/state are explicitly initialized by the initial procedure before finish. xezim passes the first visit, then exposes different handles and RNG states in the other two visits (same=0, continuity=0); individual RNG replay remains correct. Adapter-free Top/Wrapped sv_process_final_identity.sv/.json records all three visits. Verilator matches the required shared identity/RNG behavior. Assertions and exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_resume_resamples_automatic_event_expression",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X9",
+      "note": "The shared automatic x and y are initialized to zero before the fork children start; x first changes at2. IEEE9.4.2 requires an expression value change to wake @(x^y). xezim already reports hits=1/event_at=0 at1, before suspend can interact with a change; it remains1/0 at3,5,8. The expected observations are0/0 at1,3,5 and1/6 at8, since resume at4 discards the change at2 (9.7). Adapter-free Top/Wrapped sv_process_resume_automatic_event.sv/.json reproduces this startup mismatch; it does not establish that xezim consumed a suspended change. The enclosing automatic scope outlives fork children (6.21). Assertions/exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "fork_control::process_resume_after_program_exit_is_noop",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_process-X6",
+      "note": "Producer exits at2 after suspending a delay waiter. Consumer remains live until10, resumes its FINISHED handle at3, and checks it after the original deadline at6. IEEE24.7 ends only Producer and9.7 makes resume a no-op on a finished process. xezim instead ends the whole simulation at2, before Consumer or the shared checks at9. Adapter-free Top/Wrapped sv_process_resume_after_program_exit.sv/.json reproduces final at2 instead of late=0/checks=3/state=0 and final at9. Assertions/exclusions are unchanged."
+    },
+    {
+      "suite": "sv",
+      "name": "references::const_ref_reads_the_current_value",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "A function writes the global that its const ref formal names, then returns the formal; xezim returns the value copied at the call (1) instead of 9. The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json prints the same values from the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_array_element_index_is_fixed_at_the_call",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "Writes through a ref formal bound to arr[i] land in arr[3] after the callee changes i, as if copied out with a re-evaluated index; 13.5.2 refers to the element of the call and gives arr[1]=13, arr[3]=4. The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json prints the same values from the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_default_and_named_arguments",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "inc() with a ref formal defaulting to g does not change g (copy semantics), so move(.b(g), .a(h)) adds 1 instead of 2 to h. The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json prints the same values from the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_elements_of_concurrent_task_activations",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "Concurrent task activations holding ref formals bound to different array elements do not update the elements as references; 13.5.2 gives 11, 22, 33, 40. The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json prints the same values from the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_formals_of_one_actual_alias_each_other",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "Two ref formals bound to one variable do not alias: b reads 0 after a = 5. The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json prints the same values from the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_task_keeps_a_property_while_suspended",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "A suspended task's ref formal bound to a class property neither sees the caller's later write (100) nor writes the property until it returns, giving 11 instead of 110. The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json prints the same values from the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_task_keeps_the_reference_while_suspended",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "A suspended task's ref formal does not see a concurrent write to the caller's automatic actual (late=3 instead of 7). The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json prints the same values from the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_writes_are_seen_before_the_return",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "A write through a ref formal is not visible through the global it names before the function returns (seen=10 instead of 11). The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json prints the same values from the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_element_select_past_the_element",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_subarray_element",
+      "note": "With `ref int r[3]` bound to m[0], the in-range write r[1] = 5 does not reach m[0][1] (kept=0 instead of 5); the out-of-range r[3] correctly reads 0 and leaves m[1][0] alone. The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json shows that even an in-range write and read through a formal bound to m[1] give row=0 read=0 instead of 5 and 5 in the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "references::ref_element_after_an_input_in_forked_activations",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "The same concurrent task activations as references::ref_elements_of_concurrent_task_activations with the input argument first: ref formals bound to different array elements do not update them as references (q=18340 instead of 13570, which 13.5.2 gives with 11, 22, 33, 40). The adapter-free Top/Wrapped probe in verification/repros/ref_arguments.json shows the copy semantics in the installed xezim 0.11.3 build; this is not current-pin validation."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X2",
+      "note": "The explicit T argument is the importing module's 9-bit word_t; Wide::T must retain that width. The shared checksum is 109 instead of 127. The standalone reports 111 with the member-type width check still false. Verilator separately gives Wide/Same/default counts 1,1,1 instead of 2,2,1, despite matching N/T actuals. See verification/repros/sv_foreign_generic.json for sources, observations and exact installed-build provenance."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_nominal_and_nested_types",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class-X6",
+      "note": "The typedef Alias names the same enum type as A, so Counter#(Alias) and Counter#(A) must share their count. A standalone assigns consecutive tick results and prints 1,1,1 for A/Alias/B instead of 1,2,1. The shared case additionally distinguishes enum/struct declarations and queue element types. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_multiple_user_classes",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_foreign_factory_constructor",
+      "note": "FirstUser and SecondUser have distinct names and layouts, so the source is valid with either compilation-unit model. Both factories construct a FirstUser-valued object: the second result is 42 instead of 73. A single-file standalone reproduces factories=42,42 instead of 42,73. This is independent of the separate-file compilation-unit policy. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_inherited_constants",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_foreign_inherited_field_width",
+      "note": "Base#(5) gives LOCAL=6 and item_t a width of 5. The derived field bound LOCAL must use the inherited value, despite q::LOCAL=23. The shared and standalone checksums are 23 instead of 31, specifically missing the bit for $bits(field)==6. Verilator reports 0 for the same checksum. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_constructor_lexical_scope",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_foreign_constructor_default",
+      "note": "User::new has n=initial_value() in compilation-unit scope; that function reads value=20 and returns 23. The package's same-named function returns 99. The constructor result is 20 instead of 23. IEEE 13.5.3 binds and evaluates the default in the subroutine declaration scope. Verilator raises an internal FuncRef-without-fvar error. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "class::foreign_generic_package_type_static_storage",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_foreign_package_constructor",
+      "note": "q::Factory#(p::Item)::create() calls Item::new(), which must assign value=42. The result contains unknown bits; a standalone prints X,7,1 for result/tag/count instead of 42,7,1. The static tag and factory counter are explicitly initialized. See verification/repros/sv_foreign_generic.json."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::sformatf_packed_runtime_format",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_integral_format_string",
+      "note": "With bit [31:0] format = \"%0d\", $sformatf(format, 42) gives \"   2437220         42\" in xezim 0.11.3: the format's bits are printed as a decimal value followed by the argument. IEEE 1800-2023 21.3.3 interprets the content of an integral format expression as the format, so the result is \"42\"; Verilator 5.052 prints 42."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::sformatf_with_associative_index",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_associative_index_cast",
+      "note": "With int unsigned x = 32'hffffffff and string wide[bit [63:0]], wide[x + 32'd1] = ... stores key 0 in xezim 0.11.3 (prints 0 1); 7.8.4 evaluates the index as a cast to bit [63:0], so the key is 64'h100000000 (expected 1 0). See verification/repros/sv_associative_index_cast.json."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::assignment_patterns",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X81",
+      "note": "o = '{r: b, tag: \"w\"} with a row_t variable b prints \"member 0  w\": xezim stores the default for the structure-valued member instead of b's members (-2, \"typed\"). Reproduced by verification/repros/sv_xezim_unpacked_structs.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::subroutine_arguments_and_results",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X80",
+      "note": "b = a.level > 5 ? a : b with a.level = 6 keeps b (\"-1:five!\") instead of copying a (\"6:five\"). Reproduced by verification/repros/sv_xezim_unpacked_structs.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::module_variables",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X82",
+      "note": "always_comb begin q = p; q.b = p.b + 1; end leaves q.a = 0, so c.a = q.a + 1 and next_a read 0 instead of a + 1 (0x11). Reproduced by verification/repros/sv_xezim_unpacked_structs.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::handle_members_survive_heap_collections",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X83",
+      "note": "node = new(number) in always @(posedge clk) gives an object whose text property is empty, so last.m_type.text prints \"[ ]\" instead of \"[2999]\"; the same happens without the structure. Reproduced by verification/repros/sv_xezim_constructor_argument_in_always.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::initializers_results_and_defaults",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X85",
+      "note": "f() with the default '{default: 0, s: \"d\"} sees an empty s and returns 0 instead of 1; the same pattern assigned to a variable keeps s. Reproduced by verification/repros/sv_xezim_struct_default_argument.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::results_and_outputs",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X88",
+      "note": "outz(r) does not write its output formal, so r.a must become the int default 0; xezim prints \"outz x\". Reproduced by verification/repros/sv_xezim_struct_output_default.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::class_properties",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X84",
+      "note": "o.orig.m_type_name and o.ovrd.m_type_name print as space-padded wide values and o.orig.m_type.n prints empty; the time member also starts at X in xezim's 4-state run of this 2-state case. Reproduced by verification/repros/sv_xezim_unpacked_struct_properties.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::class_properties_inheritance_and_collections",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X84",
+      "note": "d.orig.m_type_name and d.ovrd.m_type_name print as space-padded wide values (\"o x\" and \"[2999!]\" expected). Reproduced by verification/repros/sv_xezim_unpacked_struct_properties.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::class_property_assignment_order",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X89",
+      "note": "h.p = '{h.p.b, h.p.a} prints \"2 2\" instead of \"2 1\", and items[next_index()].p = '{7, 8} calls next_index() once per member, writing items[1].p.a and items[2].p.b, with i = 3 instead of 1."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::nested_containers_and_class_keys",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X86",
+      "note": "c.m.first(k) on the Obj-indexed property returns 0, so \"first a\" is missing; grid[1] = new[3] is also lost (sv_rest-X87), so grid[1][2] reads 1 instead of 7. Reproduced by verification/repros/sv_xezim_nested_containers.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::methods_of_nested_container_elements",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X87",
+      "note": "grid[1] = new[3] leaves grid[1] empty, so grid[1].size() prints 0 instead of 3. Reproduced by verification/repros/sv_xezim_nested_containers.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::nested_updates_evaluate_indices_once",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X90",
+      "note": "m[next_index()].push_back(7) calls next_index() three times per statement (i = 6 after two statements, elements lost), and $unpacked_dimensions(grid)/$dimensions(grid) of int grid[][] print 1 2 instead of 2 3."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::reference_formals_across_time",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_ref_copy_semantics",
+      "note": "A suspended task's ref formal of unpacked structure type neither sees the caller's write (shared.a = 5) nor writes shared until it returns: xezim prints \"mid 5 x\" and \"end 10 x+ 1\" where 13.5.2 gives \"mid 5 x+\" and \"end 50 x+ 5\". Reproduced by verification/repros/sv_xezim_struct_reference_copies.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "unpacked_structs::reference_formal_handles_survive_heap_collections",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rest-X84",
+      "note": "h.p.m_type_name, the string member of a class property written through a ref formal, prints as a space-padded wide value and h.p.m_type.text prints empty; xezim does the same for a direct write of the property (h.p = '{...}). Reproduced by verification/repros/sv_xezim_unpacked_struct_properties.sv."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::pattern_format_keys_and_handles",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_pattern_handles_and_literals",
+      "note": "xezim 0.11.3 prints '{0, 0} for a queue of two null class handles 7104884 for the string literal \"lit\", and the packed bytes of a string-valued conditional (7566450 for \"str\"); 21.2.1.6 prints a null handle as null and a string literal in quotes. It also prints the bit [7:0] elements of an associative array as 'h41 and 'h0, where unformatted $display prints decimal. See verification/sv/limitations/pattern-format.json."
     }
   ]
 }

@@ -46,11 +46,6 @@ pub(crate) fn validate_timed_design_with_defines(design: &Design, names: &[&str]
                             .into(),
                     );
                 }
-                // Final procedures run in an unspecified order relative to the
-                // checks after run_to_finish (IEEE 1800-2023 9.2.3).
-                if token.text == "final" && !matches!(previous, "assert" | "assume" | "cover") {
-                    return Err("final procedures are not supported in timed shared cases".into());
-                }
             }
             previous = &token.text;
         }
@@ -104,9 +99,9 @@ mod tests {
     }
 
     #[test]
-    fn final_procedures_are_rejected() {
+    fn final_procedures_are_supported() {
         let source = "module Top; bit done; final done = 1; endmodule";
-        assert!(validate_timed_design(&design(source)).is_err());
+        assert!(validate_timed_design(&design(source)).is_ok());
         let source = "module Top; initial $display(\"final\"); endmodule";
         assert!(validate_timed_design(&design(source)).is_ok());
     }
@@ -120,7 +115,7 @@ mod tests {
             let source = format!(
                 "module Top; initial {assertion} final (1); final $display(\"done\"); endmodule"
             );
-            assert!(validate_timed_design(&design(&source)).is_err(), "{source}");
+            assert!(validate_timed_design(&design(&source)).is_ok(), "{source}");
         }
     }
 
@@ -201,7 +196,6 @@ module Top;endmodule"#) (top Top)(run_until 0))"##,
             "timeprecision 1ps;",
             "`timescale 1ns/1ps",
             "`resetall",
-            "final done = 1;",
         ] {
             let source = format!("`define UNUSED {body}\nmodule Top; endmodule");
             assert!(validate_timed_design(&design(&source)).is_err(), "{body}");

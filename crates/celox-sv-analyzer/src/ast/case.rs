@@ -69,12 +69,41 @@ pub(super) fn expr_is_two_state(
             callee: Callee::Checked { .. },
             ..
         } => false,
+        // The selector is compared with case equality; the result is a value
+        // or the default.
+        Expr::Call {
+            callee: Callee::Lookup { .. },
+            args,
+            ..
+        } => {
+            let key = |index: usize| index % 2 == 1 && index + 1 != args.len();
+            args.iter().enumerate().skip(1).all(|(index, arg)| {
+                key(index)
+                    || arg
+                        .as_ref()
+                        .is_some_and(|arg| expr_is_two_state(state, arg, packed_dimensions))
+            })
+        }
         Expr::Call {
             callee: Callee::Object(op),
             ..
-        } => {
-            !matches!(**op, ObjectOp::Container { op, layout } if !layout.two_state && (op.reduction().is_some() || matches!(op, ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack | ContainerOp::Equal)))
-        }
+        } => match **op {
+            // A 4-state property or member of a record may hold X or Z.
+            ObjectOp::Load(field) => !field.four_state,
+            ObjectOp::Unbox(ref record) => !record.fields.iter().any(|field| field.four_state),
+            ObjectOp::Container { op, layout } => {
+                layout.two_state
+                    || !(op.reduction().is_some()
+                        || matches!(
+                            op,
+                            ContainerOp::Get
+                                | ContainerOp::PopFront
+                                | ContainerOp::PopBack
+                                | ContainerOp::Equal
+                        ))
+            }
+            _ => true,
+        },
         Expr::Call {
             callee: Callee::Subroutine(name),
             ..

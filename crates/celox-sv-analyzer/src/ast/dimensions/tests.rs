@@ -36,7 +36,7 @@ fn query_number(
         .cloned()
         .unwrap_or_else(|| PackedDimensions::new(HashMap::default(), env, aliases));
     context.const_env = env.clone().into();
-    context.type_aliases = aliases.clone();
+    context.type_aliases = aliases.clone().into();
     query_value(root, tree, &context)
         .ok()
         .flatten()
@@ -194,6 +194,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                     is_2state: f.return_is_2state,
                     string: f.return_string,
                     pattern_type: f.return_type.clone(),
+                    enum_domain: None,
                 },
             )
         }));
@@ -676,4 +677,34 @@ fn discovery_prefix_does_not_copy_a_growing_symbol_overlay() {
         copied <= COUNT * 8,
         "{copied} copied bindings for {COUNT} declarations"
     );
+}
+
+#[test]
+fn discovery_binds_class_signatures_independently_of_queries() {
+    // Each `$bits` query during validation discovers its owners' types and
+    // reaches every class signature of the scope; binding those once per
+    // scope keeps the cost independent of the number of queries.
+    let bindings = |queries: usize| {
+        let methods = (0..queries)
+            .map(|i| {
+                format!(
+                    "function int f{i}(bit [{i}:0] v); logic [7:0] q [{i}:0]; \
+                     return $bits(v) + $size(q); endfunction"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let source = format!(
+            "package p;
+                class A; {methods} endclass
+                class B extends A; function int g(int x); return $bits(x); endfunction endclass
+            endpackage
+            module Top; endmodule"
+        );
+        CLASS_SIGNATURE_BINDINGS.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("class-signature-discovery.sv"))
+            .expect("the package analyzes");
+        CLASS_SIGNATURE_BINDINGS.with(|count| count.get())
+    };
+    assert_eq!(bindings(2), bindings(16));
 }

@@ -1106,6 +1106,13 @@ pub enum AssertionHeader {
         deferred: Option<AssertionDeferral>,
         tokens: TokenRange,
     },
+    Concurrent {
+        clock: TimingControlId,
+        disable: Option<ExprId>,
+        condition: ExprId,
+        module_item: bool,
+        tokens: TokenRange,
+    },
     /// Concurrent/property/sequence and expect headers retain an explicit
     /// grammar boundary; consumers must not treat them as immediate predicates.
     Unconverted(TokenRange),
@@ -1114,7 +1121,9 @@ pub enum AssertionHeader {
 impl AssertionHeader {
     pub fn tokens(&self) -> TokenRange {
         match self {
-            Self::Immediate { tokens, .. } | Self::Unconverted(tokens) => *tokens,
+            Self::Immediate { tokens, .. }
+            | Self::Concurrent { tokens, .. }
+            | Self::Unconverted(tokens) => *tokens,
         }
     }
 }

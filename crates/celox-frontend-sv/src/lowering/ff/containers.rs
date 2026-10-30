@@ -4,26 +4,19 @@ use celox_heap::{containers as heap, ops::encode};
 use sv::ir::{ContainerKind, ContainerLayout, ContainerOp, HandleProperty};
 
 impl Ff<'_, '_> {
-    pub(super) fn container_call(
-        &mut self,
-        op: ContainerOp,
-        layout: ContainerLayout,
-        args: &[Option<sv::ir::Expr>],
-    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        use ContainerOp::*;
-        let args = args
-            .iter()
-            .map(|arg| {
-                arg.clone()
-                    .ok_or_else(|| unsupported("omitted container operand"))
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        let (kind, capacity, signed_key, string_key) = match layout.kind {
-            ContainerKind::Dynamic => (0, 0, false, false),
-            ContainerKind::Queue { capacity } => (1, capacity, false, false),
-            ContainerKind::Associative { signed, string, .. } => (2, 0, signed, string),
+    /// The heap's parameter for a container of `layout`.
+    pub(super) fn container_parameter(&self, layout: ContainerLayout) -> u64 {
+        let (kind, capacity, signed_key, string_key, object_key) = match layout.kind {
+            ContainerKind::Dynamic => (0, 0, false, false, false),
+            ContainerKind::Queue { capacity } => (1, capacity, false, false, false),
+            ContainerKind::Associative {
+                signed,
+                string,
+                object,
+                ..
+            } => (2, 0, signed, string, object),
         };
-        let parameter = heap::parameter(
+        heap::parameter(
             layout.width,
             layout.two_state || !self.m.four_state,
             match layout.handle {
@@ -35,7 +28,105 @@ impl Ff<'_, '_> {
             capacity,
             signed_key,
             string_key,
-        );
+            object_key,
+        )
+    }
+
+    pub(super) fn container_call(
+        &mut self,
+        op: ContainerOp,
+        layout: ContainerLayout,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use ContainerOp::*;
+        let mut args = args
+            .iter()
+            .map(|arg| {
+                arg.clone()
+                    .ok_or_else(|| unsupported("omitted container operand"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        // An update of an element of an outer container reads that element
+        // and writes it back: evaluate the indices on the way once.
+        if op.mutates()
+            && let Some(receiver) = args.first_mut()
+        {
+            *receiver = self.freeze_receiver(receiver)?;
+        }
+        let original_key_width = args
+            .get(1)
+            .and_then(|key| self.m.comparison_width(key, key));
+        if op.reduction().is_none() && args.iter().any(|arg| self.m.calls(arg)) {
+            let value_receiver = matches!(op, New | Literal | Convert | Equal | CaseEqual);
+            if !value_receiver {
+                // Preserve the receiver's location, not an old immutable copy
+                // of its contents: arguments may mutate this same container.
+                if let sv::ir::Expr::Call {
+                    callee: sv::ir::Callee::Object(object),
+                    args: operands,
+                    ..
+                } = &mut args[0]
+                    && matches!(**object, sv::ir::ObjectOp::Load(_))
+                    && let Some(owner) = operands.first_mut().and_then(Option::as_mut)
+                {
+                    *owner = self.heap_operand(
+                        owner,
+                        Some((32, false)),
+                        Some(celox_design::ValueKind::ObjRef),
+                    )?;
+                }
+            }
+            // An element of an outer container is written back through its
+            // read, whose indices `freeze_receiver` has evaluated.
+            if !value_receiver
+                && self.m.calls(&args[0])
+                && !matches!(&args[0], sv::ir::Expr::Call { callee: sv::ir::Callee::Object(op), .. } if matches!(**op, sv::ir::ObjectOp::Load(_) | sv::ir::ObjectOp::Container { op: Get, .. }))
+            {
+                args[0] = self.heap_operand(
+                    &args[0],
+                    Some((32, false)),
+                    Some(celox_design::ValueKind::ObjRef),
+                )?;
+            }
+            let count = args.len();
+            for (index, arg) in args.iter_mut().enumerate() {
+                if !value_receiver && (index == 0 || matches!(op, First | Last | Next | Prev)) {
+                    continue;
+                }
+                let element = op == Literal
+                    || (matches!(op, Set | Insert | PushFront | PushBack) && index + 1 == count);
+                let (context, kind) = if element {
+                    (
+                        Some((layout.width as usize, layout.signed)),
+                        layout.handle.map(|h| match h {
+                            HandleProperty::String => celox_design::ValueKind::StrRef,
+                            HandleProperty::Object => celox_design::ValueKind::ObjRef,
+                        }),
+                    )
+                } else if op == New && index == 0 {
+                    (Some((64, true)), None)
+                } else if value_receiver {
+                    (Some((32, false)), Some(celox_design::ValueKind::ObjRef))
+                } else {
+                    match layout.kind {
+                        ContainerKind::Associative { string: true, .. } => {
+                            (Some((32, false)), Some(celox_design::ValueKind::StrRef))
+                        }
+                        ContainerKind::Associative {
+                            key_width, signed, ..
+                        } => (Some((key_width as usize, signed)), None),
+                        _ if matches!(op, Get | Set) => (Some((64, true)), None),
+                        _ => (Some((32, true)), None),
+                    }
+                };
+                *arg = self.heap_operand(arg, context, kind)?;
+            }
+        }
+        let (signed_key, string_key) = match layout.kind {
+            ContainerKind::Associative { signed, string, .. } => (signed, string),
+            ContainerKind::Dynamic | ContainerKind::Queue { .. } => (false, false),
+        };
+        let parameter = self.container_parameter(layout);
         let code = |opcode| encode(opcode, parameter);
         if op.reduction().is_some() {
             return self.container_reduction(op, layout, &args[0], parameter);
@@ -238,10 +329,7 @@ impl Ff<'_, '_> {
                             key_width,
                             string: false,
                             ..
-                        } => self
-                            .m
-                            .comparison_width(&args[1], &args[1])
-                            .is_some_and(|width| width < key_width as usize),
+                        } => original_key_width.is_some_and(|width| width < key_width as usize),
                         _ => false,
                     };
                     if narrow {
@@ -317,13 +405,7 @@ impl Ff<'_, '_> {
                             let narrow = this.b.alloc_bit(32, false);
                             this.b.emit(SIRInstruction::Slice(narrow, updated, 0, 32));
                             this.store(id, SIROffset::Static(0), 32, narrow);
-                            let sv::ir::Expr::Ident(receiver) = receiver else {
-                                return Err(unsupported("container receiver must be a variable"));
-                            };
-                            this.assign(
-                                &sv::ir::LValue::Ident(receiver),
-                                &sv::ir::Expr::Ident(updated_name),
-                            )
+                            this.container_write_back(&receiver, sv::ir::Expr::Ident(updated_name))
                         })?;
                     }
                     zero
@@ -336,6 +418,88 @@ impl Ff<'_, '_> {
             self.store(temp, SIROffset::Static(0), width, narrow);
         }
         Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// `receiver` with the indices of the outer containers it reads, and the
+    /// objects of their properties, evaluated into temporaries.
+    fn freeze_receiver(
+        &mut self,
+        receiver: &sv::ir::Expr,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(op),
+            args,
+            arg_order,
+        } = receiver
+        else {
+            return Ok(receiver.clone());
+        };
+        let frozen = match **op {
+            sv::ir::ObjectOp::Container {
+                op: ContainerOp::Get,
+                ..
+            } => {
+                let [Some(outer), Some(index)] = args.as_slice() else {
+                    return Ok(receiver.clone());
+                };
+                let outer = self.freeze_receiver(outer)?;
+                let index = self.hoist(index)?;
+                vec![Some(outer), Some(index)]
+            }
+            sv::ir::ObjectOp::Load(_) => {
+                let [Some(owner)] = args.as_slice() else {
+                    return Ok(receiver.clone());
+                };
+                vec![Some(self.hoist(owner)?)]
+            }
+            _ => return Ok(receiver.clone()),
+        };
+        Ok(sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(op.clone()),
+            args: frozen,
+            arg_order: arg_order.clone(),
+        })
+    }
+
+    /// Store the updated container `updated` where `receiver` read it: a
+    /// variable, or an element of an outer container (`m[a]` of `m[a][b]`),
+    /// which is set in turn (IEEE 1800-2023 7.4.5).
+    fn container_write_back(
+        &mut self,
+        receiver: &sv::ir::Expr,
+        updated: sv::ir::Expr,
+    ) -> Result<(), sv::AnalyzerError> {
+        match receiver {
+            sv::ir::Expr::Ident(name) => {
+                self.assign(&sv::ir::LValue::Ident(name.clone()), &updated)
+            }
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                args,
+                ..
+            } if matches!(
+                **op,
+                sv::ir::ObjectOp::Container {
+                    op: ContainerOp::Get,
+                    ..
+                }
+            ) =>
+            {
+                let sv::ir::ObjectOp::Container { layout, .. } = **op else {
+                    unreachable!("matched a container read")
+                };
+                let [Some(outer), Some(index)] = args.as_slice() else {
+                    return Err(unsupported("container element receiver"));
+                };
+                self.container_call(
+                    ContainerOp::Set,
+                    layout,
+                    &[Some(outer.clone()), Some(index.clone()), Some(updated)],
+                )?;
+                Ok(())
+            }
+            _ => Err(unsupported("container receiver must be a variable")),
+        }
     }
 
     fn container_reduction(
@@ -470,7 +634,7 @@ impl Ff<'_, '_> {
     }
 
     // Case equality exposes the planes without changing the SIR or backend ABI.
-    fn container_split(&mut self, reg: RegisterId) -> (RegisterId, RegisterId) {
+    pub(super) fn container_split(&mut self, reg: RegisterId) -> (RegisterId, RegisterId) {
         let width = self.b.register(&reg).width();
         if !self.m.four_state
             || !matches!(self.b.register(&reg), celox_sir::RegisterType::Logic { .. })
@@ -528,7 +692,7 @@ impl Ff<'_, '_> {
         (packed[0], packed[1])
     }
 
-    fn container_join(
+    pub(super) fn container_join(
         &mut self,
         value: RegisterId,
         mask: RegisterId,

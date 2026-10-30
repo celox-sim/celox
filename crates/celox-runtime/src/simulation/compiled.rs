@@ -72,6 +72,7 @@ impl<B: SimBackend> SimulationState<B> {
             || self.suspended.is_some()
             || self.declarations_pending
             || self.host_pending
+            || !pending.observed.is_empty()
             || !pending.ready.is_empty()
             || !pending.inactive.is_empty()
             || !pending.nba_queue.is_empty()
@@ -190,6 +191,9 @@ impl<B: SimBackend> SimulationState<B> {
         backend.set(scheduler.limit, limit);
         backend.set(scheduler.exit, 0u8);
         backend.set(scheduler.finish, 0u8);
+        // State may have been restored or a prior slot may have exited early.
+        // Only hosts that prove their input state settled may enter clean.
+        backend.set(scheduler.dirty, 1u8);
         backend.set(scheduler.count, 0u64);
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);
@@ -331,7 +335,8 @@ impl<B: SimBackend> SimulationState<B> {
             if pending(process) || backend.get_as::<u8>(waiting) == 0 {
                 continue;
             }
-            let site = backend.get_as::<u64>(self.model.processes[process].delay) as usize;
+            let site = (backend.get_as::<u64>(self.model.processes[process].delay)
+                & !celox_design::PROCESS_LEVEL_WAIT) as usize;
             let terms = self.model.processes[process]
                 .wait_sites
                 .get(site)

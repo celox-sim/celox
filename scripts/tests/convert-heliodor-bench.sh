@@ -41,8 +41,6 @@ if (values["heliodor-celox-jit/heliodor_suite_linux_boot_execution"] !== 2) proc
 if (values["heliodor-celox-total/heliodor_suite_linux_boot_execution"] !== 2.5) process.exit(1);
 if (values["heliodor-veryl/heliodor_suite_linux_boot_execution"] !== 4) process.exit(1);
 if (values["heliodor-celox-tiered/heliodor_suite_linux_boot_end_to_end"] !== 5.5) process.exit(1);
-if (values["heliodor-celox-tiered/heliodor_suite_linux_boot_startup"] !== 0.5) process.exit(1);
-if (values["heliodor-celox-tiered/heliodor_suite_linux_boot_execution"] !== 5) process.exit(1);
 ' "$TMP/results.json"
 
 node -e '
@@ -61,16 +59,11 @@ if (values.some((entry) => entry.name.includes("celox-tiered"))) process.exit(1)
 node -e '
 const fs = require("fs");
 const values = Object.fromEntries(JSON.parse(fs.readFileSync(process.argv[1], "utf8")).map((x) => [x.name, x.value]));
-if (Object.keys(values).length !== 25) process.exit(1);
+if (Object.keys(values).length !== 17) process.exit(1);
+if (Object.keys(values).some(name => name.includes("tiered") && !name.endsWith("_end_to_end"))) process.exit(1);
 const expected = {
-  "heliodor-veryl-tiered-x86_64/heliodor_suite_linux_boot_startup": 1.5,
-  "heliodor-veryl-tiered-x86_64/heliodor_suite_linux_boot_execution": 8,
   "heliodor-veryl-tiered-x86_64/heliodor_suite_linux_boot_end_to_end": 9.5,
-  "heliodor-celox-tiered-aarch64/heliodor_suite_linux_boot_startup": 3.5,
-  "heliodor-celox-tiered-aarch64/heliodor_suite_linux_boot_execution": 13,
   "heliodor-celox-tiered-aarch64/heliodor_suite_linux_boot_end_to_end": 16.5,
-  "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_startup": 4.5,
-  "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_execution": 16,
   "heliodor-veryl-tiered-aarch64/heliodor_suite_linux_boot_end_to_end": 20.5,
   "heliodor-native-x86_64/heliodor_suite_linux_boot_compilation": 1,
   "heliodor-native-x86_64/heliodor_suite_linux_boot_execution": 2.5,
@@ -130,7 +123,7 @@ node "$ROOT/scripts/convert-heliodor-bench.mjs" "$TMP/suite-results.tsv" "$TMP/s
 node - "$TMP/suite.json" <<'JS'
 const assert = require("node:assert/strict");
 const rows = require(process.argv[2]);
-assert.equal(rows.length, 25 * 4);
+assert.equal(rows.length, 17 * 4);
 assert.equal(new Set(rows.map(row => row.name)).size, rows.length);
 assert.equal(rows.find(row => row.name === "heliodor-native-aarch64/heliodor_suite_71_smp_linux_boot_4hart_execution").value, 8);
 JS

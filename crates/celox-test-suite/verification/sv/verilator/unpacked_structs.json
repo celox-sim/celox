@@ -1,0 +1,247 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 (\"5 0000 1\" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_verilator_nested_struct_default.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_nested_struct_default",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 (\"5 0000 1\" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101.",
+        "upstream": []
+      },
+      "name": "unpacked_structs::assignment_patterns",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::class_properties",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::class_properties_inheritance_and_collections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::class_property_assignment_order",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::class_property_four_state_members",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::container_element_four_state_defaults",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::container_element_member_selects",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::container_elements",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::container_records_survive_heap_collections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::four_state_members",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::handle_members_survive_heap_collections",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::initializers_results_and_defaults",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::members_whole_copies_and_equality",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::module_variables",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-IMPURE: <case>/source_0.sv:18:29: Unsupported: External variable referenced by non-inlined function/task: 'set'\n                                       : ... note: In instance 'celox_suite_tb.dut'\n   18 |     function automatic void set(ref pair_t r, input string text);\n      |                             ^~~\n               <case>/source_0.sv:6:18: ... Location of the external reference: 'text'\n    6 |             this.text = text;\n      |                  ^~~~\n               ... For error description see https://verilator.org/warn/IMPURE?v=5.052\n%Warning-ZERODLY: <case>/testbench.sv:103:25: Value of # delay control statically unknown. Assuming it can be #0.\n                                            : ... If all # delays are non-zero at runtime,\n                                            : ... use '--no-sched-zero-delay' for improved performance.\n                                            : ... If a real #0 is expected at runtime,\n                                            : ... use '--sched-zero-delay' to suppress this warning.\n  103 |         if (t1 > $time) #(t1 - $time);\n      |                         ^\n                  ... For warning description see https://verilator.org/warn/ZERODLY?v=5.052\n                  ... Use \"/* verilator lint_off ZERODLY */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formal_handles_survive_heap_collections",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-IMPURE: <case>/source_0.sv:24:29: Unsupported: External variable referenced by non-inlined function/task: 'forward'\n                                       : ... note: In instance 'celox_suite_tb.dut'\n   24 |     function automatic void forward(ref op_t r);\n      |                             ^~~~~~~\n               <case>/source_0.sv:6:18: ... Location of the external reference: 'n'\n    6 |             this.n = n;\n      |                  ^\n               ... For error description see https://verilator.org/warn/IMPURE?v=5.052\n%Warning-ZERODLY: <case>/testbench.sv:103:25: Value of # delay control statically unknown. Assuming it can be #0.\n                                            : ... If all # delays are non-zero at runtime,\n                                            : ... use '--no-sched-zero-delay' for improved performance.\n                                            : ... If a real #0 is expected at runtime,\n                                            : ... use '--sched-zero-delay' to suppress this warning.\n  103 |         if (t1 > $time) #(t1 - $time);\n      |                         ^\n                  ... For warning description see https://verilator.org/warn/ZERODLY?v=5.052\n                  ... Use \"/* verilator lint_off ZERODLY */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_across_time",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_four_state",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::reference_formals_of_virtual_methods",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::results_and_outputs",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::subroutine_arguments_and_results",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

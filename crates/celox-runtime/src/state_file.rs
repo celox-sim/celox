@@ -51,12 +51,13 @@
 //! Version 1 files, which have no process section, still load. A file whose
 //! processes have nothing to record is written as version 1, which older
 //! builds read too. Static-only process schedules retain version 2; graphs
-//! and reactive queues require version 3. Versions 1 and 2 remain readable.
+//! and reactive queues require version 3. Pending Observed assertion evaluations
+//! require version 4. Versions 1 through 3 remain readable.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 3;
+const VERSION: u16 = 4;
 
 mod activations;
 use activations::*;
@@ -133,6 +134,7 @@ pub struct ProcessRecord {
     /// Values shared by automatic locals across activations.
     pub cells: Vec<FrameValueRecord>,
     pub reactive: Vec<ProcessRef>,
+    pub observed: Vec<ProcessRef>,
     pub re_inactive: Vec<ProcessRef>,
     pub re_nba_queue: Vec<NbaRecord>,
     /// Suspended processes and the time each resumes at.
@@ -248,7 +250,15 @@ impl StateFile {
             .as_ref()
             .map(|schedule| &schedule.processes)
             .filter(|processes| **processes != ProcessRecord::default());
-        let version = processes.map_or(1, |p| if needs_v3(p) { VERSION } else { 2 });
+        let version = processes.map_or(1, |p| {
+            if !p.observed.is_empty() {
+                4
+            } else if needs_v3(p) {
+                3
+            } else {
+                2
+            }
+        });
         put_u16(w, version)?;
         let mut flags = 0;
         if self.four_state {
@@ -593,6 +603,9 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) ->
     if version >= 3 {
         put_extension(w, processes)?;
     }
+    if version >= 4 {
+        put_process_list(w, &processes.observed, version)?;
+    }
     Ok(())
 }
 
@@ -683,6 +696,9 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
     };
     if version >= 3 {
         get_extension(r, &mut result)?;
+    }
+    if version >= 4 {
+        result.observed = get_process_list(r, version)?;
     }
     Ok(result)
 }
@@ -890,6 +906,19 @@ mod tests {
         bytes.clear();
         file.write_to(&mut bytes).unwrap();
         assert_eq!(bytes[8..10], 3u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+    }
+
+    #[test]
+    fn observed_assertion_queue_round_trips_in_v4() {
+        let mut file = sample();
+        file.schedule.as_mut().unwrap().processes.observed = vec![
+            ProcessRef::Kernel("assertion.status".into()),
+            ProcessRef::Activation(12),
+        ];
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 4u16.to_le_bytes());
         assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }
 

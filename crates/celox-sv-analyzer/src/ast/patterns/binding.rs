@@ -102,6 +102,15 @@ fn select<'a>(
     shape: Shape<'a>,
     dims: &PackedDimensions,
 ) -> Converted<(Vec<Selected<'a>>, bool, bool)> {
+    if let Some(aggregate) = shape.unpacked_struct.clone()
+        && shape.unpacked.is_empty()
+    {
+        return Ok((
+            unpacked_struct_items(&aggregate, kind, bindings)?,
+            false,
+            true,
+        ));
+    }
     if let Some((dim, rest)) = shape.unpacked.split_first() {
         let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
@@ -139,7 +148,8 @@ fn select<'a>(
         let sub = Shape::Owned(Rc::new(VariableDimensions {
             container: None,
             randomizable: true,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             real: false,
             string: false,
             class: None,
@@ -152,6 +162,7 @@ fn select<'a>(
                 .signed_element_depth
                 .and_then(|depth| depth.checked_sub(1))
                 .filter(|depth| *depth > 0),
+            unpacked_struct: None,
         }));
         let items = indexed_items(kind, bindings, count, |index| {
             (left.min(right)..=left.max(right))
@@ -250,7 +261,8 @@ fn select<'a>(
     let bit = Shape::Owned(Rc::new(VariableDimensions {
         container: None,
         randomizable: true,
-        enum_values: None,
+        enum_domain: None,
+        packed_enum: false,
         real: false,
         string: false,
         class: None,
@@ -260,6 +272,7 @@ fn select<'a>(
         is_2state: shape.is_2state,
         members: Vec::new(),
         signed_element_depth: None,
+        unpacked_struct: None,
     }));
     let items = indexed_items(kind, bindings, width, |index| {
         usize::try_from(index)
@@ -413,6 +426,69 @@ pub(in crate::ast) fn bind_native(
                 if check {
                     check_native_array(&tree.state, id, native, &shape, dims)?;
                 }
+                // A typed pattern of a member must name the member's
+                // structure type (6.22.3).
+                if pattern && let Some(aggregate) = shape.unpacked_struct.as_deref() {
+                    unpacked_structs::check_value(aggregate, id, native, tree, dims)?;
+                }
+                if let Some(aggregate) = shape.unpacked_struct.clone()
+                    && !pattern
+                {
+                    // A default that is not a structure of the member's type
+                    // applies to each of its members (IEEE 1800-2023 10.9.2).
+                    if default && unpacked_structs::native_struct(id, native, tree, dims)?.is_none()
+                    {
+                        let members = aggregate.members();
+                        jobs.push(Job::Finish {
+                            count: members.len(),
+                            reverse: false,
+                            keep: true,
+                        });
+                        jobs.extend(members.iter().rev().map(|member| {
+                            Job::Value(Selected {
+                                value: id,
+                                shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(
+                                    &member.r#type,
+                                ))),
+                                default: true,
+                                check: false,
+                            })
+                        }));
+                        continue;
+                    }
+                    unpacked_structs::check_value(&aggregate, id, native, tree, dims)?;
+                    values.push(expression_binding::bind_value(
+                        id, native, tree, dims, None,
+                    )?);
+                    continue;
+                }
+                if let Some(class) = shape.class.as_deref()
+                    && !pattern
+                {
+                    if let Some(call) =
+                        expression_binding::object_constructor(tree, id, native, dims, class)?
+                    {
+                        values.push(call);
+                        continue;
+                    }
+                    expression_binding::check_handle_assignment(
+                        tree,
+                        id,
+                        native,
+                        dims,
+                        class,
+                        || "assignment pattern member".into(),
+                    )?;
+                }
+                if (shape.string || shape.class.is_some()) && !pattern {
+                    let value = expression_binding::bind_value(id, native, tree, dims, None)?;
+                    values.push(if shape.string {
+                        expression_binding::string_operand(value, dims)
+                    } else {
+                        value
+                    });
+                    continue;
+                }
                 if pattern {
                     let typed = typed_shape(id, tree, dims)?;
                     jobs.push(Job::Pattern(
@@ -472,6 +548,74 @@ pub(in crate::ast) fn bind_native(
         return Err(mismatch());
     }
     values.pop().ok_or_else(mismatch)
+}
+/// The member values of an assignment pattern for an unpacked structure
+/// (IEEE 1800-2023 10.9.2), first declared first.
+fn unpacked_struct_items<'a>(
+    aggregate: &unpacked_structs::UnpackedStruct,
+    kind: NativeKind,
+    bindings: Vec<Pair>,
+) -> Converted<Vec<Selected<'a>>> {
+    let members = aggregate.members();
+    let values = match kind {
+        NativeKind::List => {
+            if bindings.len() != members.len() {
+                return Err(unsupported(format!(
+                    "assignment pattern with {} items for {} structure members",
+                    bindings.len(),
+                    members.len()
+                )));
+            }
+            bindings.into_iter().map(|value| (value, false)).collect()
+        }
+        NativeKind::Keyed(keys) => {
+            let mut named = Vec::new();
+            let mut default = None;
+            for (key, value) in keys.into_iter().zip(bindings) {
+                match key {
+                    Key::Member(name) if aggregate.member(&name).is_some() => {
+                        named.push((name, value))
+                    }
+                    Key::Member(name) => {
+                        return Err(unsupported(format!(
+                            "assignment pattern key `{name}` that is not a structure member"
+                        )));
+                    }
+                    Key::Default => default = Some(value),
+                    Key::Index(_) | Key::Name { .. } => {
+                        return Err(unsupported("structure assignment pattern form"));
+                    }
+                }
+            }
+            members
+                .iter()
+                .map(|member| {
+                    named
+                        .iter()
+                        .find(|(name, _)| *name == member.name)
+                        .map(|(_, value)| (*value, false))
+                        .or(default.map(|value| (value, true)))
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "assignment pattern without a value for member `{}`",
+                                member.name
+                            ))
+                        })
+                })
+                .collect::<Converted<Vec<_>>>()?
+        }
+        _ => return Err(unsupported("structure assignment pattern form")),
+    };
+    Ok(members
+        .iter()
+        .zip(values)
+        .map(|(member, (value, default))| Selected {
+            value,
+            shape: Shape::Owned(Rc::new(procedural::dimensions_from_type(&member.r#type))),
+            default,
+            check: false,
+        })
+        .collect())
 }
 fn native_rank(
     mut id: ExprId,

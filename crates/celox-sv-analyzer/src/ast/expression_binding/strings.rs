@@ -11,6 +11,13 @@ use super::*;
 /// Whether `expr` has type `string`.
 pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {
     match expr {
+        Expr::Call {
+            callee:
+                Callee::System(crate::system_functions::SystemFunction::Process(
+                    celox_design::ProcessOp::GetRandstate,
+                )),
+            ..
+        } => true,
         Expr::Ident(name) => dimensions.get(name).is_some_and(|ty| ty.string),
         Expr::Call {
             callee: Callee::String(op),
@@ -106,7 +113,10 @@ pub(in crate::ast) fn operands(
     dimensions: &PackedDimensions,
 ) -> Vec<Expr> {
     let strings = match op {
-        StringOp::FromBits | StringOp::Itoa(_) => 0,
+        // A format keeps its type: the frontend reads a literal one as text.
+        StringOp::FromBits | StringOp::Itoa(_) | StringOp::Format { .. } | StringOp::Pattern(_) => {
+            0
+        }
         StringOp::Concat => usize::MAX,
         StringOp::Compare | StringOp::ICompare => 2,
         _ => 1,
@@ -134,6 +144,9 @@ pub(in crate::ast) fn native_string(
     dimensions: &PackedDimensions,
 ) -> bool {
     match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, separator } if separator == "." && name.spelling == "get_randstate" && objects::native_class(tree, *base, native, dimensions).as_deref() == Some(super::super::processes::CLASS)) => {
+            true
+        }
         ExprKind::Select { expression, .. }
             if containers::native_type(*expression, native, tree, dimensions)
                 .ok()
@@ -160,7 +173,34 @@ pub(in crate::ast) fn native_string(
                 .is_some_and(|ty| ty.string)
         }
         ExprKind::Call { expression, .. } => {
-            method(tree, *expression, native, dimensions).is_some_and(|(op, _)| op.returns_string())
+            matches!(&native.expression(ungroup(*expression, native)).kind,
+                ExprKind::Name(name) if name.spelling == "$sformatf")
+                || method(tree, *expression, native, dimensions)
+                    .is_some_and(|(op, _)| op.returns_string())
+                || enum_name(tree, *expression, native, dimensions)
+        }
+        // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
+        ExprKind::Member { .. } if enum_name(tree, id, native, dimensions) => true,
+        // A string member of a container element of unpacked structure type.
+        ExprKind::Member { .. }
+            if containers::element_member(ungroup(id, native), native, tree, dimensions)
+                .ok()
+                .flatten()
+                .is_some() =>
+        {
+            containers::element_member(ungroup(id, native), native, tree, dimensions)
+                .ok()
+                .flatten()
+                .is_some_and(|(ty, _)| ty.kind() == TypeKind::String)
+        }
+        // A string member of an unpacked structure variable.
+        ExprKind::Member { .. }
+            if unpacked_structs::native_member(ungroup(id, native), native, dimensions)
+                .is_some() =>
+        {
+            unpacked_structs::native_member(ungroup(id, native), native, dimensions)
+                .and_then(|name| dimensions.get(&name))
+                .is_some_and(|ty| ty.string)
         }
         // A string property of a class object.
         _ => objects::property(tree, id, native, dimensions)
@@ -170,6 +210,20 @@ pub(in crate::ast) fn native_string(
                 property.field.handle == Some(crate::system_functions::HandleProperty::String)
             }),
     }
+}
+
+/// Whether native callee expression `id` names the `name` method of an
+/// enumerated type (6.19.5.6).
+fn enum_name(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    enums::method(tree, id, native, dimensions)
+        .ok()
+        .flatten()
+        .is_some_and(|(method, _, _)| method.returns_string())
 }
 
 /// The string method that native callee expression `id` names, with the

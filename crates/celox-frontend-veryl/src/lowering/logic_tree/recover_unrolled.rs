@@ -1736,6 +1736,12 @@ fn recover_group(
     guard: Option<(NodeId, HashSet<VarAtomBase<VarId>>)>,
     arena: &mut SLTNodeArena<VarId>,
 ) -> Result<Option<(SymbolicStore<VarId>, BoundaryMap<VarId>)>, ParserError> {
+    if prefer_static_lane_writes(module, statements, candidate) {
+        // These iterations build independent lanes, not a recurrence. Folding
+        // them introduces a wide accumulator and dynamic shifts/masks for
+        // every lane; static expansion keeps the operations narrow.
+        return Ok(None);
+    }
     let Some(proof) = prove_group(module, initial_store, statements, candidate, arena) else {
         return Ok(None);
     };
@@ -1856,6 +1862,73 @@ fn recover_group(
     }
 
     Ok(Some((result_store, proof.boundaries)))
+}
+
+fn prefer_static_lane_writes(
+    module: &Module,
+    statements: &[Statement],
+    candidate: &LoopRecoveryCandidate,
+) -> bool {
+    // Bound code growth. Larger loops still use the compact counted form.
+    if candidate.unrolled.iterations.len() > 64 || statements.len() > 512 {
+        return false;
+    }
+    let mut destinations = Vec::new();
+    if collect_destinations(statements, &mut destinations).is_none() {
+        return false;
+    }
+    let mut written: HashMap<VarId, Vec<BitAccess>> = HashMap::default();
+    let mut wide = false;
+    for dst in destinations {
+        if iteration_owner(module, &candidate.unrolled, dst.id).is_some()
+            || !dst.index.0.is_empty()
+            || !crate::bitaccess::is_static_access(&dst.index, &dst.select)
+        {
+            return false;
+        }
+        let Some(variable) = module.variables.get(&dst.id) else {
+            return false;
+        };
+        let Ok(width) = resolve_total_width(module, variable) else {
+            return false;
+        };
+        let Ok(access) = crate::bitaccess::eval_var_select(module, dst.id, &dst.index, &dst.select)
+        else {
+            return false;
+        };
+        if access.msb - access.lsb + 1 > 64 || width > 4096 {
+            return false;
+        }
+        wide |= width > 64;
+        let lanes = written.entry(dst.id).or_default();
+        if lanes.iter().any(|lane| lane.overlaps(&access)) {
+            return false;
+        }
+        lanes.push(access);
+    }
+    if !wide {
+        return false;
+    }
+    let mut reads = Vec::new();
+    let mut pending: Vec<_> = statements.iter().collect();
+    while let Some(statement) = pending.pop() {
+        match statement {
+            Statement::Assign(assign) => {
+                if !collect_expression_variables(&assign.expr, &mut reads) {
+                    return false;
+                }
+            }
+            Statement::If(branch) => {
+                if !collect_expression_variables(&branch.cond, &mut reads) {
+                    return false;
+                }
+                pending.extend(&branch.true_side);
+                pending.extend(&branch.false_side);
+            }
+            _ => return false,
+        }
+    }
+    !reads.iter().any(|id| written.contains_key(id))
 }
 
 fn expanded_outputs_are_count_idioms(
@@ -5194,6 +5267,30 @@ mod tests {
             parse_comb_with_loop_recovery(module, declaration, &mut arena, candidates, 0)
                 .expect("comb lowering must succeed");
         (paths, arena)
+    }
+
+    #[test]
+    fn independent_packed_lanes_keep_static_offsets() {
+        let (module, provenance) = analyze(
+            r#"
+            module Top(a: input logic<128>, en: input logic<16>, q: output logic<128>) {
+                always_comb {
+                    q = '0;
+                    for i in 0..16 {
+                        if en[i] { q[i * 8 +: 8] = a[i * 8 +: 8]; }
+                    }
+                }
+            }
+        "#,
+        );
+        let candidates = provenance.candidates_for_module(&module);
+        assert_eq!(candidates.len(), 1);
+        let (_, arena) = parse_with_candidates(&module, &candidates);
+        assert!(
+            !arena
+                .iter()
+                .any(|node| matches!(node, SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. }))
+        );
     }
 
     fn variable(module: &Module, name: &str) -> VarId {

@@ -101,7 +101,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Install dependencies
@@ -197,7 +197,7 @@ jobs:
       - uses: actions/setup-node@v7
         if: needs.changes.result != 'success' || needs.changes.outputs.javascript == 'true' || needs.changes.outputs.scripts == 'true'
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Install dependencies
@@ -234,7 +234,7 @@ jobs:
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.rust == 'true') }}
     runs-on: ubuntu-latest
     env:
-      RUST_BACKEND_FILTER: ${{ needs.changes.outputs.rust_backend_filter || 'all()' }}
+      CELOX_BACKEND_FILTER: ${{ needs.changes.outputs.rust_backend_filter || 'all()' }}
       CELOX_CI_REPORT_DIR: work/ci-reports/rust
       HAS_MERGIFY_TOKEN: ${{ secrets.MERGIFY_TOKEN != '' }}
     steps:
@@ -247,7 +247,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: vtest-v1
+          # The vtest executor's build plan (profile, scope, features) lives in
+          # run-vtest.mjs; a change of it is a different cache.
+          key: vtest-${{ hashFiles('scripts/run-vtest.mjs') }}
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Initialize Rust test reports
@@ -269,6 +271,9 @@ jobs:
 
       - name: Build the optimized vtest executor
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false' || contains(format(' {0} ', needs.changes.outputs.rust_packages), ' celox '))
+        env:
+          CELOX_RUST_FULL: ${{ needs.changes.outputs.rust_full }}
+          BUILDS: ${{ needs.changes.outputs.rust_builds }}
         run: node scripts/run-vtest.mjs --prepare-ci
 
       # Enable the frontend and suite features together so common integration
@@ -282,7 +287,7 @@ jobs:
         id: workspace-tests
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
-          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci -E "$RUST_BACKEND_FILTER"
+          cargo nextest run --locked --workspace --exclude 'lydite*' --profile ci --cargo-profile vtest -E "$CELOX_BACKEND_FILTER"
           --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the tests this pull request can affect
@@ -302,7 +307,7 @@ jobs:
           cargo nextest run --locked -p celox --features systemverilog --profile ci
           --test counter --test hierarchy --test native_exec
           --test simulation_limits --test sv_unit_scope --test sv_packages
-          -E "$RUST_BACKEND_FILTER"
+          -E "$CELOX_BACKEND_FILTER"
 
       - name: Collect Rust test reports
         if: success() || failure()
@@ -334,11 +339,12 @@ jobs:
           job_name: rust-tests
           test_step_outcome: ${{ steps.queue-tests.outcome != 'skipped' && steps.queue-tests.outcome || steps.cocotb-tests.outcome == 'failure' && 'failure' || steps.workspace-tests.outcome != 'skipped' && steps.workspace-tests.outcome || steps.scoped-tests.outcome }}
 
-      # nextest does not run documentation tests.
+      # nextest does not run documentation tests. They build with the tests'
+      # profile, so they reuse the libraries the test build compiled.
       - name: Run workspace documentation tests with CI features
         if: needs.changes.outputs.fast_queue != 'true' && (needs.changes.outputs.rust_full != 'false')
         run: >-
-          cargo test --locked --workspace --exclude 'lydite*' --doc
+          cargo test --locked --workspace --exclude 'lydite*' --doc --profile vtest
           --features celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases
 
       - name: Run the documentation tests of the changed libraries
@@ -350,7 +356,7 @@ jobs:
           args=()
           for package in $LIBRARIES; do args+=(-p "$package"); done
           if [ -n "$FEATURES" ]; then args+=(--features "$FEATURES"); fi
-          cargo test --locked --doc "${args[@]}"
+          cargo test --locked --doc --profile vtest "${args[@]}"
   rust-default-tests:
     name: Rust default-feature tests
     needs: changes
@@ -389,7 +395,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       - name: Fetch pinned common_cells
         run: |
@@ -522,7 +528,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Install dependencies
@@ -568,7 +574,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Install dependencies
@@ -712,7 +718,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Install dependencies
@@ -753,7 +759,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Install dependencies
@@ -789,7 +795,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Download NAPI artifact
@@ -836,7 +842,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Download NAPI artifact
@@ -870,7 +876,7 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           cache: pnpm
 
       - name: Download NAPI WASM artifact

@@ -342,6 +342,7 @@ impl ConstantFunctions {
                         direction: crate::procedural::ParamDirection::Input,
                         r#type: ty.clone(),
                         default: function.argument_defaults[position].clone().map(Into::into),
+                        leaves: Vec::new(),
                     })
                     .collect(),
                 body: function
@@ -503,6 +504,7 @@ fn collect_module_constant_functions(
         subroutine_directions: &subroutine_directions,
         automatic: lifetimes::automatic_by_default(tree),
         statics: Vec::new(),
+        explicit_statics: HashSet::default(),
         static_initializers: Vec::new(),
         constant_evaluation: true,
     };
@@ -637,7 +639,8 @@ fn simulation_state_readers(functions: &[Subroutine]) -> HashMap<String, Analyze
                 Callee::System(_)
                 | Callee::String(_)
                 | Callee::Object(_)
-                | Callee::Checked { .. } => {}
+                | Callee::Checked { .. }
+                | Callee::Lookup { .. } => {}
                 Callee::Subroutine(callee) => calls.push(callee.as_str()),
             }
         }
@@ -1791,6 +1794,7 @@ impl<'a> Frame<'a> {
                 return None;
             }
             Stmt::Fork { .. }
+            | Stmt::AssertionRegion { .. }
             | Stmt::WaitFork
             | Stmt::DisableFork
             | Stmt::AssignConcat { .. }

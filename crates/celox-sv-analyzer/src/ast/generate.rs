@@ -320,12 +320,13 @@ impl Item {
                     Arc::new(self.function_aliases((*dimensions.subroutine_directions).clone()));
             }
             if !dimensions.function_return_types.is_empty() {
-                local.function_return_types =
-                    self.function_aliases(dimensions.function_return_types.clone());
+                local.function_return_types = self
+                    .function_aliases((*dimensions.function_return_types).clone())
+                    .into();
             }
         }
         if let Cow::Owned(aliases) = self.type_aliases(&dimensions.type_aliases) {
-            local.type_aliases = aliases;
+            local.type_aliases = aliases.into();
         }
         let mut signedness = dimensions.expression_signedness.clone();
         for name in self.shadowed.iter() {
@@ -1246,11 +1247,12 @@ impl<'a> Elaborator<'a, '_> {
                     }
                 }
             }
-            let mut aliases = types::type_aliases_from_body_with_env(
+            let mut aliases = types::type_aliases_of_generate_scope(
                 self.tree,
                 children,
                 &scope.env,
                 &self.aliases,
+                &scope.path,
             )?;
             let enums = parameters::enum_member_constants_from_items(
                 self.tree,
@@ -2087,6 +2089,7 @@ mod tests {
             is_2state: false,
             string: false,
             pattern_type: None,
+            enum_domain: None,
         };
         let inner = FunctionReturnMetadata {
             arguments: None,
@@ -2097,6 +2100,7 @@ mod tests {
             is_2state: true,
             string: false,
             pattern_type: None,
+            enum_domain: None,
         };
         let dimensions = PackedDimensions {
             function_return_types: [

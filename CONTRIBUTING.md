@@ -83,11 +83,12 @@ ignored registrations deliberately.
 
 With `runtime-cases`, `.vtest` bodies are read from disk instead of embedded in
 Rust binaries, so edits to an existing case do not require recompilation. Adding
-a test registration or changing Rust still requires a build. Both local commands
-and CI build the optimized executor separately from ordinary test binaries.
-CI keeps the normal test profile and existing dependency cache: sharing a Cargo
-profile alone does not share artifacts when the executor and workspace resolve
-different dependency features. Ordinary Cargo test commands retain the embedded,
+a test registration or changing Rust still requires a build. CI builds the test
+binaries with the executor's `vtest` profile and builds the executor with the
+same packages and features as the test build it serves (the whole workspace,
+or the scoped build that tests Celox), so the workspace crates are compiled
+once for both; the profile alone would not share them when the two builds
+resolve different features. Local commands keep the ordinary test profile. Ordinary Cargo test commands retain the embedded,
 in-process path. CI's Rust Tests job prepares the executor once and uses it for
 full workspace runs and scoped PR runs that include Celox. The merge queue
 runs a small integration set directly, without building the all-backend executor. Scopes without Celox

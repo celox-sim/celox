@@ -1102,6 +1102,7 @@ pub fn lower_execution_unit_with_diagnostics(
         consts: ConstMap::default(),
         low_zero_bits: crate::HashMap::default(),
         four_state,
+        use_popcnt: func.target_features.popcnt(),
         mask_map,
         known_bits: crate::HashMap::default(),
         wide_masks: WideMaskMap::default(),
@@ -1783,6 +1784,8 @@ struct ISelContext<'a> {
     low_zero_bits: crate::HashMap<RegisterId, u32>,
     /// Whether 4-state simulation is enabled.
     four_state: bool,
+    /// Whether parity reductions can use this target's POPCNT instruction.
+    use_popcnt: bool,
     /// Maps SIR RegisterId → mask VReg (parallel to reg_map).
     mask_map: RegMap,
     /// Known effective bit width per VReg. If a VReg is known to have at most

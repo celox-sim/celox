@@ -7621,3 +7621,225 @@ fn interface_header_members_preserve_parameter_dependent_types() {
         Some(11),
     );
 }
+
+#[test]
+fn class_alias_defaults_wait_for_package_constants() {
+    for aliases in [
+        "typedef Box#() Small; typedef Box Implicit;",
+        "typedef Box#()::element_t Word;",
+    ] {
+        let source = format!(
+            r#"package p;
+            parameter int WIDTH = 5;
+            class Box #(int N = WIDTH, int M = N + 2);
+                typedef bit [N-1:0] element_t;
+                function int get(); return 10 * N + M; endfunction
+            endclass
+            {aliases}
+        endpackage
+        module Top; endmodule"#
+        );
+        analyze_source(&source, Path::new("class-constant-default.sv"))
+            .expect("class defaults see their package constants after parameter collection");
+    }
+}
+
+#[test]
+fn unresolved_class_alias_defaults_still_fail() {
+    for default in ["MISSING", "WIDTH"] {
+        let source = format!(
+            "package p; class Box #(int N = {default}); endclass \
+             typedef Box#() Small; endpackage \
+             module Top; localparam int WIDTH=29; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("unresolved-class-default.sv"))
+            .expect_err("caller constants cannot supply missing class defaults");
+        assert!(
+            error
+                .to_string()
+                .contains("class parameter `N` without a constant value"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn class_alias_type_arguments_wait_for_package_constants() {
+    for aliases in [
+        "typedef bit signed [W-1:0] word_t; typedef Utils#(word_t) word_utils;",
+        "typedef Utils#(bit [W:0]) wide_utils;",
+        "typedef Utils#(bit [W:0])::item_t item_t;",
+    ] {
+        let source = format!(
+            r#"package p;
+            parameter int W = 6;
+            class Utils #(type T = int);
+                typedef T item_t;
+            endclass
+            {aliases}
+        endpackage
+        module Top; endmodule"#
+        );
+        analyze_source(&source, Path::new("class-constant-type-argument.sv"))
+            .expect("class type arguments see their package constants after parameter collection");
+    }
+}
+
+#[test]
+fn unresolved_class_alias_type_arguments_still_fail() {
+    let source = "package p; class Utils #(type T = int); endclass \
+         typedef Utils#(bit [MISSING:0]) wide_utils; endpackage \
+         module Top; localparam int MISSING = 29; endmodule";
+    let error = analyze_source(source, Path::new("unresolved-class-type-argument.sv"))
+        .expect_err("caller constants cannot bound a package type argument");
+    assert!(
+        error.to_string().contains("class type parameter value"),
+        "{error}"
+    );
+}
+
+#[test]
+fn named_aggregate_type_arguments_keep_their_declarations() {
+    let source = "package p;
+        typedef enum {A0, A1} first_e;
+        typedef enum {B0, B1} second_e;
+        typedef first_e alias_e;
+        typedef struct packed { bit [3:0] a; } s1_t;
+        typedef struct packed { bit [3:0] a; } s2_t;
+        class Box #(type T = int); endclass
+        class Holder; typedef enum {C0, C1} inner_e; endclass
+        typedef Box#(first_e) first_box;
+        typedef Box#(alias_e) alias_box;
+        typedef Box#(second_e) second_box;
+        typedef Box#(s1_t) s1_box;
+        typedef Box#(s2_t) s2_box;
+        typedef Box#(Holder::inner_e) inner_box;
+    endpackage
+    module Top; endmodule";
+    analyze_source(source, Path::new("named-aggregate-type-arguments.sv"))
+        .expect("typedefs name enumeration and struct type arguments");
+    for anonymous in ["enum {A, B}", "struct packed { int x; }"] {
+        let source = format!(
+            "package p; class Box #(type T = int); endclass \
+             typedef Box#({anonymous}) anonymous_box; endpackage module Top; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("anonymous-type-argument.sv"))
+            .expect_err("an anonymous aggregate type has no declaration to key on");
+        assert!(
+            error
+                .to_string()
+                .contains("as a class type parameter value"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn foreign_generic_specializations_bind_module_and_unit_requests() {
+    for user in [
+        "module Top; initial begin p::Db#(byte)::set(5); $display(\"%0d\", p::Db#(byte)::last); end endmodule",
+        "import p::*; class User; static function int go(); Db#(byte)::set(7); return Db#(byte)::last; endfunction endclass module Top; initial $display(\"%0d\", User::go()); endmodule",
+    ] {
+        let source = format!(
+            "package p; class Db #(type T=int); static T last; \
+             static function void set(T v); last=v; endfunction endclass endpackage {user}"
+        );
+        analyze_source(&source, Path::new("foreign_generic.sv"))
+            .unwrap_or_else(|error| panic!("{user}: {error}"));
+    }
+}
+
+#[test]
+fn foreign_generic_specialization_constructs_unit_type_argument() {
+    let code = r#"
+      package p;
+        class Registry #(type T);
+          static function T create(int n);
+            T object;
+            object=new(n);
+            return object;
+          endfunction
+        endclass
+      endpackage
+      import p::*;
+      class User;
+        typedef Registry#(User) type_id;
+        int value;
+        function new(int n); value=n; endfunction
+        static function User make(); return type_id::create(23); endfunction
+      endclass
+      module Top;
+        User object;
+        initial begin object=User::make(); $display("%0d", object.value); end
+      endmodule
+    "#;
+    analyze_source(code, Path::new("foreign_factory.sv")).unwrap();
+}
+
+#[test]
+fn foreign_generic_does_not_capture_compilation_unit_names() {
+    let source = r#"
+        class User; int value; endclass
+        package p;
+            class Factory #(type T);
+                static function User create(); User object; object=new(); return object; endfunction
+            endclass
+        endpackage
+        module Top; initial $display("%p", p::Factory#(int)::create()); endmodule
+    "#;
+    assert!(analyze_source(source, Path::new("foreign_scope_capture.sv")).is_err());
+}
+
+#[test]
+fn foreign_generic_rejects_module_class_without_instance_identity() {
+    for (name, canonical) in [("Item", "Item"), ("\\Item::Nested ", "\\Item::Nested")] {
+        let source = format!(
+            r#"
+            package p; class Box #(type T); static int count; endclass endpackage
+            module Top;
+                class {name}; int value; endclass
+                p::Box#({name}) object;
+            endmodule
+        "#
+        );
+        let error = analyze_source(&source, Path::new("foreign_module_class.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("module-local class `{canonical}`")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn foreign_generic_nested_actuals_are_bounded_on_default_stack() {
+    std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(|| {
+        let mut actual = "int".to_owned();
+        for _ in 0..70 { actual = format!("p::Box#({actual})"); }
+        let source = format!("package p; class Box #(type T); endclass endpackage module Top; {actual} object; endmodule");
+        let error = analyze_source(&source, Path::new("foreign_depth.sv")).unwrap_err();
+        assert!(error.to_string().contains("class specializations nested more than"), "{error}");
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+fn long_handle_chains_resolve_in_linear_time() {
+    // Each `.next` resolves its receiver once; resolving it again for the
+    // static and the instance lookup doubled the work per field.
+    let chain = ".next".repeat(30);
+    let source = format!(
+        "class Node; Node next; int value; endclass
+        module Top(output int y);
+            Node head;
+            initial y = head{chain}.value;
+        endmodule"
+    );
+    let started = std::time::Instant::now();
+    analyze_source(&source, Path::new("handle-chain.sv")).expect("the chain analyzes");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}

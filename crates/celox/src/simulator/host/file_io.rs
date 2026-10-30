@@ -3,6 +3,28 @@ use celox_design::HostRequestSite;
 use celox_runtime::{Halt, SimulatorErrorCode};
 
 impl<B: SimBackend> Simulator<B> {
+    /// The hierarchical name of the instance that runs `process`, which a
+    /// `%m` of its host requests prints.
+    pub(super) fn process_scope(&self, process: usize) -> Option<String> {
+        let process = &self.program.runtime_schema.processes[process];
+        self.program
+            .design
+            .instance(process.status.instance_id)
+            .map(|instance| {
+                let top = self
+                    .program
+                    .design
+                    .root_instance()
+                    .map(|root| root.module_name.as_str())
+                    .unwrap_or("");
+                std::iter::once(top)
+                    .chain(instance.display_path.iter().map(String::as_str))
+                    .filter(|part| !part.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(".")
+            })
+    }
+
     pub(crate) fn run_file_io_request(
         &mut self,
         site: &HostRequestSite<SignalRef>,
@@ -78,24 +100,7 @@ impl<B: SimBackend> Simulator<B> {
                         handle: false,
                     })
                     .collect();
-                let process = &self.program.runtime_schema.processes[site.process];
-                let scope = self
-                    .program
-                    .design
-                    .instance(process.status.instance_id)
-                    .map(|instance| {
-                        let top = self
-                            .program
-                            .design
-                            .root_instance()
-                            .map(|root| root.module_name.as_str())
-                            .unwrap_or("");
-                        std::iter::once(top)
-                            .chain(instance.display_path.iter().map(String::as_str))
-                            .filter(|part| !part.is_empty())
-                            .collect::<Vec<_>>()
-                            .join(".")
-                    });
+                let scope = self.process_scope(site.process);
                 let format = RuntimeEventSite {
                     kind: RuntimeEventKind::Write,
                     template: site.strings.first().cloned(),

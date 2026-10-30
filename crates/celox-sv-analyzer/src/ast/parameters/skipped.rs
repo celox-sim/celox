@@ -516,7 +516,8 @@ fn pattern_items(
             VariableDimensions {
                 container: None,
                 randomizable: true,
-                enum_values: None,
+                enum_domain: None,
+                packed_enum: false,
                 real: false,
                 string: false,
                 class: None,
@@ -526,6 +527,7 @@ fn pattern_items(
                 signed: false,
                 is_2state: shape.is_2state,
                 signed_element_depth: None,
+                unpacked_struct: None,
             },
         )
     };

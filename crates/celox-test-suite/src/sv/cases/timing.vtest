@@ -2997,3 +2997,24 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 4)
  (assert_eq accepted 1) (assert_eq rejected 0))
+
+; Final procedures run on explicit finish; their output may follow the adapter's
+; final block. A partial line must survive both sides of run_to_finish (9.2.3).
+(case final_procedure_output_survives_finish
+ (source "final_output.sv" #"
+module Top(output int value);
+ initial begin value=0; #2; value=7; $write("before:"); $finish; end
+ final $write("final");
+endmodule"#)
+ (top Top) (run_to_finish) (assert_eq value 7) (expect_output "before:final"))
+
+(case final_procedure_output_survives_program_completion
+ (source "final_program.sv" #"
+module Top;
+ Tb tb();
+ final $display("program final at %0d", $time);
+endmodule
+program Tb;
+ initial #3;
+endprogram"#)
+ (top Top) (run_to_finish) (expect_output "program final at 3\n"))

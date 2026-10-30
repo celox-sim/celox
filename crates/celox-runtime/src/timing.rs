@@ -443,6 +443,9 @@ pub struct ProcessState {
     /// Program processes ready to run in the Reactive region of the current
     /// time (IEEE 1800-2023 4.4.2.6).
     pub reactive: std::collections::BTreeSet<usize>,
+    /// Assertion predicates waiting for Active/NBA quiescence.
+    #[serde(default)]
+    pub observed: std::collections::BTreeSet<usize>,
     /// Program processes that resume in the Re-Inactive region (`#0`,
     /// 4.4.2.7).
     pub re_inactive: std::collections::BTreeSet<usize>,

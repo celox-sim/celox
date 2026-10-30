@@ -18,6 +18,8 @@ use crate::AnalyzerError;
 /// A system function the frontend supports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SystemFunction {
+    /// Built-in process methods (IEEE 1800-2023 9.7).
+    Process(celox_design::ProcessOp),
     Ln,
     Log10,
     Exp,
@@ -224,12 +226,25 @@ impl SystemFunction {
                 | Self::DistChiSquare
                 | Self::DistT
                 | Self::DistErlang
+                | Self::Process(_)
         )
     }
 
     /// The built-in name (`$` functions or `std::randomize`).
     pub const fn name(self) -> &'static str {
         match self {
+            Self::Process(op) => match op {
+                celox_design::ProcessOp::SelfHandle => "process::self",
+                celox_design::ProcessOp::Status => "process.status",
+                celox_design::ProcessOp::Kill => "process.kill",
+                celox_design::ProcessOp::Await => "process.await",
+                celox_design::ProcessOp::Suspend => "process.suspend",
+                celox_design::ProcessOp::Resume => "process.resume",
+                celox_design::ProcessOp::Srandom => "process.srandom",
+                celox_design::ProcessOp::GetRandstate => "process.get_randstate",
+                celox_design::ProcessOp::SetRandstate => "process.set_randstate",
+                celox_design::ProcessOp::Observe => "process observation",
+            },
             Self::Ln => "$ln",
             Self::Log10 => "$log10",
             Self::Exp => "$exp",
@@ -339,33 +354,34 @@ impl SystemFunction {
     /// Whether each call has an effect, so that copies of one call made by
     /// the analyzer must not run it twice.
     pub fn is_effectful(self) -> bool {
-        matches!(
-            self,
-            Self::Random
-                | Self::DistUniform
-                | Self::DistNormal
-                | Self::DistExponential
-                | Self::DistPoisson
-                | Self::DistChiSquare
-                | Self::DistT
-                | Self::DistErlang
-                | Self::TestPlusargs
-                | Self::ValuePlusargs
-                | Self::Urandom
-                | Self::Fopen
-                | Self::Fread
-                | Self::Ftell
-                | Self::Fseek
-                | Self::Rewind
-                | Self::Fgetc
-                | Self::Ungetc
-                | Self::Feof
-                | Self::Sscanf
-                | Self::Fscanf
-                | Self::UrandomRange
-                | Self::ScopeRandomize
-                | Self::ScopeRandomizeEnum
-        )
+        matches!(self, Self::Process(_))
+            || matches!(
+                self,
+                Self::Random
+                    | Self::DistUniform
+                    | Self::DistNormal
+                    | Self::DistExponential
+                    | Self::DistPoisson
+                    | Self::DistChiSquare
+                    | Self::DistT
+                    | Self::DistErlang
+                    | Self::TestPlusargs
+                    | Self::ValuePlusargs
+                    | Self::Urandom
+                    | Self::Fopen
+                    | Self::Fread
+                    | Self::Ftell
+                    | Self::Fseek
+                    | Self::Rewind
+                    | Self::Fgetc
+                    | Self::Ungetc
+                    | Self::Feof
+                    | Self::Sscanf
+                    | Self::Fscanf
+                    | Self::UrandomRange
+                    | Self::ScopeRandomize
+                    | Self::ScopeRandomizeEnum
+            )
     }
 
     /// Whether a call reads the state of the simulation: it has an effect,
@@ -423,6 +439,8 @@ impl SystemFunction {
     /// literals where it converts them.
     pub fn result_type(self) -> Option<(usize, bool)> {
         match self {
+            Self::Process(celox_design::ProcessOp::Status) => Some((32, true)),
+            Self::Process(_) => Some((32, false)),
             Self::Ln
             | Self::Log10
             | Self::Exp
@@ -602,6 +620,12 @@ impl Radix {
 }
 
 impl SystemTask {
+    /// Whether the task writes argument `position`, as `$readmemh` loads
+    /// its memory argument (IEEE 1800-2023 21.4).
+    pub fn writes_argument(self, position: usize) -> bool {
+        matches!(self, Self::Readmem(_)) && position == 1
+    }
+
     /// Tasks executed synchronously by the timed simulation host.
     pub fn is_host_request(self) -> bool {
         matches!(
@@ -711,6 +735,14 @@ pub enum StringOp {
     Atoi(Radix),
     /// `str.itoa(i)` and its radix variants (6.16.11-14), as the new string.
     Itoa(Radix),
+    /// `$sformatf(format, args...)` (21.3.3): the arguments formatted as
+    /// `$display` formats them. A `%t` converts a value in the time unit of
+    /// the calling scope, of which `ticks_per_unit` simulation time units
+    /// make one.
+    Format { ticks_per_unit: u64 },
+    /// The text `%p` prints for a class handle, or with a layout for a
+    /// container (21.2.1.6).
+    Pattern(Option<ContainerLayout>),
 }
 
 impl StringOp {
@@ -726,14 +758,17 @@ impl StringOp {
                 | Self::ToUpper
                 | Self::ToLower
                 | Self::Itoa(_)
+                | Self::Format { .. }
+                | Self::Pattern(_)
         )
     }
 
     /// The width and signedness of the result; a string is a 32-bit handle.
+    /// A character is a `byte`, which is signed (6.16, 6.11).
     pub fn result_type(self) -> (usize, bool) {
         match self {
             Self::Compare | Self::ICompare | Self::Len | Self::Atoi(_) => (32, true),
-            Self::Getc => (8, false),
+            Self::Getc => (8, true),
             _ => (32, false),
         }
     }
@@ -791,6 +826,8 @@ impl fmt::Display for StringOp {
             Self::Itoa(Radix::Hexadecimal) => "hextoa",
             Self::Itoa(Radix::Octal) => "octtoa",
             Self::Itoa(Radix::Binary) => "bintoa",
+            Self::Format { .. } => "$sformatf",
+            Self::Pattern(_) => "%p",
         };
         f.write_str(name)
     }
@@ -805,6 +842,29 @@ pub struct ObjectField {
     pub signed: bool,
     /// What a handle property refers to.
     pub handle: Option<HandleProperty>,
+    /// A 4-state value: its unknown-bit mask follows the value bytes.
+    pub four_state: bool,
+    /// A member of a [`Record`]: `null` reads as the member's default.
+    pub nullable: bool,
+}
+
+/// The layout of an immutable heap record that holds the value of an
+/// unpacked structure (IEEE 1800-2023 7.2) as a container element: one
+/// field per leaf member, first declared first.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Record {
+    pub size: u32,
+    pub fields: Vec<ObjectField>,
+}
+
+impl Record {
+    /// The run-time class of a record, which no class shares.
+    pub const CLASS: u32 = u32::MAX;
+
+    /// Bits of the flat structure value.
+    pub fn width(&self) -> usize {
+        self.fields.iter().map(|field| field.width as usize).sum()
+    }
 }
 
 /// What a handle property refers to.
@@ -818,6 +878,12 @@ impl ObjectField {
     /// Bytes of the value.
     pub fn bytes(self) -> u32 {
         self.width.div_ceil(8)
+    }
+
+    /// Bytes the property occupies: the value, then the mask of a 4-state
+    /// value.
+    pub fn storage(self) -> u32 {
+        self.bytes() << u32::from(self.four_state)
     }
 }
 
@@ -840,6 +906,8 @@ pub enum ContainerKind {
         key_width: u32,
         signed: bool,
         string: bool,
+        /// Keys are class handles, which keep their objects alive.
+        object: bool,
     },
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -971,6 +1039,11 @@ pub enum ObjectOp {
     /// A new object of the class of the object in the argument, with a copy
     /// of its properties (IEEE 1800-2023 8.12).
     Copy,
+    /// A new record holding the flat structure value in the argument.
+    Box(Record),
+    /// The flat structure value of the record in the argument; `null` is
+    /// the default value.
+    Unbox(Record),
 }
 
 impl ObjectOp {
@@ -1002,7 +1075,10 @@ impl ObjectOp {
             | Self::ModeSelected(_) => (32, false),
             Self::ModeGet(..) | Self::ConstraintModeGet(_) => (32, true),
             Self::Load(field) => (field.width as usize, field.signed),
-            Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy => (32, false),
+            Self::Unbox(record) => (record.width(), false),
+            Self::New { .. } | Self::ClassOf | Self::Store(_) | Self::Copy | Self::Box(_) => {
+                (32, false)
+            }
         }
     }
 }
@@ -1029,6 +1105,8 @@ impl fmt::Display for ObjectOp {
             Self::ModeSelect(..) => "select random property",
             Self::ModeSelected(_) => "selected random property query",
             Self::Copy => "shallow copy",
+            Self::Box(_) => "structure record",
+            Self::Unbox(_) => "structure record read",
         })
     }
 }
@@ -1039,6 +1117,15 @@ pub enum Callee {
     /// Check the first argument at runtime before evaluating/returning the second.
     /// Used for tagged union member access (IEEE 1800-2023 11.9).
     Checked {
+        width: usize,
+        signed: bool,
+    },
+    /// A table lookup with the arguments `selector, key, value, ...,
+    /// default`: the value of the first key the selector matches with case
+    /// equality, else the default, resized to `width` and `signed`. The
+    /// selector is evaluated once. Used for enumerated type methods
+    /// (IEEE 1800-2023 6.19.5).
+    Lookup {
         width: usize,
         signed: bool,
     },
@@ -1057,14 +1144,22 @@ impl Callee {
     pub fn subroutine(&self) -> Option<&str> {
         match self {
             Self::Subroutine(name) => Some(name),
-            Self::System(_) | Self::String(_) | Self::Object(_) | Self::Checked { .. } => None,
+            Self::System(_)
+            | Self::String(_)
+            | Self::Object(_)
+            | Self::Checked { .. }
+            | Self::Lookup { .. } => None,
         }
     }
 
     /// The system function, if this is one.
     pub fn system(&self) -> Option<SystemFunction> {
         match self {
-            Self::Subroutine(_) | Self::String(_) | Self::Object(_) | Self::Checked { .. } => None,
+            Self::Subroutine(_)
+            | Self::String(_)
+            | Self::Object(_)
+            | Self::Checked { .. }
+            | Self::Lookup { .. } => None,
             Self::System(function) => Some(*function),
         }
     }
@@ -1073,7 +1168,9 @@ impl Callee {
     /// lowered as an integral operation; see [`SystemFunction::result_type`].
     pub fn result_type(&self) -> Option<(usize, bool)> {
         match self {
-            Self::Checked { width, signed } => Some((*width, *signed)),
+            Self::Checked { width, signed } | Self::Lookup { width, signed } => {
+                Some((*width, *signed))
+            }
             Self::String(op) => Some(op.result_type()),
             Self::Object(op) => Some(op.result_type()),
             _ => self.system()?.result_type(),
@@ -1083,7 +1180,7 @@ impl Callee {
     /// Rename a user subroutine with `rename`.
     pub fn map_subroutine(self, rename: impl FnOnce(String) -> String) -> Self {
         match self {
-            Self::Checked { .. } => self,
+            Self::Checked { .. } | Self::Lookup { .. } => self,
             Self::Subroutine(name) => Self::Subroutine(rename(name)),
             Self::System(function) => Self::System(function),
             Self::String(op) => Self::String(op),
@@ -1095,7 +1192,8 @@ impl Callee {
     /// the analyzer must not run it twice: user subroutines may have side
     /// effects, as do the random number functions.
     pub fn is_effectful(&self) -> bool {
-        self.system().is_none_or(SystemFunction::is_effectful)
+        !matches!(self, Self::Lookup { .. })
+            && self.system().is_none_or(SystemFunction::is_effectful)
     }
 }
 
@@ -1103,6 +1201,7 @@ impl fmt::Display for Callee {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Checked { .. } => f.write_str("tagged union access"),
+            Self::Lookup { .. } => f.write_str("enumeration lookup"),
             Self::Subroutine(name) => f.write_str(name),
             Self::System(function) => f.write_str(function.name()),
             Self::String(op) => op.fmt(f),
@@ -1496,6 +1595,9 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$fmonitorb", Task),
     unsupported("$fmonitoro", Task),
     unsupported("$fmonitorh", Task),
+    // The binders convert `$swrite`, `$sformat` and `$sformatf` into string
+    // operations (`StringOp::Format`) before consulting the catalog, which
+    // rejects them anywhere else, such as in a constant expression.
     unsupported("$swrite", Task),
     unsupported("$swriteb", Task),
     unsupported("$swriteo", Task),

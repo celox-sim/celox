@@ -25,11 +25,11 @@ outline: [2, 3]
 
 | 領域 | サポート内容 |
 | --- | --- |
-| 型 | `logic`、`bit`、`reg`、packed ベクタ、任意の定数境界と昇順・降順の多次元 packed 配列、packed 構造体、hard / soft packed untagged union、enum（暗黙値を含む）、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
+| 型 | `logic`、`bit`、`reg`、packed ベクタ、任意の定数境界と昇順・降順の多次元 packed 配列、packed 構造体、unpacked 構造体（[unpacked 構造体](#unpacked-structures)を参照）、hard / soft packed untagged union、enum（暗黙値を含む）と enum 型の任意の式（enum の packed 配列の要素を除く、[#2417](https://github.com/celox-sim/celox/issues/2417)）に対するメソッド `first`・`last`・`next`・`prev`・`num`・`name`、`typedef`、メモリとして使う unpacked 配列、符号付き・符号なし |
 | 式 | `**` を含む算術、論理、シフト、比較、リダクション、連結・複製、`?:`、`inside`、`==?` / `!=?`、キャスト（`N'(x)`、`signed'(x)`、`T'(x)`）、`$signed` / `$unsigned` |
 | 選択 | 定数・実行時のビット選択と indexed part-select（`[i]`、`[i +: W]`、`[i -: W]`）。読み書きの両方、宣言の向きによらず |
-| パターン | packed 構造体・packed 配列・unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
-| クラス | モジュール・package・コンパイル単位で宣言したクラス。64 ビット以下の 2 値整数型・`string`・クラスハンドル型のプロパティ（初期値つきも可）、引数あり・なしの `new`、暗黙と明示のコンストラクタ、ハンドル経由またはクラス内から修飾なしで呼ぶメソッド（`function` と `task`、本体をクラス外に書く `extern` も可）、`this`、`null`、ハンドルの代入と比較、プロパティとメソッドの継承（基底クラスのコンストラクタは `super.new(...)` か `extends Base(...)` で呼ぶ）、`super.` によるメンバ参照、virtual メソッド、抽象クラス（`virtual class`）と pure virtual メソッド、interface クラスを実装するクラスと interface クラスのハンドルを通したメソッド呼び出し、関数とタスクとしてのクラスハンドルの `$cast`、static プロパティとメソッド、static メンバと `C::new` の `C::` によるスコープ解決、ハンドルの配列、値パラメータと型パラメータを持つパラメータ付きクラス、ハンドルや `C#(...)::` を通したパラメータの参照、クラスと interface クラスの typedef と `C::T`、名前付きのコンストラクタ引数、浅いコピー（`new h`）。[クラス](#classes)を参照 |
+| パターン | packed・unpacked 構造体、packed 配列、unpacked 配列の assignment pattern（`'{a, b}`、`'{x: a, default: 0}`、`'{n{a}}`、`T'{...}`） |
+| クラス | モジュール・package・コンパイル単位で宣言したクラス。64 ビット以下の 2 値・4 値整数型（4 値のプロパティは X で始まり、X/Z ビットを保持します）・`string`・クラスハンドル型と、それらをメンバとする unpacked 構造体（[unpacked 構造体](#unpacked-structures)を参照）のプロパティ（初期値つきも可）、引数あり・なしの `new`、暗黙と明示のコンストラクタ、ハンドル経由またはクラス内から修飾なしで呼ぶメソッド（`function` と `task`、本体をクラス外に書く `extern` も可）、`this`、`null`、ハンドルの代入と比較、プロパティとメソッドの継承（基底クラスのコンストラクタは `super.new(...)` か `extends Base(...)` で呼ぶ）、`super.` によるメンバ参照、virtual メソッド、抽象クラス（`virtual class`）と pure virtual メソッド、interface クラスを実装するクラスと interface クラスのハンドルを通したメソッド呼び出し、関数とタスクとしてのクラスハンドルの `$cast`、static プロパティとメソッド、static メンバと `C::new` の `C::` によるスコープ解決、ハンドルの配列、値パラメータと型パラメータを持つパラメータ付きクラス、ハンドルや `C#(...)::` を通したパラメータの参照、クラスと interface クラスの typedef と `C::T`、名前付きのコンストラクタ引数、浅いコピー（`new h`）。[クラス](#classes)を参照 |
 | 文字列 | `string` 型の変数、関数の引数と戻り値。文字列・文字列リテラル・キャスト（`string'(x)`）の代入、`==` / `!=` と大小比較、連結と複製（実行時の回数も可）、文字の読み書き（`s[i]`）、メソッド `len`、`getc`、`putc`、`toupper`、`tolower`、`compare`、`icompare`、`substr`、`atoi` / `atohex` / `atooct` / `atobin`、`itoa` / `hextoa` / `octtoa` / `bintoa`。`%s` と書式なしの表示。[文字列](#strings)を参照 |
 | パラメータ | 整数のパラメータ、128ビットを超える幅と X/Z を保持するパラメータ上書き、assignment pattern で与える unpacked 配列型・packed 構造体型のパラメータ（定数テーブル）と unpacked 配列のパターンによる上書き |
 
@@ -42,7 +42,7 @@ outline: [2, 3]
 | 順序プロセス | `always_ff @(posedge clk)`、`always @(posedge clk or negedge rst_n)` など。ブロッキング・ノンブロッキング代入、連結を代入先とする代入、4 値のクロック・リセット信号、複数のクロックドメインで共有する非同期リセット、同一クロック・同一リセットの両エッジを使うプロセス、あるプロセスのクロックを別のプロセスの非同期リセットとして使う信号（時間付きの `Simulation` はすべてのエッジを実行します。`Simulator::tick` はイベントの立ち上がりエッジだけです） |
 | initial ブロック | `initial` ブロックと変数宣言の初期化子（`logic [7:0] v = 8'h5a;`、interface のメンバーを含む）。初期化子は `initial` ブロックより先に適用。書き込む値が定数のもの（定数の `if`、`$readmemh` / `$readmemb`、実行前に反復回数が分かるループ（`repeat` と、1 つの変数を定数ずつ固定の境界まで進める `for` / `while` / `do`-`while`）を含む）は初期状態を定める。デザインの状態を読むものやシステムタスクを呼ぶものなどそれ以外は、時間を持つ `Simulation` で時刻 0 からプロセスとして実行（`Simulator` はプロセスを実行しないため、このようなデザインでは `SimulatorErrorKind::ProcessRequiresSimulation` でビルドに失敗） |
 | 文 | `if` / `else`、`case`、`casez`、`casex`、`case ... inside`、`unique` / `priority`、`for`、`while`、`do ... while`、`repeat`、`forever`、`foreach`（反復回数が定数なら展開し、そうでなければ実行時に実行）、`break` / `continue` / `return`、即時アサーションと遅延付き即時アサーション |
-| 関数 | `input` / `output` / `inout` 引数を持てる `function` と、`task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
+| 関数 | `input` / `output` / `inout` / `ref` / `const ref` 引数（[参照渡しの引数](#reference-arguments)を参照）を持てる `function` と、`task`。`return`、または関数名への代入で値を返す。ローカル変数と `localparam`、部分選択や複合的な代入先への代入。呼び出しはインライン展開。定数式（パラメータ、範囲）の中の定数引数による呼び出しはエラボレーション時に評価 |
 
 ### タイミング制御 {#timing-controls}
 
@@ -104,6 +104,30 @@ package／`$unit` の static 引数を持つ時間待ち task と、static task 
 
 `with` 制約、値域が未対応または未解決のenum、unpacked 配列、net、定数、
 select・連結式の引数は未対応として拒否します。
+
+### プロセスハンドル
+
+組込みクラス `process`（`std::process` とも記述できます、26.7）の `self()`、`status()`、`kill()`、`await()`、`suspend()`、
+`resume()` と `process::state` に対応します（IEEE 1800-2023 9.7）。ハンドルは変数・
+クラスのプロパティ・コンテナに保持できます。同じスレッドの `self()` は同じハンドルを返し、
+終了後も状態を参照できます。終了済みの親に対する `kill()` も、その子孫を停止します。
+`wait (p.status() == process::FINISHED)` は状態の変化で再評価されます。
+
+待機中のプロセスを停止するとイベントへの感応も停止します。再開時はイベント待ちを再設定し、
+条件待ちはすぐに条件を確認し、期限を過ぎた遅延待ちは再開します。手続きや task は自分自身を
+停止できますが、function 内での自己停止と `await()` は拒否します。`process` の構築と継承も拒否します。
+
+すべての `final` 手続きは同じプロセスの識別情報と乱数列を共有します（9.2.3）。
+`$stop` からの再開時も保持され、final 処理全体が終了するまで状態は RUNNING です。
+`process` という名前のユーザーパッケージの修飾付き typedef も保持します。
+組込みの状態型は `std::process::state` で指定できます。
+
+`srandom()`・`get_randstate()`・`set_randstate()` は対象プロセスの乱数列を操作します
+（18.13.3–18.13.5）。状態文字列はCelox固有の不透明な値です。チェックポイントはハンドルと
+停止・待機状態を保持します。保存ファイルは公開済みプロセスハンドルを含む状態に未対応のため、
+`checkpoint()` / `restore()` を使ってください。参照したプロセスの識別情報はシミュレーションの解放まで保持します。
+別のプロセスからの `kill()` は対象の実行フレームと automatic 変数の束縛を解放し、
+識別情報と乱数状態を保持します。
 
 ### クラスの乱数化
 
@@ -180,26 +204,40 @@ seedを使って解を探索し、成功時だけ対象プロパティをまと�
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
 SystemVerilog に対しても、共有の Veryl 適合性スイートを実行しています。
 
+### unpacked 構造体 {#unpacked-structures}
+
+unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列挙型、`string`、
+クラスハンドル、packed 構造体、入れ子の unpacked 構造体を使え、各メンバは自身の
+2 値・4 値の型を保ちます。この型の変数は、モジュール変数、手続き内のローカル変数、クラスプロパティ、
+キュー・動的配列・連想配列の要素（`q[i].m` でメンバを読めます）、
+任意の方向（[`ref`](#reference-arguments) を含む）のサブルーチン引数と戻り値にできます。メンバはその型の変数と同じように
+読み書きできます。構造体全体は、同じ型の値との代入と `==`・`!=`・`===`・`!==` による
+比較、`?:` による選択、assignment pattern（`'{a, b}`、`'{m: v, default: d}`、
+`T'{...}`。`default` は入れ子の構造体のメンバにも適用）による構築ができます。
+構造体全体へのその他の演算子、選択、キャストは拒否されます。
+
 ## 未対応の構文 {#what-is-not-supported}
 
 未対応の構文は、無視せずに、その構文名を示す `Unsupported` エラーを返します。エラーには
 その構文を追跡する issue の番号が含まれます。専用の issue がない構文は、フロントエンドの
 ロードマップ [#88](https://github.com/celox-sim/celox/issues/88) を指します。
 
-- [対応範囲](#classes)外のクラスの機能：クラスハンドル以外の変数への `$cast`、クラス内で宣言した列挙定数、クラスパラメータの値としての列挙型・構造体型・共用体型と名前付きの 4 値・文字列定数、宣言した package やコンパイル単位の外でのパラメータ付きクラスの特殊化、4 値・`real`・配列・64 ビットを超えるプロパティ。時間待ちを含む task の static ローカル宣言、再帰呼び出し、`ref` 引数。
+- [対応範囲](#classes)外のクラスの機能：クラスハンドル以外の変数への `$cast`、クラスパラメータの値としての名前のない列挙型・構造体型・共用体型と名前付きの 4 値・文字列定数、package のクラスをモジュール内クラス型で特殊化する機能、`real`・配列・64 ビットを超えるプロパティ、プロパティ（unpacked 構造体型のプロパティのメンバを含む）のビット選択・部分選択と packed 構造体メンバ、`output` / `inout` 引数としてのプロパティ、4 値プロパティの乱数化と制約。時間待ちを含む task の static ローカル宣言、再帰呼び出し。
 - `inout` / `ref` / 式を使う modport、virtual interface など。
   ANSI ヘッダーのポートは、クロック入力やパラメータ依存の幅も含めて modport 経由で渡せます。
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
 - 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
-  named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、並行アサーション、`force` / `release`。
+  named event と `->`、`fork` / `join`、`wait fork` / `disable fork`、下記のBoolean部分集合を超える並行アサーション、`force` / `release`。
 - プロセス内のタイミング制御：イベント式と `iff` 条件内の impure な関数呼び出し、
-  static task 引数を読む `wait` 条件、イベント式、`iff` 条件。
+  static task 引数を読む `wait` 条件、イベント式、`iff` 条件。クラスのプロパティを（直接、ハンドルや関数を通じて、
+  またはプロパティが持つコンテナとして）読む `wait` 条件とイベント式。プロパティへの書き込みで待機中のプロセスが
+  起きないためです。static プロパティはモジュールの変数なので待機できます。
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、unpacked 構造体、`real`。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・固定長配列の要素としての unpacked 構造体、配列（動的配列・キュー・連想配列を含む）・`real`・既定値を持つメンバ。
 - 順序回路のプロセス：`always_ff` のイベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。
@@ -239,9 +277,13 @@ SystemVerilog に対しても、共有の Veryl 適合性スイートを実行�
 
 パラメータ付きクラスでは、パラメータの値と型の組ごとに 1 つの特殊化があり、それぞれが独立したクラスとして static プロパティを持ちます（IEEE 1800-2023 8.25）。`C#(2, int)` と `C#(.T(int), .N(2))` は同じ特殊化で、`C#(2)` のハンドルは `C#(3)` の変数に代入できません。パラメータ値の割り当ては書いた場所で評価するので、モジュールのパラメータに依存してもかまいません。型としてのクラス名だけはクラスの中でもデフォルトの特殊化 `C#()` を表します。`::` の前に置いたクラス名は、クラスの中と extern メソッドの本体では宣言中の特殊化を指し、それ以外の場所では `C#()::` と書く必要があります（8.25.1）。interface クラスは継承する interface クラスのパラメータと typedef を引き継ぎ、異なる interface クラスや特殊化から同じ名前を引き継ぐ場合は自分で宣言し直す必要があります（8.26.6.2、8.26.6.3）。Celox はモジュールの型とスコープが参照する特殊化を実行前にすべて作り、generate ブロック内の割り当てはそのインスタンスごとに評価します。
 
-package やコンパイル単位で宣言したクラスは、宣言した場所で一度だけレイアウトを決めてメソッドを下ろします（IEEE 1800-2023 3.12.1、26.3）。モジュールは import や `p::C` で、コンパイル単位のクラスなら名前で、別のソースファイルからでも使えます。static プロパティは package の変数で、クラスを使うすべてのモジュールが共有します。モジュールのクラスはこれを継承して virtual メソッドをオーバーライドでき、そのモジュールのハンドルを通した呼び出しはモジュールのクラスのオーバーライドにも届きます。パラメータ付きクラスの特殊化はクラスを宣言した場所で作るので、そのスコープの外ではそこで名前を挙げた特殊化だけを使えます。package とコンパイル単位の要素だけのソースは、それらのスコープをエラボレーションします。
+クラスが宣言した列挙型のメンバーはそのクラスの定数で、メソッド・プロパティ・パラメータからは名前で、他のスコープからは `C::NAME` で参照できます（6.19、8.23）。パラメータ付きクラスでは特殊化ごとの値になります。
 
-package 内で具体化したクラスの typedef と型パラメータは、`Small::element_t` のように import した別名を通して参照できます。継承した型と package の再 export にも対応します。型の次元は宣言元の特殊化で確定するため、利用するモジュールの同名パラメータでは変化しません。別のモジュールや package のクラスも、これらの確定したメンバー型を継承できます（6.18、8.13、8.23）。
+型パラメータの値には、typedef で名前を付けた列挙型・構造体・共用体も使えます。宣言ごとに別の型なので、同じ構造でも別の特殊化になり、その typedef（`typedef A B`）は `A` と同じ特殊化になります（6.18、6.19、6.22.1）。generate ブロックの typedef はブロックのインスタンスごと（ループでは繰り返しごと）に別の型を宣言し（27.4）、package の typedef はどこで import しても同じ型です。名前のない列挙型・構造体・共用体は型パラメータの値にできません。`typedef C#(word_t) word_c` のように package の parameter で幅が決まる型を package 内の typedef で特殊化に渡すと、その package の定数で確定します。
+
+package やコンパイル単位で宣言したクラスは、宣言スコープでレイアウトとメソッド本体を束縛します（IEEE 1800-2023 3.12.1、26.3）。モジュールは import や `p::C` で、コンパイル単位のクラスなら名前で、別のソースファイルからでも使えます。static プロパティは package の変数で、クラスを使うすべてのモジュールが共有します。モジュールのクラスはこれを継承して virtual メソッドをオーバーライドでき、そのモジュールのハンドルを通した呼び出しはモジュールのクラスのオーバーライドにも届きます。package のパラメータ付きクラスは、利用するモジュール、package、コンパイル単位のクラスからも特殊化できます。型引数にはコンパイル単位のクラスも渡せます。明示した実引数は呼び出し側で評価し、既定値とクラス本体は宣言元の package で束縛します。同じ特殊化はプログラム全体で型と static ストレージを共有します（8.25）。モジュール内のクラスを型引数にする場合は、インスタンスごとの型の同一性への対応が必要なため、現在は拒否します。package とコンパイル単位の要素だけのソースは、それらのスコープをエラボレーションします。
+
+package 内で具体化したクラスの typedef と型パラメータは、`Small::element_t` のように import した別名を通して参照できます。継承した型と package の再 export にも対応します。型の次元は宣言元の特殊化で確定するため、利用するモジュールの同名パラメータでは変化しません。別のモジュールや package のクラスも、これらの確定したメンバー型を継承できます（6.18、8.13、8.23）。値パラメータや localparam の文字列も基底の特殊化の値を継承し、派生側の package に同名の定数があっても変わりません（8.13、8.25）。
 
 チェックポイントはオブジェクトを保持します。状態ファイルは文字列を記録しますがオブジェクトは記録しないため、オブジェクトを持つ変数があると状態ファイルの保存は失敗します。
 
@@ -320,6 +362,27 @@ union 全体の演算は宣言時の符号指定に従います（既定は unsi
 `bit` / `logic` 混在時は 4-state の領域を共有し、2-state メンバーを
 読み書きする際には X/Z を 0 に変換します。
 tagged union と unpacked union は未対応です。
+
+### 参照渡しの引数 {#reference-arguments}
+
+`ref` と `const ref` の仮引数はコピーではなく実引数そのものです（IEEE 1800-2023 13.5.2）。
+仮引数への書き込みはすぐに見え、実引数の別の名前とも別名になり、task は待ちの間も参照を保ちます。
+実引数には、変数（`string`、クラスハンドル、キュー、動的配列、連想配列、unpacked 配列を含む）、
+呼び出し時にハンドルを評価するクラスオブジェクトのプロパティ、呼び出し時に添字を評価する
+固定長 unpacked 配列の要素、unpacked 構造体のメンバを渡せます。[unpacked 構造体](#unpacked-structures)型の
+仮引数は、構造体の変数・メンバ・クラスプロパティの各メンバを参照します（仮想メソッド経由でも同じ）。`const` は方向と同様に後続の仮引数に引き継がれます（13.3）。
+
+規格どおり次を拒否します：static な寿命のサブルーチンの `ref` 仮引数、式・定数・部分選択・ネット、
+または仮引数と等価でない型（6.22.2）の実引数、`const ref` 仮引数への書き込み、`ref` 仮引数への
+ノンブロッキング代入（6.21）、fork 変数の初期値以外での `fork ... join_any` / `join_none` 内の
+`ref` 仮引数の使用（9.3.2）、連続代入やイベント式での `ref` 引数を持つ関数の呼び出し
+（13.4.1。`const ref` は可）。
+
+`ref static`、動的配列・キュー・連想配列の要素（参照がサイズ変更より長く生きる必要がある、13.5.2）、
+クラスプロパティの要素、クラスプロパティやそのメンバに束縛した仮引数の一部への書き込み、
+配列要素に束縛した仮引数の実行時にしか決まらない位置での選択（展開されるループの位置は決まる）は
+未対応として拒否します。クラスプロパティに束縛した仮引数は `output` / `inout` 引数に渡せ、その呼び出しが
+戻るときに書き戻します。
 
 ### 名前付きサブルーチン引数
 
@@ -420,7 +483,18 @@ static な output 引数も、代入しない経路では以前の値を保持�
 定数関数としての呼び出しは
 毎回新しい値を使い、実行時の状態に影響しません（13.4.3）。
 
-値を保持する task ローカル変数と、定数でない static 初期化子は引き続き未対応です。
+プロセスの static なローカル変数には実行時の値を使う初期化子も書けます。初期化子は宣言順に、
+どの手続きよりも先に 1 回だけ実行し（IEEE 1800-2023 6.8）、モジュールの変数とほかの static な
+ローカル変数を読めますが、automatic 変数は読めません。IEEE 1800-2023 6.21 は "an explicit static
+keyword shall be required when an initialization value is specified as part of a static variable's
+declaration" と定め、手続きブロック内で初期化子を持つ static 変数に `static` キーワードを要求します。
+既存のソースはこのキーワードを省くことが多いため（`initial` ブロック内の `string s = v.name();` など）、
+Celox はキーワードのない宣言も受け付けます。定数の初期化子はどの手続きでも、実行時の値を使う初期化子は
+`initial` のように 1 回だけ実行する手続きで受け付けます。`always` 手続きでキーワードなしに実行時の値で
+初期化すると、入るたびに実行する意図の可能性が高いためエラーになります。`static` か `automatic` を
+指定して意図を示してください。
+
+値を保持する task ローカル変数と、関数の static なローカル変数の定数でない初期化子は引き続き未対応です。
 これらには `automatic` を指定してください。package 関数の状態は package 変数で、
 すべてのインスタンスのプロセスが書き込めます。既定の寿命（`interface automatic`）が
 使用先のモジュールと異なる interface は拒否します。
@@ -781,3 +855,25 @@ Veryl の適合性スイートは、Veryl が出力する SystemVerilog に対�
 - テストベンチ用のモジュール（クロックや `$finish` のスケジューリングを伴う `initial`
   ブロック、階層代入）は、シミュレーション可能な SystemVerilog モジュールとして
   出力されません。
+
+### 並行アサーション
+
+moduleとgenerate内の、明示的なクロックを持つ単一サイクルのBoolean
+`assert property`、`assume property`、`cover property`に対応します。
+
+```systemverilog
+check_valid: assert property (@(posedge clk) disable iff (reset) valid)
+    else $error("valid was not set at the clock tick");
+```
+
+判定式にはPreponedのサンプリング値を使います。Active/NBA完了後のObservedで、
+現在値の`disable iff`とサンプリング済みの判定式を評価します。すべての判定が終わった後、
+Reactiveで成功・失敗アクションを実行し、アクションは現在値を読みます。
+判定式のX/Zは失敗、disable条件のX/Zは無効化しない扱いです
+（IEEE 1800-2023 16.5、16.5.1、16.14.1）。16.5に従い、クロックは同一時刻内で
+グリッチを発生させないものとします。
+
+タイミング制御のないblocking代入と表示・severity taskのアクションに対応します。
+手続き内の並行アサーション、暗黙/default clocking、名前付きproperty/sequence、
+遅延・反復・含意、履歴関数やユーザー関数を含む判定式、タイミング制御・NBA・
+サブルーチン文のアクションは未対応です。対応する構文では`disable iff`をクロックの後に置きます。
