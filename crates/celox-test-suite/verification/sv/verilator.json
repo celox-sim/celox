@@ -37,7 +37,8 @@
     "verilator/timing.json",
     "verilator/types.json",
     "verilator/unpacked_structs.json",
-    "verilator/virtual_interfaces.json"
+    "verilator/virtual_interfaces.json",
+    "verilator/wide_container_elements.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

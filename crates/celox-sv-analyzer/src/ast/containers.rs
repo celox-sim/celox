@@ -106,12 +106,29 @@ pub(super) fn with_dimensions(
     if matches!(base.kind(), TypeKind::Real | TypeKind::Shortreal) {
         return Err(unsupported("real dynamic container elements"));
     }
-    let record = match base.unpacked_struct() {
-        Some(aggregate) => unpacked_structs::record(&tree.state, aggregate, &context.const_env)?,
-        None => None,
-    };
     let shape = casts::expr_type_from_type(&tree.state, &base, &context.const_env)
         .ok_or_else(|| unsupported("dynamic container element type"))?;
+    let record = match base.unpacked_struct() {
+        Some(aggregate) => unpacked_structs::record(&tree.state, aggregate, &context.const_env)?,
+        // An integral element wider than a container word is held in a
+        // record of one field, like a structure element.
+        None if shape.width > 64
+            && base.container.is_none()
+            && matches!(
+                base.kind(),
+                TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+            ) =>
+        {
+            let mut field = classes::field(&tree.state, &base, &context.const_env, 0)?;
+            // A missing element reads as the default of its type.
+            field.nullable = true;
+            Some(crate::system_functions::Record {
+                size: field.storage(),
+                fields: vec![field],
+            })
+        }
+        None => None,
+    };
     if record.is_none() && (shape.width == 0 || shape.width > 64) {
         return Err(unsupported("dynamic container elements wider than 64 bits"));
     }
@@ -547,7 +564,7 @@ pub(super) fn value(
 
             if target.record.is_some() {
                 return Err(unsupported(
-                    "comparison of dynamic containers of unpacked structures",
+                    "comparison of dynamic containers of unpacked structures or of elements wider than 64 bits",
                 ));
             }
             // The elements are inner containers' handles, not their values.
@@ -647,6 +664,9 @@ pub(super) fn value(
                         return Err(unsupported(
                             "sorting unpacked structures requires a with expression",
                         ));
+                    }
+                    if op != ContainerOp::Reverse && target.record.is_some() {
+                        return Err(unsupported("sorting elements wider than 64 bits"));
                     }
                     if op != ContainerOp::Reverse
                         && target.layout.handle == Some(HandleProperty::Object)
@@ -833,7 +853,12 @@ fn query(
                 unpacked
             } else {
                 unpacked
-                    + if innermost.layout.handle.is_some() {
+                    // An integral element kept in a record keeps its
+                    // packed dimensions; a structure has none.
+                    + if innermost.layout.handle.is_some()
+                        && (innermost.record.is_none()
+                            || innermost.element.unpacked_struct().is_some())
+                    {
                         0
                     } else {
                         innermost.element.packed_ranges.len()
@@ -1041,7 +1066,10 @@ mod tests {
     #[test]
     fn unsupported_container_forms_fail_before_lowering() {
         for (source, expected) in [
-            ("module Top; bit[127:0] a[]; endmodule", "wider than 64"),
+            (
+                "module Top; bit[127:0] q[$]; initial q.sort(); endmodule",
+                "sorting elements wider than 64 bits",
+            ),
             (
                 "module Top; int a[int], n; function int k(); n++; return n; endfunction initial a[k()] += 1; endmodule",
                 "compound assignment to a dynamic element selected with a side effect",
@@ -1202,8 +1230,12 @@ mod method_call_tests {
 
 /// An element that `get` reads, as a whole value: the flat structure value
 /// of a record element.
-fn element_read(target: &ContainerType, get: Expr) -> Expr {
+pub(super) fn element_read(target: &ContainerType, get: Expr) -> Expr {
     match &target.record {
+        // An integral element keeps its signedness.
+        Some(record) if target.element.unpacked_struct().is_none() => {
+            classes::object_call(ObjectOp::Load(record.fields[0]), vec![get])
+        }
         Some(record) => classes::object_call(ObjectOp::Unbox(record.clone()), vec![get]),
         None => get,
     }

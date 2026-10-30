@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "wide_container_elements::wide_elements_default_to_x",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 zero-extends a signed value passed to push_back or insert of a queue whose elements are wider than the value: push_back of an int of -1 into a bit [199:0] or bit [47:0] queue stores 'hffff_ffff zero-extended instead of all ones. IEEE 1800-2023 7.10.2 and 13.5.1 copy the item argument as by assignment, which extends a signed value by its sign (10.7); Verilator sign-extends the same value assigned to an element or a variable, and the standalone source reproduces the difference. xezim 0.11.3 passes the case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_verilator_queue_argument_extension.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_queue_argument_extension",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "execute",
+        "reason": "Verilator 5.052 zero-extends a signed value passed to push_back or insert of a queue whose elements are wider than the value: push_back of an int of -1 into a bit [199:0] or bit [47:0] queue stores 'hffff_ffff zero-extended instead of all ones. IEEE 1800-2023 7.10.2 and 13.5.1 copy the item argument as by assignment, which extends a signed value by its sign (10.7); Verilator sign-extends the same value assigned to an element or a variable, and the standalone source reproduces the difference. xezim 0.11.3 passes the case.",
+        "upstream": []
+      },
+      "name": "wide_container_elements::wide_elements_extend_by_the_value_signedness",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_container_elements::wide_elements_keep_every_bit",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "wide_container_elements::wide_elements_of_parameterized_classes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

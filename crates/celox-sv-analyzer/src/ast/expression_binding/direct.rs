@@ -2094,16 +2094,7 @@ fn selected_value(
         let template = objects::select_template(&property);
         if dimensions.property_select_base != Some(base) {
             // The value replaces the template as a `[N-1:0]` vector.
-            let zero_based = match property.r#type.packed_ranges() {
-                [range] => {
-                    eval_ast_const_expr(&tree.state, range.right(), &dimensions.const_env)
-                        == Some(0)
-                        && eval_ast_const_expr(&tree.state, range.left(), &dimensions.const_env)
-                            .is_some_and(|left| left >= 0)
-                }
-                _ => false,
-            };
-            if !zero_based || !property.r#type.members.is_empty() {
+            if !zero_based_vector(&property.r#type, tree, dimensions) {
                 return Err(unsupported(
                     "read of a select of a class property that is not declared [N-1:0]",
                 ));
@@ -2119,6 +2110,54 @@ fn selected_value(
             return Ok(crate::ast::inlining::substitute_expr_idents(
                 selected,
                 &HashMap::from_iter([(template, objects::load(&property, handle))]),
+            ));
+        }
+    }
+    // A select of the iterator of a locator over elements kept in records,
+    // such as `item[31:0]`, selects the element's value.
+    if !suffix.is_empty()
+        && let ExprKind::Name(name) = &native.expression(base).kind
+        && let name = instances::normalize_identifier(&name.spelling)
+        && dimensions.get(&name).is_none()
+        && let Some((container, handle)) = locators::record_iterator(base, native, dimensions)
+        && container.element.unpacked_struct().is_none()
+    {
+        if !zero_based_vector(&container.element, tree, dimensions) {
+            return Err(unsupported(
+                "select of an element wider than 64 bits that is not declared [N-1:0]",
+            ));
+        }
+        let mut scope = dimensions.clone();
+        scope.insert(
+            name.clone(),
+            procedural::dimensions_from_type(&container.element),
+        );
+        scope
+            .expression_signedness
+            .insert(name.clone(), container.element.is_signed());
+        let selected = selected_value(root, native, tree, &scope)?;
+        return Ok(crate::ast::inlining::substitute_expr_idents(
+            selected,
+            &HashMap::from_iter([(name, containers::element_read(&container, handle))]),
+        ));
+    }
+    // An element wider than 64 bits is held in a record, whose packed
+    // selects, such as `q[0][129]`, are not bound yet.
+    if let ExprKind::Name(name) = &native.expression(base).kind
+        && let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling))
+        && let Some(mut container) = shape.container.as_deref()
+    {
+        let mut levels = shape.unpacked.len() + 1;
+        while let Some(inner) = container.element.container.as_deref() {
+            container = inner;
+            levels += 1;
+        }
+        if suffix.len() > levels
+            && container.record.is_some()
+            && container.element.unpacked_struct().is_none()
+        {
+            return Err(unsupported(
+                "bit-select or part-select of a container element wider than 64 bits",
             ));
         }
     }
@@ -2701,6 +2740,24 @@ fn scheduler_call(
         ))));
     }
     Ok(None)
+}
+
+/// `r#type` is a vector with one `[N-1:0]` range, whose select indices are
+/// offsets from bit 0.
+fn zero_based_vector(
+    r#type: &Type,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+) -> bool {
+    let zero_based = match r#type.packed_ranges() {
+        [range] => {
+            eval_ast_const_expr(&tree.state, range.right(), &dimensions.const_env) == Some(0)
+                && eval_ast_const_expr(&tree.state, range.left(), &dimensions.const_env)
+                    .is_some_and(|left| left >= 0)
+        }
+        _ => false,
+    };
+    zero_based && r#type.members.is_empty()
 }
 
 #[cfg(test)]

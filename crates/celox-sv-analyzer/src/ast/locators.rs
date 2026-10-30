@@ -504,6 +504,11 @@ pub(super) fn bind(
                         "array locator method comparing nonintegral elements requires a with expression",
                     ));
                 }
+                Array::Container(container) if container.record.is_some() => {
+                    return Err(unsupported(
+                        "array locator method comparing elements wider than 64 bits requires a with expression",
+                    ));
+                }
                 Array::Container(container) => LocatorKey::Integral {
                     width: container.layout.width,
                     signed: container.layout.signed,
@@ -593,11 +598,7 @@ pub(super) fn index(
     }
     // The whole value of an element kept as a record.
     if let Some((container, handle)) = record_iterator(id, native, dims) {
-        let record = container.record.clone().expect("a record element");
-        return Ok(Some(classes::object_call(
-            ObjectOp::Unbox(record),
-            vec![handle],
-        )));
+        return Ok(Some(containers::element_read(&container, handle)));
     }
     let (member, arguments) = match &native.expression(id).kind {
         ExprKind::Call {

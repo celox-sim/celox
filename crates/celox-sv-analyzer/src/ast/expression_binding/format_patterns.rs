@@ -165,6 +165,11 @@ pub(in crate::ast) fn pattern(
         {
             return Err(unsupported("%p of a container of aggregate elements"));
         }
+        if container.record.is_some() {
+            return Err(unsupported(
+                "%p of a container of elements wider than 64 bits",
+            ));
+        }
         if container
             .key
             .as_ref()
