@@ -17,6 +17,13 @@ ignore = [
     { id = "RUSTSEC-2025-0057", reason = "fxhash: used directly and by veryl-analyzer" },
     # Unmaintained, no vulnerability. Transitive via veryl-analyzer.
     { id = "RUSTSEC-2024-0436", reason = "paste: transitive via veryl-analyzer" },
+    # zstd 0.13 / zstd-safe 7 remain only through wasmtime 50's default `cache`
+    # feature (wasmtime-internal-cache). Celox never enables the wasmtime
+    # compilation cache, and no wasmtime release depends on zstd 0.14 yet.
+    # Remove these once wasmtime upgrades zstd.
+    { id = "RUSTSEC-2026-0391", reason = "zstd 0.13: only via unused wasmtime cache, no upgrade" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd-safe 7: only via unused wasmtime cache, no upgrade" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd-safe 7: only via unused wasmtime cache, no upgrade" },
 ]
 
 [licenses]
@@ -52,3 +59,6 @@ allow-wildcard-paths = true
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+# develop pins Veryl to an upstream revision; master stays on released crates
+# (scripts/check-veryl-lane.mjs).
+allow-git = ["https://github.com/veryl-lang/veryl.git"]

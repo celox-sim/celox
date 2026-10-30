@@ -1314,3 +1314,18 @@ variable of an `initial` block and rejects the module's `C::queue_t`
 declaration; its exact compile diagnostic remains an
 executed failure in [the Icarus class report](verification/sv/icarus/class.json).
 No assertions or exclusions are weakened.
+
+## veryl-native-queue-components
+
+The `tb_queue` cases exercise Veryl HEAD's native `$tb::queue` component
+(introduced in Veryl PR #3558, revision `1cd88389745b`). The shared SV adapter
+cannot emit these handles: emission panics with `internal error: entered
+unreachable code` before invoking either external simulator. Verilator also
+cannot run the four-state case, which its adapter reports as unsupported.
+
+The focused [Verilator report](verification/repros/tb_queue_verilator.json) and
+[Icarus report](verification/repros/tb_queue_icarus.json) retain the attempted
+cases. Reproduce with `--include-ignored --filter tb_queue::` on the respective
+verification runner. These exclusions apply only to external emission; Celox
+runs every case on all four backends, including native and Cranelift parallel
+configurations.

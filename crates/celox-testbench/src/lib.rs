@@ -24,6 +24,23 @@ pub use format::{
 };
 pub use value::TestbenchValue;
 
+/// Operations on a testbench-owned deque. A capacity of zero is unbounded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum QueueOp {
+    PushBack,
+    PushFront,
+    PopFront,
+    PopBack,
+    DropFront,
+    DropBack,
+    Front,
+    Back,
+    Clear,
+    Size,
+    IsEmpty,
+    IsFull,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct StateLocation<A> {
     pub address: A,
@@ -220,6 +237,20 @@ pub enum TestbenchStatement<Event, Signal, Expression, Argument, Target = Signal
     },
     RandomGetSeed {
         handle: String,
+        ret: Option<Target>,
+    },
+    Queue {
+        handle: String,
+        op: QueueOp,
+        value: Option<Expression>,
+        value_target: Option<Target>,
+        value_mask: BigUint,
+        value_width: usize,
+        value_signed: bool,
+        width: u32,
+        signed: bool,
+        four_state: bool,
+        capacity: u32,
         ret: Option<Target>,
     },
     ComponentMethod {
