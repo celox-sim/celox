@@ -1,5 +1,8 @@
 import copy
+import importlib
 import importlib.util
+import importlib.metadata
+import inspect
 import os
 import sys
 from unittest.mock import patch
@@ -26,15 +29,19 @@ class TaxiResultsTests(unittest.TestCase):
             return taxi.read_results(path, expected)
 
     def test_results_require_complete_unique_passing_finite_tests(self):
-        test = '<testcase classname="tb" name="frame" time="0.5" sim_time_ns="100"/>'
+        duration = '<property name="sim_time_duration" value="100"/>'
+        unit = '<property name="sim_time_unit" value="ns"/>'
+        test = '<testcase classname="tb" name="frame" time="0.5"><properties>' + unit + duration + '</properties></testcase>'
         good = '<testsuites><testsuite>' + test + '</testsuite></testsuites>'
         self.assertEqual(self.parse(good), {'body_seconds': .5, 'simulation_ns': {'tb/frame': 100}})
         bad = [good.replace(test, ''), good.replace(test, test * 2),
                good.replace('time="0.5"', 'time="NaN"'), good.replace('time="0.5"', 'time="-1"'),
-               good.replace('sim_time_ns="100"', 'sim_time_ns="inf"'),
-               good.replace('sim_time_ns="100"', 'sim_time_ns="0"'),
-               good.replace('name="frame"', 'name=""'), good.replace(' sim_time_ns="100"', '')]
-        bad += [good.replace('/>', f'><{tag}/></testcase>') for tag in ['failure', 'error', 'skipped']]
+               good.replace('value="100"', 'value="inf"'),
+               good.replace('value="100"', 'value="0"'),
+               good.replace('name="frame"', 'name=""'), good.replace(duration, ''),
+               good.replace(unit, ''), good.replace('value="ns"', 'value="us"'),
+               good.replace(duration, duration * 2)]
+        bad += [good.replace('</testcase>', f'<{tag}/></testcase>') for tag in ['failure', 'error', 'skipped']]
         for text in bad:
             with self.subTest(text=text), self.assertRaises((ValueError, KeyError)):
                 self.parse(text)
@@ -50,22 +57,49 @@ class TaxiResultsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 taxi.check_pair(bad)
 
-    def test_monotonic_hook_is_local_and_ignores_wall_clock_reversal(self):
+    def test_native_monotonic_clock_matches_pin_and_ignores_wall_clock_reversal(self):
+        requirements = (taxi.ROOT / 'benchmarks/taxi/requirements.txt').read_text().splitlines()
+        pinned = next(line.removeprefix('cocotb==') for line in requirements if line.startswith('cocotb=='))
         regression = SimpleNamespace(time=time)
         package = ModuleType('cocotb')
-        package.__version__ = '2.0.1'
+        package.__version__ = pinned
         package.regression = regression
-        with patch.dict(sys.modules, cocotb=package), patch.object(time, 'time', side_effect=[20, 10]), patch.object(time, 'perf_counter', side_effect=[2, 3]):
+        with patch.dict(sys.modules, cocotb=package), patch.object(time, 'time', side_effect=[20, 10]), patch.object(time, 'monotonic', side_effect=[2, 3]):
             original = time.time
-            clock.configure([])
-            begin = regression.time.time()
-            self.assertEqual(regression.time.time() - begin, 1)
+            clock.configure()
+            self.assertIs(regression.time, time)
+            begin = regression.time.monotonic()
+            self.assertEqual(regression.time.monotonic() - begin, 1)
             self.assertIs(time.time, original)
             self.assertEqual(time.time(), 20)
             self.assertEqual(time.time(), 10)
-        package.__version__ = 'other'
-        with patch.dict(sys.modules, cocotb=package), self.assertRaises(RuntimeError):
-            clock.configure([])
+        for version, timer in [('2.0.1', time), ('other', time), (pinned, SimpleNamespace())]:
+            package.__version__ = version
+            regression.time = timer
+            with self.subTest(version=version, timer=timer), patch.dict(sys.modules, cocotb=package), self.assertRaises(RuntimeError):
+                clock.configure()
+
+    @unittest.skipUnless(importlib.util.find_spec('cocotb') and importlib.metadata.version('cocotb') == clock.SUPPORTED_COCOTB, 'requires the pinned simulator dependencies')
+    def test_installed_cocotb_startup_entry_points(self):
+        # Resolve the same entry points as pygpi, including the timer check's
+        # no-argument signature. A mocked cocotb cannot catch API migrations.
+        case = taxi.MANIFEST['cases']['lfsr64']
+        with patch.dict(os.environ, GPI_USERS='stale-user-library'):
+            env = taxi.runtime_environment(case, taxi.ROOT)
+        import cocotb_tools.config as config
+        self.assertTrue(env['LIBPYTHON_LOC'])
+        self.assertEqual(env['GPI_USERS'], env['LIBPYTHON_LOC'] + ';' + config.pygpi_entry_point())
+        for entry in env['PYGPI_USERS'].split(','):
+            module, name = entry.split(':')
+            if module == 'taxi_bench_clock':
+                function = clock.configure
+            else:
+                function = getattr(importlib.import_module(module), name)
+            inspect.signature(function).bind()
+        from cocotb import regression
+        timer = regression.time
+        clock.configure()
+        self.assertIs(regression.time, timer)
 
     def test_source_verification_rejects_wrong_revision_modified_and_extra_files(self):
         with tempfile.TemporaryDirectory() as directory:

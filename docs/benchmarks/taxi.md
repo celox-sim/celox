@@ -10,7 +10,10 @@ The [manifest](https://github.com/celox-sim/celox/blob/master/benchmarks/taxi/ma
 pins [fpganinja/taxi](https://github.com/fpganinja/taxi) to
 `cc70b270b910d369ab1ad7b3855e76399fd461f1`, including sources, tops, parameters,
 expected test counts and random seed 12345. The Python requirements are pinned;
-CI uses Ubuntu 24.04, Python 3.13, cocotb 2.0.1 and Verilator 5.052.
+CI uses Ubuntu 24.04, Python 3.13, cocotb 2.1.0 and Verilator 5.052.
+Each configuration has a six-hour job limit and a one-hour limit per compiler
+or simulator process; RX configurations run the complete test matrix three
+times per simulator.
 
 | Configuration | Design | Tests per simulator per sample |
 | --- | --- | ---: |
@@ -36,12 +39,11 @@ for 30 days. The dashboard separates CPU models.
 The charts show three distinct measurements:
 
 - **Test body:** median of three sums of cocotb XML test times. This includes
-  Python stimulus, resets, simulator interaction and assertions. A shared GPI
-  startup hook substitutes `perf_counter()` only for the pinned regression
-  manager's elapsed-time clock, retaining cocotb's measurement boundaries and
-  XML writer. Other Python clocks and upstream tests are unchanged. This prevents
-  wall-clock corrections from corrupting elapsed times. It measures
-  the usable cocotb workload, including Python overhead.
+  Python stimulus, resets, simulator interaction and assertions. Cocotb 2.1.0
+  uses `time.monotonic()` for its test durations. A shared GPI startup check
+  verifies the pinned version without replacing its clock, measurement
+  boundaries or XML writer. Wall-clock corrections cannot corrupt elapsed
+  times. It measures the usable cocotb workload, including Python overhead.
 - **Whole process:** median of three fresh executable processes, from spawn to
   exit. Celox's Python discovery and result checks are inside this interval;
   Verilator's Python environment is configured beforehand. Both retain Python
