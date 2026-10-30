@@ -1008,7 +1008,7 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         );
         return Ok(None);
     }
-    let lowerer = crate::SLTToSIRLowerer::new(four_state)
+    let mut lowerer = crate::SLTToSIRLowerer::new(four_state)
         .with_unpacked_input_types(arena, unpacked_element_widths);
     let context = WorkLoweringContext {
         input: &prepared.input,
@@ -1020,7 +1020,6 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
         fold_group_schedule_index: &prepared.fold_group_schedule_index,
         unpacked_element_widths,
         direct_ff_writes_by_action: &prepared.direct_ff_writes_by_action,
-        lowerer: &lowerer,
         four_state,
         split_large_units: true,
     };
@@ -1029,7 +1028,7 @@ pub fn sort_lanes<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     let mut units = Vec::new();
     for (task_index, task) in tasks.iter().enumerate() {
         let first_unit = units.len();
-        let mut lowering = WorkLowering::new(&context);
+        let mut lowering = WorkLowering::new(&context, &mut lowerer);
         for &position in &task.items {
             for &work_item in &items[plan.order[position]] {
                 lowering

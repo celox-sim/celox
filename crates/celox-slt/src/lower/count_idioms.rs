@@ -915,7 +915,7 @@ impl SLTToSIRLowerer {
     pub(super) fn lower_slt_vector_expr<
         A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
     >(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         expr: SLTVectorExpr<A>,
         width: usize,
@@ -1042,7 +1042,7 @@ impl SLTToSIRLowerer {
     pub(super) fn try_lower_count_idiom<
         A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
     >(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         arena: &SLTNodeArena<A>,

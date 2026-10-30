@@ -4,17 +4,17 @@ use super::*;
 
 impl SLTToSIRLowerer {
     pub(super) fn contains_div_rem<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> bool {
         self.prepare_cost_cache(arena);
-        if let Some(result) = self.cost_cache.borrow().contains_div_rem[node.0] {
+        if let Some(result) = self.cost_cache.contains_div_rem[node.0] {
             return result;
         }
         self.note_analysis_visits(1);
         let excluded = {
-            let cache = self.cost_cache.borrow();
+            let cache = &self.cost_cache;
             cache.initially_materialized[node.0] || cache.fanout[node.0] > 1
         };
         let result = !excluded
@@ -28,7 +28,7 @@ impl SLTToSIRLowerer {
             ) || Self::node_children(node, arena)
                 .into_iter()
                 .any(|child| self.contains_div_rem(child, arena)));
-        let mut cache = self.cost_cache.borrow_mut();
+        let cache = &mut self.cost_cache;
         cache.touch(node);
         cache.contains_div_rem[node.0] = Some(result);
         result
@@ -148,7 +148,7 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn mux_cfg_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         cond: NodeId,
         then_expr: NodeId,
         else_expr: NodeId,
@@ -215,7 +215,7 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn mux_slice_cfg_plan<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         cond: NodeId,
         then_expr: NodeId,
         else_expr: NodeId,
@@ -299,7 +299,7 @@ impl SLTToSIRLowerer {
     pub(super) fn hoist_shared_mux_nodes<
         A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
     >(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         plan: &MuxCfgPlan,
         arena: &SLTNodeArena<A>,

@@ -37,7 +37,7 @@ fn guarded_lane_concat(
 fn common_zero_controller_guards_rob_sized_lane_concat() {
     let mut arena = SLTNodeArena::new();
     let (root, guard, first_predicate) = guarded_lane_concat(&mut arena, 32, None);
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     let mut builder = SIRBuilder::new();
     let mut cache = crate::HashMap::default();
     lowerer.reset_cost_cache(root, &arena, &cache, true);
@@ -182,7 +182,7 @@ fn common_zero_controller_rejects_one_ungated_lane() {
 fn guarded_concat_recomputes_true_only_value_after_merge() {
     let mut arena = SLTNodeArena::new();
     let (root, guard, first_predicate) = guarded_lane_concat(&mut arena, 32, None);
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     let mut builder = SIRBuilder::new();
     let mut cache = crate::HashMap::default();
     lowerer.lower(&mut builder, root, &arena, &mut cache);
@@ -330,7 +330,7 @@ fn zero_controller_analysis_uses_iterative_postorder_on_deep_dag() {
         parts.push((gated, 1));
     }
     let root = arena.alloc(SLTNode::Concat(parts)).unwrap();
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     let cache = crate::HashMap::default();
     lowerer.reset_cost_cache(root, &arena, &cache, true);
 
