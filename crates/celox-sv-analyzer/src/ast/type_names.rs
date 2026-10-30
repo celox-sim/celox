@@ -69,7 +69,7 @@ impl Spelling {
         self.0.as_deref()
     }
 
-    fn keyword_of(&self) -> Option<&'static str> {
+    pub(super) fn keyword_of(&self) -> Option<&'static str> {
         self.parts()?.keyword
     }
 

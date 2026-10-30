@@ -187,6 +187,7 @@ mod procedural;
 mod scope;
 mod scoped_map;
 mod selects;
+mod semantic_types;
 mod shared_map;
 mod statements;
 mod subroutine_owners;
