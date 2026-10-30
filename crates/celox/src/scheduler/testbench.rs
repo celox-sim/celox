@@ -247,6 +247,10 @@ fn generate(
         continuations: vec![],
         eager: None,
         eager_continuations: vec![],
+        four_state: program
+            .layout()
+            .four_state
+            .then_some(&program.layout().is_4states),
     };
     let initialize = g.b.new_block();
     let start = g.b.new_block();
@@ -567,8 +571,8 @@ fn generate(
             .iter()
             .filter(|(source, _)| events.canonical(*source) == *source)
         {
-            let before = g.load(saved, 1);
-            let current = g.load(source, 1);
+            let before = g.signal_level(saved);
+            let current = g.signal_level(source);
             let same = g.binary(1, before, BinaryOp::Eq, current);
             allowed = g.binary(1, allowed, BinaryOp::And, same);
         }

@@ -74,6 +74,7 @@ pub(crate) struct SchedulerRefs {
     pub(crate) count: SignalRef,
     pub(crate) current: SignalRef,
     pub(crate) levels: SignalRef,
+    pub(crate) unknown_levels: SignalRef,
     pub(crate) ready: SignalRef,
     /// The wake and waiting slots of each kernel the scheduler runs that
     /// only delays, by process index.
@@ -431,6 +432,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     count: resolve(&slots.count),
                     current: resolve(&slots.current),
                     levels: resolve(&slots.levels),
+                    unknown_levels: resolve(&slots.unknown_levels),
                     ready: resolve(&slots.ready),
                     wake: (0..scheduler.fallback.len())
                         .map(|index| {
