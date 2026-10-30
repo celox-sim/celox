@@ -3,7 +3,9 @@ mod arena;
 mod effect;
 mod expr;
 mod recover_unrolled;
-pub(crate) use recover_unrolled::{proves_binary_combinational, proves_combinational};
+pub(crate) use recover_unrolled::{
+    complete_binary_cases, proves_binary_combinational, proves_combinational,
+};
 pub(crate) mod sensitivity;
 mod state;
 
