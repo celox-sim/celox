@@ -218,84 +218,6 @@ assign o_data = {part[1], part[0]};
         @case "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection";
     }
 
-    fn test_instance_input_function_output_writeback(sim) {
-        // Veryl emits a call with an output argument in an input port connection, which IEEE
-        // 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-        // ("systemverilog input port connection", #88).
-        @ignore_on(sv);
-        @case "hierarchy::test_instance_input_function_output_writeback";
-    }
-
-    fn test_instance_input_function_output_concat_dynamic_writeback(sim) {
-        // SV arm: Veryl emits a call with an output argument in an input port connection, which
-        // IEEE 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-        // ("systemverilog input port connection", #88).
-        @ignore_on(veryl, sv);
-        @case "hierarchy::test_instance_input_function_output_concat_dynamic_writeback";
-    }
-
-fn test_inactive_instance_input_output_call_adds_no_parent_driver(sim) {
-    // Veryl emits a call with an output argument in an input port connection, which IEEE 1800
-    // 13.4 forbids outside procedural code; the SV frontend rejects it
-    // ("systemverilog input port connection", #88).
-    @ignore_on(sv);
-    @case "hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver";
-}
-
-    fn test_instance_input_function_output_preserves_runtime_display(sim) {
-        // veryl-simulator does not write the connection's function output
-        // actual back.
-        @omit_veryl;
-        // Veryl emits a call with an output argument in an input port connection, which IEEE
-        // 1800 13.4 forbids outside procedural code; the SV frontend rejects it
-        // ("systemverilog input port connection", #88).
-        @ignore_on(sv);
-        @setup { let code = r#"
-module Child (
-i: input logic,
-o: output logic
-) {
-assign o = i;
-}
-module Top (
-a: input logic,
-child_o: output logic,
-seen_o: output logic
-) {
-function write_seen (
-x: input logic,
-seen: output logic
-) -> logic {
-seen = x;
-$display("seen=%0d", seen);
-return x;
-}
-var seen: logic;
-inst child: Child (
-i: write_seen(a, seen),
-o: child_o
-);
-assign seen_o = seen;
-}
-"#; }
-        @build Simulator::builder(code, "Top");
-    let a = sim.signal("a");
-    let child_o = sim.signal("child_o");
-    let seen_o = sim.signal("seen_o");
-    sim.drain_runtime_events();
-
-    sim.modify(|io| io.set(a, 1u8)).unwrap();
-    assert_eq!(sim.get(child_o), 1u8.into());
-    assert_eq!(sim.get(seen_o), 1u8.into());
-    assert_eq!(
-        sim.drain_runtime_events(),
-        vec![celox::RuntimeEvent::Display {
-            message: b"seen=1".to_vec(),
-        }],
-    );
-
-    }
-
     fn test_instance_output_dynamic_index_function_output_writeback(sim) {
         // Veryl 0.22.0 accepts this dynamic select in an output port connection; veryl-
         // lang/veryl#3476 rejects it after 0.22.0.
@@ -799,4 +721,33 @@ assign mem_o = mem;
 }
 "#;
     assert_nonconstant_output_rejected(code);
+}
+
+#[test]
+fn test_instance_input_function_output_call_is_rejected() {
+    // A function call with an output argument in a port connection is not
+    // procedural code (IEEE 1800-2023 13.4.1); Veryl rejects it.
+    let code = r#"
+        module Child (i: input logic, o: output logic) { assign o = i; }
+        module Top (a: input logic, child_o: output logic, seen_o: output logic) {
+            function write_seen (x: input logic, seen: output logic) -> logic {
+                seen = x;
+                return x;
+            }
+            var seen: logic;
+            inst child: Child (i: write_seen(a, seen), o: child_o);
+            assign seen_o = seen;
+        }
+    "#;
+    let error = Simulator::builder(code, "Top").build().unwrap_err();
+    let celox::SimulatorErrorKind::Analyzer(errors) = error.kind() else {
+        panic!("expected analyzer rejection, got: {error:?}");
+    };
+    assert!(
+        errors.iter().any(|error| matches!(
+            error,
+            veryl_analyzer::AnalyzerError::FunctionOutputInPortConnection { .. }
+        )),
+        "{errors:?}"
+    );
 }
