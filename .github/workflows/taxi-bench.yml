@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -37,8 +37,8 @@ jobs:
   # cases may use different hosts; never compare their absolute times.
   comparison:
     needs: build
-    runs-on: ubuntu-26.04
-    timeout-minutes: 180
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
     strategy:
       fail-fast: false
       max-parallel: 2
@@ -58,6 +58,8 @@ jobs:
           path: work/taxi-bin
       - name: Install pinned Python dependencies
         run: python -m pip install -r benchmarks/taxi/requirements.txt
+      - name: Verify pinned cocotb startup
+        run: python -m unittest discover -s scripts/tests -p test_taxi_bench.py -v
       - name: Record comparison host
         run: |
           mkdir -p work/taxi-report
@@ -79,7 +81,7 @@ jobs:
       - name: Compare complete upstream tests
         run: |
           chmod +x work/taxi-bin/celox
-          python scripts/run-taxi-bench.py run '${{ matrix.case }}' work/taxi-source work/taxi-bin/celox work/taxi-report/result
+          python scripts/run-taxi-bench.py run '${{ matrix.case }}' work/taxi-source work/taxi-bin/celox work/taxi-report/result --timeout 3600
       - name: Retain raw comparisons and failures
         if: always()
         uses: actions/upload-artifact@v7
@@ -92,7 +94,7 @@ jobs:
   publish:
     needs: comparison
     if: github.ref == 'refs/heads/master'
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:

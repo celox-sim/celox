@@ -7,11 +7,12 @@ import test from "node:test";
 import { taxiMetrics } from "./publish-taxi-bench.mjs";
 
 const manifest = JSON.parse(readFileSync(new URL("../benchmarks/taxi/manifest.json", import.meta.url)));
+const pinnedCocotb = readFileSync(new URL("../benchmarks/taxi/requirements.txt", import.meta.url), "utf8").match(/^cocotb==(.+)$/m)[1];
 function fixture() {
-  return { schemaVersion: 1, case: "lfsr64", contract: manifest.contract, status: "passed", body_clock: "cocotb-regression-perf_counter-v1",
+  return { schemaVersion: 1, case: "lfsr64", contract: manifest.contract, status: "passed", body_clock: "cocotb-regression-monotonic-v2",
     taxi_revision: manifest.revision, celox_commit: "commit", seed: manifest.seed,
     expected_tests: 1, requested_samples: 3, host: { architecture: "x86_64" },
-    cocotb_version: "2.0.1", verilator_version: "Verilator 5.052 2026-04-01", celox_binary_sha256: "a".repeat(64),
+    cocotb_version: pinnedCocotb, verilator_version: "Verilator 5.052 2026-04-01", celox_binary_sha256: "a".repeat(64),
     parameters: manifest.cases.lfsr64.parameters,
     source_sha256: Object.fromEntries([...manifest.cases.lfsr64.sources,
       `${manifest.cases.lfsr64.testDirectory}/${manifest.cases.lfsr64.module}.py`].map(p => [p, "b".repeat(64)])),
@@ -40,7 +41,7 @@ test("Taxi metrics keep body, process and compilation separate for both engines"
 
 test("Taxi publication rejects stale, partial or invalid comparisons", () => {
   const mutations = [r => r.status = "failed", r => r.status = "incomplete", r => r.case = "unknown",
-    r => r.taxi_revision = "wrong", r => r.celox_commit = "stale", r => r.contract = "old", r => r.body_clock = "time.time",
+    r => r.taxi_revision = "wrong", r => r.celox_commit = "stale", r => r.contract = "old", r => r.body_clock = "time.time", r => r.body_clock = "cocotb-regression-perf_counter-v1",
     r => r.parameters = {}, r => r.source_sha256 = {}, r => r.configuration.celox = "O3",
     r => r.seed++, r => r.expected_tests++, r => r.requested_samples--, r => r.pairs.pop(),
     r => r.pairs[0].celox.body_seconds = NaN, r => r.pairs[0].celox.wall_seconds = 0,
@@ -48,7 +49,7 @@ test("Taxi publication rejects stale, partial or invalid comparisons", () => {
     r => r.pairs[0].verilator.simulation_ns = { other: 100 },
     r => r.pairs[0].verilator.simulation_ns["tb/frame"]++,
     r => r.compilation_seconds.celox = -1, r => r.compilation_seconds.celox = 1e308, r => r.host.architecture = "aarch64",
-    r => r.celox_binary_sha256 = "", r => r.cocotb_version = "other", r => r.verilator_version = "latest"];
+    r => r.celox_binary_sha256 = "", r => r.cocotb_version = "other", r => r.cocotb_version = "2.0.1", r => r.verilator_version = "latest"];
   for (const mutate of mutations) {
     const report = fixture(); mutate(report);
     assert.throws(() => taxiMetrics(report, "commit"));
@@ -63,6 +64,7 @@ test("Taxi daily compares complete configurations on the same VM and publishes o
   assert.match(workflow, /fail-fast: false/);
   assert.match(workflow, /case: \[lfsr64, phy64, rx16, rx8, rx32\]/);
   assert.match(workflow, /version: "5\.052"/);
+  assert.deepEqual([...workflow.matchAll(/runs-on: (.+)/g)].map(m => m[1]), Array(3).fill("ubuntu-24.04"));
   assert.match(workflow, /needs: comparison\n    if: github.ref == 'refs\/heads\/master'/);
   assert.doesNotMatch(workflow, /continue-on-error|--no-verify/);
   assert.match(workflow, /if: always\(\)[\s\S]+retention-days: 30/);

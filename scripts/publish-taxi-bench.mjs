@@ -11,11 +11,11 @@ const positive = value => typeof value === "number" && Number.isFinite(value) &&
 export function taxiMetrics(report, commit) {
   const spec = manifest.cases[report.case];
   if (!spec || report.schemaVersion !== 1 || report.contract !== manifest.contract ||
-      report.status !== "passed" || report.body_clock !== "cocotb-regression-perf_counter-v1" || report.taxi_revision !== manifest.revision ||
+      report.status !== "passed" || report.body_clock !== "cocotb-regression-monotonic-v2" || report.taxi_revision !== manifest.revision ||
       report.celox_commit !== commit || report.seed !== manifest.seed ||
       report.expected_tests !== spec.tests || report.requested_samples !== manifest.samples ||
       report.pairs?.length !== manifest.samples || report.host?.architecture !== "x86_64" ||
-      report.cocotb_version !== "2.0.1" || !/^Verilator 5\.052\b/.test(report.verilator_version) ||
+      report.cocotb_version !== "2.1.0" || !/^Verilator 5\.052\b/.test(report.verilator_version) ||
       !/^[a-f0-9]{64}$/.test(report.celox_binary_sha256 ?? "")) {
     throw new Error("Incomplete or incompatible Taxi comparison");
   }
