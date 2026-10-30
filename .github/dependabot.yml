@@ -1,0 +1,11 @@
+version: 2
+updates:
+  # Dependabot regenerates actions.lock together with workflow version updates.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: "ci(deps)"
+    labels:
+      - dependencies

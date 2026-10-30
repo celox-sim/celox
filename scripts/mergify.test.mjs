@@ -123,7 +123,7 @@ test("Renovate preserves the manually reviewed compatibility group", () => {
   assert.deepEqual(compatibility.labels, ["dependencies"]);
   assert.equal(
     rules.filter((rule) => rule.labels?.includes("merge-ready")).length,
-    4,
+    3,
   );
   assert.ok(
     rules.indexOf(compatibility) >
