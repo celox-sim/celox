@@ -1,0 +1,1 @@
+Keep the element declaration of array operands so arrays of the same enum stay compatible as arguments, results and defaults (Codex review)
