@@ -80,6 +80,18 @@ pub(super) fn run<B: SimBackend>(
             _ => None,
         })
         .collect();
+    // The reset events `rst.assert` moves, which the generated unit writes.
+    let mut reset_events: Vec<B::Event> = vec![];
+    for statement in sites.iter().flatten() {
+        if let GenericTestbenchStatement::ResetAssert {
+            reset_event: Some(event),
+            ..
+        } = statement
+            && reset_events.iter().all(|known| known.id() != event.id())
+        {
+            reset_events.push(*event);
+        }
+    }
     let marker = m.marker_site.map(|site| site as usize);
     let drain = |sim: &mut Simulator<B>, ctx: &mut DetailedExecContext| {
         let Some(marker) = marker else {
@@ -416,6 +428,29 @@ pub(super) fn run<B: SimBackend>(
                     {
                         events.push((*clock, 1));
                         rising = true;
+                    }
+                }
+                // A reset the unit wrote since the baselines were saved
+                // moves its event. An unknown level has no known edge to
+                // replay: the host detects it against the baselines.
+                for event in &reset_events {
+                    if reset_edges
+                        .iter()
+                        .any(|(known, _)| known.id() == event.id())
+                    {
+                        continue;
+                    }
+                    let Some(&(_, saved)) = baselines.iter().find(|(id, _)| *id == event.id())
+                    else {
+                        continue;
+                    };
+                    let level = |signal| {
+                        let (value, mask) = sim.backend.get_four_state(signal);
+                        (value != BigUint::from(0u8), mask != BigUint::from(0u8))
+                    };
+                    let current = level(sim.backend.resolve_signal(&event.addr()));
+                    if !current.1 && current != level(saved) {
+                        reset_edges.push((*event, u8::from(current.0)));
                     }
                 }
                 events.append(&mut reset_edges);

@@ -437,6 +437,15 @@ fn account_edges(g: &mut Generator<'_>, m: &Meta, overflow: BlockId) {
     g.store(m.control[TB_TICKS], 64, ticks);
 }
 
+/// Store `value` to a one-signal reset and mark the design dirty.
+fn write_reset(g: &mut Generator<'_>, signal: &SemanticSignal<AbsoluteAddr>, value: u8) {
+    let width = signal.width.max(1);
+    let value = g.constant(u64::from(value), width);
+    g.store(signal.address, width, value);
+    let dirty = g.constant(1, 8);
+    g.store(g.slots.dirty, 8, dirty);
+}
+
 fn generate(
     program: &LaidOutProgram,
     tb: &TestbenchProgram<AbsoluteAddr>,
@@ -573,10 +582,42 @@ fn generate(
         branch(&mut g, release, wake_block, released[i]);
         g.b.switch_to_block(wake_block);
         put(&mut g, p[0], 0);
+        let mut statements = vec![];
+        sites(tb.processes().nth(i).unwrap(), &mut statements);
+        // Release the reset a `rst.assert` asserted: its request, plus one.
+        let releases: Vec<_> = kernel
+            .requests
+            .iter()
+            .enumerate()
+            .filter_map(|(index, request)| match request {
+                KernelRequest::Statement(site) => match statements[*site] {
+                    SemanticStatement::ResetAssert {
+                        reset_signal,
+                        deassert_value,
+                        ..
+                    } => Some((index, reset_signal, *deassert_value, g.b.new_block())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         let reset = g.load(p[4], 64);
-        let has_reset = g.equals(reset, 0);
+        let mut cases = vec![SIRSwitchCase {
+            value: 0u64.into(),
+            target: released[i],
+        }];
+        cases.extend(releases.iter().map(|&(index, _, _, target)| SIRSwitchCase {
+            value: (index as u64 + 1).into(),
+            target,
+        }));
         let reset_host = g.b.new_block();
-        branch(&mut g, has_reset, released[i], reset_host);
+        dispatch(&mut g, reset, cases, reset_host);
+        for (_, signal, value, target) in releases {
+            g.b.switch_to_block(target);
+            write_reset(&mut g, signal, value);
+            put(&mut g, p[4], 0);
+            jump(&mut g, released[i]);
+        }
         g.b.switch_to_block(reset_host);
         put(&mut g, m.control[TB_CURRENT], i as u64);
         put(&mut g, m.control[TB_PHASE], 3 + 2 * i as u64);
@@ -633,9 +674,7 @@ fn generate(
             })
             .collect();
         dispatch(&mut g, request_value, cases, overflow);
-        let mut statements = vec![];
-        sites(tb.processes().nth(i).unwrap(), &mut statements);
-        for (request, block) in kernel.requests.iter().zip(requests) {
+        for (request_index, (request, block)) in kernel.requests.iter().zip(requests).enumerate() {
             g.b.switch_to_block(block);
             match request {
                 KernelRequest::Settle { reads } => {
@@ -858,6 +897,46 @@ fn generate(
                             jump(&mut g, save[i]);
                         }
                     }
+                    SemanticStatement::ResetAssert {
+                        reset_signal,
+                        clock_event,
+                        duration,
+                        assert_value,
+                        ..
+                    } => {
+                        let clock = m.events.iter().position(|a| a == clock_event).unwrap();
+                        let count = match duration {
+                            ClockCount::Static(n) => g.constant((*n).max(1), 64),
+                            ClockCount::Dynamic(expr) => {
+                                let native = equals_slot(&mut g, m.control[TB_NATIVE_SETTLE], 1);
+                                let evaluate_block = g.b.new_block();
+                                let host = g.b.new_block();
+                                branch(&mut g, native, evaluate_block, host);
+                                g.b.switch_to_block(host);
+                                host_statement(&mut g, m, i);
+                                g.b.switch_to_block(evaluate_block);
+                                settle_for(&mut g, m, &mut cones, deferred, vec![], true, finish);
+                                let value = evaluate(&mut g, program, slots, expr);
+                                let count = resize(&mut g, value, 64);
+                                let zero = g.equals(count, 0);
+                                let one = g.constant(1, 64);
+                                choose(&mut g, zero, one, count)
+                            }
+                        };
+                        write_reset(&mut g, reset_signal, *assert_value);
+                        g.store(p[1], 64, count);
+                        put(&mut g, p[0], 1);
+                        put(&mut g, p[2], clock as u64);
+                        put(&mut g, p[4], request_index as u64 + 1);
+                        let enabled = equals_slot(&mut g, m.clocks[clock][3], 0);
+                        let activate = g.b.new_block();
+                        branch(&mut g, enabled, activate, save[i]);
+                        g.b.switch_to_block(activate);
+                        put(&mut g, m.clocks[clock][3], 1);
+                        let now = g.load(m.control[TB_NOW], 64);
+                        g.store(m.clocks[clock][0], 64, now);
+                        jump(&mut g, save[i]);
+                    }
                     _ => host_statement(&mut g, m, i),
                 },
                 _ => host_statement(&mut g, m, i),
@@ -933,6 +1012,10 @@ fn generate(
         // follows it, and while a settle is pending its baseline was saved
         // before the copy caught up.
         let events = &program.design.events;
+        let offsets = &program.layout().offsets;
+        // The resets the TB wrote since the baselines: their writes become
+        // edges of their clock slots, applied with the clocks due now.
+        let mut resets = vec![];
         for &(source, saved) in m
             .baselines
             .iter()
@@ -940,6 +1023,32 @@ fn generate(
         {
             let before = g.signal_level(saved);
             let current = g.signal_level(source);
+            let reset = (!m
+                .events
+                .iter()
+                .any(|e| offsets.get(e) == offsets.get(&source)))
+            .then(|| {
+                schema
+                    .clocks
+                    .iter()
+                    .position(|a| offsets.get(a) == offsets.get(&source))
+            })
+            .flatten();
+            if let Some(bit) = reset {
+                let moved = g.binary(1, before, BinaryOp::Ne, current);
+                // A reset that moves to or from an unknown level keeps its
+                // edges in the host: a clock slot has known levels only.
+                let (_, unknown_before) = g.level_planes(before);
+                let (current, unknown_current) = g.level_planes(current);
+                if let (Some(a), Some(b)) = (unknown_before, unknown_current) {
+                    let unknown = g.binary(1, a, BinaryOp::Or, b);
+                    let unknown = g.binary(1, unknown, BinaryOp::And, moved);
+                    let known = g.equals(unknown, 0);
+                    allowed = g.binary(1, allowed, BinaryOp::And, known);
+                }
+                resets.push((source, saved, moved, current, bit));
+                continue;
+            }
             let same = g.binary(1, before, BinaryOp::Eq, current);
             allowed = g.binary(1, allowed, BinaryOp::And, same);
         }
@@ -977,12 +1086,26 @@ fn generate(
             let two = g.constant(2, 64);
             g.store_at(slots.clock_period, bit * 64, 64, two);
         }
+        for &(_, _, moved, current, bit) in &resets {
+            let set = g.bit(moved, bit);
+            armed = g.binary(64, armed, BinaryOp::Or, set);
+            let rises = g.binary(1, moved, BinaryOp::And, current);
+            let set = g.bit(rises, bit);
+            values = g.binary(64, values, BinaryOp::Or, set);
+            g.store_at(slots.clock_next, bit * 64, 64, now);
+            let two = g.constant(2, 64);
+            g.store_at(slots.clock_period, bit * 64, 64, two);
+        }
         // Without an edge due, the moved events were judged above: the
         // time step has nothing more to evaluate.
         let none = g.equals(armed, 0);
         let invoke = g.b.new_block();
         branch(&mut g, none, publish, invoke);
         g.b.switch_to_block(invoke);
+        // The slot sees each moved reset at its level before the write.
+        for &(source, saved, ..) in &resets {
+            copy(&mut g, program, saved, source);
+        }
         g.store(slots.clock_armed, 64, armed);
         g.store(slots.clock_value, 64, values);
         g.store(slots.limit, 64, now);

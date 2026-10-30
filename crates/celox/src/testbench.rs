@@ -2289,6 +2289,83 @@ mod tests {
     }
 
     #[test]
+    fn compiled_tb_resets_and_their_edges_stay_in_the_generated_scheduler() {
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset, q: output logic<8>) {
+                always_ff { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                inst rst: $tb::reset_gen (clk);
+                var q: logic<8>;
+                var total: logic<16>;
+                inst dut: Counter(clk, rst, q);
+                initial {
+                    total = 0;
+                    for round in 0..4 {
+                        rst.assert(2);
+                        $assert(q == 0);
+                        clk.next(5);
+                        $assert(q == 5);
+                        total += q as 16;
+                    }
+                    // A reset the TB assigns moves its event too.
+                    rst = 0;
+                    clk.next(1);
+                    $assert(q == 0);
+                    rst = 1;
+                    clk.next(3);
+                    total += q as 16;
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "total"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.1, vec![3, 23]);
+        // The resets, their releases and their edges run in generated code.
+        assert_eq!(compiled.2.1, 0, "host edge batches: {:?}", compiled.2);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_resets_with_derived_resets_match_the_reference() {
+        // The design derives its own reset from the TB's: those writes stay
+        // in the host, without costing every slot of the run.
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset, run: input logic,
+                           q: output logic<8>) {
+                let core_rst: reset = rst & run;
+                always_ff (clk, core_rst) { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                inst rst: $tb::reset_gen (clk);
+                var run: logic;
+                var q: logic<8>;
+                inst dut: Counter(clk, rst, run, q);
+                initial {
+                    run = 1;
+                    rst.assert(2);
+                    clk.next(5);
+                    $assert(q == 5);
+                    rst.assert(1);
+                    $assert(q == 0);
+                    clk.next(3);
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
     fn compiled_tb_failures_keep_their_messages_and_times() {
         // A second process reports physical event times instead of ticks.
         for (extra, expected) in [
@@ -2586,6 +2663,80 @@ mod tests {
         }
     }
 
+    /// A reset that `rst.assert` moves and a TB write then makes unknown
+    /// keeps its unknown level when its edges fall back to the host. The
+    /// move from 1 is a negedge (IEEE 1800-2023 9.4.2), and the flip-flop's
+    /// unknown reset condition is false (12.4): it counts once more.
+    fn unknown_tb_reset_levels<B: SimBackend>(
+        build: impl Fn(crate::SchedulerMode) -> Simulator<B>,
+    ) {
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = build(mode);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let [rst, count, c0] =
+                ["rst", "count", "c0"].map(|name| sim.get_four_state(sim.signal(name)));
+            assert_ne!(rst.1, 0u8.into(), "{mode:?}: rst stays unknown: {rst:?}");
+            assert_eq!(c0, (4u8.into(), 0u8.into()), "{mode:?}");
+            // The reference scheduler does not run the negedge of a TB
+            // write to an unknown level.
+            if mode == crate::SchedulerMode::Compiled {
+                assert_eq!(count, (9u8.into(), 0u8.into()), "{mode:?}");
+            }
+        }
+    }
+
+    const UNKNOWN_TB_RESET: &str = r#"
+        module Counter(clk: input clock, rst: input reset, count: output logic<8>) {
+            always_ff (clk, rst) { if_reset { count = 0; } else { count += 1; } }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen (clk);
+            var unknown: logic;
+            var count: logic<8>;
+            var c0: logic<8>;
+            inst dut: Counter(clk, rst, count);
+            initial {
+                rst.assert(2);
+                clk.next(4);
+                c0 = count;
+                rst = unknown;
+                clk.next(4);
+                $finish();
+            }
+        }
+    "#;
+
+    #[test]
+    fn unknown_tb_reset_levels_survive_host_edges_on_the_interpreter() {
+        unknown_tb_reset_levels(|mode| {
+            Simulator::builder(UNKNOWN_TB_RESET, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn unknown_tb_reset_levels_survive_host_edges_natively() {
+        unknown_tb_reset_levels(|mode| {
+            Simulator::builder(UNKNOWN_TB_RESET, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
     /// A four-state design's TB edges run in the generated scheduler, as
     /// the edge engine runs them: a reset, a clock enable and so a gated
     /// clock that the TB sets to x or z, and flip-flops that start at x.
@@ -2613,9 +2764,10 @@ mod tests {
             results.push((values, counters.1));
         }
         assert_eq!(results[0].0, results[1].0);
-        // Only the edges after the TB's five writes of the reset, which
-        // move an event, go to the host; the others stay in the unit.
-        assert_eq!(results[1].1, 5, "host edge batches");
+        // A TB write moves the reset in the unit unless the reset moves to
+        // or from x or z, as its first write from its initial x does; that
+        // and the first step go to the host.
+        assert_eq!(results[1].1, 2, "host edge batches");
         let (value, mask) = &results[1].0[2];
         assert!(*mask != 0u8.into(), "count starts at x: {value}/{mask}");
     }
