@@ -2938,19 +2938,12 @@ fn rejects_unpacked_arrays_of_nonequivalent_element_types() {
     "#;
     let error = analyze_source(source, Path::new("nonequivalent_unpacked.sv"))
         .expect_err("a signed row is not equivalent to an unsigned one");
-    let row = |signed| typecheck::UnpackedArrayType {
-        dims: vec![2],
-        element_width: 8,
-        signed,
-        four_state: true,
-        element: None,
-    };
     assert_eq!(
         error,
         AnalyzerError::IncompatibleUnpackedArray {
             context: "assignment pattern item".to_string(),
-            actual: Box::new(row(true)),
-            target: Box::new(row(false)),
+            actual: "logic signed [7:0] [2]".to_string(),
+            target: "logic [7:0] [2]".to_string(),
         }
     );
 }

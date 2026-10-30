@@ -40,7 +40,7 @@ impl TyTable {
                 };
                 !scalar_enum(&a)
                     && !scalar_enum(&b)
-                    && bits(&a) == bits(&b)
+                    && a.bits() == b.bits()
                     && a.four_state == b.four_state
                     && a.signed == b.signed
             }
@@ -56,7 +56,7 @@ impl TyTable {
             ) => {
                 let kinds = match (a_kind, b_kind) {
                     // Rule d: bounds may differ.
-                    (ArrayKind::Fixed(a), ArrayKind::Fixed(b)) => size(a) == size(b),
+                    (ArrayKind::Fixed(a), ArrayKind::Fixed(b)) => a.size() == b.size(),
                     // Rule e: the same kind and equivalent index types.
                     (ArrayKind::Dynamic, ArrayKind::Dynamic)
                     | (ArrayKind::Queue { .. }, ArrayKind::Queue { .. }) => true,
@@ -100,15 +100,15 @@ impl TyTable {
                 return Err(Mismatch::Associative);
             }
             (ArrayKind::Fixed(source), ArrayKind::Fixed(target)) => {
-                if size(*source) != size(*target) {
+                if source.size() != target.size() {
                     return Err(Mismatch::Size {
-                        actual: size(*source),
-                        target: size(*target),
+                        actual: source.size(),
+                        target: target.size(),
                     });
                 }
                 Assignable::Always
             }
-            (_, ArrayKind::Fixed(target)) => Assignable::WhenSized(size(*target)),
+            (_, ArrayKind::Fixed(target)) => Assignable::WhenSized(target.size()),
             _ => Assignable::Always,
         };
         if !self.equivalent(source_element, target_element) {
@@ -116,14 +116,4 @@ impl TyTable {
         }
         Ok(assignable)
     }
-}
-
-/// How many elements or bits a dimension has.
-fn size(range: Range) -> u128 {
-    range.left.abs_diff(range.right) + 1
-}
-
-/// How many bits a packed type has.
-fn bits(packed: &Packed) -> u128 {
-    packed.dims.iter().map(|&range| size(range)).product()
 }

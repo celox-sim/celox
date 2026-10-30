@@ -76,21 +76,29 @@ pub(super) fn unpacked_array_type(
     })
 }
 
-/// Whether a fixed-size unpacked array of `actual` may be assigned to one of
-/// `target` (IEEE 1800-2023 7.6): their elements are equivalent types and
-/// they have as many elements. Shapes that have no semantic type keep the
+/// How a fixed-size unpacked array of `actual` and one of `target` are
+/// spelled if the first may not be assigned to the second (IEEE 1800-2023
+/// 7.6): their elements are not equivalent types or they have another
+/// number of elements. Shapes that have no semantic type keep the
 /// comparison of their element width, states and signing.
-pub(super) fn compatible(
+pub(super) fn incompatible(
     state: &AnalysisState,
     actual: &VariableDimensions,
     target: &VariableDimensions,
     dims: &PackedDimensions,
-) -> bool {
+) -> Option<(String, String)> {
+    let actual_type = unpacked_array_type(state, actual, dims)?;
+    let target_type = unpacked_array_type(state, target, dims)?;
     let table = &state.types;
     let of_shape = |shape| semantic_types::of_shape(table, state, shape, &dims.const_env);
     match (of_shape(actual), of_shape(target)) {
-        (Some(actual), Some(target)) => table.assignable_array(actual, target).is_ok(),
-        _ => unpacked_array_type(state, actual, dims) == unpacked_array_type(state, target, dims),
+        (Some(actual), Some(target)) => table
+            .assignable_array(actual, target)
+            .is_err()
+            .then(|| (table.spell(actual), table.spell(target))),
+        _ => {
+            (actual_type != target_type).then(|| (actual_type.to_string(), target_type.to_string()))
+        }
     }
 }
 
@@ -234,21 +242,14 @@ fn check_assignment(
         check_assignment(tree, *then_expression, target, context, dims)?;
         return check_assignment(tree, *else_expression, target, context, dims);
     }
-    let Some(target_type) = unpacked_array_type(&tree.state, target, dims) else {
+    let Some((actual, target)) = native_unpacked_shape(id, tree, dims)
+        .and_then(|actual| incompatible(&tree.state, &actual, target, dims))
+    else {
         return Ok(());
     };
-    let Some(actual) = native_unpacked_shape(id, tree, dims) else {
-        return Ok(());
-    };
-    let Some(actual_type) = unpacked_array_type(&tree.state, &actual, dims) else {
-        return Ok(());
-    };
-    if compatible(&tree.state, &actual, target, dims) {
-        return Ok(());
-    }
     Err(AnalyzerError::IncompatibleUnpackedArray {
         context: context(),
-        actual: Box::new(actual_type),
-        target: Box::new(target_type),
+        actual,
+        target,
     })
 }
