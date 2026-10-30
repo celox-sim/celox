@@ -442,6 +442,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::parameter_literals_hide_module_constants at 3545:26: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::parameter_literals_hide_module_constants",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "class::randomization_cyclic_controls at 1564:46: assert_eq errors: expected 0x0, got 0x1",
       "expectation": "Simulation",
       "name": "class::randomization_cyclic_controls",
@@ -568,6 +579,17 @@
       "name": "class::randomize_without_rand_members",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::scoped_typedef_handles at 3467:46: assert_eq names: expected 0xf, got 0xa",
+      "expectation": "Simulation",
+      "name": "class::scoped_typedef_handles",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

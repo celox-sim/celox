@@ -1112,18 +1112,27 @@ fn resolve_scope_imports(
         // A qualified name names a declaration of the package, or one it
         // exports: `q::x` then denotes the declaration `x` denotes in `q`
         // (IEEE 1800-2023 26.6).
-        // `C::x` names a member of a class `C` that an import makes visible
-        // (IEEE 1800-2023 8.23, 26.3).
+        // `C::x` names a member of a class `C` that an import of the scope,
+        // or of its compilation unit before it, makes visible (IEEE
+        // 1800-2023 8.23, 26.3).
+        let unit_imports = unit
+            .iter()
+            .flat_map(|unit| &unit.visibility.imports)
+            .filter(|(offset, ..)| *offset < start)
+            .map(|(_, package, item)| (package, item.as_ref()));
         if packages.get(package_name).is_none()
-            && (imports
+            && imports
                 .explicit
                 .iter()
-                .any(|(_, item)| item == package_name)
-                || imports.wildcard.iter().any(|imported| {
-                    packages
+                .map(|(package, item)| (package, Some(item)))
+                .chain(imports.wildcard.iter().map(|package| (package, None)))
+                .chain(unit_imports)
+                .any(|(imported, item)| match item {
+                    Some(item) => item == package_name,
+                    None => packages
                         .get(imported)
-                        .is_some_and(|imported| imported.provides(package_name).is_some())
-                }))
+                        .is_some_and(|imported| imported.provides(package_name).is_some()),
+                })
         {
             continue;
         }

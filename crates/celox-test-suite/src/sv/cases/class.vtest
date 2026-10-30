@@ -3385,3 +3385,161 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 55522))
+
+; Handles declared with a class-scoped typedef of a registry specialization,
+; as `uvm_object_utils` declares `type_id`, call its methods: static
+; `C::type_id::create()`, virtual ones through a base handle, and a method
+; whose local has the registry's own class-scoped typedef (8.23, 8.25.1).
+(case scoped_typedef_handles
+ (source "scoped_typedef_handles.sv" #"
+package p;
+ virtual class Wrapper;
+  pure virtual function string get_type_name();
+ endclass
+ typedef class Common;
+ class Registry #(type T = int, string Tname = "<unknown>") extends Wrapper;
+  typedef Registry #(T, Tname) this_type;
+  typedef Common #(this_type, T, Tname) common_type;
+  static this_type me;
+  static function this_type get();
+   if (me == null) me = new;
+   return me;
+  endfunction
+  static function T create();
+   T object = new;
+   return object;
+  endfunction
+  virtual function string get_type_name();
+   common_type common = common_type::get();
+   return common.name();
+  endfunction
+ endclass
+ class Common #(type Reg = int, type T = int, string Tname = "<unknown>");
+  static Common #(Reg, T, Tname) inst;
+  static function Common #(Reg, T, Tname) get();
+   if (inst == null) inst = new;
+   return inst;
+  endfunction
+  function string name();
+   return Tname;
+  endfunction
+ endclass
+ class PkgComp;
+  int value = 3;
+  typedef Registry #(PkgComp, "pkg") type_id;
+ endclass
+endpackage
+import p::*;
+class UnitComp;
+ int value = 5;
+ typedef Registry #(UnitComp, "unit") type_id;
+endclass
+module Top(output int sum, output int names);
+ class LocalRegistry #(type T = int, string Tname = "<unknown>");
+  typedef LocalRegistry #(T, Tname) this_type;
+  static function T create();
+   T object = new;
+   return object;
+  endfunction
+  virtual function string get_type_name();
+   this_type self = this;
+   return Tname;
+  endfunction
+ endclass
+ class LocalComp;
+  int value = 7;
+  typedef LocalRegistry #(LocalComp, "local") type_id;
+ endclass
+ initial begin
+  automatic UnitComp::type_id u = new;
+  automatic PkgComp::type_id k = new;
+  automatic LocalComp::type_id l = new;
+  automatic Wrapper w = k;
+  automatic UnitComp uc = UnitComp::type_id::create();
+  automatic PkgComp pc = PkgComp::type_id::create();
+  automatic LocalComp lc = LocalComp::type_id::create();
+  sum = uc.value + 10 * pc.value + 100 * lc.value;
+  names = (u.get_type_name() == "unit") + 2 * (w.get_type_name() == "pkg")
+   + 4 * (l.get_type_name() == "local")
+   + 8 * (UnitComp::type_id::get() == UnitComp::type_id::get());
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 735) (assert_eq names 15))
+
+; A string class parameter wider than 128 bits is passed on by name to the
+; specializations its typedefs, property, return and local types name (8.25).
+(case parameter_strings_wider_than_a_constant
+ (source "parameter_strings_wider_than_a_constant.sv" #"
+package p;
+ class Named #(string S = "x");
+  typedef Named #(S) this_type;
+  static Named #(S) inst;
+  static function Named #(S) get();
+   if (inst == null) inst = new;
+   return inst;
+  endfunction
+  function string name();
+   this_type self = this;
+   Named #(S) again = self;
+   return S;
+  endfunction
+ endclass
+ class Holder #(string S = "x");
+  typedef Named #(S) named_t;
+  function string name();
+   named_t named = named_t::get();
+   return named.name();
+  endfunction
+ endclass
+endpackage
+module Top(output int ok, output int len);
+ import p::*;
+ Holder #("a_name_longer_than_sixteen") holder = new;
+ initial begin
+  ok = holder.name() == "a_name_longer_than_sixteen";
+  len = holder.name().len();
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq ok 1) (assert_eq len 26))
+
+; `new` initializes subroutine locals whose class a package scope or a typedef
+; names (8.7).
+(case new_initializers_of_scoped_and_alias_types
+ (source "new_initializers_of_scoped_and_alias_types.sv" #"
+package items;
+ class Item;
+  int value = 4;
+ endclass
+ typedef Item item_t;
+endpackage
+typedef items::Item unit_item_t;
+module Top(output int sum);
+ function automatic int total();
+  items::Item a = new;
+  items::item_t b = new;
+  unit_item_t c = new;
+  a.value += 1;
+  b.value += 2;
+  return a.value + 10 * b.value + 100 * c.value;
+ endfunction
+ initial sum = total();
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 465))
+
+; A class parameter without an integral value hides the module's constant of
+; its name, and the class passes its value on by name (8.25).
+(case parameter_literals_hide_module_constants
+ (source "parameter_literals_hide_module_constants.sv" #"
+module Top(output int ok);
+ localparam string S = "module";
+ class Name #(string S = "x"); function string s(); return S; endfunction endclass
+ class Shadow #(string S = "x");
+  function string s();
+   Name #(S) name = new;
+   return name.s();
+  endfunction
+ endclass
+ Shadow #("a_name_longer_than_sixteen") shadow = new;
+ initial ok = shadow.s() == "a_name_longer_than_sixteen";
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq ok 1))
