@@ -310,6 +310,7 @@ impl Packages {
             // of two sources may share a name.
             state.classes.borrow_mut().clear();
             state.class_specializations.borrow_mut().clear();
+            state.class_specialization_names.borrow_mut().clear();
             state.class_declaration_scopes.borrow_mut().clear();
             state.class_declarations_repeated.borrow_mut().clear();
             let scope = analyze_package(UNIT, tree, &packages, &state);

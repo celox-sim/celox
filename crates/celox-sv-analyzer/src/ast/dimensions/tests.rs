@@ -739,6 +739,55 @@ fn discovery_settles_a_scope_once_for_its_queries() {
 }
 
 #[test]
+fn class_references_prepare_each_specialization_once() {
+    // Classes naming the same specializations, which each discovery pass
+    // collects again, copy the scope tables to prepare each specialization
+    // once, however many references there are.
+    let preparations = |references: usize| {
+        let properties = (0..references)
+            .map(|i| format!("C#(8) a{i}; C#(4) b{i};"))
+            .collect::<String>();
+        let source = format!(
+            "package p;
+                class C #(int N = 2); bit [N-1:0] v; endclass
+                class D; {properties} endclass
+                function int f(); bit [3:0] w; return $bits(w); endfunction
+            endpackage
+            module Top; endmodule"
+        );
+        SPECIALIZATION_PREPARATIONS.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("class-preparations.sv"))
+            .expect("the package analyzes");
+        SPECIALIZATION_PREPARATIONS.with(|count| count.get())
+    };
+    assert_eq!(preparations(2), preparations(16));
+}
+
+#[test]
+fn class_scopes_copy_the_scope_tables_once_per_binding() {
+    // The scopes of the specializations whose signatures a binding makes
+    // share one copy of the tables around them.
+    let copies = |specializations: usize| {
+        let properties = (0..specializations)
+            .map(|i| format!("C#({}) c{i};", i + 1))
+            .collect::<String>();
+        let source = format!(
+            "package p;
+                typedef bit [7:0] byte_t;
+                class C #(int N = 2); function bit [N-1:0] get(byte_t x); return 0; endfunction endclass
+                class D; {properties} endclass
+                function int f(); bit [3:0] w; return $bits(w); endfunction
+            endpackage
+            module Top; endmodule"
+        );
+        CLASS_SCOPE_COPIES.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("class-scopes.sv")).expect("the package analyzes");
+        CLASS_SCOPE_COPIES.with(|count| count.get())
+    };
+    assert_eq!(copies(2), copies(16));
+}
+
+#[test]
 fn class_references_of_one_spelling_specialize_once() {
     let specializations = |references: usize| {
         let properties = (0..references)

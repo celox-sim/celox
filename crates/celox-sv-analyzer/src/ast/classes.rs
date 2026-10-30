@@ -713,6 +713,25 @@ pub(super) fn class(
     if let Some(class) = tree.state.classes.borrow().get(name) {
         return Ok(class.clone());
     }
+    shared_class(
+        tree,
+        name,
+        &SharedMap::from(env.clone()),
+        &SharedMap::from(aliases.clone()),
+    )
+}
+
+/// [`class`] in shared tables, which the scope of the class and of its
+/// bases share instead of copying.
+pub(super) fn shared_class(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    env: &SharedMap<i128>,
+    aliases: &SharedMap<Type>,
+) -> Converted<Rc<Class>> {
+    if let Some(class) = tree.state.classes.borrow().get(name) {
+        return Ok(class.clone());
+    }
     // A class of another scope is laid out in its own scope, where the
     // names it uses are declared.
     let declaration = declaration(tree, name).filter(|declaration| {
@@ -728,8 +747,14 @@ pub(super) fn class(
             .insert(name.to_owned(), class.clone());
         return Ok(class);
     };
-    let (env, aliases) = specializations::scope(tree, name, env, aliases);
-    let (env, aliases) = (&env, &aliases);
+    let (scope_env, scope_aliases) = specializations::shared_scope(tree, name, env, aliases);
+    // The types of the class are bound in one context of its scope.
+    let context = PackedDimensions {
+        const_env: scope_env.clone(),
+        type_aliases: scope_aliases.clone(),
+        ..PackedDimensions::default()
+    };
+    let (env, aliases) = (&*scope_env, &*scope_aliases);
     let native = tree.declarations();
     // The specialization of an interface class named the interface classes
     // it extends where its header is, as a class names its base below.
@@ -753,7 +778,7 @@ pub(super) fn class(
             .collect::<Converted<Vec<_>>>()?,
     };
     if declaration.interface {
-        return interface_class(tree, name, declaration, interfaces, env, aliases);
+        return interface_class(tree, name, declaration, interfaces, env, &context);
     }
     let base = match &declaration.base {
         None => None,
@@ -764,11 +789,11 @@ pub(super) fn class(
                 .and_then(|specialization| specialization.bases.first().cloned());
             let ty = match recorded {
                 Some(ty) => ty,
-                None => type_binding::procedural_type(base.data_type, native, tree, env, aliases)?
+                None => type_binding::binding::bind_in(base.data_type, native, tree, &context)?
                     .and_then(|ty| ty.class().map(str::to_owned))
                     .ok_or_else(|| unsupported("base class type"))?,
             };
-            Some(class(tree, &ty, env, aliases)?)
+            Some(shared_class(tree, &ty, &scope_env, &scope_aliases)?)
         }
     };
     let mut properties = base
@@ -794,21 +819,11 @@ pub(super) fn class(
         {
             return Err(unsupported("static random class property"));
         }
-        let ty = type_binding::procedural_type(
-            property.declaration.data_type,
-            native,
-            tree,
-            env,
-            aliases,
-        )?
-        .ok_or_else(|| unsupported("class property type"))?;
+        let ty =
+            type_binding::binding::bind_in(property.declaration.data_type, native, tree, &context)?
+                .ok_or_else(|| unsupported("class property type"))?;
         for variable in &property.declaration.variables {
-            let ty = containers::with_dimensions(
-                ty.clone(),
-                &variable.dimensions,
-                tree,
-                &PackedDimensions::new(HashMap::default(), env, aliases),
-            )?;
+            let ty = containers::with_dimensions(ty.clone(), &variable.dimensions, tree, &context)?;
             if !ty.unpacked_ranges.is_empty() {
                 return Err(unsupported("class property with unpacked dimensions"));
             }
@@ -933,7 +948,7 @@ pub(super) fn class(
             method.subroutine
         };
         methods.retain(|known| known.name != method_name);
-        let (formals, result) = signature(tree, native_id, env, aliases);
+        let (formals, result) = signature(tree, native_id, &context);
         methods.push(Method {
             name: method_name,
             owner: name.to_owned(),
@@ -1078,8 +1093,9 @@ fn interface_class(
     declaration: &celox_sv_syntax::ClassDeclaration,
     interfaces: Vec<String>,
     env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    context: &PackedDimensions,
 ) -> Converted<Rc<Class>> {
+    let aliases = &*context.type_aliases;
     let native = tree.declarations();
     // The parameters and typedefs it declares hide inherited ones; those it
     // inherits from one interface class in several ways are one (8.26.6.3).
@@ -1121,15 +1137,11 @@ fn interface_class(
         // A method whose types cannot be resolved, such as one using a
         // type parameter or a typedef of the interface class, leaves the
         // interface class without a layout; it is lowered only when used.
-        type_binding::subroutine_formals(
-            subroutine,
-            tree,
-            &PackedDimensions::new(HashMap::default(), env, aliases),
-        )?;
-        return_type(tree, method.subroutine, env, aliases)?;
+        type_binding::subroutine_formals(subroutine, tree, context)?;
+        return_type(tree, method.subroutine, context)?;
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
         methods.retain(|known| known.name != method_name);
-        let (formals, result) = signature(tree, method.subroutine, env, aliases);
+        let (formals, result) = signature(tree, method.subroutine, context);
         methods.push(Method {
             name: method_name,
             owner: name.to_owned(),
@@ -1191,8 +1203,7 @@ fn own_declarations(
 fn signature(
     tree: &AnalysisContext<'_>,
     id: celox_sv_syntax::SubroutineId,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    context: &PackedDimensions,
 ) -> (Vec<Option<String>>, Option<Option<Type>>) {
     let formals = tree
         .declarations()
@@ -1206,9 +1217,9 @@ fn signature(
                 .map(|name| instances::normalize_identifier(&name.spelling))
         })
         .collect();
-    let result = return_type(tree, id, env, aliases)
+    let result = return_type(tree, id, context)
         .ok()
-        .map(|ty| ty.and_then(|ty| type_parameters::resolve(&tree.state, ty, env)));
+        .map(|ty| ty.and_then(|ty| type_parameters::resolve(&tree.state, ty, &context.const_env)));
     (formals, result)
 }
 
@@ -1216,12 +1227,11 @@ fn signature(
 fn return_type(
     tree: &AnalysisContext<'_>,
     id: celox_sv_syntax::SubroutineId,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
     let native = tree.declarations();
     match native.subroutine(id).return_type {
-        Some(ty) => type_binding::procedural_type(ty, native, tree, env, aliases),
+        Some(ty) => type_binding::binding::bind_in(ty, native, tree, context),
         None => Ok(None),
     }
 }

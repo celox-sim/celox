@@ -565,6 +565,10 @@ thread_local! {
     static SYNTAX_TYPE_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_TYPE_SCAN_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static CLASS_SIGNATURE_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Preparations of a class specialization that copy the scope tables.
+    pub(in crate::ast) static SPECIALIZATION_PREPARATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Copies of the scope tables that the scopes of classes are made in.
+    pub(in crate::ast) static CLASS_SCOPE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Scope discoveries that queries settle.
     pub(super) static SCOPE_SETTLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Specializations made for the references of class scopes.

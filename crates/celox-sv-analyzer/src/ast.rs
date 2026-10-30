@@ -42,7 +42,11 @@ pub(super) struct AnalysisState {
     /// The constants and types of the scope that declares each class, which
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
     class_declaration_scopes:
-        std::cell::RefCell<HashMap<String, (HashMap<String, i128>, HashMap<String, Type>)>>,
+        std::cell::RefCell<HashMap<String, (SharedMap<i128>, SharedMap<Type>)>>,
+    /// The specializations that class references have named, by class
+    /// declaration (see [`classes::specializations`]).
+    class_specialization_names:
+        std::cell::RefCell<HashMap<String, Vec<classes::specializations::Named>>>,
     /// The classes declared in a generate block that elaboration repeats,
     /// which would be a class of their own in each repetition (27.4).
     class_declarations_repeated: std::cell::RefCell<HashSet<String>>,
@@ -747,6 +751,11 @@ impl Module {
             }
             syntax_tree.state.classes.borrow_mut().clear();
             syntax_tree.state.class_specializations.borrow_mut().clear();
+            syntax_tree
+                .state
+                .class_specialization_names
+                .borrow_mut()
+                .clear();
             syntax_tree.state.foreign_error.borrow_mut().take();
             syntax_tree.state.foreign_names.borrow_mut().clear();
         }

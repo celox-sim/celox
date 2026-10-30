@@ -493,7 +493,8 @@ pub(in crate::ast) fn inline_subroutines(
             if name == inline.class.name {
                 continue;
             }
-            let Ok(class) = classes::class(tree, &name, &dims.const_env, &dims.type_aliases) else {
+            let Ok(class) = classes::shared_class(tree, &name, &dims.const_env, &dims.type_aliases)
+            else {
                 continue;
             };
             if !class.is_abstract
