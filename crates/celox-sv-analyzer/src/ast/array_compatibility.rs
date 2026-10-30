@@ -76,30 +76,38 @@ pub(super) fn unpacked_array_type(
     })
 }
 
-/// How a fixed-size unpacked array of `actual` and one of `target` are
+/// How fixed-size unpacked arrays of types `actual` and `target` are
 /// spelled if the first may not be assigned to the second (IEEE 1800-2023
 /// 7.6): their elements are not equivalent types or they have another
-/// number of elements. Shapes that have no semantic type keep the
-/// comparison of their element width, states and signing.
+/// number of elements.
+fn incompatible_types(
+    table: &semantic_types::TyTable,
+    actual: semantic_types::TyId,
+    target: semantic_types::TyId,
+) -> Option<(String, String)> {
+    let fixed = |id| {
+        matches!(
+            table.data(id),
+            semantic_types::TyData::Array {
+                kind: semantic_types::ArrayKind::Fixed(_),
+                ..
+            }
+        )
+    };
+    (fixed(actual) && fixed(target) && table.assignable_array(actual, target).is_err())
+        .then(|| (table.spell(actual), table.spell(target)))
+}
+
+/// How fixed-size unpacked arrays of `actual` and `target` are spelled if
+/// the first may not be assigned to the second (see [`incompatible_types`]).
 pub(super) fn incompatible(
     state: &AnalysisState,
     actual: &VariableDimensions,
     target: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Option<(String, String)> {
-    let actual_type = unpacked_array_type(state, actual, dims)?;
-    let target_type = unpacked_array_type(state, target, dims)?;
-    let table = &state.types;
-    let of_shape = |shape| semantic_types::of_shape(table, state, shape, &dims.const_env);
-    match (of_shape(actual), of_shape(target)) {
-        (Some(actual), Some(target)) => table
-            .assignable_array(actual, target)
-            .is_err()
-            .then(|| (table.spell(actual), table.spell(target))),
-        _ => {
-            (actual_type != target_type).then(|| (actual_type.to_string(), target_type.to_string()))
-        }
-    }
+    let of_shape = |shape| semantic_types::of_shape(&state.types, state, shape, &dims.const_env);
+    incompatible_types(&state.types, of_shape(actual)?, of_shape(target)?)
 }
 
 /// The shape of a variable `name` after `indices` index selects, when that
@@ -123,15 +131,16 @@ pub(super) fn selected_unpacked_shape(
     })
 }
 
-/// The shape of the unpacked array an expression names: a variable, one of
-/// its subarrays selected by indices, or a slice of either with a constant
-/// element count. Other expressions (member selects, calls, concatenations)
-/// are not resolved.
-pub(super) fn native_unpacked_shape(
+/// The variable an expression selects from, as the dotted path of its
+/// name, with how many index selects it makes and the element count of a
+/// slice it ends with: a variable, one of its subarrays selected by
+/// indices, or a slice of either with a constant element count. Other
+/// expressions (member selects, calls, concatenations) are not resolved.
+fn native_selection(
     mut id: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
-) -> Option<VariableDimensions> {
+) -> Option<(String, usize, Option<u128>)> {
     use celox_sv_syntax::{DimensionKind, ExprKind};
     let native = tree.declarations();
     let constant = |id| {
@@ -168,28 +177,72 @@ pub(super) fn native_unpacked_shape(
                 outermost = false;
                 id = *expression;
             }
+            // A hierarchical name is known by its dotted path.
             ExprKind::Name(_) | ExprKind::Member { .. } => {
-                // A hierarchical name is known by its dotted path.
-                let path = dotted_path(id, native)?;
-                let mut shape = selected_unpacked_shape(&path, indices, dims)?;
-                if let Some(count) = slice {
-                    let count = ConstExpr::Literal(count.to_string());
-                    shape.unpacked[0] = UnpackedDimension {
-                        left: ConstExpr::Literal("0".into()),
-                        right: ConstExpr::Binary {
-                            left: Box::new(count.clone()),
-                            op: BinaryOp::Sub,
-                            right: Box::new(ConstExpr::Literal("1".into())),
-                        },
-                        width: count,
-                    };
-                }
-                return Some(shape);
+                return Some((dotted_path(id, native)?, indices, slice));
             }
             _ => return None,
         }
     }
 }
+
+/// The shape of the unpacked array an expression names (see
+/// [`native_selection`]).
+pub(super) fn native_unpacked_shape(
+    id: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Option<VariableDimensions> {
+    let (path, indices, slice) = native_selection(id, tree, dims)?;
+    let mut shape = selected_unpacked_shape(&path, indices, dims)?;
+    if let Some(count) = slice {
+        let count = ConstExpr::Literal(count.to_string());
+        shape.unpacked[0] = UnpackedDimension {
+            left: ConstExpr::Literal("0".into()),
+            right: ConstExpr::Binary {
+                left: Box::new(count.clone()),
+                op: BinaryOp::Sub,
+                right: Box::new(ConstExpr::Literal("1".into())),
+            },
+            width: count,
+        };
+    }
+    Some(shape)
+}
+
+/// The type of the unpacked array an expression names (see
+/// [`native_selection`]): each index select takes an element of the array,
+/// and a slice is a fixed-size array of its element count (7.4.6).
+fn native_unpacked_type(
+    id: celox_sv_syntax::ExprId,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Option<semantic_types::TyId> {
+    use semantic_types::{ArrayKind, Range, TyData};
+    let (path, indices, slice) = native_selection(id, tree, dims)?;
+    let table = &tree.state.types;
+    let mut ty = semantic_types::of_shape(table, &tree.state, dims.get(&path)?, &dims.const_env)?;
+    for _ in 0..indices {
+        let TyData::Array { element, .. } = table.data(ty) else {
+            return None;
+        };
+        ty = element;
+    }
+    if let Some(count) = slice {
+        let TyData::Array { element, .. } = table.data(ty) else {
+            return None;
+        };
+        ty = table.intern(TyData::Array {
+            kind: ArrayKind::Fixed(Range {
+                left: 0,
+                right: i128::try_from(count).ok()?.checked_sub(1)?,
+            }),
+            element,
+        });
+    }
+    Some(ty)
+}
+
 /// The dotted path of a name or a hierarchical name `a.b.c`.
 fn dotted_path(
     id: celox_sv_syntax::ExprId,
@@ -242,8 +295,11 @@ fn check_assignment(
         check_assignment(tree, *then_expression, target, context, dims)?;
         return check_assignment(tree, *else_expression, target, context, dims);
     }
-    let Some((actual, target)) = native_unpacked_shape(id, tree, dims)
-        .and_then(|actual| incompatible(&tree.state, &actual, target, dims))
+    let table = &tree.state.types;
+    let Some((actual, target)) =
+        semantic_types::of_shape(table, &tree.state, target, &dims.const_env)
+            .zip(native_unpacked_type(id, tree, dims))
+            .and_then(|(target, actual)| incompatible_types(table, actual, target))
     else {
         return Ok(());
     };
