@@ -354,14 +354,31 @@ impl Plan {
             };
             let units =
                 |map: &HashMap<AbsoluteAddr, Vec<Unit>>| -> Result<Option<Vec<Unit>>, String> {
-                    let aliased = map
-                        .keys()
-                        .any(|key| *key != signal && topology.canonical(*key) == signal);
+                    // An alias's domain must be the event's own; one with
+                    // nothing to run is no domain at all.
+                    let aliased = map.iter().any(|(key, units)| {
+                        *key != signal && topology.canonical(*key) == signal && !units.is_empty()
+                    });
                     if aliased {
                         return Err("an event domain has no separate units".into());
                     }
                     Ok(map.get(&signal).cloned())
                 };
+            let eval_only = units(&sir.eval_only_ffs)?;
+            let apply = units(&sir.apply_ffs)?;
+            // An event no RTL process waits for, such as a TB clock that
+            // only paces initial processes, has an empty domain.
+            let eval_apply = match units(&sir.eval_apply_ffs)? {
+                Some(units) => units,
+                None if eval_only.is_none() && apply.is_none() => Vec::new(),
+                None => return Err("an event domain has no separate units".into()),
+            };
+            // Nothing to evaluate is also nothing to apply.
+            let (eval_only, apply) = if eval_apply.is_empty() {
+                (eval_only.or(Some(Vec::new())), apply.or(Some(Vec::new())))
+            } else {
+                (eval_only, apply)
+            };
             let event = Event {
                 signal,
                 width: *program
@@ -371,13 +388,12 @@ impl Plan {
                     .ok_or("an event signal has no storage")?,
                 active,
                 clock,
-                eval_apply: units(&sir.eval_apply_ffs)?
-                    .ok_or("an event domain has no separate units")?,
+                eval_apply,
                 aliases: wiring_clocks
                     .then(|| crate::clock_aliases::extract(program, signal))
                     .flatten(),
-                eval_only: units(&sir.eval_only_ffs)?,
-                apply: units(&sir.apply_ffs)?,
+                eval_only,
+                apply,
             };
             if event_storage
                 .insert(storage(signal), events.len())

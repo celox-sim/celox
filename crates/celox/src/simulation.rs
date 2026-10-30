@@ -409,7 +409,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 }
 
-fn vcd_dump_runtime_error(error: crate::simulator::DumpError) -> RuntimeErrorCode {
+pub(crate) fn vcd_dump_runtime_error(error: crate::simulator::DumpError) -> RuntimeErrorCode {
     match error {
         crate::simulator::DumpError::Runtime(error) => error,
         crate::simulator::DumpError::Io(error) => RuntimeErrorCode::Runtime {
