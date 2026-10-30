@@ -685,7 +685,7 @@ test("every rust-cache job of CI has a warm job that computes the same key", () 
     const twin = warming.get(id);
     assert.ok(twin, `rust-cache.yml warms no cache for CI job ${id}`);
     assert.equal(twin.match(/^    runs-on: (.*)$/m)?.[1], job.match(/^    runs-on: (.*)$/m)?.[1], id);
-    assert.deepEqual(stepWith(twin, "./.github/actions/setup-rust"), stepWith(job, "./.github/actions/setup-rust"), id);
+    assert.deepEqual(stepWith(twin, "$/.github/actions/setup-rust"), stepWith(job, "$/.github/actions/setup-rust"), id);
     assert.deepEqual(stepWith(twin, "Swatinem/rust-cache@v2"), stepWith(job, "Swatinem/rust-cache@v2"), id);
     assert.deepEqual(keyEnv(job), [], `${id} sets a job-level variable that enters its cache key`);
     assert.deepEqual(keyEnv(twin), [], id);

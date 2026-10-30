@@ -72,7 +72,7 @@ test("repaired publisher scripts execute against the qualified product checkout"
     const blocks = workflow.split(/^  ([\w-]+):\n/m);
     const block = blocks[blocks.indexOf(name) + 1];
     assert.match(block, /ref: \$\{\{ needs.validate.outputs.source_sha \}\}/);
-    const tools = block.split("      - name: Check out publisher tooling")[1].split("      - uses: ./.github/actions/setup-rust")[0];
+    const tools = block.split("      - name: Check out publisher tooling")[1].split("      - uses: $/.github/actions/setup-rust")[0];
     assert.match(tools, /ref: \$\{\{ github.sha \}\}/);
     assert.match(tools, /path: work\/publisher-tooling/);
     assert.match(tools, /sparse-checkout: scripts/);

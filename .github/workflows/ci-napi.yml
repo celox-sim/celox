@@ -106,7 +106,7 @@ jobs:
           node-version: 26
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -190,7 +190,7 @@ jobs:
           node-version: 26
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -198,7 +198,7 @@ jobs:
       - uses: pnpm/action-setup@v6
 
       - name: Install Rust toolchain
-        uses: ./.github/actions/setup-rust
+        uses: $/.github/actions/setup-rust
         with:
           targets: ${{ matrix.target }}
 
@@ -279,7 +279,7 @@ jobs:
           node-version: 26
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -322,7 +322,7 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -432,7 +432,7 @@ jobs:
           registry-url: https://registry.npmjs.org
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
