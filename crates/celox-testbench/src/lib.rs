@@ -310,6 +310,10 @@ pub struct TestbenchKernel<A> {
     pub status: A,
     pub request: A,
     pub requests: Vec<KernelRequest<A>>,
+    /// The runtime event site of each `$display` statement, by statement
+    /// site.
+    #[serde(default)]
+    pub display_sites: Vec<(usize, u32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -682,6 +686,17 @@ impl<L> ExprBytecode<L> {
     }
     pub fn ops(&self) -> &[ExprOpcode<L>] {
         &self.ops
+    }
+
+    /// Whether evaluating the expression writes state, as a function call
+    /// that assigns a variable does.
+    pub fn writes_state(&self) -> bool {
+        self.ops.iter().any(|op| {
+            matches!(
+                op,
+                ExprOpcode::StoreU64 { .. } | ExprOpcode::StoreString { .. }
+            )
+        })
     }
 
     pub fn is_empty(&self) -> bool {
