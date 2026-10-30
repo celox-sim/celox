@@ -1172,13 +1172,6 @@
     },
     {
       "suite": "veryl",
-      "name": "hierarchy::test_instance_input_function_output_writeback",
-      "status": "mismatch",
-      "classification": "suite_issue",
-      "note": "The emitted SV connects input port `.i(write_seen(a, seen))`, a call of a function with an `output` argument in a port expression, which is not within a procedural statement. 13.4.1 makes this illegal, so the design has no defined behavior (xezim leaves seen = x/0; with zinit it reads 0, expected 1). The Veryl case expects simulation of SV that the LRM forbids."
-    },
-    {
-      "suite": "veryl",
       "name": "hierarchy::test_instance_input_port_assignment_width_context",
       "status": "mismatch",
       "classification": "xezim_bug",
