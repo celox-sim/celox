@@ -109,7 +109,6 @@ pub(super) fn run<B: SimBackend>(
             ("host_slot_work", sim.host_slot_work),
             ("time_slots", !schema.time_slots.is_empty()),
             ("sample_shadows", !schema.sample_shadows.is_empty()),
-            ("four_state", sim.backend.layout().four_state),
         ];
         let native_settle = settle_blockers.iter().all(|(_, blocks)| !blocks);
         let native_edges = native_settle && edge_blockers.iter().all(|(_, blocks)| !blocks);
