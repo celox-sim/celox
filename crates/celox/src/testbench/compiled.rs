@@ -93,27 +93,36 @@ pub(super) fn run<B: SimBackend>(
     let batch = clock_batch::ClockBatch::new(sim);
     // The last tick whose progress was reported.
     let mut reported = ctx.current_time;
+    let mut exits = Exits::default();
     loop {
         let schema = &sim.program.runtime_schema;
-        let native_edges = !sim.host_slot_work
-            && sim.host_watch.is_empty()
-            && sim.vcd_writer.is_none()
-            && schema.persistent_comb_state.is_empty()
-            && sim.components.is_empty()
-            && !sim.schedule.timed
-            && schema.time_slots.is_empty()
-            && schema.watches.is_empty()
-            && schema.comb_observers.is_empty()
-            && schema.sample_shadows.is_empty()
-            && !sim.backend.layout().four_state;
+        // What keeps edges and settles in the host, named for the log.
+        let settle_blockers = [
+            ("host_watch", !sim.host_watch.is_empty()),
+            ("components", !sim.components.is_empty()),
+            ("timed", sim.schedule.timed),
+            ("vcd", sim.vcd_writer.is_some()),
+            ("comb_observers", !schema.comb_observers.is_empty()),
+            ("watches", !schema.watches.is_empty()),
+        ];
+        let edge_blockers = [
+            ("host_slot_work", sim.host_slot_work),
+            ("time_slots", !schema.time_slots.is_empty()),
+            ("sample_shadows", !schema.sample_shadows.is_empty()),
+            ("four_state", sim.backend.layout().four_state),
+        ];
+        let native_settle = settle_blockers.iter().all(|(_, blocks)| !blocks);
+        let native_edges = native_settle && edge_blockers.iter().all(|(_, blocks)| !blocks);
+        if exits.blockers.is_empty() {
+            exits.blockers = settle_blockers
+                .iter()
+                .chain(&edge_blockers)
+                .filter(|(_, blocks)| *blocks)
+                .map(|(name, _)| *name)
+                .collect();
+        }
         sim.backend
             .set(m.control[TB_NATIVE_EDGES], u64::from(native_edges));
-        let native_settle = sim.host_watch.is_empty()
-            && sim.components.is_empty()
-            && !sim.schedule.timed
-            && sim.vcd_writer.is_none()
-            && schema.comb_observers.is_empty()
-            && schema.watches.is_empty();
         sim.backend
             .set(m.control[TB_NATIVE_SETTLE], u64::from(native_settle));
         sim.backend.set(dirty, u8::from(sim.dirty));
@@ -175,6 +184,7 @@ pub(super) fn run<B: SimBackend>(
         if drained.finished {
             return Some(ExecResult::Finished);
         }
+        exits.count(sim.backend.get_as::<u64>(m.control[TB_EXIT]));
         match sim.backend.get_as::<u64>(m.control[TB_EXIT]) {
             TB_DONE => return Some(ExecResult::Continue),
             TB_FINISHED => return Some(ExecResult::Finished),
@@ -391,5 +401,42 @@ pub(super) fn run<B: SimBackend>(
         }
         // Saved function temporaries are layout-owned roots throughout a run.
         sim.maybe_collect_heap([]);
+    }
+}
+
+/// Returns of the generated TB scheduler to the host, logged when a run ends:
+/// each one is a service or safe point the generated code could not provide.
+#[derive(Default)]
+struct Exits {
+    host: u64,
+    reset: u64,
+    edges: u64,
+    safepoint: u64,
+    /// Design features that keep settles or edges in the host.
+    blockers: Vec<&'static str>,
+}
+
+impl Exits {
+    fn count(&mut self, exit: u64) {
+        match exit {
+            TB_HOST => self.host += 1,
+            TB_RESET => self.reset += 1,
+            TB_EDGES => self.edges += 1,
+            TB_SAFEPOINT => self.safepoint += 1,
+            _ => {}
+        }
+    }
+}
+
+impl Drop for Exits {
+    fn drop(&mut self) {
+        tracing::debug!(
+            host = self.host,
+            reset = self.reset,
+            edges = self.edges,
+            safepoint = self.safepoint,
+            blockers = ?self.blockers,
+            "[testbench-exits]"
+        );
     }
 }
