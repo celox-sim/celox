@@ -57,14 +57,20 @@ pub(super) fn with_dimensions(
                     let object = ty.kind() == TypeKind::Object && ty.container.is_none();
                     let shape = casts::expr_type_from_type(&tree.state, &ty, &context.const_env)
                         .ok_or_else(|| unsupported("associative index type"))?;
+                    // A process handle is an identity that the simulation
+                    // keeps until it ends, so it serves as an integral key
+                    // whose entry outlives the process (IEEE 1800-2023 7.8.5,
+                    // 9.7).
                     if !string
                         && !object
-                        && (!matches!(ty.kind(), TypeKind::Bit | TypeKind::Logic | TypeKind::Reg)
-                            || shape.width > 64
+                        && (!matches!(
+                            ty.kind(),
+                            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Process
+                        ) || shape.width > 64
                             || !ty.unpacked_ranges.is_empty())
                     {
                         return Err(unsupported(
-                            "associative indices require strings, class handles or integral types up to 64 bits",
+                            "associative indices require strings, class or process handles or integral types up to 64 bits",
                         ));
                     }
                     Some(ContainerKind::Associative {

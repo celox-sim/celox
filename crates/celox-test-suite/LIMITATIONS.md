@@ -1124,6 +1124,13 @@ failures remain executed results. The adapter-free
 and its adjacent JSON reproduce premature completion as Top and Wrapped;
 xezim is reviewed as `sv_process-X6`.
 
+`fork_control::process_handles_index_associative_arrays` indexes associative
+arrays with process handles (IEEE 1800-2023 7.8, 9.7), as UVM's `uvm_tlm_fifo`
+tracks its blocked getters. Verilator 5.052 and xezim 0.11.3 pass it; Icarus
+13.0 rejects its `mailbox` property and process declarations, and that exact
+compile failure remains an executed result in
+[the Icarus report](verification/sv/icarus/fork_control.json).
+
 The mutual status-wait regression must advance to the cancellation at 3 and
 report `checks=2`, `observed_at=3`. xezim passes; Verilator reports zero for both
 outputs, also in the adapter-free

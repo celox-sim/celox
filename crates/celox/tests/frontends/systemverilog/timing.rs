@@ -1982,6 +1982,10 @@ timed_cases! {
 }
 
 timed_cases! {
+ fn process_handles_index_associative_arrays = "fork_control::process_handles_index_associative_arrays";
+}
+
+timed_cases! {
  fn process_suspend_and_resume_waits = "fork_control::process_suspend_and_resume_waits";
  fn process_self_suspend_and_await = "fork_control::process_self_suspend_and_await";
  fn process_status_wait_and_disable = "fork_control::process_status_wait_and_disable";
