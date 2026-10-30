@@ -19,6 +19,7 @@ sv_backends! {
     fn display_later_formats(sim) { @case "string_format::display_later_formats"; }
     fn pattern_format(sim) { @case "string_format::pattern_format"; }
     fn pattern_format_keys_and_handles(sim) { @case "string_format::pattern_format_keys_and_handles"; }
+    fn formatted_strings_into_integral_outputs(sim) { @case "string_format::formatted_strings_into_integral_outputs"; }
     // A string literal operand leaves a conditional integral (5.9): `%p`
     // prints it unformatted, not in quotes.
     fn pattern_format_conditional_string_literal(sim) {
