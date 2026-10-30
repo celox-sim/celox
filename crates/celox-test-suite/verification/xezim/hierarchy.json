@@ -180,42 +180,9 @@
       "category": "Hierarchy",
       "detail": "",
       "expectation": "Simulation",
-      "name": "hierarchy::test_inactive_instance_input_output_call_adds_no_parent_driver",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Hierarchy",
-      "detail": "",
-      "expectation": "Simulation",
       "name": "hierarchy::test_instance_array_broadcast_and_unpacked_array_connection",
       "phase": "execute",
       "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Hierarchy",
-      "detail": "",
-      "expectation": "Simulation",
-      "name": "hierarchy::test_instance_input_function_output_concat_dynamic_writeback",
-      "phase": "execute",
-      "status": "passed",
-      "stronger_than_sv": false,
-      "tag_reasons": {},
-      "tags": []
-    },
-    {
-      "category": "Hierarchy",
-      "detail": "hierarchy::test_instance_input_function_output_writeback reads seen_o with unknown bits in a two-state run",
-      "expectation": "Simulation",
-      "name": "hierarchy::test_instance_input_function_output_writeback",
-      "phase": "execute",
-      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
