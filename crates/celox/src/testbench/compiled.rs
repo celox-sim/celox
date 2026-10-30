@@ -4,11 +4,13 @@ use super::TestbenchStatement;
 use super::*;
 use celox_testbench::*;
 
+// Unit runs, host edge batches and host statement services since the last
+// call.
 #[cfg(test)]
-thread_local! { static COUNTERS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0,0)) }; }
+thread_local! { static COUNTERS: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) }; }
 #[cfg(test)]
-pub(super) fn take_counters() -> (usize, usize) {
-    COUNTERS.with(|c| c.replace((0, 0)))
+pub(super) fn take_counters() -> (usize, usize, usize) {
+    COUNTERS.with(|c| c.replace((0, 0, 0)))
 }
 
 pub(super) fn run<B: SimBackend>(
@@ -65,9 +67,42 @@ pub(super) fn run<B: SimBackend>(
             v
         })
         .collect();
+    // TB assertions report at their source locations.
+    let locations: HashMap<usize, SourceLocation> = sites
+        .iter()
+        .flatten()
+        .filter_map(|statement| match statement {
+            GenericTestbenchStatement::Assert {
+                site_id,
+                location: Some(location),
+                ..
+            } => Some((*site_id as usize, location.clone())),
+            _ => None,
+        })
+        .collect();
+    let marker = m.marker_site.map(|site| site as usize);
+    let drain = |sim: &mut Simulator<B>, ctx: &mut DetailedExecContext| {
+        let Some(marker) = marker else {
+            return drain_runtime_assertions(sim, ctx, None);
+        };
+        let format_ctx = RuntimeFormatContext {
+            tb_time: Some(ctx.simulation_time()),
+            scope: None,
+        };
+        let events = sim.drain_marked_runtime_events(format_ctx, marker);
+        record_runtime_events(
+            ctx,
+            events.into_iter().map(|(site, event)| {
+                let location = site.and_then(|site| locations.get(&site).cloned());
+                (event, location)
+            }),
+        )
+    };
     for &a in &m.control {
         sim.backend.set(a, 0u64);
     }
+    sim.backend
+        .set(m.control[TB_RECORD], u64::from(ctx.record_passes));
     sim.backend.set(m.control[TB_PHASE], u64::MAX);
     sim.backend
         .set(m.control[TB_LIMIT], ctx.tick_limit.unwrap_or(u64::MAX));
@@ -126,23 +161,28 @@ pub(super) fn run<B: SimBackend>(
         sim.backend
             .set(m.control[TB_NATIVE_SETTLE], u64::from(native_settle));
         sim.backend.set(dirty, u8::from(sim.dirty));
+        // The host drains every event the unit recorded when it returns.
+        sim.backend.set(m.control[TB_UNMARKED], 0u64);
+        sim.backend.set(m.control[TB_PENDING], 0u64);
+        // An interpreted unit returns sooner, so that a tiered backend
+        // switches to its compiled code soon after it is ready.
         sim.backend.set(
             m.control[TB_BUDGET],
             if sim.backend.runs_compiled_scheduler() {
                 1024u64
             } else {
-                1
+                64
             },
         );
         #[cfg(test)]
         COUNTERS.with(|c| {
-            let (runs, edges) = c.get();
-            c.set((runs + 1, edges));
+            let (runs, edges, host) = c.get();
+            c.set((runs + 1, edges, host));
         });
         if let Err(e) = sim.backend.run_process(entry) {
             // A fatal assertion in a domain the unit ran ends it with an
             // error; its message is in the runtime events.
-            let drained = drain_runtime_assertions(sim, ctx, None);
+            let drained = drain(sim, ctx);
             if let Some(message) = drained.fatal_message {
                 return Some(ExecResult::Fail(message_diagnostic(&message)));
             }
@@ -177,7 +217,7 @@ pub(super) fn run<B: SimBackend>(
             }
         }
         reported = ctx.current_time;
-        let drained = drain_runtime_assertions(sim, ctx, None);
+        let drained = drain(sim, ctx);
         if let Some(message) = drained.fatal_message {
             return Some(ExecResult::Fail(message_diagnostic(&message)));
         }
@@ -197,8 +237,20 @@ pub(super) fn run<B: SimBackend>(
                     "testbench clock time overflow or invalid scheduler continuation".into(),
                 ));
             }
-            TB_SAFEPOINT => {}
+            TB_SAFEPOINT | TB_DRAIN => {}
+            TB_FAILED => {
+                return Some(ExecResult::Fail(message_diagnostic(
+                    &drained
+                        .last_message
+                        .unwrap_or_else(|| b"assertion failed".to_vec()),
+                )));
+            }
             TB_HOST | TB_RESET => {
+                #[cfg(test)]
+                COUNTERS.with(|c| {
+                    let (runs, edges, host) = c.get();
+                    c.set((runs, edges, host + 1));
+                });
                 let index = sim.backend.get_as::<u64>(m.control[TB_CURRENT]) as usize;
                 let p = m.processes[index];
                 let kernel = &tb.kernels()[index];
@@ -315,8 +367,8 @@ pub(super) fn run<B: SimBackend>(
             TB_EDGES => {
                 #[cfg(test)]
                 COUNTERS.with(|c| {
-                    let (runs, edges) = c.get();
-                    c.set((runs, edges + 1));
+                    let (runs, edges, host) = c.get();
+                    c.set((runs, edges + 1, host));
                 });
                 let mut state = sim
                     .component_simulation
@@ -412,6 +464,7 @@ struct Exits {
     reset: u64,
     edges: u64,
     safepoint: u64,
+    drain: u64,
     /// Design features that keep settles or edges in the host.
     blockers: Vec<&'static str>,
 }
@@ -423,6 +476,7 @@ impl Exits {
             TB_RESET => self.reset += 1,
             TB_EDGES => self.edges += 1,
             TB_SAFEPOINT => self.safepoint += 1,
+            TB_DRAIN => self.drain += 1,
             _ => {}
         }
     }
@@ -435,6 +489,7 @@ impl Drop for Exits {
             reset = self.reset,
             edges = self.edges,
             safepoint = self.safepoint,
+            drain = self.drain,
             blockers = ?self.blockers,
             "[testbench-exits]"
         );

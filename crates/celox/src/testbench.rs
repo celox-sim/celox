@@ -662,6 +662,7 @@ fn run_testbench_limited<B: SimBackend>(
         tick_limit,
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
+        record_passes: false,
     };
     let mut result = if sim.components.finish_requested() {
         ExecResult::Finished
@@ -810,6 +811,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         tick_limit: None,
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
+        record_passes: true,
     };
     let result = if sim.components.finish_requested() {
         ExecResult::Finished
@@ -841,6 +843,9 @@ struct DetailedExecContext {
     tick_limit: Option<u64>,
     tick_limit_reached: bool,
     random: RandomTable,
+    /// Whether passing assertions are recorded, as the detailed API reports
+    /// them.
+    record_passes: bool,
 }
 
 impl DetailedExecContext {
@@ -983,14 +988,27 @@ fn drain_runtime_assertions<B: SimBackend>(
     ctx: &mut DetailedExecContext,
     location: Option<&SourceLocation>,
 ) -> DrainedAssertionEvents {
-    let mut last_message = None;
-    let mut fatal_message = None;
-    let mut finished = false;
     let format_ctx = RuntimeFormatContext {
         tb_time: Some(ctx.simulation_time()),
         scope: None,
     };
-    for event in sim.drain_runtime_events_deferred_with_context(format_ctx) {
+    let events = sim.drain_runtime_events_deferred_with_context(format_ctx);
+    record_runtime_events(
+        ctx,
+        events.into_iter().map(|event| (event, location.cloned())),
+    )
+}
+
+/// Forward the messages of runtime events and record their failures, each
+/// at its source location.
+fn record_runtime_events(
+    ctx: &mut DetailedExecContext,
+    events: impl IntoIterator<Item = (RuntimeEvent, Option<SourceLocation>)>,
+) -> DrainedAssertionEvents {
+    let mut last_message = None;
+    let mut fatal_message = None;
+    let mut finished = false;
+    for (event, location) in events {
         match event {
             // Only errors fail a test (IEEE 1800-2023 20.10).
             RuntimeEvent::Report(report) if report.severity < Severity::Error => {
@@ -1005,7 +1023,7 @@ fn drain_runtime_assertions<B: SimBackend>(
                 ctx.assertions.push(AssertionResult {
                     passed: false,
                     message: Some(message),
-                    location: location.cloned(),
+                    location,
                 });
             }
             RuntimeEvent::Missed { count } => {
@@ -1632,12 +1650,23 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let passed = !eval_expr(sim, expr).is_zero();
             if passed {
-                let rendered_message = render_assert_message(sim, message, ctx.simulation_time());
-                ctx.assertions.push(AssertionResult {
-                    passed,
-                    message: rendered_message.clone(),
-                    location: location.clone(),
-                });
+                if ctx.record_passes {
+                    let rendered_message =
+                        render_assert_message(sim, message, ctx.simulation_time());
+                    ctx.assertions.push(AssertionResult {
+                        passed,
+                        message: rendered_message,
+                        location: location.clone(),
+                    });
+                } else {
+                    // The message is not rendered, but what its arguments
+                    // write still happens.
+                    for arg in assert_event_args(message) {
+                        if arg.expr.bytecode().writes_state() {
+                            eval_expr(sim, &arg.expr);
+                        }
+                    }
+                }
                 ExecResult::Continue
             } else {
                 publish_tb_assert_event(sim, *site_id, message);
@@ -2191,6 +2220,269 @@ mod tests {
         }
         assert_eq!(results[0], results[1]);
         assert_eq!(results[1], (128, 96, 128));
+    }
+
+    /// Run `source` with the reference loop and with the compiled TB
+    /// scheduler, and return each result with the compiled run's counters.
+    fn run_both_schedulers(
+        source: &str,
+        signals: &[&str],
+    ) -> [(TestResult, Vec<u64>, (usize, usize, usize)); 2] {
+        [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ]
+        .map(|mode| {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters();
+            let result = run_compiled_testbench(&mut sim, &tb);
+            let counters = compiled::take_counters();
+            assert_eq!(
+                counters.0 != 0,
+                mode == crate::SchedulerMode::Compiled,
+                "generated scheduler runs: {counters:?}"
+            );
+            let values = signals
+                .iter()
+                .map(|name| sim.get_as::<u64>(sim.signal(name)))
+                .collect();
+            (result, values, counters)
+        })
+    }
+
+    #[test]
+    fn compiled_tb_statements_stay_in_the_generated_scheduler() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                var total: logic<16>;
+                inst dut: Counter(clk, q);
+                initial {
+                    total = 0;
+                    for round in 0..4 {
+                        clk.next(5);
+                        $assert(q == 5 * (round as 8 + 1), "round %d q=%d", round, q);
+                        $display("round %d q=%d at %t", round, q);
+                        total += q as 16;
+                    }
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "total"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.1, vec![20, 50]);
+        // Assertions, displays and the finish run in generated code.
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_failures_keep_their_messages_and_times() {
+        // A second process reports physical event times instead of ticks.
+        for (extra, expected) in [
+            ("", "continue t=3 q=3\nfatal t=5 q=5"),
+            (
+                "initial { clk.next(100); }",
+                "continue t=6 q=3\nfatal t=10 q=5",
+            ),
+        ] {
+            let source = format!(
+                r#"
+                module Counter(clk: input clock, q: output logic<8>) {{
+                    always_ff {{ q += 1; }}
+                }}
+                #[test(Top)] module Top {{
+                    inst clk: $tb::clock_gen;
+                    var q: logic<8>;
+                    inst dut: Counter(clk, q);
+                    initial {{
+                        clk.next(3);
+                        $assert_continue(q == 100, "continue t=%t q=%d", q);
+                        clk.next(2);
+                        $assert(q == 200, "fatal t=%t q=%d", q);
+                        clk.next(2);
+                        $finish();
+                    }}
+                    {extra}
+                }}
+            "#
+            );
+            let [reference, compiled] = run_both_schedulers(&source, &["q"]);
+            assert_eq!(reference.0, TestResult::Fail(expected.into()));
+            assert_eq!(reference.0, compiled.0);
+            assert_eq!(reference.1, compiled.1);
+            assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+        }
+    }
+
+    #[test]
+    fn compiled_tb_rtl_reports_keep_their_times() {
+        // The generated scheduler runs many times before the host drains
+        // these reports.
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff {
+                    q += 1;
+                    if q[1:0] == 2'd2 { $assert_continue(1'b0, "rtl t=%t q=%d", q); }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(12); $finish(); }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert!(
+            matches!(&reference.0, TestResult::Fail(message) if message.lines().count() == 3),
+            "{:?}",
+            reference.0
+        );
+        assert_eq!(reference.0, compiled.0);
+        assert_eq!(compiled.2.1, 0, "host edge batches: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_finish_in_one_process_stops_the_others() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                var loops: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(10); $finish(); }
+                initial {
+                    loops = 0;
+                    for i in 0..100 { clk.next(); loops += 1; }
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "loops"]);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_drains_events_before_the_buffer_overflows() {
+        // More records in one time than the runtime event buffer holds.
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                initial {
+                    for i in 0..3000 { $write(""); }
+                    clk.next();
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &[]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn detailed_compiled_tb_runs_record_passing_assertions() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial {
+                    for i in 0..3 {
+                        clk.next();
+                        $assert(q != 0, "q=%d", q);
+                    }
+                    $finish();
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .four_state(false)
+            .build_native()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let detailed = run_testbench_detailed(&mut sim, &tb);
+        assert!(detailed.passed);
+        let messages: Vec<_> = detailed
+            .assertions
+            .iter()
+            .map(|assertion| (assertion.passed, assertion.message.clone()))
+            .collect();
+        assert_eq!(
+            messages,
+            [1, 2, 3].map(|q| (true, Some(format!("q={q}").into_bytes())))
+        );
+    }
+
+    #[test]
+    fn passing_assertions_keep_the_writes_of_their_messages() {
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var count: u8;
+                function bump() -> u8 {
+                    count = count + 1;
+                    return count;
+                }
+                initial {
+                    count = 0;
+                    $assert(1'b1, "%d", bump());
+                    $assert(count == 1, "%d", bump());
+                    clk.next();
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["count"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, vec![2]);
+        assert_eq!(compiled.1, vec![2]);
+    }
+
+    #[test]
+    fn compiled_tb_drains_rtl_event_bursts() {
+        // Bursts of records in successive times that fit the runtime event
+        // buffer one at a time, but not together.
+        let source = r#"
+            module Burst(clk: input clock, q: output logic<8>) {
+                always_ff {
+                    q += 1;
+                    if q == 1 { for i in 0..400 { $write(""); } }
+                    if q == 2 { for i in 0..800 { $write(""); } }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Burst(clk, q);
+                initial { clk.next(4); $finish(); }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(compiled.1, reference.1);
     }
 
     #[test]

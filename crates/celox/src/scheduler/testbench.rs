@@ -200,6 +200,169 @@ fn sites<'a>(
     }
 }
 
+type Expr = ExprBytecode<StateLocation<AbsoluteAddr>>;
+
+/// Run the compiled kernel of `expr` and load its value.
+fn evaluate(
+    g: &mut Generator<'_>,
+    program: &LaidOutProgram,
+    slots: &SchedulerSlots<AbsoluteAddr>,
+    expr: &Expr,
+) -> RegisterId {
+    let expr = expr.kernel().expect("lowered testbench expression");
+    g.b.inline_execution_unit(&program.sir.processes[expr.entry]);
+    if !expr.writes.is_empty() {
+        let dirty = g.constant(1, 8);
+        g.store(slots.dirty, 8, dirty);
+    }
+    g.load_at(expr.result.address, expr.result.byte_offset * 8, expr.width)
+}
+
+/// `value` at `width` bits: truncated, or extended with zeros as the host
+/// writes an event argument.
+fn resize(g: &mut Generator<'_>, value: RegisterId, width: usize) -> RegisterId {
+    let source = g.b.register(&value).width();
+    let result = g.b.alloc_bit(width, false);
+    if width < source {
+        g.b.emit(SIRInstruction::Slice(result, value, 0, width));
+    } else {
+        g.b.emit(SIRInstruction::Unary(
+            result,
+            celox_design::UnaryOp::Ident,
+            value,
+        ));
+    }
+    result
+}
+
+/// The DUT storage `expr` loads.
+fn dut_reads(program: &LaidOutProgram, expr: &Expr) -> Vec<AbsoluteAddr> {
+    let mut reads: Vec<_> = expr
+        .ops()
+        .iter()
+        .filter_map(|op| match op {
+            ExprOpcode::LoadU64 { location, .. }
+            | ExprOpcode::LoadWide { location, .. }
+            | ExprOpcode::LoadIndexed { location, .. }
+            | ExprOpcode::LoadBitSelect { location, .. }
+            | ExprOpcode::LoadString { location, .. } => program
+                .runtime
+                .rtl_accesses
+                .contains(&location.address)
+                .then_some(location.address),
+            _ => None,
+        })
+        .collect();
+    reads.sort_unstable();
+    reads.dedup();
+    reads
+}
+
+/// The arguments of a message, or `None` when one is a string: compiled
+/// code holds those as heap handles, which the host formats.
+fn message_args(
+    message: &Option<AssertMessage<SemanticArgument<AbsoluteAddr>>>,
+) -> Option<&[SemanticArgument<AbsoluteAddr>]> {
+    let args = match message {
+        None => &[][..],
+        Some(AssertMessage::Formatted { args, .. } | AssertMessage::DynamicArgs(args)) => args,
+    };
+    (!args.iter().any(|arg| arg.is_string)).then_some(args)
+}
+
+/// The simulation time the host formats the reports of a run with when it
+/// ends here.
+fn report_time(g: &mut Generator<'_>, m: &Meta) -> RegisterId {
+    if m.processes.len() == 1 && m.clocks.len() <= 1 {
+        g.load(m.control[TB_TICKS], 64)
+    } else {
+        g.load(m.control[TB_REPORT_TIME], 64)
+    }
+}
+
+/// Give the runtime events recorded since the last marker the current
+/// report time.
+fn mark(g: &mut Generator<'_>, m: &Meta) {
+    let Some(site_id) = m.marker_site else {
+        return;
+    };
+    let time = report_time(g, m);
+    g.b.emit(SIRInstruction::RuntimeEvent {
+        site_id,
+        args: vec![time],
+    });
+    put(g, m.control[TB_UNMARKED], 0);
+    let pending = g.load(m.control[TB_PENDING], 64);
+    let one = g.constant(1, 64);
+    let pending = g.binary(64, pending, BinaryOp::Add, one);
+    g.store(m.control[TB_PENDING], 64, pending);
+}
+
+/// Whether the host should drain the runtime events before the ring
+/// buffer can overflow. The events of a time step or statement are recorded
+/// before the next check: leave room for nearly a whole buffer of them, as
+/// when every time step's events were drained.
+fn drain_due(g: &mut Generator<'_>, m: &Meta, capacity: usize) -> RegisterId {
+    let pending = g.load(m.control[TB_PENDING], 64);
+    let limit = g.constant((capacity / 8).max(1) as u64, 64);
+    g.binary(1, pending, BinaryOp::GeU, limit)
+}
+
+/// Settle what a statement observes before it runs, as the host does:
+/// everything for a message, otherwise what `expr` reads.
+fn settle_for(
+    g: &mut Generator<'_>,
+    m: &Meta,
+    cones: &mut Cones<'_>,
+    deferred: bool,
+    reads: Vec<AbsoluteAddr>,
+    everything: bool,
+    finish: BlockId,
+) {
+    if !everything && reads.is_empty() {
+        return;
+    }
+    let after = g.b.new_block();
+    match (deferred && !everything)
+        .then(|| cones.cone(&reads))
+        .flatten()
+    {
+        Some(units) => {
+            let dirty = g.load(g.slots.dirty, 8);
+            let clean = g.equals(dirty, 0);
+            let compute = g.b.new_block();
+            branch(g, clean, after, compute);
+            g.b.switch_to_block(compute);
+            for unit in &units {
+                g.inline(unit, finish);
+            }
+            jump(g, after);
+        }
+        None => settle_then(g, m, after),
+    }
+    g.b.switch_to_block(after);
+}
+
+/// Yield to the host to run statement of process `i` there.
+fn host_statement(g: &mut Generator<'_>, m: &Meta, i: usize) {
+    put(g, m.control[TB_PHASE], 2 + 2 * i as u64);
+    put(g, m.control[TB_EXIT], TB_HOST);
+    g.b.seal_block(SIRTerminator::Return);
+}
+
+/// Resume process `i` after a statement that recorded runtime events,
+/// draining them in the host first when the buffer fills.
+fn resume_after_events(g: &mut Generator<'_>, m: &Meta, i: usize, run: BlockId, capacity: usize) {
+    mark(g, m);
+    let due = drain_due(g, m, capacity);
+    let drain = g.b.new_block();
+    branch(g, due, drain, run);
+    g.b.switch_to_block(drain);
+    put(g, m.control[TB_PHASE], 2 + 2 * i as u64);
+    put(g, m.control[TB_EXIT], TB_DRAIN);
+    g.b.seal_block(SIRTerminator::Return);
+}
+
 fn generate(
     program: &LaidOutProgram,
     tb: &TestbenchProgram<AbsoluteAddr>,
@@ -207,6 +370,7 @@ fn generate(
     slots: &SchedulerSlots<AbsoluteAddr>,
     deferred: bool,
 ) -> Unit {
+    let capacity = program.layout().runtime_event_capacity;
     let mut b = Builder::new();
     let comb = b.new_block();
     let reads = HashSet::default();
@@ -488,11 +652,132 @@ fn generate(
                     g.store(m.clocks[clock][0], 64, now);
                     jump(&mut g, save[i]);
                 }
-                _ => {
-                    put(&mut g, m.control[TB_PHASE], 2 + 2 * i as u64);
-                    put(&mut g, m.control[TB_EXIT], TB_HOST);
-                    g.b.seal_block(SIRTerminator::Return);
-                }
+                KernelRequest::Statement(site) => match statements[*site] {
+                    SemanticStatement::Assert {
+                        expr,
+                        site_id,
+                        continue_on_fail,
+                        message,
+                        ..
+                    } if message_args(message).is_some() => {
+                        // The host records passing assertions itself, and
+                        // settles when observers watch the design.
+                        let record = equals_slot(&mut g, m.control[TB_RECORD], 0);
+                        let native = equals_slot(&mut g, m.control[TB_NATIVE_SETTLE], 1);
+                        let native = g.binary(1, record, BinaryOp::And, native);
+                        let evaluate_block = g.b.new_block();
+                        let host = g.b.new_block();
+                        branch(&mut g, native, evaluate_block, host);
+                        g.b.switch_to_block(host);
+                        host_statement(&mut g, m, i);
+                        g.b.switch_to_block(evaluate_block);
+                        let mut reads = dut_reads(program, expr);
+                        if let Some(args) = message_args(message) {
+                            for arg in args {
+                                reads.extend(dut_reads(program, &arg.expr));
+                            }
+                        }
+                        settle_for(
+                            &mut g,
+                            m,
+                            &mut cones,
+                            deferred,
+                            reads,
+                            message.is_some(),
+                            finish,
+                        );
+                        let value = evaluate(&mut g, program, slots, expr);
+                        let width = g.b.register(&value).width();
+                        let zero = g.constant(0, width);
+                        let passed = g.binary(1, value, BinaryOp::Ne, zero);
+                        // A passing assertion does not format its message,
+                        // but what its arguments write still happens.
+                        let effects: Vec<_> = message_args(message)
+                            .unwrap()
+                            .iter()
+                            .filter(|arg| arg.expr.writes_state())
+                            .collect();
+                        let pass = if effects.is_empty() {
+                            run[i]
+                        } else {
+                            g.b.new_block()
+                        };
+                        let failed = g.b.new_block();
+                        branch(&mut g, passed, pass, failed);
+                        if !effects.is_empty() {
+                            g.b.switch_to_block(pass);
+                            for arg in effects {
+                                evaluate(&mut g, program, slots, &arg.expr);
+                            }
+                            jump(&mut g, run[i]);
+                        }
+                        g.b.switch_to_block(failed);
+                        let site =
+                            &program.runtime.runtime_schema.runtime_event_sites[*site_id as usize];
+                        let widths = site.arg_widths.clone();
+                        let args = message_args(message)
+                            .unwrap()
+                            .iter()
+                            .zip(widths)
+                            .map(|(arg, width)| {
+                                let value = evaluate(&mut g, program, slots, &arg.expr);
+                                resize(&mut g, value, width.max(1))
+                            })
+                            .collect();
+                        g.b.emit(SIRInstruction::RuntimeEvent {
+                            site_id: *site_id,
+                            args,
+                        });
+                        if *continue_on_fail {
+                            resume_after_events(&mut g, m, i, run[i], capacity);
+                        } else {
+                            mark(&mut g, m);
+                            put(&mut g, m.control[TB_PHASE], 2 + 2 * i as u64);
+                            put(&mut g, m.control[TB_EXIT], TB_FAILED);
+                            g.b.seal_block(SIRTerminator::Return);
+                        }
+                    }
+                    SemanticStatement::Display { message, .. }
+                        if let Some(&(_, site_id)) =
+                            kernel.display_sites.iter().find(|(s, _)| s == site) =>
+                    {
+                        let native = equals_slot(&mut g, m.control[TB_NATIVE_SETTLE], 1);
+                        let evaluate_block = g.b.new_block();
+                        let host = g.b.new_block();
+                        branch(&mut g, native, evaluate_block, host);
+                        g.b.switch_to_block(host);
+                        host_statement(&mut g, m, i);
+                        g.b.switch_to_block(evaluate_block);
+                        settle_for(&mut g, m, &mut cones, deferred, vec![], true, finish);
+                        let site =
+                            &program.runtime.runtime_schema.runtime_event_sites[site_id as usize];
+                        let widths = site.arg_widths.clone();
+                        let args = message_args(message)
+                            .unwrap_or_default()
+                            .iter()
+                            .zip(widths)
+                            .map(|(arg, width)| {
+                                let value = evaluate(&mut g, program, slots, &arg.expr);
+                                resize(&mut g, value, width.max(1))
+                            })
+                            .collect();
+                        g.b.emit(SIRInstruction::RuntimeEvent { site_id, args });
+                        resume_after_events(&mut g, m, i, run[i], capacity);
+                    }
+                    SemanticStatement::Finish => {
+                        // A lone process on one clock ends the run; any
+                        // other process stops every process at this time.
+                        if m.processes.len() == 1 && m.clocks.len() <= 1 {
+                            jump(&mut g, finished);
+                        } else {
+                            put(&mut g, m.control[TB_STOPPED], 1);
+                            put(&mut g, p[0], 2);
+                            jump(&mut g, save[i]);
+                        }
+                    }
+                    _ => host_statement(&mut g, m, i),
+                },
+                _ => host_statement(&mut g, m, i),
             }
         }
         g.b.switch_to_block(save[i]);
@@ -701,7 +986,13 @@ fn generate(
     let add = choose(&mut g, rising, one, zero);
     let ticks = g.binary(64, ticks, BinaryOp::Add, add);
     g.store(m.control[TB_TICKS], 64, ticks);
-    jump(&mut g, end);
+    // A `$finish` the design recorded in the edges ends the run after this
+    // time's edges, for the host to drain it.
+    let design_finished = g.load(slots.finish, 8);
+    let zero = g.constant(0, 8);
+    g.store(slots.finish, 8, zero);
+    let design_finished = g.binary(1, design_finished, BinaryOp::Ne, zero);
+    branch(&mut g, design_finished, finish, end);
     g.b.switch_to_block(end);
     let stopped = equals_slot(&mut g, m.control[TB_STOPPED], 1);
     let check_done = g.b.new_block();
@@ -748,13 +1039,25 @@ fn generate(
     let advance = g.b.new_block();
     branch(&mut g, pending, advance, limited);
     g.b.switch_to_block(advance);
+    // Give the events of this time its report time before the next one,
+    // and let the host drain them before the buffer can overflow.
+    let unmarked = equals_slot(&mut g, m.control[TB_UNMARKED], 0);
+    let marked = g.b.new_block();
+    let label = g.b.new_block();
+    branch(&mut g, unmarked, marked, label);
+    g.b.switch_to_block(label);
+    mark(&mut g, m);
+    jump(&mut g, marked);
+    g.b.switch_to_block(marked);
     g.store(m.control[TB_NOW], 64, next);
     put(&mut g, m.control[TB_PHASE], 0);
+    let due = drain_due(&mut g, m, capacity);
     let budget = g.load(m.control[TB_BUDGET], 64);
     let one = g.constant(1, 64);
     let budget = g.binary(64, budget, BinaryOp::Sub, one);
     g.store(m.control[TB_BUDGET], 64, budget);
     let exhausted = g.equals(budget, 0);
+    let exhausted = g.binary(1, exhausted, BinaryOp::Or, due);
     branch(&mut g, exhausted, safe, start);
     for (block, code) in [
         (done, TB_DONE),
@@ -770,35 +1073,54 @@ fn generate(
     }
     emit_settle(&mut g, m, &program.sir.eval_comb, finish, overflow);
     let mut unit = g.finish();
+    // Count the events each record leaves for a marker and for the host's
+    // next drain. Markers count themselves.
     let mut next = unit.register_map.keys().map(|r| r.0).max().unwrap_or(0) + 1;
-    for block in unit.blocks.values_mut() {
-        let old = std::mem::take(&mut block.instructions);
+    let mut register = |unit: &mut Unit| {
+        let r = RegisterId(next);
+        next += 1;
+        unit.register_map.insert(
+            r,
+            celox_sir::RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
+        r
+    };
+    let ids: Vec<_> = unit.blocks.keys().copied().collect();
+    for id in ids {
+        let old = std::mem::take(&mut unit.blocks.get_mut(&id).unwrap().instructions);
+        let mut instructions = Vec::with_capacity(old.len());
         for instruction in old {
-            let event = matches!(instruction, SIRInstruction::RuntimeEvent { .. });
-            block.instructions.push(instruction);
+            let event = matches!(&instruction, SIRInstruction::RuntimeEvent { site_id, .. }
+                if Some(*site_id) != m.marker_site);
+            instructions.push(instruction);
             if event {
-                let one = RegisterId(next);
-                next += 1;
-                unit.register_map.insert(
-                    one,
-                    celox_sir::RegisterType::Bit {
-                        width: 64,
-                        signed: false,
-                    },
-                );
-                block
-                    .instructions
-                    .push(SIRInstruction::Imm(one, SIRValue::new(1u64)));
-                block.instructions.push(SIRInstruction::Store(
-                    stable(m.control[TB_BUDGET]),
-                    SIROffset::Static(0),
-                    64,
-                    one,
-                    vec![],
-                    vec![],
-                ));
+                let one = register(&mut unit);
+                instructions.push(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+                for slot in [m.control[TB_UNMARKED], m.control[TB_PENDING]] {
+                    let count = register(&mut unit);
+                    let sum = register(&mut unit);
+                    instructions.push(SIRInstruction::Load(
+                        count,
+                        stable(slot),
+                        SIROffset::Static(0),
+                        64,
+                    ));
+                    instructions.push(SIRInstruction::Binary(sum, count, BinaryOp::Add, one));
+                    instructions.push(SIRInstruction::Store(
+                        stable(slot),
+                        SIROffset::Static(0),
+                        64,
+                        sum,
+                        vec![],
+                        vec![],
+                    ));
+                }
             }
         }
+        unit.blocks.get_mut(&id).unwrap().instructions = instructions;
     }
     unit
 }
