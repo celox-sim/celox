@@ -549,3 +549,10 @@ pull requests, merge groups, and pushes to master/develop. Dependabot manages
 GitHub Actions updates, including matching lockfile entries; Renovate continues
 to manage other dependencies. See the
 [GitHub lockfile documentation](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles).
+
+Lockfile verification is required even for documentation-only queue batches.
+The CI `Queue validation` job requires its reusable lockfile verification job
+to succeed; failures, cancellations, and skips block merging. All Mergify queues
+also require the standalone `Verify workflow lockfile` check. Keep that check
+required in the master/develop rulesets so older PR check results cannot bypass
+a newly introduced lockfile requirement.

@@ -328,10 +328,12 @@ test("full runs on long-lived branches report every job's result", () => {
 });
 
 test("queue validation rejects missing coverage, producer failures and detection failure", () => {
+  assert.match(job("workflow-lockfile"), /uses: \.\/\.github\/workflows\/verify-lockfile\.yml/);
   const gate = job("queue-validation");
+  assert.match(gate, /needs: \[changes, workflow-lockfile,/);
   assert.match(gate, /if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.queue != 'false'/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
-  const needs = Object.fromEntries(["lint", "rust", "napi-windows", "napi-linux-arm64", "js-ubuntu", "js-windows", "playground-browser", "docs"].map(name => [name, { result: "success" }]));
+  const needs = Object.fromEntries(["workflow-lockfile", "lint", "rust", "napi-windows", "napi-linux-arm64", "js-ubuntu", "js-windows", "playground-browser", "docs"].map(name => [name, { result: "success" }]));
   needs.changes = { result: "success", outputs: { queue: "true", full_validation: "true", fast_queue: "false", rust: "true", napi: "true", napi_arm64: "true", javascript: "true", scripts: "true", docs: "true" } };
   const passes = (value) => spawnSync("bash", ["-e", "-c", script], { env: { ...process.env, NEEDS: JSON.stringify(value) } }).status === 0;
   assert.equal(passes(needs), true);
@@ -346,9 +348,14 @@ test("queue validation rejects missing coverage, producer failures and detection
     assert.equal(passes(light), false);
   }
   const docs = structuredClone(needs);
-  for (const name of Object.keys(docs)) if (!["changes", "docs"].includes(name)) docs[name].result = "skipped";
+  for (const name of Object.keys(docs)) if (!["changes", "workflow-lockfile", "docs"].includes(name)) docs[name].result = "skipped";
   for (const flag of ["rust", "napi", "napi_arm64", "javascript", "scripts"]) docs.changes.outputs[flag] = "false";
   assert.equal(passes(docs), true);
+  const missingLockfile = structuredClone(docs);
+  delete missingLockfile["workflow-lockfile"];
+  assert.equal(passes(missingLockfile), false);
+  docs["workflow-lockfile"].result = "skipped";
+  assert.equal(passes(docs), false);
 });
 
 test("PR caches cannot evict the shared default-branch Rust caches", () => {

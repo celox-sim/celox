@@ -85,6 +85,7 @@ queue_rules:
     merge_conditions:
       - check-success = Queue validation
       - check-success = Conventional Commit title
+      - check-success = Verify workflow lockfile
     queue_conditions:
       - head ~= ^(integration/|renovate/veryl-crates$|upgrade/veryl-|release-please--branches--master--components--celox$|master$)
       - base ~= ^(master|develop)$
@@ -114,6 +115,7 @@ queue_rules:
     merge_conditions:
       - check-success = Queue validation
       - check-success = Conventional Commit title
+      - check-success = Verify workflow lockfile
     queue_conditions:
       - head ~= ^renovate/
       - -head ~= ^(integration/|renovate/veryl-crates$|upgrade/veryl-|release-please--branches--master--components--celox$|master$)
@@ -144,6 +146,7 @@ queue_rules:
     merge_conditions:
       - check-success = Queue validation
       - check-success = Conventional Commit title
+      - check-success = Verify workflow lockfile
     queue_conditions:
       - -head ~= ^renovate/
       - -head ~= ^(integration/|renovate/veryl-crates$|upgrade/veryl-|release-please--branches--master--components--celox$|master$)
