@@ -201,10 +201,11 @@ const overviewTabs: TabDef[] = [
     match: (n) => n.startsWith("heliodor_linux_boot_") || n.startsWith("heliodor_suite_"),
     sections: heliodorSections,
   },
+  { key: "rica", label: "rica", match: (n) => n.startsWith("collection_rica_"), sections: singleSection },
   {
     key: "circuits",
     label: "Representative Circuits",
-    match: (n) => n.startsWith("collection_"),
+    match: (n) => n.startsWith("collection_") && !n.startsWith("collection_rica_"),
     sections: singleSection,
   },
 ];
@@ -402,6 +403,8 @@ function shortDate(epoch: number): string {
 /** Format chart title from benchName */
 function formatChartTitle(benchName: string): string {
   let s = benchName;
+  const rica = s.match(/^collection_rica_(kernel-[a-z-]+)_([a-f0-9]+)_(x64|arm64)_total$/);
+  if (rica) return `rica ${rica[1]} · total · ${rica[3]} · workload ${rica[2]}`;
   const taxi = s.match(/^taxi_(lfsr64|phy64|rx16|rx8|rx32)_v1_x64_(body|process|compilation)$/);
   if (taxi) {
     const phases: Record<string, string> = {
@@ -856,7 +859,7 @@ onBeforeUnmount(() => {
         from publication. <a :href="withBase('/benchmarks/taxi.html')">Measurement details</a>.
       </p>
 
-      <p v-if="activeTab === 'circuits'" class="bench-methodology">
+      <p v-if="activeTab === 'circuits' || activeTab === 'rica'" class="bench-methodology">
         Fixed self-checking workloads, compared by total process time including
         compilation, resets, stimulus and assertions. Each point is the median
         of three fresh processes. Different workload
