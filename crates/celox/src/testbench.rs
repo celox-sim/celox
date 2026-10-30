@@ -2293,6 +2293,131 @@ mod tests {
         }
     }
 
+    /// A four-state design's TB edges run in the generated scheduler, as
+    /// the edge engine runs them: a reset, a clock enable and so a gated
+    /// clock that the TB sets to x or z, and flip-flops that start at x.
+    fn four_state_tb_edges<B: SimBackend>(build: impl Fn(crate::SchedulerMode) -> Simulator<B>) {
+        let names = [
+            "count", "gated", "c0", "c1", "c2", "c3", "c4", "g1", "g2", "g3", "g4",
+        ];
+        let mut results = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = build(mode);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters();
+            let values: Vec<_> = names
+                .iter()
+                .map(|name| sim.get_four_state(sim.signal(name)))
+                .collect();
+            results.push((values, counters.1));
+        }
+        assert_eq!(results[0].0, results[1].0);
+        // Only the edges after the TB's five writes of the reset, which
+        // move an event, go to the host; the others stay in the unit.
+        assert_eq!(results[1].1, 5, "host edge batches");
+        let (value, mask) = &results[1].0[2];
+        assert!(*mask != 0u8.into(), "count starts at x: {value}/{mask}");
+    }
+
+    const FOUR_STATE_TB: &str = r#"
+        module Gate(clk: input clock, rst: input reset_async_low, en: input logic,
+                    count: output logic<8>, gated: output logic<8>) {
+            let gclk: '_ clock = clk & en;
+            always_ff (clk, rst) { if_reset { count = 0; } else { count += 1; } }
+            always_ff (gclk) { gated += 1; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var rst: reset_async_low;
+            var en: logic;
+            var count: logic<8>;
+            var gated: logic<8>;
+            var c0: logic<8>; var c1: logic<8>; var c2: logic<8>;
+            var c3: logic<8>; var c4: logic<8>;
+            var g1: logic<8>; var g2: logic<8>; var g3: logic<8>; var g4: logic<8>;
+            inst dut: Gate(clk, rst, en, count, gated);
+            initial {
+                clk.next(8);
+                c0 = count;
+                rst = 0;
+                clk.next(1);
+                rst = 1;
+                en = 'x;
+                clk.next(8);
+                c1 = count; g1 = gated;
+                en = 1;
+                clk.next(8);
+                c2 = count; g2 = gated;
+                rst = 'x;
+                clk.next(8);
+                c3 = count; g3 = gated;
+                rst = 'z;
+                en = 'z;
+                clk.next(4);
+                rst = 1;
+                en = 0;
+                clk.next(8);
+                c4 = count; g4 = gated;
+                $finish();
+            }
+        }
+    "#;
+
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_on_the_interpreter() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_natively() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "cranelift")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_with_cranelift() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_cranelift()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "wasm-runtime")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_on_wasm() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_wasm()
+                .unwrap()
+        });
+    }
+
     // Latches, including ones that read the clock, keep TB edges in the
     // generated scheduler: a TB write settles there before the edges.
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]

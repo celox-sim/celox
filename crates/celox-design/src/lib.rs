@@ -1406,7 +1406,7 @@ pub struct DerivedEdgeUnits<A> {
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
 /// [`SchedulerSlots::current`], [`SchedulerSlots::levels`],
-/// [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
+/// [`SchedulerSlots::unknown_levels`], [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
 /// [`SchedulerSlots::clock_armed`] and every
 /// [`SchedulerSlots::wake`] object, and of each element of
 /// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`].
@@ -1454,6 +1454,10 @@ pub struct SchedulerSlots<A> {
     /// The levels of the event signals at the start of the last slot, one
     /// bit per event in event order.
     pub levels: A,
+    /// Which of [`Self::levels`] are unknown (x or z) in a four-state
+    /// design, one bit per event as there; the level's bit then tells x
+    /// from z.
+    pub unknown_levels: A,
     /// The kernels ready to run in the current slot, one bit per kernel in
     /// kernel order.
     pub ready: A,
@@ -1489,6 +1493,7 @@ impl<A> SchedulerSlots<A> {
             count: map(self.count),
             current: map(self.current),
             levels: map(self.levels),
+            unknown_levels: map(self.unknown_levels),
             ready: map(self.ready),
             wake: self.wake.into_iter().map(&mut map).collect(),
             waiting: self.waiting.into_iter().map(&mut map).collect(),
@@ -1514,6 +1519,7 @@ impl<A> SchedulerSlots<A> {
             &self.count,
             &self.current,
             &self.levels,
+            &self.unknown_levels,
             &self.ready,
             &self.clock_next,
             &self.clock_period,
