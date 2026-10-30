@@ -1,0 +1,1 @@
+Codex round on c4efc63: slice assignments resolve hierarchical source arrays; the chandle target check runs at the shared assignment entry, before container, property and virtual-interface dispatch.
