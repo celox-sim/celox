@@ -533,6 +533,7 @@ fn analyze(
     let top = veryl_parser::resource_table::insert_str(top);
     let mut build_config = BuildConfig::from(&metadata.build);
     build_config.allow_inferred_latches = true;
+    build_config.four_state = four_state;
     build_config.file_dependencies = file_dependencies.clone();
     if let Some(ct) = clock_type {
         build_config.clock_type = ct;
@@ -705,8 +706,7 @@ fn analyze(
             .iter()
             .any(|diagnostic| diagnostic.covers_uncovered_branch(error))
     });
-    frontend_diagnostics
-        .retain(|diagnostic| four_state || !diagnostic.proven_binary_combinational());
+    frontend_diagnostics.retain(|diagnostic| !diagnostic.proven_binary_combinational());
     (sir, errors, frontend_diagnostics, elaboration_warnings)
 }
 
