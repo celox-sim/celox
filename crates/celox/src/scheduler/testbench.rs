@@ -104,6 +104,9 @@ fn dispatch(
     }
     jump(g, default);
 }
+/// `control[TB_PHASE]` after a published time step: the run resumes
+/// after its edges.
+const PUBLISHED: u64 = u64::MAX - 1;
 // TBs can have more continuation sites than the timed scheduler's 8-bit
 // continuation selector. Keep their dispatch in the TB's own 64-bit slot.
 fn settle_then(g: &mut Generator<'_>, m: &Meta, target: BlockId) {
@@ -363,6 +366,77 @@ fn resume_after_events(g: &mut Generator<'_>, m: &Meta, i: usize, run: BlockId, 
     g.b.seal_block(SIRTerminator::Return);
 }
 
+/// Account for the edges of the time step in `control[TB_NOW]`: count
+/// the tick, schedule each fired clock's next edges and count down the
+/// processes waiting on it.
+fn account_edges(g: &mut Generator<'_>, m: &Meta, overflow: BlockId) {
+    let now = g.load(m.control[TB_NOW], 64);
+    let ticks = g.load(m.control[TB_TICKS], 64);
+    let limit = g.load(m.control[TB_LIMIT], 64);
+    let active = g.binary(1, ticks, BinaryOp::LtU, limit);
+    let running = equals_slot(g, m.control[TB_STOPPED], 0);
+    let active = g.binary(1, active, BinaryOp::And, running);
+    let mut rising = g.constant(0, 1);
+    for (clock, c) in m.clocks.iter().enumerate() {
+        let enabled = equals_slot(g, c[3], 1);
+        let next = g.load(c[0], 64);
+        let due = g.binary(1, next, BinaryOp::Eq, now);
+        let due = g.binary(1, due, BinaryOp::And, enabled);
+        let due = g.binary(1, due, BinaryOp::And, active);
+        rising = g.binary(1, rising, BinaryOp::Or, due);
+        let fall = g.load(c[1], 64);
+        let falling = g.binary(1, fall, BinaryOp::Eq, now);
+        let armed = g.load(c[2], 64);
+        let not_due = g.equals(falling, 0);
+        let zero = g.constant(0, 64);
+        let remain = choose(g, not_due, armed, zero);
+        g.store(c[2], 64, remain);
+        let fire = g.b.new_block();
+        let skip = g.b.new_block();
+        branch(g, due, fire, skip);
+        g.b.switch_to_block(fire);
+        let period = g.constant(m.periods[clock], 64);
+        let next = g.binary(64, now, BinaryOp::Add, period);
+        let wraps = g.binary(1, next, BinaryOp::LtU, now);
+        let valid = g.b.new_block();
+        branch(g, wraps, overflow, valid);
+        g.b.switch_to_block(valid);
+        g.store(c[0], 64, next);
+        let half = g.constant(m.periods[clock] - m.periods[clock] / 2, 64);
+        let fall = g.binary(64, now, BinaryOp::Add, half);
+        g.store(c[1], 64, fall);
+        put(g, c[2], 1);
+        for p in &m.processes {
+            let waiting = equals_slot(g, p[0], 1);
+            let this = equals_slot(g, p[2], clock as u64);
+            let waiting = g.binary(1, waiting, BinaryOp::And, this);
+            let decrement = g.b.new_block();
+            let after = g.b.new_block();
+            branch(g, waiting, decrement, after);
+            g.b.switch_to_block(decrement);
+            let left = g.load(p[1], 64);
+            let one = g.constant(1, 64);
+            let left = g.binary(64, left, BinaryOp::Sub, one);
+            g.store(p[1], 64, left);
+            let last = g.equals(left, 0);
+            let release = g.b.new_block();
+            branch(g, last, release, after);
+            g.b.switch_to_block(release);
+            put(g, p[0], 3);
+            g.store(p[3], 64, next);
+            jump(g, after);
+            g.b.switch_to_block(after);
+        }
+        jump(g, skip);
+        g.b.switch_to_block(skip);
+    }
+    let one = g.constant(1, 64);
+    let zero = g.constant(0, 64);
+    let add = choose(g, rising, one, zero);
+    let ticks = g.binary(64, ticks, BinaryOp::Add, add);
+    g.store(m.control[TB_TICKS], 64, ticks);
+}
+
 fn generate(
     program: &LaidOutProgram,
     tb: &TestbenchProgram<AbsoluteAddr>,
@@ -420,6 +494,7 @@ fn generate(
     let start = g.b.new_block();
     let edge = g.b.new_block();
     let after_edges = g.b.new_block();
+    let accounted = g.b.new_block();
     let end = g.b.new_block();
     let done = g.b.new_block();
     let limited = g.b.new_block();
@@ -444,6 +519,10 @@ fn generate(
         SIRSwitchCase {
             value: 1u64.into(),
             target: after_edges,
+        },
+        SIRSwitchCase {
+            value: PUBLISHED.into(),
+            target: accounted,
         },
     ];
     for (i, &r) in run.iter().enumerate() {
@@ -795,6 +874,7 @@ fn generate(
     // Its continuation is independent of TB process continuations.
     g.b.switch_to_block(edge);
     let host_edges = g.b.new_block();
+    let publish = g.b.new_block();
     let schema = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
     let positions: Option<Vec<_>> = m
         .events
@@ -833,13 +913,15 @@ fn generate(
                 None => settle_then(&mut g, m, judge),
             }
             g.b.switch_to_block(judge);
-            equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1)
+            let host = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 0);
+            let one = g.constant(1, 1);
+            g.binary(1, host, BinaryOp::Xor, one)
         } else {
             // Settle what the TB wrote here, as the host would before the
             // edges, unless observers keep the edges in the host.
-            let allowed = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1);
+            let host = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 0);
             let settle = g.b.new_block();
-            branch(&mut g, allowed, settle, host_edges);
+            branch(&mut g, host, host_edges, settle);
             g.b.switch_to_block(settle);
             let judge = g.b.new_block();
             settle_then(&mut g, m, judge);
@@ -895,9 +977,11 @@ fn generate(
             let two = g.constant(2, 64);
             g.store_at(slots.clock_period, bit * 64, 64, two);
         }
-        let any = g.equals(armed, 0);
+        // Without an edge due, the moved events were judged above: the
+        // time step has nothing more to evaluate.
+        let none = g.equals(armed, 0);
         let invoke = g.b.new_block();
-        branch(&mut g, any, host_edges, invoke);
+        branch(&mut g, none, publish, invoke);
         g.b.switch_to_block(invoke);
         g.store(slots.clock_armed, 64, armed);
         g.store(slots.clock_value, 64, values);
@@ -916,7 +1000,19 @@ fn generate(
         let limit = g.equals(exit, SchedulerExit::Limit as u64);
         let finished = g.equals(exit, SchedulerExit::Finish as u64);
         let ok = g.binary(1, limit, BinaryOp::Or, finished);
-        branch(&mut g, ok, after_edges, overflow);
+        branch(&mut g, ok, publish, overflow);
+        // A waveform records each time step: the host dumps it once the
+        // step's edges are accounted for, so that its reports and a
+        // `$finish` see this step's tick, then the run continues.
+        g.b.switch_to_block(publish);
+        let record = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], TB_EDGES_PUBLISHED);
+        let dump = g.b.new_block();
+        branch(&mut g, record, dump, after_edges);
+        g.b.switch_to_block(dump);
+        account_edges(&mut g, m, overflow);
+        put(&mut g, m.control[TB_PHASE], PUBLISHED);
+        put(&mut g, m.control[TB_EXIT], TB_PUBLISH);
+        g.b.seal_block(SIRTerminator::Return);
     } else {
         jump(&mut g, host_edges);
     }
@@ -925,71 +1021,9 @@ fn generate(
     put(&mut g, m.control[TB_EXIT], TB_EDGES);
     g.b.seal_block(SIRTerminator::Return);
     g.b.switch_to_block(after_edges);
-    let now = g.load(m.control[TB_NOW], 64);
-    let ticks = g.load(m.control[TB_TICKS], 64);
-    let limit = g.load(m.control[TB_LIMIT], 64);
-    let active = g.binary(1, ticks, BinaryOp::LtU, limit);
-    let running = equals_slot(&mut g, m.control[TB_STOPPED], 0);
-    let active = g.binary(1, active, BinaryOp::And, running);
-    let mut rising = g.constant(0, 1);
-    for (clock, c) in m.clocks.iter().enumerate() {
-        let enabled = equals_slot(&mut g, c[3], 1);
-        let next = g.load(c[0], 64);
-        let due = g.binary(1, next, BinaryOp::Eq, now);
-        let due = g.binary(1, due, BinaryOp::And, enabled);
-        let due = g.binary(1, due, BinaryOp::And, active);
-        rising = g.binary(1, rising, BinaryOp::Or, due);
-        let fall = g.load(c[1], 64);
-        let falling = g.binary(1, fall, BinaryOp::Eq, now);
-        let armed = g.load(c[2], 64);
-        let not_due = g.equals(falling, 0);
-        let zero = g.constant(0, 64);
-        let remain = choose(&mut g, not_due, armed, zero);
-        g.store(c[2], 64, remain);
-        let fire = g.b.new_block();
-        let skip = g.b.new_block();
-        branch(&mut g, due, fire, skip);
-        g.b.switch_to_block(fire);
-        let period = g.constant(m.periods[clock], 64);
-        let next = g.binary(64, now, BinaryOp::Add, period);
-        let wraps = g.binary(1, next, BinaryOp::LtU, now);
-        let valid = g.b.new_block();
-        branch(&mut g, wraps, overflow, valid);
-        g.b.switch_to_block(valid);
-        g.store(c[0], 64, next);
-        let half = g.constant(m.periods[clock] - m.periods[clock] / 2, 64);
-        let fall = g.binary(64, now, BinaryOp::Add, half);
-        g.store(c[1], 64, fall);
-        put(&mut g, c[2], 1);
-        for p in &m.processes {
-            let waiting = equals_slot(&mut g, p[0], 1);
-            let this = equals_slot(&mut g, p[2], clock as u64);
-            let waiting = g.binary(1, waiting, BinaryOp::And, this);
-            let decrement = g.b.new_block();
-            let after = g.b.new_block();
-            branch(&mut g, waiting, decrement, after);
-            g.b.switch_to_block(decrement);
-            let left = g.load(p[1], 64);
-            let one = g.constant(1, 64);
-            let left = g.binary(64, left, BinaryOp::Sub, one);
-            g.store(p[1], 64, left);
-            let last = g.equals(left, 0);
-            let release = g.b.new_block();
-            branch(&mut g, last, release, after);
-            g.b.switch_to_block(release);
-            put(&mut g, p[0], 3);
-            g.store(p[3], 64, next);
-            jump(&mut g, after);
-            g.b.switch_to_block(after);
-        }
-        jump(&mut g, skip);
-        g.b.switch_to_block(skip);
-    }
-    let one = g.constant(1, 64);
-    let zero = g.constant(0, 64);
-    let add = choose(&mut g, rising, one, zero);
-    let ticks = g.binary(64, ticks, BinaryOp::Add, add);
-    g.store(m.control[TB_TICKS], 64, ticks);
+    account_edges(&mut g, m, overflow);
+    jump(&mut g, accounted);
+    g.b.switch_to_block(accounted);
     // A `$finish` the design recorded in the edges ends the run after this
     // time's edges, for the host to drain it.
     let design_finished = g.load(slots.finish, 8);

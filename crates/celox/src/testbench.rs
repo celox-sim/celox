@@ -1951,6 +1951,7 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
+
     use crate::{Simulator, TestResult};
 
     #[test]
@@ -2807,6 +2808,39 @@ mod tests {
         );
     }
 
+    // Clocks that only pace TB processes, with no RTL domain, still run
+    // their edges in the generated scheduler.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn tb_only_clocks_run_edges_natively() {
+        let source = r#"
+            #[test(Top)]
+            module Top {
+                inst slow: $tb::clock_gen #(period: 10);
+                inst fast: $tb::clock_gen #(period: 2);
+                var observed: logic;
+                initial {
+                    slow.next(1);
+                    $assert(observed == 1'd1);
+                    $finish();
+                }
+                initial {
+                    fast.next(3);
+                    observed = 1'd1;
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top").build_native().unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        compiled::take_counters();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        let counters = compiled::take_counters();
+        assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+    }
+
     #[test]
     fn concurrent_tb_publishes_each_clock_phase_to_vcd() {
         let source = r#"
@@ -2834,6 +2868,27 @@ mod tests {
         );
         sim.flush_vcd().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
+        // Native edges publish each time step the same way.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let native_path = directory.path().join("native.vcd");
+            let mut sim = Simulator::builder(source, "Top")
+                .vcd(&native_path)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters();
+            assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+            sim.flush_vcd().unwrap();
+            let native = std::fs::read_to_string(&native_path).unwrap();
+            let body = |text: &str| text.split_once("$enddefinitions").unwrap().1.to_string();
+            assert_eq!(body(&native), body(&text));
+        }
         let timestamps: Vec<_> = text
             .lines()
             .filter_map(|line| line.strip_prefix('#'))
@@ -2845,6 +2900,62 @@ mod tests {
                 "missing low phase {falling_edge}: {timestamps:?}"
             );
         }
+    }
+
+    // A `$finish` an RTL domain runs on a native edge still publishes the
+    // terminating time step to the VCD.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn rtl_finish_on_native_edge_publishes_terminal_step() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff (clk) {
+                    q += 1;
+                    if q == 3 { $finish(); }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen #(period: 2);
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(100); }
+            }
+        "#;
+        let directory = tempfile::tempdir().unwrap();
+        let unpublished = {
+            let mut sim = Simulator::builder(source, "Top").build_native().unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1000)
+        };
+        assert_eq!(unpublished.result, TestResult::Pass);
+        let mut bodies = Vec::new();
+        for native in [false, true] {
+            let path = directory.path().join(format!("{native}.vcd"));
+            let builder = Simulator::builder(source, "Top").vcd(&path);
+            let result = if native {
+                let mut sim = builder.build_native().unwrap();
+                let tb = compile_initial_testbench(&sim).unwrap();
+                compiled::take_counters();
+                let result = run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1000);
+                let counters = compiled::take_counters();
+                assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+                sim.flush_vcd().unwrap();
+                // Publishing the step does not drop its tick.
+                assert_eq!(result, unpublished);
+                result.result
+            } else {
+                let mut sim = builder.build_interpreter().unwrap();
+                let tb = compile_initial_testbench(&sim).unwrap();
+                let result = run_compiled_testbench_to_finish(&mut sim, &tb);
+                sim.flush_vcd().unwrap();
+                result
+            };
+            assert_eq!(result, TestResult::Pass);
+            let text = std::fs::read_to_string(&path).unwrap();
+            bodies.push(text.split_once("$enddefinitions").unwrap().1.to_string());
+        }
+        assert_eq!(bodies[1], bodies[0]);
+        assert!(bodies[0].contains("#6\n"), "{}", bodies[0]);
     }
 
     #[test]

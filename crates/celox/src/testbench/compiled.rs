@@ -136,7 +136,6 @@ pub(super) fn run<B: SimBackend>(
             ("host_watch", !sim.host_watch.is_empty()),
             ("components", !sim.components.is_empty()),
             ("timed", sim.schedule.timed),
-            ("vcd", sim.vcd_writer.is_some()),
             ("comb_observers", !schema.comb_observers.is_empty()),
             ("watches", !schema.watches.is_empty()),
         ];
@@ -155,8 +154,12 @@ pub(super) fn run<B: SimBackend>(
                 .map(|(name, _)| *name)
                 .collect();
         }
-        sim.backend
-            .set(m.control[TB_NATIVE_EDGES], u64::from(native_edges));
+        let edges = match (native_edges, sim.vcd_writer.is_some()) {
+            (false, _) => 0,
+            (true, false) => 1,
+            (true, true) => TB_EDGES_PUBLISHED,
+        };
+        sim.backend.set(m.control[TB_NATIVE_EDGES], edges);
         sim.backend
             .set(m.control[TB_NATIVE_SETTLE], u64::from(native_settle));
         sim.backend.set(dirty, u8::from(sim.dirty));
@@ -216,6 +219,17 @@ pub(super) fn run<B: SimBackend>(
             }
         }
         reported = ctx.current_time;
+        let exit = sim.backend.get_as::<u64>(m.control[TB_EXIT]);
+        // The unit settled what the step's edges need; the dump settles a
+        // deferred remainder itself. Publish before a `$finish` or fatal
+        // report ends the run, so the waveform keeps the terminating step.
+        if exit == TB_PUBLISH
+            && let Err(error) = sim.try_dump_unless_rewound(now)
+        {
+            return Some(ExecResult::Fail(
+                crate::simulation::vcd_dump_runtime_error(error).to_string(),
+            ));
+        }
         let drained = drain(sim, ctx);
         if let Some(message) = drained.fatal_message {
             return Some(ExecResult::Fail(message_diagnostic(&message)));
@@ -223,8 +237,8 @@ pub(super) fn run<B: SimBackend>(
         if drained.finished {
             return Some(ExecResult::Finished);
         }
-        exits.count(sim.backend.get_as::<u64>(m.control[TB_EXIT]));
-        match sim.backend.get_as::<u64>(m.control[TB_EXIT]) {
+        exits.count(exit);
+        match exit {
             TB_DONE => return Some(ExecResult::Continue),
             TB_FINISHED => return Some(ExecResult::Finished),
             TB_LIMITED => {
@@ -236,7 +250,7 @@ pub(super) fn run<B: SimBackend>(
                     "testbench clock time overflow or invalid scheduler continuation".into(),
                 ));
             }
-            TB_SAFEPOINT | TB_DRAIN => {}
+            TB_SAFEPOINT | TB_DRAIN | TB_PUBLISH => {}
             TB_FAILED => {
                 return Some(ExecResult::Fail(message_diagnostic(
                     &drained
@@ -464,6 +478,7 @@ struct Exits {
     edges: u64,
     safepoint: u64,
     drain: u64,
+    publish: u64,
     /// Design features that keep settles or edges in the host.
     blockers: Vec<&'static str>,
 }
@@ -476,6 +491,7 @@ impl Exits {
             TB_EDGES => self.edges += 1,
             TB_SAFEPOINT => self.safepoint += 1,
             TB_DRAIN => self.drain += 1,
+            TB_PUBLISH => self.publish += 1,
             _ => {}
         }
     }
@@ -489,6 +505,7 @@ impl Drop for Exits {
             edges = self.edges,
             safepoint = self.safepoint,
             drain = self.drain,
+            publish = self.publish,
             blockers = ?self.blockers,
             "[testbench-exits]"
         );
