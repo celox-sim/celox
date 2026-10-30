@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793376411576,
+  "lastUpdate": 1793378971809,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -423536,6 +423536,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-x86_64/heliodor_suite_66_smp_linux_boot_4hart_execution",
             "unit": "ms",
             "value": 4379423.160853
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "7e0eb5b7cad00e8e2156be7ea1d9721e193d58eb",
+          "message": "feat(sv): support increment and decrement in expressions (#2541)",
+          "timestamp": "2026-10-29T08:15:21Z",
+          "url": "https://github.com/celox-sim/celox/commit/7e0eb5b7cad00e8e2156be7ea1d9721e193d58eb"
+        },
+        "date": 1793378971809,
+        "cpu": "INTEL XEON PLATINUM 8573C",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-parallel-x86_64/heliodor_suite_66_smp_linux_boot_4hart_compilation",
+            "unit": "ms",
+            "value": 676685.052522
+          },
+          {
+            "name": "heliodor-native-parallel-x86_64/heliodor_suite_66_smp_linux_boot_4hart_execution",
+            "unit": "ms",
+            "value": 5478043.737951
           }
         ]
       }
