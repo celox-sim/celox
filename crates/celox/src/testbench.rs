@@ -2293,6 +2293,67 @@ mod tests {
         }
     }
 
+    // Latches, including ones that read the clock, keep TB edges in the
+    // generated scheduler: a TB write settles there before the edges.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn latch_designs_run_tb_edges_natively() {
+        let icg = r#"
+            module Icg(clk: input clock, en: input logic, count: output logic<8>) {
+                var en_l: logic;
+                always_comb { if !clk { en_l = en; } }
+                let gclk: '_ clock = clk & en_l;
+                always_ff (gclk) { count += 1; }
+            }
+            module Pipeline(clk: input clock, upstream: output logic<8>,
+                            held: output logic<8>, downstream: output logic<8>) {
+                always_ff (clk) { upstream += 1; downstream = held; }
+                always_comb { if !clk { held = upstream; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var en: logic;
+                var count: logic<8>;
+                var upstream: logic<8>;
+                var held: logic<8>;
+                var downstream: logic<8>;
+                inst gate: Icg(clk, en, count);
+                inst pipe: Pipeline(clk, upstream, held, downstream);
+                initial {
+                    en = 0;
+                    clk.next(3);
+                    $assert(count == 0);
+                    $assert(upstream == 3 && held == 3 && downstream == 2);
+                    en = 1;
+                    clk.next(4);
+                    $assert(count == 4);
+                    en = 0;
+                    clk.next(2);
+                    $assert(count == 4);
+                    en = 1;
+                    clk.next(1);
+                    $assert(count == 5);
+                    $finish();
+                }
+            }
+        "#;
+        for source in [include_str!("../testdata/veryl/latch_initial.veryl"), icg] {
+            let mut sim = Simulator::builder(source, "Top")
+                .allow_inferred_latches(true)
+                .build_native()
+                .unwrap();
+            assert!(!sim.program.runtime_schema.persistent_comb_state.is_empty());
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters();
+            assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+        }
+    }
+
     #[test]
     fn concurrent_tb_preserves_low_phase_latch_updates() {
         let source = r#"
