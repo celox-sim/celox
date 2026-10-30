@@ -17,7 +17,7 @@ mod spelling;
 #[cfg(test)]
 mod tests;
 
-pub(super) use conversion::of_shape;
+pub(super) use conversion::{of_shape, of_type};
 
 /// An interned semantic type of a [`TyTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

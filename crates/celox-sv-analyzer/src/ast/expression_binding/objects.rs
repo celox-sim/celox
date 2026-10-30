@@ -37,98 +37,8 @@ pub(in crate::ast) fn native_class(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<String> {
-    let id = ungroup(id, native);
-    if let ExprKind::Call { expression, .. } = &native.expression(id).kind
-        && let ExprKind::Member {
-            expression: base,
-            separator,
-            name,
-        } = &native.expression(*expression).kind
-        && separator == "::"
-        && name.spelling == "self"
-        && super::super::processes::scope(tree, session, *base, native, dimensions)
-    {
-        return Some(super::super::processes::CLASS.to_owned());
-    }
-    // The result of a function or method that returns a class handle, whose
-    // members the call may select (IEEE 1800-2023 8.4).
-    if let ExprKind::Call { expression, .. } = &native.expression(id).kind {
-        let name = match method(tree, session, *expression, native, dimensions) {
-            Ok(Some((name, ..))) => name,
-            Ok(None) => super::direct::callable_name(tree, *expression, native)?,
-            Err(_) => return None,
-        };
-        return dimensions.function_return_types.get(&name)?.class.clone();
-    }
-    // A class handle member of an unpacked structure variable.
-    if let Some(name) = unpacked_structs::native_member(ungroup(id, native), native, dimensions) {
-        return dimensions.get(&name)?.class.clone();
-    }
-    // A class handle member of a container element of unpacked structure type.
-    if let Ok(Some((ty, _))) = containers::element_member(id, native, tree, session, dimensions) {
-        return ty.class().map(str::to_owned);
-    }
-    let expression = native.expression(ungroup(id, native));
-    if let ExprKind::Select {
-        expression,
-        dimension,
-    } = &expression.kind
-        && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
-    {
-        if let Some(ty) = containers::native_type(*expression, native, tree, session, dimensions)
-            .ok()
-            .flatten()
-        {
-            return ty.element.class().map(str::to_owned);
-        }
-        let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind else {
-            return None;
-        };
-        let ty = dimensions.get(&instances::normalize_identifier(&name.spelling))?;
-        return ty
-            .container
-            .as_ref()
-            .and_then(|ty| ty.element.class().map(str::to_owned))
-            .or_else(|| ty.class.clone().filter(|_| !ty.unpacked.is_empty()));
-    }
-    if let ExprKind::Name(name) = &expression.kind {
-        let name = instances::normalize_identifier(&name.spelling);
-        if let Some(ty) = dimensions.get(&name) {
-            return ty.class.clone();
-        }
-        if name == "super" {
-            return super_class(tree, session, dimensions);
-        }
-    }
-    // The receiver of `h.p` is resolved once for both kinds of property, so
-    // a chain `a.b.c` takes one walk.
-    if let ExprKind::Member {
-        expression: receiver,
-        separator,
-        name,
-    } = &expression.kind
-        && separator == "."
-        // Otherwise a member of a property of unpacked structure type, found
-        // as a property below.
-        && let Some(owner) = native_class(tree, session, *receiver, native, dimensions)
-    {
-        let member = instances::normalize_identifier(&name.spelling);
-        let receiver = (!is_super(*receiver, native)).then_some(*receiver);
-        if let Some((property, _)) =
-            property_in(tree, session, dimensions, &owner, &member, receiver).ok()?
-        {
-            return property.r#type.class().map(str::to_owned);
-        }
-        return class(tree, session, dimensions, &owner)
-            .ok()?
-            .static_property(&member)
-            .and_then(|property| property.r#type.class().map(str::to_owned));
-    }
-    if let Some(class) = static_property_class(tree, session, id, native, dimensions).ok()? {
-        return Some(class);
-    }
-    let (property, _) = property(tree, session, id, native, dimensions).ok()??;
-    property.r#type.class().map(str::to_owned)
+    let ty = expression_types::type_of(tree, session, id, native, dimensions)?;
+    expression_types::class_name(&session.types, ty)
 }
 
 /// Access depends on the lexical class, not the class of the receiver (8.18).
@@ -173,10 +83,10 @@ pub(in crate::ast) fn scope_class(dimensions: &PackedDimensions) -> Option<Strin
 
 /// The base of the scope class, which `super` refers to inside a method that
 /// has an object (IEEE 1800-2023 8.15).
-fn super_class(
+pub(in crate::ast) fn super_class(
     tree: &AnalysisContext<'_>,
-    session: &mut Session,
     dimensions: &PackedDimensions,
+    session: &mut Session,
 ) -> Option<String> {
     dimensions.get(THIS)?;
     class(tree, session, dimensions, &scope_class(dimensions)?)
@@ -187,7 +97,7 @@ fn super_class(
 
 /// Whether native expression `id` is `super`, which passes the enclosing
 /// method's `this`.
-fn is_super(id: ExprId, native: &Declarations) -> bool {
+pub(in crate::ast) fn is_super(id: ExprId, native: &Declarations) -> bool {
     matches!(&native.expression(ungroup(id, native)).kind,
         ExprKind::Name(name) if name.spelling == "super")
 }
@@ -413,6 +323,19 @@ fn static_property_class(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
+    Ok(static_property_type(tree, id, native, dimensions, session)?
+        .and_then(|ty| ty.class().map(str::to_owned)))
+}
+
+/// The type of the static property that native expression `id` names,
+/// `h.p` or `C::p`.
+pub(in crate::ast) fn static_property_type(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    session: &mut Session,
+) -> Converted<Option<Type>> {
     let ExprKind::Member {
         expression,
         separator,
@@ -431,7 +354,28 @@ fn static_property_class(
     };
     Ok(class(tree, session, dimensions, &class_name)?
         .static_property(&instances::normalize_identifier(&name.spelling))
-        .and_then(|property| property.r#type.class().map(str::to_owned)))
+        .map(|property| property.r#type.clone()))
+}
+
+/// The type of property `member` of class `owner`, an instance property
+/// read through `receiver` or a static one.
+pub(in crate::ast) fn member_type(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    owner: &str,
+    member: &str,
+    receiver: Option<ExprId>,
+    session: &mut Session,
+) -> Option<Type> {
+    if let Some((property, _)) =
+        property_in(tree, session, dimensions, owner, member, receiver).ok()?
+    {
+        return Some(property.r#type);
+    }
+    class(tree, session, dimensions, owner)
+        .ok()?
+        .static_property(member)
+        .map(|property| property.r#type.clone())
 }
 
 /// The property that native expression `id` names, `h.p` or an unqualified
