@@ -414,6 +414,47 @@ fn tiered_report_records_when_each_tier_ran() {
     }
 }
 
+// Unknown bits print as `x` in testbench messages (IEEE 1800-2023
+// 21.2.1.3), not as their payload (#2629).
+#[test]
+fn veryl_testbench_displays_print_unknown_bits() {
+    let source = r#"
+        #[test(Top)]
+        module Top {
+            inst clk: $tb::clock_gen;
+            var mem: logic<64> [4];
+            var v  : logic<64>;
+            initial {
+                clk.next(1);
+                v = mem[1];
+                $display("v=%h", v);
+                $display("m=%h", mem[2]);
+                $finish();
+            }
+        }
+    "#;
+    for backend in [
+        "native",
+        "tiered",
+        "interpreter",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+    ] {
+        for (state, digit) in [("--four-state", 'x'), ("--two-state", '0')] {
+            let output = run(&[("top.veryl", source)], &["--backend", backend, state]);
+            assert!(output.status.success(), "{backend} {state}: {output:?}");
+            let printed = String::from_utf8_lossy(&output.stderr);
+            let value = digit.to_string().repeat(16);
+            for line in [format!("v={value}"), format!("m={value}")] {
+                assert!(
+                    printed.lines().any(|printed| printed == line),
+                    "{backend} {state}: missing {line} in {printed}"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(not(any(
     all(target_arch = "x86_64", feature = "arm64-codegen"),
     all(target_arch = "aarch64", feature = "x86_64-codegen")

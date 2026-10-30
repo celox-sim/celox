@@ -699,9 +699,108 @@ impl<L> ExprBytecode<L> {
         })
     }
 
+    /// The storage an expression only reads: a variable, or an array
+    /// element at a constant index. Formatting it can keep its unknown bits.
+    pub fn plain_load(&self) -> Option<PlainLoad<&L>> {
+        match self.ops.as_slice() {
+            [
+                ExprOpcode::LoadU64 {
+                    location,
+                    byte_size,
+                    mask,
+                },
+            ] => {
+                let width = low_ones(*mask)?;
+                (width <= byte_size * 8).then_some(PlainLoad {
+                    location,
+                    bit: 0,
+                    width,
+                    element: None,
+                })
+            }
+            // A selection at a constant offset, such as an element of a
+            // packed array.
+            [
+                ExprOpcode::LoadU64 {
+                    location,
+                    byte_size,
+                    mask,
+                },
+                ExprOpcode::ConstU64(shift),
+                ExprOpcode::BinOp(TestbenchOperator::LogicShiftR),
+                ExprOpcode::ConstU64(select),
+                ExprOpcode::BinOp(TestbenchOperator::BitAnd),
+            ] => {
+                let shift = usize::try_from(*shift).ok()?;
+                let width = low_ones(*select)?;
+                let loaded = low_ones(*mask)?;
+                (loaded <= byte_size * 8 && shift + width <= loaded).then_some(PlainLoad {
+                    location,
+                    bit: shift,
+                    width,
+                    element: None,
+                })
+            }
+            [
+                ExprOpcode::LoadWide {
+                    location, width, ..
+                },
+            ] => Some(PlainLoad {
+                location,
+                bit: 0,
+                width: *width,
+                element: None,
+            }),
+            [
+                ExprOpcode::ConstU64(index),
+                ExprOpcode::LoadIndexed {
+                    location,
+                    stride_bits,
+                    base_bit_offset,
+                    element_width,
+                },
+            ] => Some(PlainLoad {
+                location,
+                bit: 0,
+                width: *element_width,
+                element: Some(PlainElement {
+                    index: usize::try_from(*index).ok()?,
+                    stride_bits: *stride_bits,
+                    base_bit_offset: *base_bit_offset,
+                }),
+            }),
+            _ => None,
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
+}
+
+/// The width of `mask` when its set bits are the low ones.
+fn low_ones(mask: u64) -> Option<usize> {
+    let width = mask.trailing_ones() as usize;
+    (width != 0 && mask.count_ones() as usize == width).then_some(width)
+}
+
+/// See [`ExprBytecode::plain_load`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlainLoad<L> {
+    pub location: L,
+    /// The bit the load starts at after the location's byte.
+    pub bit: usize,
+    pub width: usize,
+    /// The element an indexed load reads, `None` for a load at the
+    /// location.
+    pub element: Option<PlainElement>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PlainElement {
+    pub index: usize,
+    pub stride_bits: usize,
+    pub base_bit_offset: usize,
 }
 
 /// A native expression entry point and its ordinary state result slot.
@@ -720,22 +819,26 @@ pub struct BindError<A> {
     pub address: A,
 }
 
-pub struct ExecutableArgument {
+pub struct ExecutableArgument<Signal> {
     pub expr: CompiledExpr,
     pub width: usize,
     pub signed: bool,
     pub is_string: bool,
     pub float_precision: Option<celox_design::FloatPrecision>,
+    /// The storage of an argument that only reads it, whose unknown bits
+    /// its formatting keeps: a signal and the bit the argument starts at in
+    /// its value.
+    pub stored: Option<(Signal, usize)>,
 }
 
-pub type ExecutableAssertMessage = AssertMessage<ExecutableArgument>;
+pub type ExecutableAssertMessage<Signal> = AssertMessage<ExecutableArgument<Signal>>;
 pub type ExecutableClockCount = ClockCount<CompiledExpr>;
 pub type ExecutableLoopBound = LoopBound<CompiledExpr>;
 pub type ExecutableStatement<Event, Signal> = TestbenchStatement<
     Event,
     Signal,
     CompiledExpr,
-    ExecutableArgument,
+    ExecutableArgument<Signal>,
     TestbenchTarget<Signal, CompiledExpr>,
 >;
 pub type ExecutableComponentBinding<Event, Signal> = ComponentBinding<Event, Signal, CompiledExpr>;

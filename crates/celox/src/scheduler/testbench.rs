@@ -238,6 +238,47 @@ fn resize(g: &mut Generator<'_>, value: RegisterId, width: usize) -> RegisterId 
     result
 }
 
+/// The value of message argument `arg` at `width` bits. A four-state value
+/// the argument only reads keeps its unknown bits (IEEE 1800-2023
+/// 21.2.1.3): it is loaded as the expression kernel loads it, with its mask.
+fn message_arg(
+    g: &mut Generator<'_>,
+    program: &LaidOutProgram,
+    slots: &SchedulerSlots<AbsoluteAddr>,
+    arg: &SemanticArgument<AbsoluteAddr>,
+    width: usize,
+) -> RegisterId {
+    let stored = arg.expr.plain_load().filter(|load| {
+        program.layout().four_state
+            && load.width == width
+            && program
+                .design
+                .state_objects
+                .get(&load.location.address)
+                .is_some_and(|object| object.is_4state)
+    });
+    let Some(load) = stored else {
+        let value = evaluate(g, program, slots, &arg.expr);
+        return resize(g, value, width);
+    };
+    let bit = load.location.byte_offset * 8 + load.bit;
+    let offset = match load.element {
+        None => SIROffset::Static(bit),
+        Some(element) => {
+            let offset = element.index * element.stride_bits + bit + element.base_bit_offset;
+            SIROffset::Dynamic(g.constant(offset as u64, 64))
+        }
+    };
+    let register = g.b.alloc_logic(width);
+    g.b.emit(SIRInstruction::Load(
+        register,
+        stable(load.location.address),
+        offset,
+        width,
+    ));
+    register
+}
+
 /// The DUT storage `expr` loads.
 fn dut_reads(program: &LaidOutProgram, expr: &Expr) -> Vec<AbsoluteAddr> {
     let mut reads: Vec<_> = expr
@@ -842,8 +883,7 @@ fn generate(
                             .iter()
                             .zip(widths)
                             .map(|(arg, width)| {
-                                let value = evaluate(&mut g, program, slots, &arg.expr);
-                                resize(&mut g, value, width.max(1))
+                                message_arg(&mut g, program, slots, arg, width.max(1))
                             })
                             .collect();
                         g.b.emit(SIRInstruction::RuntimeEvent {
@@ -879,8 +919,7 @@ fn generate(
                             .iter()
                             .zip(widths)
                             .map(|(arg, width)| {
-                                let value = evaluate(&mut g, program, slots, &arg.expr);
-                                resize(&mut g, value, width.max(1))
+                                message_arg(&mut g, program, slots, arg, width.max(1))
                             })
                             .collect();
                         g.b.emit(SIRInstruction::RuntimeEvent { site_id, args });
