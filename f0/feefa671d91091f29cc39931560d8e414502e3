@@ -1,0 +1,1 @@
+Codex rounds on 8b4a49d/64582bd: DPI-C output actuals are included in module-wide driver discovery (DriverScan, kernel window writes); builtin output actuals check their tagged union members.
