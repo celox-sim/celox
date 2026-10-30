@@ -70,7 +70,7 @@ pub struct LimitedTestbenchResult {
     pub tick_limit_reached: bool,
 }
 
-pub(crate) type AssertMessage = ExecutableAssertMessage;
+pub(crate) type AssertMessage = ExecutableAssertMessage<SignalRef>;
 
 /// Clock cycle count: either a compile-time constant or a runtime expression.
 pub type ClockCount = ExecutableClockCount;
@@ -88,7 +88,7 @@ enum TestbenchEvaluationError {
 
 pub(crate) type TestbenchStatement<B> = ExecutableStatement<<B as SimBackend>::Event, SignalRef>;
 
-pub(crate) type CompiledAssertArg = ExecutableArgument;
+pub(crate) type CompiledAssertArg = ExecutableArgument<SignalRef>;
 
 fn eval_expr<B: SimBackend>(
     sim: &mut Simulator<B>,
@@ -241,16 +241,25 @@ fn format_assert_arg<B: SimBackend>(
     spec: char,
     field: FieldSpec,
 ) -> Vec<u8> {
-    let value = eval_expr(sim, &arg.expr);
-    let width = match &value {
-        TbValue::String(bytes) => bytes.len() * 8,
-        _ => arg.width,
+    let (value, mask, width) = match arg.stored.filter(|_| !arg.is_string) {
+        // Keep the unknown bits of a stored value (IEEE 1800-2023 21.2.1.3).
+        Some(stored) => {
+            let (value, mask) = stored_value(sim, stored, arg.width);
+            (value, Some(mask), arg.width)
+        }
+        None => {
+            let value = eval_expr(sim, &arg.expr);
+            let width = match &value {
+                TbValue::String(bytes) => bytes.len() * 8,
+                _ => arg.width,
+            };
+            (value.to_biguint(), None, width)
+        }
     };
-    let value = value.to_biguint();
     format_veryl_display_arg(
         &DisplayFormatArg {
             value: &value,
-            mask: None,
+            mask: mask.as_ref(),
             width,
             signed: arg.signed,
             is_string: arg.is_string,
@@ -259,6 +268,30 @@ fn format_assert_arg<B: SimBackend>(
         spec,
         field,
     )
+}
+
+/// The `width` bits from `bit` of the value and unknown bits of `signal`,
+/// read without the rest of the signal: its mask plane follows its value.
+fn stored_value<B: SimBackend>(
+    sim: &Simulator<B>,
+    (signal, bit): (SignalRef, usize),
+    width: usize,
+) -> (BigUint, BigUint) {
+    let range = |offset: usize| SignalRef {
+        offset: offset + bit / 8,
+        width: bit % 8 + width,
+        is_4state: false,
+        array_layout: None,
+    };
+    let bits = width_mask(width);
+    let value = (sim.backend.get(range(signal.offset)) >> (bit % 8)) & &bits;
+    let mask = if signal.is_4state && sim.backend.layout().four_state {
+        let plane = signal.offset + signal.width.div_ceil(8);
+        (sim.backend.get(range(plane)) >> (bit % 8)) & bits
+    } else {
+        BigUint::ZERO
+    };
+    (value, mask)
 }
 
 fn render_assert_message<B: SimBackend>(
@@ -913,7 +946,10 @@ fn publish_tb_assert_event<B: SimBackend>(
 ) {
     let args = assert_event_args(message)
         .iter()
-        .map(|arg| eval_expr(sim, &arg.expr).to_biguint())
+        .map(|arg| match arg.stored.filter(|_| !arg.is_string) {
+            Some(stored) => stored_value(sim, stored, arg.width),
+            None => (eval_expr(sim, &arg.expr).to_biguint(), BigUint::ZERO),
+        })
         .collect::<Vec<_>>();
     let layout = sim.layout();
     let Some(site_layout) = layout
@@ -957,9 +993,10 @@ fn publish_tb_assert_event<B: SimBackend>(
         arg_count as u64,
     );
 
-    for (idx, value) in args.iter().take(arg_count).enumerate() {
+    for (idx, (value, mask)) in args.iter().take(arg_count).enumerate() {
         let arg_layout = &site_layout.args[idx];
         let words = value.to_u64_digits();
+        let mask_words = mask.to_u64_digits();
         for word_idx in 0..arg_layout.word_count {
             let value_word = words.get(word_idx).copied().unwrap_or(0);
             write_u64_volatile(
@@ -974,7 +1011,7 @@ fn publish_tb_assert_event<B: SimBackend>(
                 slot_base
                     + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
                     + (arg_layout.mask_word_offset + word_idx) * 8,
-                0,
+                mask_words.get(word_idx).copied().unwrap_or(0),
             );
         }
     }
@@ -2430,6 +2467,82 @@ mod tests {
         );
         assert_eq!(reference.0, compiled.0);
         assert_eq!(compiled.2.1, 0, "host edge batches: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn tb_messages_format_unknown_bits() {
+        // Digits whose bits are all unknown print `x`, partly unknown ones
+        // `X` (IEEE 1800-2023 21.2.1.3). Veryl prints any unknown decimal as
+        // `x`.
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var mem: logic<16> [4];
+                var padded: logic<12> [4];
+                var p: logic<8>;
+                var u: logic<8>;
+                assign p = 8'bxx0x0101;
+                initial {
+                    clk.next(1);
+                    $assert_continue(1'b0, "m=%h n=%h p=%h d=%d", mem[2], padded[1], p, u);
+                    $assert(1'b1, "p=%h", p);
+                    $finish();
+                }
+            }
+        "#;
+        fn check<B: SimBackend>(build: impl Fn() -> Simulator<B>, context: &str) {
+            let mut sim = build();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            let detailed = run_testbench_detailed(&mut sim, &tb);
+            let messages: Vec<_> = detailed
+                .assertions
+                .iter()
+                .map(|assertion| {
+                    (
+                        assertion.passed,
+                        String::from_utf8(assertion.message.clone().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                messages,
+                [
+                    (false, "m=xxxx n=xxx p=X5 d=x".to_string()),
+                    (true, "p=X5".to_string())
+                ],
+                "{context}"
+            );
+            let mut sim = build();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench(&mut sim, &tb),
+                TestResult::Fail("m=xxxx n=xxx p=X5 d=x".into()),
+                "{context}"
+            );
+        }
+        let builder = |mode| {
+            Simulator::builder(source, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+        };
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            check(
+                || builder(mode).build_native().unwrap(),
+                &format!("native {mode:?}"),
+            );
+            #[cfg(feature = "cranelift")]
+            check(
+                || builder(mode).build_cranelift().unwrap(),
+                &format!("cranelift {mode:?}"),
+            );
+            check(
+                || builder(mode).build_interpreter().unwrap(),
+                &format!("interpreter {mode:?}"),
+            );
+        }
     }
 
     #[test]
