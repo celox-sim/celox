@@ -38,7 +38,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.release-token.outputs.token }}
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - name: Create develop on first use
         id: develop

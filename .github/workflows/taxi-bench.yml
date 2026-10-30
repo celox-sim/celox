@@ -23,7 +23,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Build native cocotb CLI
         run: cargo build --locked --release -p celox-vpi --features systemverilog --bin celox

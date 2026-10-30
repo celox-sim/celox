@@ -44,15 +44,6 @@
     },
     {
       "matchManagers": [
-        "github-actions"
-      ],
-      "matchDepNames": [
-        "python"
-      ],
-      "enabled": false
-    },
-    {
-      "matchManagers": [
         "cargo"
       ],
       "matchPackageNames": [
@@ -116,24 +107,6 @@
         "npm"
       ],
       "minimumReleaseAge": "7 days"
-    },
-    {
-      "matchManagers": [
-        "github-actions"
-      ],
-      "pinDigests": true,
-      "matchUpdateTypes": [
-        "minor",
-        "patch",
-        "pin",
-        "digest"
-      ],
-      "minimumReleaseAge": "3 days",
-      "automerge": false,
-      "labels": [
-        "dependencies",
-        "merge-ready"
-      ]
     },
     {
       "matchManagers": [
@@ -234,6 +207,13 @@
         "lydite/conformance/veryl/Cargo.toml",
         "lydite/conformance/veryl/capture-macros/Cargo.toml",
         "lydite/conformance/veryl/harness/Cargo.toml"
+      ],
+      "enabled": false
+    },
+    {
+      "description": "Dependabot updates GitHub Actions together with actions.lock.",
+      "matchManagers": [
+        "github-actions"
       ],
       "enabled": false
     }

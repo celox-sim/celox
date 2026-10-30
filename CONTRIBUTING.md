@@ -520,3 +520,32 @@ dequeue as usual to withdraw the merge request entirely. The generated
 
 Each label's behavior works after its configuration reaches the PR's base
 branch. Creating or applying a label alone does not install the queue policy.
+
+## GitHub Actions dependencies
+
+All workflows use the generated `.github/workflows/actions.lock` to pin direct
+and transitive action dependencies. Install the official CLI extension and
+regenerate the lockfile after adding workflows or changing action references:
+
+```sh
+gh extension install github/gh-actions-lock --pin v0.4.0
+gh actions-lock --no-narrow
+gh actions-lock --verify
+```
+
+Keep readable version references in workflows; review the generated commit and
+repository identity changes in `actions.lock`. Do not edit the lockfile by hand.
+Use `gh actions-lock --verify-local` for an offline coverage check. To advance
+moving tags or branches deliberately, review upstream changes and run
+`gh actions-lock --no-narrow --relock`.
+
+Repository actions use `$/` references so their transitive dependencies are
+included. These actions run from the workflow commit, even when checkout uses a
+different validation revision. When adding a local action, use `$/` or run
+`gh actions-lock --no-narrow --migrate-local-actions` and review that migration.
+
+The Verify workflow lockfile check verifies coverage and upstream provenance on
+pull requests, merge groups, and pushes to master/develop. Dependabot manages
+GitHub Actions updates, including matching lockfile entries; Renovate continues
+to manage other dependencies. See the
+[GitHub lockfile documentation](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles).

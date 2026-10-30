@@ -80,7 +80,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
       - name: Capture benchmark host metadata
@@ -197,7 +197,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
         if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
       - uses: Swatinem/rust-cache@v2
         if: ${{ !inputs.arm64_profile || inputs.arm64_profile_run_id == '' }}
@@ -417,7 +417,7 @@ jobs:
       - uses: actions/setup-node@v7
         with:
           node-version: 26
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - name: Record host
         run: |
@@ -499,7 +499,7 @@ jobs:
         with:
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
 
       - name: Resolve Heliodor HEAD
