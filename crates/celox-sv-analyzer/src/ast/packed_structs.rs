@@ -43,6 +43,10 @@ impl PackedMember {
     pub(in crate::ast) fn is_tagged(&self) -> bool {
         self.tag.is_some()
     }
+    /// The declaration of the aggregate that has the member.
+    pub(in crate::ast) fn owner(&self) -> &Arc<str> {
+        &self.owner
+    }
     pub(in crate::ast) fn same_owner(&self, other: &Self) -> bool {
         self.owner == other.owner
     }
