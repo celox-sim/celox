@@ -2047,6 +2047,24 @@ mod tests {
         assert_eq!(sim.get_as::<u8>(q), 4);
     }
 
+    // Retained comb state keeps TB edges out of the compiled scheduler, so a
+    // two-state case covering every selector value must not retain any.
+    #[test]
+    fn complete_binary_case_retains_no_comb_state() {
+        let arms = (0..4)
+            .map(|i| format!("2'd{i}: q = d + 8'd{i};"))
+            .collect::<String>();
+        let source = format!(
+            "module Top(s: input logic<2>, d: input logic<8>, q: output logic<8>) {{
+                always_comb {{ case s {{ {arms} }} }}
+            }}"
+        );
+        let sim = Simulator::builder(&source, "Top")
+            .build_interpreter()
+            .unwrap();
+        assert!(sim.program.runtime_schema.persistent_comb_state.is_empty());
+    }
+
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[test]
     fn native_image_retains_latch_observation_and_tb_dependencies() {

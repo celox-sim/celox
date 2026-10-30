@@ -51,6 +51,7 @@ pub struct ModuleParser<'a> {
     comb_blocks: Vec<LogicPath<VarId>>,
     comb_process_ranges: Vec<crate::artifact::CombProcess>,
     allow_inferred_latches: bool,
+    four_state: bool,
     comb_observers: Vec<CombObserver<VarId>>,
     comb_runtime_event_sites: Vec<RuntimeEventSite>,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
@@ -908,6 +909,7 @@ impl<'a> ModuleParser<'a> {
             comb_blocks: Vec::new(),
             comb_process_ranges: Vec::new(),
             allow_inferred_latches: config.allow_inferred_latches,
+            four_state: config.four_state,
             comb_observers: Vec::new(),
             comb_runtime_event_sites: Vec::new(),
             comb_boundaries: HashMap::default(),
@@ -934,7 +936,7 @@ impl<'a> ModuleParser<'a> {
     ) -> Result<(), ParserError> {
         let arena_start = self.arena.len();
         let site_offset = self.comb_runtime_event_sites.len() as u32;
-        let (paths, store, boundaries, mut observers, sites) = parse_comb_with_loop_recovery(
+        let (mut paths, store, boundaries, mut observers, sites) = parse_comb_with_loop_recovery(
             self.module,
             decl,
             &mut self.arena,
@@ -959,9 +961,16 @@ impl<'a> ModuleParser<'a> {
             ))
         });
         if self.allow_inferred_latches && !continuous {
-            let proven_combinational = crate::logic_tree::proves_combinational(&paths, &self.arena);
+            let mut proven_combinational =
+                crate::logic_tree::proves_combinational(&paths, &self.arena);
             let proven_binary_combinational = !proven_combinational
                 && crate::logic_tree::proves_binary_combinational(&paths, &self.arena);
+            // A two-state selector has no value outside complete binary
+            // labels, so the unmatched branch never runs.
+            if proven_binary_combinational && !self.four_state {
+                proven_combinational =
+                    crate::logic_tree::complete_binary_cases(&mut paths, &mut self.arena);
+            }
             self.comb_process_ranges.push(crate::artifact::CombProcess {
                 paths: self.comb_blocks.len()..self.comb_blocks.len() + paths.len(),
                 reads: crate::logic_tree::sensitivity::implicit_reads(
