@@ -207,8 +207,8 @@ impl Alias {
             let sample = |position: &ConstExpr| constant(&sampled(position));
             Some(sample(msb)?.abs_diff(sample(lsb)?) + 1)
         };
-        let failed = std::cell::Cell::new(false);
-        let read = |msb: ConstExpr, lsb: ConstExpr, signed: bool| {
+        let mut failed = false;
+        let mut read = |msb: ConstExpr, lsb: ConstExpr, signed: bool| {
             let (msb, lsb) = (literal(msb), literal(lsb));
             let select = |msb, lsb| Expr::Select {
                 expr: Box::new(Expr::Ident(self.formal.clone())),
@@ -220,7 +220,7 @@ impl Alias {
                 return select(msb, lsb);
             }
             let (Some(inside), Some(bits)) = (self.inside(&msb), select_width(&msb, &lsb)) else {
-                failed.set(true);
+                failed = true;
                 return select(msb, lsb);
             };
             let past = |offset: u128| ConstExpr::Literal((*width as u128 + offset).to_string());
@@ -234,7 +234,7 @@ impl Alias {
             .into_iter()
             .map(|stmt| {
                 stmt.map(
-                    &mut |expr| self.select_positions(expr, &read),
+                    &mut |expr| self.select_positions(expr, &mut read),
                     &mut |lvalue| match lvalue {
                         LValue::Select {
                             name,
@@ -254,7 +254,7 @@ impl Alias {
                 )
             })
             .collect();
-        if failed.get() {
+        if failed {
             return Err(unsupported(format!(
                 "run-time select of ref argument `{}` bound to an array element",
                 self.source_name
@@ -266,7 +266,7 @@ impl Alias {
     fn select_positions(
         &self,
         expr: Expr,
-        read: &dyn Fn(ConstExpr, ConstExpr, bool) -> Expr,
+        read: &mut dyn FnMut(ConstExpr, ConstExpr, bool) -> Expr,
     ) -> Expr {
         let mut inner = |expr| self.select_positions(expr, read);
         match expr {
