@@ -67,7 +67,12 @@ pub const TB_LIMITED: u64 = 5;
 pub const TB_OVERFLOW: u64 = 6;
 
 pub const TB_RESET: u64 = 7;
+/// A time step ended; the host records it in the waveform.
+pub const TB_PUBLISH: u64 = 11;
+/// `control[TB_NATIVE_EDGES]`: 0 when edges run in the host, 1 when in the
+/// unit, [`TB_EDGES_PUBLISHED`] when in the unit with each time step published.
 pub const TB_NATIVE_EDGES: usize = 7;
+pub const TB_EDGES_PUBLISHED: u64 = 2;
 pub const TB_STOPPED: usize = 8;
 pub const TB_NATIVE_SETTLE: usize = 9;
 pub const TB_FINISHED: u64 = 8;
