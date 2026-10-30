@@ -1,1 +1,6 @@
-Name structures and unions by their typedef, which is a type of its own in each generate scope, and fall back to the declaration position for anonymous ones (Codex review)
+Revision history for #2643:
+
+rev 2 (content) 2026-10-30 11:47 UTC — Name structures and unions by their typedef, which is a type of its own in each generate scope, and fall back to the declaration position for anonymous ones (Codex review)
+rev 1 (initial) 2026-10-30 11:47 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2643,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"784a79e8e57e38d283a51f35bbff4b61691b2895","timestamp_iso":"2026-10-30T11:47:58Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"784a79e8e57e38d283a51f35bbff4b61691b2895","new_sha":"65351dffd8c5849863bf923502aa2989ece5fe1d","timestamp_iso":"2026-10-30T11:47:58Z","reason":"Name structures and unions by their typedef, which is a type of its own in each generate scope, and fall back to the declaration position for anonymous ones (Codex review)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/784a79e8e57e38d283a51f35bbff4b61691b2895...65351dffd8c5849863bf923502aa2989ece5fe1d"}]} -->
