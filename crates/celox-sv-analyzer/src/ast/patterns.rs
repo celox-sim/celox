@@ -253,22 +253,23 @@ pub(super) fn assignment_value(
         .as_ref()
         .and_then(|actual| array_compatibility::unpacked_array_type(state, actual, dims));
     let target = array_compatibility::unpacked_array_type(state, shape, dims);
-    match (actual, target, actual_shape) {
-        (Some(actual), Some(target), Some(actual_shape))
-            if !array_compatibility::compatible(state, &actual_shape, shape, dims) =>
-        {
-            return Err(AnalyzerError::IncompatibleUnpackedArray {
-                context: "assignment pattern element".into(),
-                actual: Box::new(actual),
-                target: Box::new(target),
-            });
-        }
-        (Some(_), None, _) => {
+    if let Some((actual, target)) = actual_shape
+        .as_ref()
+        .and_then(|actual| array_compatibility::incompatible(state, actual, shape, dims))
+    {
+        return Err(AnalyzerError::IncompatibleUnpackedArray {
+            context: "assignment pattern element".into(),
+            actual,
+            target,
+        });
+    }
+    match (actual, target) {
+        (Some(_), None) => {
             return Err(unsupported(
                 "unpacked array assignment pattern item for scalar",
             ));
         }
-        (None, Some(_), _) => {
+        (None, Some(_)) => {
             return Err(unsupported(
                 "scalar assignment pattern item for unpacked array",
             ));

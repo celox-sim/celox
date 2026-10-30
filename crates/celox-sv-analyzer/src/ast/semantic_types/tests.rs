@@ -233,3 +233,28 @@ fn unpacked_arrays_assign_by_element_type_and_size() {
     assert_eq!(assign("m_t", "m_t"), Ok(Assignable::Always));
     assert_eq!(assign("i_t", "q_t"), Err(Mismatch::NotArrays));
 }
+
+#[test]
+fn diagnostics_spell_element_types_and_element_counts() {
+    let (table, ids) = typedefs(
+        "typedef logic signed [7:0] r_t [2][3]; typedef bit b_t [4]; typedef int q_t[$];
+         typedef byte m_t[string]; typedef enum {X, Y} e_t; typedef e_t ea_t [2];
+         typedef string s_t [1:0]; typedef struct packed {int A;} p_t; typedef p_t pa_t [2];",
+    );
+    for (name, spelling) in [
+        ("r_t", "logic signed [7:0] [2][3]"),
+        ("b_t", "bit [4]"),
+        ("q_t", "bit signed [31:0] [$]"),
+        ("m_t", "bit signed [7:0] [string]"),
+        ("s_t", "string [2]"),
+        ("pa_t", "bit [31:0] [2]"),
+    ] {
+        assert_eq!(table.spell(ids[name]), spelling, "{name}");
+    }
+    assert!(
+        table.spell(ids["ea_t"]).starts_with("enum "),
+        "{}",
+        table.spell(ids["ea_t"])
+    );
+    assert!(table.spell(ids["ea_t"]).ends_with(" [2]"));
+}
