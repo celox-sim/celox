@@ -2,6 +2,17 @@
   "cases": [
     {
       "category": "Types",
+      "detail": "string_format::formatted_strings_into_integral_outputs at 521:3: assert_eq d: expected 0x5a, got 0x58",
+      "expectation": "Simulation",
+      "name": "string_format::formatted_strings_into_integral_outputs",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal.",
       "expectation": "Simulation",
       "known_issue": {

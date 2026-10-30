@@ -270,7 +270,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 
 `string` 型の変数はシミュレータのヒープ上の文字列への参照を持ちます。代入、等値比較、値の変化の検出は 32 ビット整数と同じコストで、文字列の中身を読む・作る演算だけがランタイムを呼び出します。文字列はタイムスロットの間と各 `tick` の後に回収されます。IEEE 1800-2023 6.16 のとおり、文字列にするときに NUL バイトは取り除かれ、文字列へ代入・キャストした整数値は最上位のバイトから並びます。
 
-未対応：`$sformat` / `$sformatf`、`atoreal` / `realtoa`、`$value$plusargs`・ファイル I/O・DPI-C の文字列引数、VPI・VCD 出力・TypeScript API での文字列値。
+未対応：`atoreal` / `realtoa`、`$value$plusargs`・ファイル I/O・DPI-C の文字列引数、VPI・VCD 出力・TypeScript API での文字列値。
 
 ### クラス {#classes}
 
