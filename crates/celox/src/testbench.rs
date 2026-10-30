@@ -24,6 +24,7 @@ use celox_testbench::{
     format_veryl_display_arg, pad_veryl_field,
 };
 use num_bigint::BigUint;
+use num_traits::{ToPrimitive as _, Zero as _};
 use rand::{RngExt as _, SeedableRng as _};
 use rand_pcg::Pcg64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,7 +71,7 @@ pub struct LimitedTestbenchResult {
     pub tick_limit_reached: bool,
 }
 
-pub(crate) type AssertMessage = ExecutableAssertMessage<SignalRef>;
+pub(crate) type AssertMessage = ExecutableAssertMessage;
 
 /// Clock cycle count: either a compile-time constant or a runtime expression.
 pub type ClockCount = ExecutableClockCount;
@@ -88,19 +89,42 @@ enum TestbenchEvaluationError {
 
 pub(crate) type TestbenchStatement<B> = ExecutableStatement<<B as SimBackend>::Event, SignalRef>;
 
-pub(crate) type CompiledAssertArg = ExecutableArgument<SignalRef>;
+pub(crate) type CompiledAssertArg = ExecutableArgument;
 
+/// The value of `expr` with its unknown bits read as 0, as a two-state use
+/// reads them (IEEE 1800-2023 6.11.2). A condition is true when this is
+/// nonzero: when the value has a known one bit (12.4, 16.3).
 fn eval_expr<B: SimBackend>(
     sim: &mut Simulator<B>,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
-    let (value, writes) = eval_backend_expr_tracked(&mut sim.backend, expr);
+    let (value, mask) = eval_expr_four_state(sim, expr);
+    if mask.is_zero() {
+        return value;
+    }
+    let value = value.to_biguint();
+    let known = &value ^ (&value & mask);
+    match known.to_u64() {
+        Some(known) if expr.kernel().is_some_and(|kernel| kernel.width <= 64) => {
+            TbValue::U64(known)
+        }
+        _ => TbValue::Wide(known),
+    }
+}
+
+/// The value of `expr` and its unknown bits.
+fn eval_expr_four_state<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    expr: &celox_testbench::CompiledExpr,
+) -> (TbValue, BigUint) {
+    let (value, mask, writes) = eval_backend_expr_tracked(&mut sim.backend, expr);
     sim.dirty |= writes
         .iter()
         .any(|&(offset, len)| !private_testbench_range(sim, offset, len));
-    value
+    (value, mask)
 }
 
+/// The value bits of `expr`: an unknown bit reads as its value-plane bit.
 pub(crate) fn eval_backend_expr<B: SimBackend>(
     backend: &mut B,
     expr: &celox_testbench::CompiledExpr,
@@ -108,10 +132,11 @@ pub(crate) fn eval_backend_expr<B: SimBackend>(
     eval_backend_expr_tracked(backend, expr).0
 }
 
+/// Run `expr`: its value, its unknown bits and the ranges it wrote.
 fn eval_backend_expr_tracked<B: SimBackend>(
     backend: &mut B,
     expr: &celox_testbench::CompiledExpr,
-) -> (TbValue, Vec<(usize, usize)>) {
+) -> (TbValue, BigUint, Vec<(usize, usize)>) {
     let kernel = expr
         .kernel()
         .expect("expression was compiled before state layout");
@@ -133,6 +158,15 @@ fn eval_backend_expr_tracked<B: SimBackend>(
     } else {
         TbValue::Wide(BigUint::from_bytes_le(bytes))
     };
+    // A four-state result slot holds its mask plane after its value plane.
+    let mask = if kernel.four_state {
+        let plane = kernel.width.div_ceil(8);
+        BigUint::from_bytes_le(unsafe {
+            std::slice::from_raw_parts(memory.add(kernel.result + plane), plane)
+        })
+    } else {
+        BigUint::ZERO
+    };
     let writes = kernel
         .writes
         .iter()
@@ -150,7 +184,7 @@ fn eval_backend_expr_tracked<B: SimBackend>(
     for &(offset, len) in &writes {
         backend.mark_settle_range(offset, len);
     }
-    (value, writes)
+    (value, mask, writes)
 }
 
 fn private_testbench_range<B: SimBackend>(sim: &Simulator<B>, offset: usize, len: usize) -> bool {
@@ -241,21 +275,13 @@ fn format_assert_arg<B: SimBackend>(
     spec: char,
     field: FieldSpec,
 ) -> Vec<u8> {
-    let (value, mask, width) = match arg.stored.filter(|_| !arg.is_string) {
-        // Keep the unknown bits of a stored value (IEEE 1800-2023 21.2.1.3).
-        Some(stored) => {
-            let (value, mask) = stored_value(sim, stored, arg.width);
-            (value, Some(mask), arg.width)
-        }
-        None => {
-            let value = eval_expr(sim, &arg.expr);
-            let width = match &value {
-                TbValue::String(bytes) => bytes.len() * 8,
-                _ => arg.width,
-            };
-            (value.to_biguint(), None, width)
-        }
+    // Formatting keeps unknown bits (IEEE 1800-2023 21.2.1.3).
+    let (value, mask) = eval_expr_four_state(sim, &arg.expr);
+    let width = match &value {
+        TbValue::String(bytes) => bytes.len() * 8,
+        _ => arg.width,
     };
+    let (value, mask) = (value.to_biguint(), (!mask.is_zero()).then_some(mask));
     format_veryl_display_arg(
         &DisplayFormatArg {
             value: &value,
@@ -268,30 +294,6 @@ fn format_assert_arg<B: SimBackend>(
         spec,
         field,
     )
-}
-
-/// The `width` bits from `bit` of the value and unknown bits of `signal`,
-/// read without the rest of the signal: its mask plane follows its value.
-fn stored_value<B: SimBackend>(
-    sim: &Simulator<B>,
-    (signal, bit): (SignalRef, usize),
-    width: usize,
-) -> (BigUint, BigUint) {
-    let range = |offset: usize| SignalRef {
-        offset: offset + bit / 8,
-        width: bit % 8 + width,
-        is_4state: false,
-        array_layout: None,
-    };
-    let bits = width_mask(width);
-    let value = (sim.backend.get(range(signal.offset)) >> (bit % 8)) & &bits;
-    let mask = if signal.is_4state && sim.backend.layout().four_state {
-        let plane = signal.offset + signal.width.div_ceil(8);
-        (sim.backend.get(range(plane)) >> (bit % 8)) & bits
-    } else {
-        BigUint::ZERO
-    };
-    (value, mask)
 }
 
 fn render_assert_message<B: SimBackend>(
@@ -946,9 +948,9 @@ fn publish_tb_assert_event<B: SimBackend>(
 ) {
     let args = assert_event_args(message)
         .iter()
-        .map(|arg| match arg.stored.filter(|_| !arg.is_string) {
-            Some(stored) => stored_value(sim, stored, arg.width),
-            None => (eval_expr(sim, &arg.expr).to_biguint(), BigUint::ZERO),
+        .map(|arg| {
+            let (value, mask) = eval_expr_four_state(sim, &arg.expr);
+            (value.to_biguint(), mask)
         })
         .collect::<Vec<_>>();
     let layout = sim.layout();
@@ -2798,7 +2800,7 @@ mod tests {
             assert_ne!(rst.1, 0u8.into(), "{mode:?}: rst stays unknown: {rst:?}");
             assert_eq!(c0, (4u8.into(), 0u8.into()), "{mode:?}");
             // The reference scheduler does not run the negedge of a TB
-            // write to an unknown level.
+            // write to an unknown level (#2650).
             if mode == crate::SchedulerMode::Compiled {
                 assert_eq!(count, (9u8.into(), 0u8.into()), "{mode:?}");
             }
@@ -2876,11 +2878,20 @@ mod tests {
                 .collect();
             results.push((values, counters.1));
         }
-        assert_eq!(results[0].0, results[1].0);
+        // The reference scheduler misses the negedge of `rst = 'x` (#2650):
+        // from then on its count is one lower.
+        let mut reference = results[0].0.clone();
+        for (index, name) in names.iter().enumerate() {
+            if ["count", "c3", "c4"].contains(name) {
+                reference[index].0 += 1u8;
+            }
+        }
+        assert_eq!(reference, results[1].0);
         // A TB write moves the reset in the unit unless the reset moves to
-        // or from x or z, as its first write from its initial x does; that
-        // and the first step go to the host.
-        assert_eq!(results[1].1, 2, "host edge batches");
+        // or from x or z: its writes from its initial x to 0, from 1 to x,
+        // from x to z and from z to 1 go to the host, and so does the first
+        // step.
+        assert_eq!(results[1].1, 5, "host edge batches");
         let (value, mask) = &results[1].0[2];
         assert!(*mask != 0u8.into(), "count starts at x: {value}/{mask}");
     }
@@ -2974,6 +2985,242 @@ mod tests {
                 .build_wasm()
                 .unwrap()
         });
+    }
+
+    const UNKNOWN_WRITES_TB: &str = r#"
+        module Top2(clk: input clock, a: input logic, q: output logic) {
+            always_ff (clk) { q = a; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var r: logic; var s: logic; var a: logic; var q: logic;
+            var w: logic<8>; var m: logic<8>;
+            var n: logic; var o: logic; var e: logic; var t: logic<8>;
+            var i1: logic<8>; var i2: logic<8>;
+            var v: logic<8>; var idx: logic<3>; var b: bit<8>;
+            var y: logic; var f: bit;
+            var k4: logic<4>; var wm: logic; var ux: logic<8>; var cb: bit<8>;
+            var ir: logic; var ua: logic<8> [4]; var idx2: logic<2>; var ue: logic<8>;
+            var pz: logic<4>; var sel: logic;
+            inst dut: Top2(clk, a, q);
+            function pass_bit(x: input bit) -> bit {
+                return x;
+            }
+            initial {
+                r = 1; s = 0; a = 0; v = 0;
+                clk.next(1);
+                r = 'x; s = 'z; a = 'x;
+                w = 'x;
+                m = 8'b01xz01xz;
+                n = r & 1; o = r | 1; e = r == 1;
+                t = if r ? 8'd3 : 8'd5;
+                if r { i1 = 1; } else { i1 = 2; }
+                if r == 1 { i2 = 1; } else { i2 = 2; }
+                idx = 'x;
+                v[idx] = 1;
+                b = m as u8;
+                y = s;
+                f = pass_bit(r);
+                k4 = 4'b0101;
+                wm = k4 ==? 4'b01xx;
+                ux = 'x;
+                cb = (ux as u8) + 1;
+                ir = v[idx];
+                ua[0] = 8'h12;
+                idx2 = 'x;
+                ue = ua[idx2];
+                pz = 4'b0z10;
+                sel = pz[2];
+                clk.next(2);
+                $finish();
+            }
+        }
+    "#;
+
+    /// A TB write stores x and z bits in a four-state build, in both
+    /// schedulers: constants, operator results, and through the DUT. An
+    /// unknown condition is false (IEEE 1800-2023 12.4), an unknown ternary
+    /// condition combines both arms (11.4.11), a write at an unknown index
+    /// writes nothing and a read there is x (11.5.1), a copy or a selection keeps z bits, a
+    /// wildcard pattern's unknown bits match anything (11.4.6), and a
+    /// two-state cast, variable or function argument reads unknown bits as
+    /// 0 (6.11.2). A two-state build reads every unknown bit as 0, a
+    /// wildcard pattern's too. A two-state build reads every unknown bit as 0.
+    fn tb_writes_keep_unknown_bits<B: SimBackend>(
+        build: impl Fn(bool, crate::SchedulerMode) -> Simulator<B>,
+    ) {
+        let names = [
+            "r", "s", "a", "q", "w", "m", "n", "o", "e", "t", "i1", "i2", "v", "b", "y", "f", "wm",
+            "cb", "ir", "ue", "sel",
+        ];
+        // Celox encodes an X bit as (1, 1) and a Z bit as (0, 1).
+        let four_state: [(u64, u64); 21] = [
+            (1, 1),
+            (0, 1),
+            (1, 1),
+            (1, 1),
+            (0xff, 0xff),
+            (0x66, 0x33),
+            (1, 1),
+            (1, 0),
+            (1, 1),
+            (7, 6),
+            (2, 0),
+            (2, 0),
+            (0, 0),
+            (0x44, 0),
+            (0, 1),
+            (0, 0),
+            (1, 0),
+            (1, 0),
+            (1, 1),
+            (0xff, 0xff),
+            (0, 1),
+        ];
+        let two_state: [(u64, u64); 21] = [
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0x44, 0),
+            (0, 0),
+            (1, 0),
+            (0, 0),
+            (5, 0),
+            (2, 0),
+            (2, 0),
+            (1, 0),
+            (0x44, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (1, 0),
+            (1, 0),
+            (0x12, 0),
+            (0, 0),
+        ];
+        for (four, expected) in [(true, four_state), (false, two_state)] {
+            for mode in [
+                crate::SchedulerMode::Reference,
+                crate::SchedulerMode::Compiled,
+            ] {
+                let mut sim = build(four, mode);
+                let tb = compile_initial_testbench(&sim).unwrap();
+                assert_eq!(
+                    run_compiled_testbench_to_finish(&mut sim, &tb),
+                    TestResult::Pass
+                );
+                let values: Vec<_> = names
+                    .iter()
+                    .map(|name| sim.get_four_state(sim.signal(name)))
+                    .collect();
+                let expected: Vec<_> = expected
+                    .iter()
+                    .map(|&(value, mask)| (BigUint::from(value), BigUint::from(mask)))
+                    .collect();
+                assert_eq!(values, expected, "four_state={four} {mode:?} {names:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tb_writes_keep_unknown_bits_on_the_interpreter() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_natively() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "cranelift")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_with_cranelift() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_cranelift()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "wasm-runtime")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_on_wasm() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_wasm()
+                .unwrap()
+        });
+    }
+
+    /// An immediate assertion of an unknown value fails (IEEE 1800-2023
+    /// 16.3), and its message keeps the unknown bits of a computed argument.
+    #[test]
+    fn tb_assertions_of_unknown_values_fail() {
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var r: logic; var p: logic<8>;
+                initial {
+                    r = 'x;
+                    p = 8'b0000_01x1;
+                    clk.next(1);
+                    $assert(r | 1, "known");
+                    $assert_continue(r == 1, "eq=%b sum=%h", r == 1, p + 1);
+                    $assert_continue(r, "plain");
+                    $finish();
+                }
+            }
+        "#;
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            let detailed = run_testbench_detailed(&mut sim, &tb);
+            let messages: Vec<_> = detailed
+                .assertions
+                .iter()
+                .map(|assertion| {
+                    (
+                        assertion.passed,
+                        String::from_utf8(assertion.message.clone().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                messages,
+                [
+                    (true, "known".to_string()),
+                    (false, "eq=x sum=xxxxxxxx".to_string()),
+                    (false, "plain".to_string()),
+                ],
+                "{mode:?}"
+            );
+        }
     }
 
     // Latches, including ones that read the clock, keep TB edges in the

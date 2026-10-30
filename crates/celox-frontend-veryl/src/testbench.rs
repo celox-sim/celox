@@ -10,7 +10,7 @@ use celox_testbench::{
     TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
 };
 use fxhash::{FxHashMap as HashMap, FxHashSet};
-use num_traits::ToPrimitive as _;
+use num_traits::{ToPrimitive as _, Zero as _};
 use veryl_analyzer::ir::{
     ArrayLiteralItem, AssertKind, CasePattern, Expression, Factor, ForBound, ForRange, Function,
     FunctionCall, HierAssignDestination, HierVarRef, Op as VerylOp, Statement, SystemFunctionInput,
@@ -1190,6 +1190,31 @@ impl ExprCompiler<'_> {
         };
         match expr {
             Expression::Term(f) => {
+                // A fill literal (`'0`, `'1`, `'x`, `'z`) fills its context
+                // (IEEE 1800-2023 5.7.1).
+                if let (Some(context), Factor::Value(comptime)) = (context, f.as_ref())
+                    && comptime.get_value().is_ok_and(|value| value.width() == 0)
+                    && let Some((payload, mask, width, _)) =
+                        crate::bitaccess::celox_value_from_comptime_in_context(
+                            comptime,
+                            Some(context.width),
+                        )
+                {
+                    if mask.is_zero() {
+                        ops.push(if width <= 64 {
+                            TbOpcode::ConstU64(payload.to_u64().unwrap_or(0))
+                        } else {
+                            TbOpcode::ConstWide(payload)
+                        });
+                    } else {
+                        ops.push(TbOpcode::ConstLogic {
+                            payload,
+                            mask,
+                            width,
+                        });
+                    }
+                    return context;
+                }
                 self.emit_factor(f, ops);
                 let source = ValueContext {
                     width: self.natural_width(expr),
@@ -1283,6 +1308,9 @@ impl ExprCompiler<'_> {
                             signed: cast.source_signed,
                         }),
                     );
+                    if cast.result_is_2state && !cast.source_is_2state {
+                        ops.push(TbOpcode::ToTwoState);
+                    }
                     let casted = ValueContext {
                         width: source.width,
                         signed: cast.result_signed,
@@ -1570,7 +1598,16 @@ impl ExprCompiler<'_> {
         value: &veryl_analyzer::value::Value,
         ops: &mut Vec<UnboundTbOpcode>,
     ) {
-        if value.width() <= 64 {
+        let mask = value.mask_xz();
+        if !mask.is_zero() {
+            // Celox encodes an X bit as (1, 1) and a Z bit as (0, 1); the
+            // analyzer has the opposite value bits.
+            ops.push(TbOpcode::ConstLogic {
+                payload: value.payload().as_ref() ^ mask.as_ref(),
+                mask: mask.into_owned(),
+                width: value.width().max(1),
+            });
+        } else if value.width() <= 64 {
             ops.push(TbOpcode::ConstU64(value.payload_u64()));
         } else {
             ops.push(TbOpcode::ConstWide(value.payload().into_owned()));

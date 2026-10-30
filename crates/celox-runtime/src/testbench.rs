@@ -100,13 +100,8 @@ fn bind_component<B: SimBackend>(
 fn bind_assert_arg<B: SimBackend>(
     backend: &Binding<'_, B>,
     arg: SemanticArgument<AbsoluteAddr>,
-) -> Option<ExecutableArgument<SignalRef>> {
-    let stored = arg
-        .expr
-        .plain_load()
-        .and_then(|load| stored_signal(backend, load));
+) -> Option<ExecutableArgument> {
     Some(ExecutableArgument {
-        stored,
         expr: bind_expr(backend, arg.expr)?,
         width: arg.width,
         signed: arg.signed,
@@ -115,29 +110,10 @@ fn bind_assert_arg<B: SimBackend>(
     })
 }
 
-/// The signal a plain load reads and the bit the load starts at in its
-/// value: a variable, or part of one, such as an element of an array.
-fn stored_signal<B: SimBackend>(
-    backend: &Binding<'_, B>,
-    load: celox_testbench::PlainLoad<&celox_testbench::StateLocation<AbsoluteAddr>>,
-) -> Option<(SignalRef, usize)> {
-    let signal = backend.resolve_signal(&load.location.address);
-    let bit = load.location.byte_offset * 8
-        + load.bit
-        + load.element.map_or(Some(0), |element| {
-            element
-                .index
-                .checked_mul(element.stride_bits)?
-                .checked_add(element.base_bit_offset)
-        })?;
-    // Bit offsets name packed storage, not an element-strided array's.
-    (signal.array_layout.is_none() && bit + load.width <= signal.width).then_some((signal, bit))
-}
-
 fn bind_assert_message<B: SimBackend>(
     backend: &Binding<'_, B>,
     message: GenericAssertMessage<SemanticArgument<AbsoluteAddr>>,
-) -> Option<ExecutableAssertMessage<SignalRef>> {
+) -> Option<ExecutableAssertMessage> {
     match message {
         GenericAssertMessage::Formatted { template, args } => {
             let args = args

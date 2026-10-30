@@ -218,14 +218,60 @@ fn evaluate(
         let dirty = g.constant(1, 8);
         g.store(slots.dirty, 8, dirty);
     }
-    g.load_at(expr.result.address, expr.result.byte_offset * 8, expr.width)
+    if !expr.four_state {
+        return g.load_at(expr.result.address, expr.result.byte_offset * 8, expr.width);
+    }
+    // A result with unknown bits keeps them in a logic register.
+    let result = g.b.alloc_logic(expr.width);
+    g.b.emit(SIRInstruction::Load(
+        result,
+        stable(expr.result.address),
+        SIROffset::Static(expr.result.byte_offset * 8),
+        expr.width,
+    ));
+    result
+}
+
+fn is_logic(g: &Generator<'_>, value: RegisterId) -> bool {
+    matches!(g.b.register(&value), celox_sir::RegisterType::Logic { .. })
+}
+
+/// Whether `value` is true as a condition: it has a known one bit, whatever
+/// its unknown bits (IEEE 1800-2023 12.4, 16.3).
+fn truth(g: &mut Generator<'_>, value: RegisterId) -> RegisterId {
+    if !is_logic(g, value) {
+        let width = g.b.register(&value).width();
+        let zero = g.constant(0, width);
+        return g.binary(1, value, BinaryOp::Ne, zero);
+    }
+    let any = g.b.alloc_logic(1);
+    g.b.emit(SIRInstruction::Unary(any, celox_design::UnaryOp::Or, value));
+    two_state(g, any)
+}
+
+/// `value` with its unknown bits read as 0 (IEEE 1800-2023 6.11.2).
+fn two_state(g: &mut Generator<'_>, value: RegisterId) -> RegisterId {
+    if !is_logic(g, value) {
+        return value;
+    }
+    let result = g.b.alloc_bit(g.b.register(&value).width(), false);
+    g.b.emit(SIRInstruction::Unary(
+        result,
+        celox_design::UnaryOp::ToTwoState,
+        value,
+    ));
+    result
 }
 
 /// `value` at `width` bits: truncated, or extended with zeros as the host
-/// writes an event argument.
+/// writes an event argument. Unknown bits stay unknown.
 fn resize(g: &mut Generator<'_>, value: RegisterId, width: usize) -> RegisterId {
     let source = g.b.register(&value).width();
-    let result = g.b.alloc_bit(width, false);
+    let result = if is_logic(g, value) {
+        g.b.alloc_logic(width)
+    } else {
+        g.b.alloc_bit(width, false)
+    };
     if width < source {
         g.b.emit(SIRInstruction::Slice(result, value, 0, width));
     } else {
@@ -236,47 +282,6 @@ fn resize(g: &mut Generator<'_>, value: RegisterId, width: usize) -> RegisterId 
         ));
     }
     result
-}
-
-/// The value of message argument `arg` at `width` bits. A four-state value
-/// the argument only reads keeps its unknown bits (IEEE 1800-2023
-/// 21.2.1.3): it is loaded as the expression kernel loads it, with its mask.
-fn message_arg(
-    g: &mut Generator<'_>,
-    program: &LaidOutProgram,
-    slots: &SchedulerSlots<AbsoluteAddr>,
-    arg: &SemanticArgument<AbsoluteAddr>,
-    width: usize,
-) -> RegisterId {
-    let stored = arg.expr.plain_load().filter(|load| {
-        program.layout().four_state
-            && load.width == width
-            && program
-                .design
-                .state_objects
-                .get(&load.location.address)
-                .is_some_and(|object| object.is_4state)
-    });
-    let Some(load) = stored else {
-        let value = evaluate(g, program, slots, &arg.expr);
-        return resize(g, value, width);
-    };
-    let bit = load.location.byte_offset * 8 + load.bit;
-    let offset = match load.element {
-        None => SIROffset::Static(bit),
-        Some(element) => {
-            let offset = element.index * element.stride_bits + bit + element.base_bit_offset;
-            SIROffset::Dynamic(g.constant(offset as u64, 64))
-        }
-    };
-    let register = g.b.alloc_logic(width);
-    g.b.emit(SIRInstruction::Load(
-        register,
-        stable(load.location.address),
-        offset,
-        width,
-    ));
-    register
 }
 
 /// The DUT storage `expr` loads.
@@ -850,9 +855,7 @@ fn generate(
                             finish,
                         );
                         let value = evaluate(&mut g, program, slots, expr);
-                        let width = g.b.register(&value).width();
-                        let zero = g.constant(0, width);
-                        let passed = g.binary(1, value, BinaryOp::Ne, zero);
+                        let passed = truth(&mut g, value);
                         // A passing assertion does not format its message,
                         // but what its arguments write still happens.
                         let effects: Vec<_> = message_args(message)
@@ -883,7 +886,8 @@ fn generate(
                             .iter()
                             .zip(widths)
                             .map(|(arg, width)| {
-                                message_arg(&mut g, program, slots, arg, width.max(1))
+                                let value = evaluate(&mut g, program, slots, &arg.expr);
+                                resize(&mut g, value, width.max(1))
                             })
                             .collect();
                         g.b.emit(SIRInstruction::RuntimeEvent {
@@ -919,7 +923,8 @@ fn generate(
                             .iter()
                             .zip(widths)
                             .map(|(arg, width)| {
-                                message_arg(&mut g, program, slots, arg, width.max(1))
+                                let value = evaluate(&mut g, program, slots, &arg.expr);
+                                resize(&mut g, value, width.max(1))
                             })
                             .collect();
                         g.b.emit(SIRInstruction::RuntimeEvent { site_id, args });
@@ -956,6 +961,7 @@ fn generate(
                                 g.b.switch_to_block(evaluate_block);
                                 settle_for(&mut g, m, &mut cones, deferred, vec![], true, finish);
                                 let value = evaluate(&mut g, program, slots, expr);
+                                let value = two_state(&mut g, value);
                                 let count = resize(&mut g, value, 64);
                                 let zero = g.equals(count, 0);
                                 let one = g.constant(1, 64);
