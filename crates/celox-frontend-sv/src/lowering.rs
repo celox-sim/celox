@@ -794,9 +794,15 @@ fn child_output_drivers(
         let Some(child) = modules.get(&child_id) else {
             continue;
         };
+        let Ok(authored_connections) =
+            expand_structure_connections(&instance.port_connections, &module.source, &child.source)
+        else {
+            // Attaching the instance reports an invalid connection.
+            continue;
+        };
         let element_connections = match instance.array_element {
             Some((position, count)) => match array_element_connections(
-                &instance.port_connections,
+                &authored_connections,
                 child,
                 position,
                 count,
@@ -813,7 +819,7 @@ fn child_output_drivers(
         };
         let connections = element_connections
             .as_deref()
-            .unwrap_or(&instance.port_connections);
+            .unwrap_or(&authored_connections);
         for connection in connections {
             if !child.source.ports().iter().any(|port| {
                 port.name() == connection.formal
@@ -3767,6 +3773,9 @@ fn lower_module_with_overrides(
     let mut initial_memory_values = Vec::new();
 
     for port in module.ports() {
+        if port.r#type().structure_identity().is_some() {
+            continue;
+        }
         if name_to_id.contains_key(port.name()) {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "duplicate port name `{}`",
@@ -3850,6 +3859,9 @@ fn lower_module_with_overrides(
     }
 
     for signal in module.signals() {
+        if signal.r#type().structure_identity().is_some() {
+            continue;
+        }
         if name_to_id.contains_key(signal.name()) {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "duplicate port or signal name `{}`",
@@ -4612,6 +4624,109 @@ fn check_tagged_port_connections(
     Ok(())
 }
 
+/// Connect unpacked structures through their independently typed leaf ports.
+/// Aggregate declarations remain in source metadata for nominal type checking.
+fn expand_structure_connections<'a>(
+    connections: &'a [LoweredSvPortConnection],
+    parent: &sv::ir::Module,
+    child: &sv::ir::Module,
+) -> Result<std::borrow::Cow<'a, [LoweredSvPortConnection]>, ParserError> {
+    if !child
+        .ports()
+        .iter()
+        .any(|port| port.r#type().structure_identity().is_some())
+    {
+        return Ok(std::borrow::Cow::Borrowed(connections));
+    }
+    let mut expanded = Vec::new();
+    let mut connected_structures = HashSet::default();
+    for connection in connections {
+        let Some(port) = child.ports().iter().find(|port| {
+            port.name() == connection.formal && port.r#type().structure_identity().is_some()
+        }) else {
+            expanded.push(connection.clone());
+            continue;
+        };
+        let invalid = |message: String| {
+            ParserError::illegal_context(
+                "systemverilog unpacked structure port connection",
+                message,
+                None,
+            )
+        };
+        if !connected_structures.insert(&connection.formal) {
+            return Err(invalid(format!(
+                "duplicate connection of port `{}`",
+                connection.formal
+            )));
+        }
+        if let Some(pattern) = &connection.bound_pattern {
+            if port.direction() != sv::ir::PortDirection::Input {
+                return Err(invalid(
+                    "an output structure port requires a variable".into(),
+                ));
+            }
+            let parts = port
+                .bind_structure_pattern(pattern)
+                .map_err(|error| invalid(error.to_string()))?;
+            for ((member, _), value) in port.r#type().structure_leaves().iter().zip(parts) {
+                expanded.push(LoweredSvPortConnection {
+                    formal: format!("{}.{member}", connection.formal),
+                    actual: connection.actual.clone(),
+                    actual_expr: Some(value),
+                    bound_pattern: None,
+                });
+            }
+            continue;
+        }
+        if connection.actual_expr.is_none() {
+            // An explicitly open port leaves all of its leaf ports open.
+            continue;
+        }
+        let actual = parent
+            .ports()
+            .iter()
+            .find(|p| p.name() == connection.actual)
+            .map(|p| p.r#type())
+            .or_else(|| {
+                parent
+                    .signals()
+                    .iter()
+                    .find(|s| s.name() == connection.actual)
+                    .map(|s| s.r#type())
+            });
+        if actual.and_then(|ty| ty.structure_identity()) != port.r#type().structure_identity() {
+            return Err(invalid(format!(
+                "port `{}` requires a variable of the same unpacked structure type",
+                connection.formal
+            )));
+        }
+        let expected = sv::ir::Expr::Concat(
+            port.r#type()
+                .structure_leaves()
+                .iter()
+                .map(|(member, _)| sv::ir::Expr::Ident(format!("{}.{member}", connection.actual)))
+                .collect(),
+        );
+        if connection.actual_expr.as_ref() != Some(&expected)
+            && connection.actual_expr.as_ref()
+                != Some(&sv::ir::Expr::Ident(connection.actual.clone()))
+        {
+            return Err(invalid("an unpacked structure port currently requires a named variable or an input assignment pattern".into()));
+        }
+        for (member, _) in port.r#type().structure_leaves() {
+            let actual = format!("{}.{member}", connection.actual);
+            expanded.push(LoweredSvPortConnection {
+                formal: format!("{}.{member}", connection.formal),
+                actual: actual.clone(),
+                actual_expr: Some(sv::ir::Expr::Ident(actual)),
+                bound_pattern: None,
+            });
+        }
+    }
+    Ok(std::borrow::Cow::Owned(expanded))
+}
+
 fn bind_port_patterns(
     connections: &mut [LoweredSvPortConnection],
     child: &LoweredSvModule,
@@ -4683,7 +4798,12 @@ pub(crate) fn attach_instance_glue(
         let Some(child) = lowered_modules.get(&child_id) else {
             return Err(unsupported_sv_instance(instance.module_name.clone()));
         };
-        let mut authored_connections = instance.port_connections.clone();
+        let mut authored_connections = expand_structure_connections(
+            &instance.port_connections,
+            &lowered.source,
+            &child.source,
+        )?
+        .into_owned();
         bind_port_patterns(&mut authored_connections, child)?;
         let connections = match instance.array_element {
             Some((position, count)) => {

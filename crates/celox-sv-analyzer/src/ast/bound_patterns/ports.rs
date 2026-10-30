@@ -128,6 +128,18 @@ impl BoundPattern {
         }
     }
 
+    pub(crate) fn bind_structure_port(&self, target: &Type) -> Converted<Vec<crate::ir::Expr>> {
+        let aggregate = target
+            .unpacked_struct()
+            .ok_or_else(|| unsupported("unpacked structure port type"))?;
+        let state = AnalysisState::default();
+        let shape = procedural::dimensions_from_type(target);
+        let value = self.lower(&state, &shape, &PackedDimensions::default())?;
+        unpacked_structs::leaf_parts(aggregate, &value)
+            .ok_or_else(|| unsupported("unpacked structure port pattern layout"))
+            .map(|parts| parts.into_iter().map(Into::into).collect())
+    }
+
     pub(crate) fn bind_port(&self, target: &Type) -> Converted<crate::ir::Expr> {
         let state = AnalysisState::default();
         let shape = procedural::dimensions_from_type(target);
@@ -222,6 +234,7 @@ pub(super) fn native_value_type_plan(
                             shape
                                 .filter(|shape| {
                                     !shape.members.is_empty()
+                                        || shape.unpacked_struct.is_some()
                                         || !shape.unpacked.is_empty()
                                         || shape.packed.len() > 1
                                 })
@@ -269,6 +282,7 @@ impl VariableDimensions {
             .map(|dim| UnpackedRange::new(dim.left.clone(), dim.right.clone()))
             .collect();
         ty.members = self.members.clone();
+        ty.unpacked_struct = self.unpacked_struct.clone();
         ty.signed_element_depth = self.signed_element_depth;
         ty.pattern_target(&const_functions::Environment {
             constants: &*dims.const_env,

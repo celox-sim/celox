@@ -109,6 +109,18 @@ fn expression_connection(
         return Ok(connection);
     }
     let expr = expression_binding::value(root, native, tree, dims)?;
-    let actual = expr_ident_name(&expr).unwrap_or_else(|| formal.clone());
+    let actual = unpacked_structs::native_member(root, native, dims)
+        .or_else(|| match &native.expression(root).kind {
+            celox_sv_syntax::ExprKind::Name(name)
+                if dims
+                    .get(&normalize_identifier(&name.spelling))
+                    .is_some_and(|ty| ty.unpacked_struct.is_some()) =>
+            {
+                Some(normalize_identifier(&name.spelling))
+            }
+            _ => None,
+        })
+        .or_else(|| expr_ident_name(&expr))
+        .unwrap_or_else(|| formal.clone());
     Ok(PortConnection::new(formal, actual, Some(expr)))
 }

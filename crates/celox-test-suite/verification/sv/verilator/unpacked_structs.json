@@ -157,6 +157,29 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 (\"5 0000 1\" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_nested_struct_default",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 (\"5 0000 1\" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_verilator_nested_struct_default.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "unpacked_structs::module_port_recursive_defaults",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "unpacked_structs::module_variables",

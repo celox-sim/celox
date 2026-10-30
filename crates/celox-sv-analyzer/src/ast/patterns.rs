@@ -135,6 +135,20 @@ pub(super) fn assignment_value(
     dims: &PackedDimensions,
     default: bool,
 ) -> Converted<Expr> {
+    // A structure-valued default of the member's own type is one whole
+    // value. Preserve its leaf expressions instead of resizing the handles
+    // and state bits together as an integral vector (10.9.2).
+    if shape.unpacked.is_empty()
+        && let Some(target) = &shape.unpacked_struct
+        && value_type.is_some_and(|ty| {
+            ty.unpacked_ranges().is_empty()
+                && ty
+                    .unpacked_struct()
+                    .is_some_and(|actual| actual.same_type(target))
+        })
+    {
+        return Ok(value.clone());
+    }
     let default = default
         && !value_type.is_some_and(|ty| shape.pattern_type(state, dims).as_ref() == Some(ty));
     if default {
@@ -179,6 +193,25 @@ pub(super) fn assignment_value(
                 count
             ]));
         }
+        if let Some(aggregate) = &shape.unpacked_struct {
+            return Ok(Expr::Concat(
+                aggregate
+                    .members()
+                    .iter()
+                    .map(|member| {
+                        assignment_value(
+                            state,
+                            value,
+                            signed,
+                            value_type,
+                            &procedural::dimensions_from_type(&member.r#type),
+                            dims,
+                            true,
+                        )
+                    })
+                    .collect::<Converted<_>>()?,
+            ));
+        }
         if !shape.members.is_empty() {
             if shape
                 .members
@@ -207,6 +240,13 @@ pub(super) fn assignment_value(
                     .collect::<Converted<_>>()?,
             ));
         }
+    }
+    if shape.unpacked_struct.is_some()
+        || value_type.is_some_and(|ty| ty.unpacked_struct().is_some())
+    {
+        return Err(unsupported(
+            "assignment pattern with incompatible unpacked structure operand or target",
+        ));
     }
     let actual = value_type
         .map(procedural::dimensions_from_type)

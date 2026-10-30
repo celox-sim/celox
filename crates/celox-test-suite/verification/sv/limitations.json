@@ -3019,6 +3019,10 @@
         "unpacked_structs::handle_members_survive_heap_collections",
         "unpacked_structs::initializers_results_and_defaults",
         "unpacked_structs::members_whole_copies_and_equality",
+        "unpacked_structs::module_port_four_state_members",
+        "unpacked_structs::module_port_patterns",
+        "unpacked_structs::module_port_recursive_defaults",
+        "unpacked_structs::module_ports",
         "unpacked_structs::module_variables",
         "unpacked_structs::reference_formal_handles_survive_heap_collections",
         "unpacked_structs::reference_formals",
@@ -3044,7 +3048,8 @@
     ],
     "cases": {
       "verilator": [
-        "unpacked_structs::assignment_patterns"
+        "unpacked_structs::assignment_patterns",
+        "unpacked_structs::module_port_recursive_defaults"
       ]
     }
   },

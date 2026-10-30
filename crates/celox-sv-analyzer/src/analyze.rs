@@ -131,11 +131,50 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 )),
             );
         }
+        let member_ports = ports
+            .iter()
+            .flat_map(|port| {
+                port.r#type().structure_leaves().iter().map(|(member, ty)| {
+                    ir::Port::new(
+                        format!("{}.{member}", port.name()),
+                        port.direction(),
+                        ty.clone(),
+                        port.is_net(),
+                    )
+                    .with_unresolved_net(port.is_unresolved_net())
+                })
+            })
+            .collect::<Vec<_>>();
+        // As with local structures, intermediate members name aggregates,
+        // not storage. Keep their nominal types for `.i(port.member)` glue.
+        for port in module.ports() {
+            for (name, ty) in port
+                .r#type()
+                .structure_aggregates(port.name())
+                .into_iter()
+                .skip(1)
+            {
+                ports.push(
+                    ir::Port::new(
+                        name,
+                        port.direction().into(),
+                        ir::Type::from_ast(
+                            ty,
+                            &ast::const_functions::Environment {
+                                constants: &constants,
+                                functions: &state.const_functions,
+                            },
+                        ),
+                        port.is_net(),
+                    )
+                    .with_unresolved_net(port.is_unresolved_net()),
+                );
+            }
+        }
+        ports.extend(member_ports);
         let signals = module
             .signals()
             .iter()
-            // A variable of unpacked structure type is its leaf variables.
-            .filter(|signal| !signal.is_aggregate())
             .map(|signal| {
                 ir::Signal::new(
                     signal.name().to_string(),
