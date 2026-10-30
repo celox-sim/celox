@@ -14,7 +14,9 @@ The complete benchmark matrix and raw history are available on the
 ## Workloads
 
 The main view prioritizes complete hardware workloads: Heliodor and representative
-SHA-256, FFT and LZ77 circuits. rica's existing runner and tarunes qualification
+SHA-256, FFT and LZ77 circuits, plus rica's five self-checking RISC-V kernels.
+The **rica** tab compares Celox tiered and Veryl simulator tiered by total process
+time; its daily workflow runs at 04:47 UTC. Details and tarunes qualification
 are tracked in the [circuit collection](./collection.md), including pinned sources,
 acceptance checks and the planned SystemVerilog frontend comparisons.
 
