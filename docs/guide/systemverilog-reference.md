@@ -1379,8 +1379,11 @@ is available, with the same field widths, X/Z digits and `%t` scaling.
 `$sformatf` can appear in any expression of a procedural statement, including
 function results, arguments, concatenations and conditional operands. The format
 can be a string literal or, evaluated when the call runs, a `string` or integral
-value. The output of `$sformat` and `$swrite` must be a `string` variable or
-class property; integral outputs are unsupported.
+value. The output of `$sformat` and `$swrite` is a `string` or integral
+variable or class property. An integral output takes the text as a string
+literal assigned to it (5.9): right-justified with zeros on the left, and a
+text longer than the output keeps its rightmost characters. An unpacked array
+of `byte` is not supported as the output.
 
 `%p` of a literal format, in these functions and in `$display`, `$write`,
 the file output and the severity tasks, prints an integral value as `%0d`

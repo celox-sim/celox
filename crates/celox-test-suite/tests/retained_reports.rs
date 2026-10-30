@@ -594,6 +594,18 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "source_0.sv:26: sorry: Overriding the default variable lifetime is not yet supported.",
                         ),
+                        ("verilator", "string_format::formatted_strings_into_integral_outputs") => {
+                            (
+                                "mismatch",
+                                "execute",
+                                "assert_eq d: expected 0x5a, got 0x58",
+                            )
+                        }
+                        ("icarus", "string_format::formatted_strings_into_integral_outputs") => (
+                            "runtime_error",
+                            "execute",
+                            "native testbench exited without reaching $finish",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

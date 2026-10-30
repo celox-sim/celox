@@ -1506,3 +1506,23 @@ the [Icarus report](verification/sv/icarus/mailboxes.json).
 That peeks and gets are woken in arrival order, that four-state messages keep
 their unknown bits, and that a message keeps its object alive across heap
 collections are tested on Celox only.
+
+### Formatted strings into integral outputs
+
+`string_format::formatted_strings_into_integral_outputs` writes `$swrite` and
+`$sformat` results into integral variables of several widths and signedness,
+into a class property and into the 1024-bit result of a function, as UVM's
+`uvm_string_to_bits` does (IEEE 1800-2023 21.3.3): each is assigned as a string
+literal is (5.9), right-justified with zeros on the left, and a string longer
+than the variable keeps its rightmost characters (`"XYZ"` into 8 bits is
+`8'h5a`). The pinned xezim 0.11.3 passes. Verilator 5.052 keeps the leftmost
+character instead (`8'h58`) for `$swrite`, although it assigns the same literal
+directly as `8'h5a`; the
+[adapter-free source](verification/repros/sv_verilator_swrite_integral_truncation.sv)
+prints `swrite=58 literal=5a` with Verilator and `swrite=5a literal=5a` with
+Celox and xezim. Its exact mismatch remains an executed failure in
+[the Verilator string_format report](verification/sv/verilator/string_format.json).
+Icarus 13.0 does not accept a `bit` vector as the `$swrite` output and exits
+before `$finish`; that runtime failure is retained in
+[the Icarus string_format report](verification/sv/icarus/string_format.json).
+No assertions or exclusions are weakened.

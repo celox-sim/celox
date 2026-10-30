@@ -1053,32 +1053,130 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// its output as a string literal is assigned (IEEE 1800-2023 21.3.3,
     /// 5.9).
     fn format_assignment(
-        &self,
+        &mut self,
         output: celox_sv_syntax::ExprId,
         value: Expr,
-    ) -> Result<Stmt, AnalyzerError> {
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
-        if let Some((property, receiver)) =
-            expression_binding::object_property(self.tree, output, native, &self.dims)?
-        {
-            if property.field.handle != Some(system_functions::HandleProperty::String) {
-                return Err(unsupported("`$sformat` output that is not a string"));
+        let property = expression_binding::object_property(self.tree, output, native, &self.dims)?;
+        let string = match &property {
+            Some((property, _)) => {
+                property.field.handle == Some(system_functions::HandleProperty::String)
             }
+            None => expression_binding::native_string(self.tree, output, native, &self.dims),
+        };
+        // An integral output takes the string as a string literal assigned
+        // to it (IEEE 1800-2023 21.3.3, 5.9): its characters right-justified,
+        // the leftmost ones dropped when they do not fit, zeros on the left.
+        let (mut stmts, value) = if string {
+            (Vec::new(), value)
+        } else {
+            self.string_bits(output, value)?
+        };
+        if let Some((property, receiver)) = property {
             let handle =
                 expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
-            return self.property_store(&property, handle, "=", value);
-        }
-        if !expression_binding::native_string(self.tree, output, native, &self.dims) {
-            return Err(unsupported("`$sformat` output that is not a string"));
+            stmts.push(self.property_store(&property, handle, "=", value)?);
+            return Ok(stmts);
         }
         let (_, lhs) = self.native_lvalue(output)?;
         let mut rhs = value;
         self.rename_expr(&mut rhs);
-        Ok(Stmt::Assign {
+        stmts.push(Stmt::Assign {
             lhs,
             rhs,
             nonblocking: false,
-        })
+        });
+        Ok(stmts)
+    }
+
+    /// The statements that put the bits of string `value` into a hidden
+    /// local of the integral type of `output`, and that local: each
+    /// character in turn shifts in from the right, so the last ones remain.
+    fn string_bits(
+        &mut self,
+        output: celox_sv_syntax::ExprId,
+        value: Expr,
+    ) -> Result<(Vec<Stmt>, Expr), AnalyzerError> {
+        let current =
+            expression_binding::value(output, self.tree.declarations(), self.tree, &self.dims)?;
+        if expression_binding::real_value(&current, &self.dims) {
+            return Err(unsupported("`$sformat` output that is not a string"));
+        }
+        let ty = dimensions::bound_bits_type(&self.tree.state, &current, &self.dims)
+            .ok_or_else(|| unsupported("`$sformat` output that is not a string"))?;
+        let mut bits = Type::new(TypeKind::Logic);
+        if ty.width > 1 {
+            bits.packed_ranges = vec![PackedRange::new(
+                ConstExpr::Literal((ty.width - 1).to_string()),
+                ConstExpr::Literal("0".into()),
+            )];
+        }
+        let (text_source, text) =
+            self.hidden(type_binding::builtin_type("string", None).expect("a builtin type"));
+        let (bits_source, bits) = self.hidden(bits);
+        let (_, index) =
+            self.hidden(type_binding::builtin_type("int", None).expect("a builtin type"));
+        let _ = text_source;
+        let mut value = value;
+        self.rename_expr(&mut value);
+        let string = |op, args: Vec<Expr>| expression_binding::string_call(op, args);
+        let character = Expr::Binary {
+            left: Box::new(string(
+                StringOp::Getc,
+                vec![Expr::Ident(text.clone()), Expr::Ident(index.clone())],
+            )),
+            op: BinaryOp::BitAnd,
+            right: Box::new(Expr::Literal("8'hff".into())),
+        };
+        let stmts = vec![
+            Stmt::Assign {
+                lhs: LValue::Ident(text.clone()),
+                rhs: value,
+                nonblocking: false,
+            },
+            Stmt::Assign {
+                lhs: LValue::Ident(bits.clone()),
+                rhs: Expr::Literal("0".into()),
+                nonblocking: false,
+            },
+            Stmt::Loop {
+                kind: LoopKind::For,
+                init: vec![Stmt::Assign {
+                    lhs: LValue::Ident(index.clone()),
+                    rhs: Expr::Literal("0".into()),
+                    nonblocking: false,
+                }],
+                condition: Some(Expr::Binary {
+                    left: Box::new(Expr::Ident(index.clone())),
+                    op: BinaryOp::Lt,
+                    right: Box::new(string(StringOp::Len, vec![Expr::Ident(text.clone())])),
+                }),
+                step: vec![Stmt::Assign {
+                    lhs: LValue::Ident(index.clone()),
+                    rhs: Expr::Binary {
+                        left: Box::new(Expr::Ident(index.clone())),
+                        op: BinaryOp::Add,
+                        right: Box::new(Expr::Literal("1".into())),
+                    },
+                    nonblocking: false,
+                }],
+                body: vec![Stmt::Assign {
+                    lhs: LValue::Ident(bits.clone()),
+                    rhs: Expr::Binary {
+                        left: Box::new(Expr::Binary {
+                            left: Box::new(Expr::Ident(bits.clone())),
+                            op: BinaryOp::Shl,
+                            right: Box::new(Expr::Literal("8".into())),
+                        }),
+                        op: BinaryOp::BitOr,
+                        right: Box::new(character),
+                    },
+                    nonblocking: false,
+                }],
+            },
+        ];
+        Ok((stmts, Expr::Ident(bits_source)))
     }
 
     /// An assignment to a property of a class object: `h.p = v`, or `p = v`
@@ -2094,7 +2192,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 declarations,
                 &self.dims,
             )?;
-            return Ok(vec![self.format_assignment(output, value)?]);
+            return self.format_assignment(output, value);
         }
         // `$swrite(output, args...)` assigns what `$write(args...)` would
         // print, in the radix of its name (IEEE 1800-2023 21.3.3).
@@ -2170,7 +2268,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 },
                 std::iter::once(format).chain(values).collect(),
             );
-            return Ok(vec![self.format_assignment(output, value)?]);
+            return self.format_assignment(output, value);
         }
         if name == "$sformatf" {
             let mut value =

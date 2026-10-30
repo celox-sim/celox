@@ -488,3 +488,36 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "'{\"a\":20, \"x\":10}|'{-2:65, 7:0}|'{null, null}|null|\"lit\"\n'{\"a\":20, \"x\":10}|'{-2:65, 7:0}|'{null, null}|null|\"lit\"\n\"str\" \"n2\"\nnull null null\nnull null\n'{1, 2} '{9}\n"))
 
+(case formatted_strings_into_integral_outputs
+  (source "top.sv" #"
+module Top(output bit [15:0] a, output bit [39:0] b, output logic signed [15:0] c,
+           output bit [7:0] d, output bit [31:0] p, output bit [15:0] tail);
+    class C;
+        bit [31:0] p;
+    endclass
+    localparam W = 1023;
+    function logic [W:0] to_bits(string str);
+        $swrite(to_bits, "%0s", str);
+    endfunction
+    C o;
+    logic [W:0] big;
+    initial begin
+        o = new();
+        $swrite(a, "%0s", "AB");
+        $sformat(b, "x=%0d", 7);
+        $swrite(c, "%0s", "\xff\xfe");
+        $swrite(d, "%0s", "XYZ");
+        $sformat(o.p, "%0s", "hi");
+        p = o.p;
+        big = to_bits("ok");
+        tail = big[15:0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq a 0x4142)
+  (assert_eq b 0x783d37)
+  (assert_eq c 0xfffe)
+  (assert_eq d 0x5a)
+  (assert_eq p 0x6869)
+  (assert_eq tail 0x6f6b))
