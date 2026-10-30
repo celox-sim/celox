@@ -64,7 +64,9 @@ test("Taxi daily compares complete configurations on the same VM and publishes o
   assert.match(workflow, /fail-fast: false/);
   assert.match(workflow, /case: \[lfsr64, phy64, rx16, rx8, rx32\]/);
   assert.match(workflow, /version: "5\.052"/);
-  assert.deepEqual([...workflow.matchAll(/runs-on: (.+)/g)].map(m => m[1]), Array(3).fill("ubuntu-24.04"));
+  assert.match(workflow, /uses: \.\/\.github\/actions\/setup-verilator/);
+  assert.match(workflow, /revision: ea338be98e1e838d3518809ce8899f85a009963c/);
+  assert.deepEqual([...workflow.matchAll(/runs-on: (.+)/g)].map(m => m[1]), Array(3).fill("ubuntu-26.04"));
   assert.match(workflow, /needs: comparison\n    if: github.ref == 'refs\/heads\/master'/);
   assert.doesNotMatch(workflow, /continue-on-error|--no-verify/);
   assert.match(workflow, /if: always\(\)[\s\S]+retention-days: 30/);

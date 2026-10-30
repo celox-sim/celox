@@ -10,7 +10,11 @@ The [manifest](https://github.com/celox-sim/celox/blob/master/benchmarks/taxi/ma
 pins [fpganinja/taxi](https://github.com/fpganinja/taxi) to
 `cc70b270b910d369ab1ad7b3855e76399fd461f1`, including sources, tops, parameters,
 expected test counts and random seed 12345. The Python requirements are pinned;
-CI uses Ubuntu 24.04, Python 3.13, cocotb 2.1.0 and Verilator 5.052.
+CI uses Ubuntu 26.04, Python 3.13, cocotb 2.1.0 and Verilator 5.052.
+The local setup action builds Verilator from the fixed upstream commit
+`ea338be98e1e838d3518809ce8899f85a009963c` on the runner. Its installation cache
+is separated by Ubuntu version, architecture, compiler, libc and build recipe.
+Cache hits still verify the installed version and source identity.
 Each configuration has a six-hour job limit and a one-hour limit per compiler
 or simulator process; RX configurations run the complete test matrix three
 times per simulator.
