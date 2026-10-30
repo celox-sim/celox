@@ -27,7 +27,7 @@ pub(super) fn instances_from_scope(
             continue;
         }
         let native = syntax_tree.declarations().instantiation(native);
-        let _constant_functions = item.enter();
+        let syntax_tree = &item.enter(syntax_tree);
         let start = instances.len();
         let dimensions = views.dimensions(item);
         instances_from_native_declaration(
@@ -45,7 +45,7 @@ pub(super) fn instances_from_scope(
             for connection in &mut instance.port_connections {
                 connection.map_expressions(|expr| {
                     let mut expr = substitute_expr_constants_with_parameter_literals(
-                        &syntax_tree.state,
+                        syntax_tree,
                         expr,
                         &item.env,
                         &item.literals,
@@ -88,7 +88,7 @@ fn instances_from_native_declaration(
                 &parameter_types_from_const_env(const_env),
             );
             let value = expr_to_index_const(
-                &syntax_tree.state,
+                syntax_tree,
                 substitute_expr_idents(
                     const_expr_to_expr(value),
                     &packed_dimensions.parameter_values,
@@ -124,7 +124,7 @@ fn instances_from_native_declaration(
         for connection in &mut port_connections {
             connection.map_expressions(|expr| {
                 substitute_expr_constants_with_parameter_literals(
-                    &syntax_tree.state,
+                    syntax_tree,
                     expr,
                     const_env,
                     &HashMap::default(),
@@ -154,8 +154,8 @@ fn instances_from_native_declaration(
                     "multidimensional module instance array".to_string(),
                 ));
             };
-            let left = eval_ast_const_expr(&syntax_tree.state, range.left(), const_env);
-            let right = eval_ast_const_expr(&syntax_tree.state, range.right(), const_env);
+            let left = eval_ast_const_expr(&syntax_tree.functions, range.left(), const_env);
+            let right = eval_ast_const_expr(&syntax_tree.functions, range.right(), const_env);
             let bounds = left
                 .zip(right)
                 .filter(|(left, right)| left.abs_diff(*right) < 4096)
@@ -358,9 +358,10 @@ fn array_argument_shape(
             Job::Conditional => {
                 let right = values.pop()?;
                 let left = values.pop()?;
-                let left_type = array_compatibility::unpacked_array_type(&tree.state, &left, dims)?;
+                let left_type =
+                    array_compatibility::unpacked_array_type(&tree.functions, &left, dims)?;
                 let right_type =
-                    array_compatibility::unpacked_array_type(&tree.state, &right, dims)?;
+                    array_compatibility::unpacked_array_type(&tree.functions, &right, dims)?;
                 if left_type != right_type
                     || left.packed != right.packed
                     || left.members != right.members
@@ -394,7 +395,7 @@ fn parameter_override(
             &packed_dimensions.type_aliases,
         )?
         .and_then(|ty| {
-            type_parameters::resolve(&syntax_tree.state, ty, &packed_dimensions.const_env)
+            type_parameters::resolve(&syntax_tree.functions, ty, &packed_dimensions.const_env)
         })
         .ok_or_else(|| unsupported(format!("parameter type override `{name}`")))?;
         return Ok(ParameterOverride::type_override(name, ty));
@@ -426,7 +427,11 @@ fn parameter_override(
         {
             let condition = constant_binding::bind(condition, syntax_tree, packed_dimensions)?
                 .and_then(|value| {
-                    eval_ast_const_expr(&syntax_tree.state, &value, &packed_dimensions.const_env)
+                    eval_ast_const_expr(
+                        &syntax_tree.functions,
+                        &value,
+                        &packed_dimensions.const_env,
+                    )
                 })
                 .ok_or_else(|| {
                     unsupported("nonconstant or ambiguous condition in array parameter argument")
@@ -463,7 +468,7 @@ fn parameter_override(
             &packed_dimensions.type_aliases,
         )?
         .and_then(|ty| {
-            type_parameters::resolve(&syntax_tree.state, ty, &packed_dimensions.const_env)
+            type_parameters::resolve(&syntax_tree.functions, ty, &packed_dimensions.const_env)
         })
         .ok_or_else(|| unsupported("type parameter packed bounds"))?;
         return Ok(ParameterOverride::type_override(name, ty));
@@ -483,7 +488,7 @@ fn parameter_override(
             && let Some(ty) = packed_dimensions.type_aliases.get(&type_name)
         {
             let ty = type_parameters::resolve(
-                &syntax_tree.state,
+                &syntax_tree.functions,
                 ty.clone(),
                 &packed_dimensions.const_env,
             )
@@ -505,7 +510,7 @@ fn parameter_override(
         && let Some(r#type) = packed_dimensions.type_aliases.get(type_name)
     {
         let ty = type_parameters::resolve(
-            &syntax_tree.state,
+            &syntax_tree.functions,
             r#type.clone(),
             &packed_dimensions.const_env,
         )

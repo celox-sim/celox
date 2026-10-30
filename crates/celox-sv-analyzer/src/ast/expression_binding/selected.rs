@@ -164,11 +164,11 @@ mod range_tests {
                 panic!()
             };
             assert_eq!(
-                eval_ast_const_expr(&tree.state, &msb, &HashMap::default()),
+                eval_ast_const_expr(&tree.functions, &msb, &HashMap::default()),
                 Some(high)
             );
             assert_eq!(
-                eval_ast_const_expr(&tree.state, &lsb, &HashMap::default()),
+                eval_ast_const_expr(&tree.functions, &lsb, &HashMap::default()),
                 Some(low)
             );
         }

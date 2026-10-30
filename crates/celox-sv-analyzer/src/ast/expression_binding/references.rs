@@ -158,8 +158,7 @@ pub(super) fn check_actual(
             "ref argument of `{name}` binding queues with different bounds"
         )));
     }
-    if formal.is_some_and(|formal| !equivalent(&tree.state, formal, &shape, &dimensions.const_env))
-    {
+    if formal.is_some_and(|formal| !equivalent(tree, formal, &shape, &dimensions.const_env)) {
         return Err(invalid(
             "the actual's type is not equivalent to the formal's (IEEE 1800-2023 6.22.2)",
         ));
@@ -192,15 +191,16 @@ fn property_shape(
 /// only with the same structure type; a virtual interface only with one of
 /// the same interface and modport (25.9), not with its number.
 fn equivalent(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     a: &VariableDimensions,
     b: &VariableDimensions,
     env: &HashMap<String, i128>,
 ) -> bool {
+    let functions = &tree.functions;
     if a.virtual_interface != b.virtual_interface {
         return false;
     }
-    let count = |width: &ConstExpr| eval_ast_const_expr(state, width, env);
+    let count = |width: &ConstExpr| eval_ast_const_expr(functions, width, env);
     match (&a.container, &b.container) {
         (None, None) => {}
         (Some(a), Some(b)) => {
@@ -211,7 +211,7 @@ fn equivalent(
                 (ContainerKind::Associative { .. }, ContainerKind::Associative { .. }) => {
                     match (&a.key, &b.key) {
                         (Some(x), Some(y)) => equivalent(
-                            state,
+                            tree,
                             &procedural::dimensions_from_type(x),
                             &procedural::dimensions_from_type(y),
                             env,
@@ -224,7 +224,7 @@ fn equivalent(
             };
             return same_kind
                 && equivalent(
-                    state,
+                    tree,
                     &procedural::dimensions_from_type(&a.element),
                     &procedural::dimensions_from_type(&b.element),
                     env,

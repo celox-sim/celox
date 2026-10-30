@@ -372,7 +372,7 @@ pub(super) fn type_name(
 ) -> Converted<String> {
     let range = |left: &ConstExpr, right: &ConstExpr| -> Converted<String> {
         let bound = |bound: &ConstExpr| {
-            eval_ast_const_expr(&tree.state, bound, env)
+            eval_ast_const_expr(&tree.functions, bound, env)
                 .ok_or_else(|| unsupported_operand("a type with a range that is not constant"))
         };
         Ok(format!("[{}:{}]", bound(left)?, bound(right)?))
@@ -467,8 +467,8 @@ fn vector_name(
         };
         r#type.kind == kind
             && matches!(r#type.packed_ranges.as_slice(), [only]
-                if eval_ast_const_expr(&tree.state, &only.left, env) == Some(width - 1)
-                    && eval_ast_const_expr(&tree.state, &only.right, env) == Some(0))
+                if eval_ast_const_expr(&tree.functions, &only.left, env) == Some(width - 1)
+                    && eval_ast_const_expr(&tree.functions, &only.right, env) == Some(0))
     });
     let (mut name, signed) = match keyword {
         Some(keyword) => (keyword.to_owned(), keyword != "time"),

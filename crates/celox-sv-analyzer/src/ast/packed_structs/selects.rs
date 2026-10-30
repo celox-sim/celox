@@ -96,21 +96,22 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
 }
 
 fn finish_lvalue(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     path: &[String],
     offset: usize,
     r#type: &Type,
     relative: LValue,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
-    let width = expr_type_from_type(state, r#type, &dimensions.const_env)?.width;
+    let functions = &tree.functions;
+    let width = expr_type_from_type(&tree.functions, r#type, &dimensions.const_env)?.width;
     let (msb, lsb, signed) = match relative {
         LValue::Ident(_) => (width.checked_sub(1)? as i128, 0, r#type.is_signed),
         LValue::Select {
             msb, lsb, signed, ..
         } => (
-            eval_ast_const_expr(state, &msb, &dimensions.const_env)?,
-            eval_ast_const_expr(state, &lsb, &dimensions.const_env)?,
+            eval_ast_const_expr(functions, &msb, &dimensions.const_env)?,
+            eval_ast_const_expr(functions, &lsb, &dimensions.const_env)?,
             signed,
         ),
     };
@@ -137,7 +138,6 @@ pub(in crate::ast) fn whole_member(
     base: Option<String>,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
-    let state = &*tree.state;
     let bound_interface = bind_interface_path(tree, &mut path, dimensions);
     if !bound_interface && let Some(base) = base {
         path[0] = base;
@@ -148,7 +148,7 @@ pub(in crate::ast) fn whole_member(
     let (offset, ty) = selected_member(&path, dimensions)
         .ok_or_else(|| unknown_member(&path, bound_interface, dimensions))?;
     finish_lvalue(
-        state,
+        tree,
         &path,
         offset,
         ty,
@@ -172,7 +172,6 @@ pub(in crate::ast) fn select_member(
     dimensions: &PackedDimensions,
     select: impl FnOnce(String, &PackedDimensions, bool) -> Converted<LValue>,
 ) -> Converted<LValue> {
-    let state = &*tree.state;
     let bound_interface = bind_interface_path(tree, &mut path, dimensions);
     if !bound_interface && let Some(base) = base {
         path[0] = base;
@@ -187,7 +186,7 @@ pub(in crate::ast) fn select_member(
         &member_dimensions(&path[0], ty, dimensions),
         true,
     )?;
-    finish_lvalue(state, &path, offset, ty, relative, dimensions).ok_or_else(|| {
+    finish_lvalue(tree, &path, offset, ty, relative, dimensions).ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")

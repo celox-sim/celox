@@ -36,7 +36,7 @@ enum Entry {
 /// With `concurrent`, the bodies may run in overlapping activations, and
 /// every static local keeps its value.
 pub(super) fn keep_static_locals<'b, T>(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     statics: &HashMap<String, T>,
     directions: &Directions,
     bodies: impl IntoIterator<Item = (&'b mut Vec<Stmt>, bool)>,
@@ -50,7 +50,7 @@ pub(super) fn keep_static_locals<'b, T>(
     }
     let mut bodies = bodies.into_iter().collect::<Vec<_>>();
     let initialized = match explicit {
-        Some(explicit) => initialized_at_time_zero(state, statics, explicit, &bodies),
+        Some(explicit) => initialized_at_time_zero(tree, statics, explicit, &bodies),
         None => HashSet::default(),
     };
     for (body, _) in &mut bodies {
@@ -59,7 +59,7 @@ pub(super) fn keep_static_locals<'b, T>(
             stmt.walk(&mut |stmt| concurrent |= matches!(stmt, Stmt::Fork { .. }));
         }
         keep_in(
-            state,
+            tree,
             body,
             statics,
             &initialized,
@@ -85,7 +85,7 @@ pub(super) fn keep_static_locals<'b, T>(
 /// rather than on entry cannot repeat; in an `always` procedure it remains
 /// rejected, like one that reads an automatic variable.
 fn initialized_at_time_zero<T>(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     statics: &HashMap<String, T>,
     explicit: &HashSet<String>,
     bodies: &[(&mut Vec<Stmt>, bool)],
@@ -107,7 +107,7 @@ fn initialized_at_time_zero<T>(
         }
     }
     let runtime = |init: &Expr| {
-        !expr_is_constant(state, init) && !automatic.iter().any(|name| expr_reads(init, name))
+        !expr_is_constant(tree, init) && !automatic.iter().any(|name| expr_reads(init, name))
     };
     let mut pending = initializers
         .iter()
@@ -117,7 +117,7 @@ fn initialized_at_time_zero<T>(
     let mut initialized = HashSet::default();
     while let Some(name) = pending.pop() {
         let (init, allowed) = initializers.get(name).copied().unwrap_or_default();
-        if init.is_some_and(|init| !expr_is_constant(state, init) && !(allowed && runtime(init)))
+        if init.is_some_and(|init| !expr_is_constant(tree, init) && !(allowed && runtime(init)))
             || !initialized.insert(name.to_string())
         {
             continue;
@@ -136,7 +136,7 @@ fn initialized_at_time_zero<T>(
 
 #[allow(clippy::too_many_arguments)]
 fn keep_in<T>(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     stmts: &mut Vec<Stmt>,
     statics: &HashMap<String, T>,
     initialized: &HashSet<String>,
@@ -155,7 +155,7 @@ fn keep_in<T>(
                 || concurrent
                 || sampled_reads(&stmts[index + 1..], name)
                 || entry(
-                    state,
+                    tree,
                     name,
                     init.as_ref(),
                     &stmts[index + 1..],
@@ -183,7 +183,7 @@ fn keep_in<T>(
                 ..
             } => {
                 keep_in(
-                    state,
+                    tree,
                     then_body,
                     statics,
                     initialized,
@@ -193,7 +193,7 @@ fn keep_in<T>(
                     concurrent,
                 )?;
                 keep_in(
-                    state,
+                    tree,
                     else_body,
                     statics,
                     initialized,
@@ -206,7 +206,7 @@ fn keep_in<T>(
             Stmt::Case { items, default, .. } => {
                 for item in items {
                     keep_in(
-                        state,
+                        tree,
                         &mut item.body,
                         statics,
                         initialized,
@@ -218,7 +218,7 @@ fn keep_in<T>(
                 }
                 if let Some(default) = default {
                     keep_in(
-                        state,
+                        tree,
                         default,
                         statics,
                         initialized,
@@ -233,7 +233,7 @@ fn keep_in<T>(
                 init, step, body, ..
             } => {
                 keep_in(
-                    state,
+                    tree,
                     init,
                     statics,
                     initialized,
@@ -243,7 +243,7 @@ fn keep_in<T>(
                     concurrent,
                 )?;
                 keep_in(
-                    state,
+                    tree,
                     step,
                     statics,
                     initialized,
@@ -253,7 +253,7 @@ fn keep_in<T>(
                     concurrent,
                 )?;
                 keep_in(
-                    state,
+                    tree,
                     body,
                     statics,
                     initialized,
@@ -266,7 +266,7 @@ fn keep_in<T>(
             Stmt::Fork { branches, .. } => {
                 for branch in branches {
                     keep_in(
-                        state,
+                        tree,
                         branch,
                         statics,
                         initialized,
@@ -286,7 +286,7 @@ fn keep_in<T>(
 
 /// Reject a static local of `subroutine` that keeps its value between calls.
 pub(super) fn check_subroutine_statics(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     subroutine: &Subroutine,
     constants: &HashMap<String, i128>,
     locals: &[LocalVariable],
@@ -305,7 +305,7 @@ pub(super) fn check_subroutine_statics(
                 && result.is_ok()
             {
                 result = entry(
-                    state,
+                    tree,
                     name,
                     init.as_ref(),
                     &stmts[index + 1..],
@@ -317,7 +317,7 @@ pub(super) fn check_subroutine_statics(
                     Entry::Observed
                         if init.is_none()
                             && bit_result::proves_local(
-                                state,
+                                tree,
                                 name,
                                 &stmts[index + 1..],
                                 constants,
@@ -372,7 +372,7 @@ pub(super) fn check_subroutine_statics(
 /// a static function the variable named after it is static too, so a call
 /// that does not assign it returns the result of an earlier call.
 pub(super) fn check_static_result(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     constants: &HashMap<String, i128>,
     locals: &[LocalVariable],
     subroutine: &Subroutine,
@@ -391,7 +391,7 @@ pub(super) fn check_static_result(
     // `return value;` assigns the result as it leaves.
     match flow.block(&subroutine.body, false) {
         Ok(exits) if exits.next != Some(false) => Ok(()),
-        _ if bit_result::proves(state, subroutine, constants, locals) => Ok(()),
+        _ if bit_result::proves(tree, subroutine, constants, locals) => Ok(()),
         _ => Err(AnalyzerError::Unsupported(format!(
             "static function `{}` whose result keeps its value between calls (assign it on \
              every path, or declare the function `automatic`)",
@@ -434,7 +434,7 @@ fn source_name(name: &str) -> &str {
 /// Reject a static local of `body` whose initializer is not constant, as
 /// [`entry`] does for a local whose entry value it examines.
 pub(super) fn check_constant_initializers(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     body: &[Stmt],
     statics: &HashSet<String>,
 ) -> Result<(), AnalyzerError> {
@@ -448,7 +448,7 @@ pub(super) fn check_constant_initializers(
                 && statics.contains(name)
                 && result.is_ok()
             {
-                result = constant_initializer(state, name, init);
+                result = constant_initializer(tree, name, init);
             }
         });
     }
@@ -456,11 +456,11 @@ pub(super) fn check_constant_initializers(
 }
 
 fn constant_initializer(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: &str,
     init: &Expr,
 ) -> Result<(), AnalyzerError> {
-    if expr_is_constant(state, init) {
+    if expr_is_constant(tree, init) {
         return Ok(());
     }
     Err(AnalyzerError::Unsupported(format!(
@@ -473,7 +473,7 @@ fn constant_initializer(
 /// Whether the statements after the declaration of the static local `name`
 /// read the value it holds on entry.
 fn entry(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: &str,
     init: Option<&Expr>,
     after: &[Stmt],
@@ -483,7 +483,7 @@ fn entry(
     // A static initializer runs once, before simulation starts; one that is
     // not constant could only run on every entry instead.
     if let Some(init) = init {
-        constant_initializer(state, name, init)?;
+        constant_initializer(tree, name, init)?;
     }
     let flow = Flow {
         name,
@@ -1108,7 +1108,8 @@ fn const_expr_reads(expr: &ConstExpr, name: &str) -> bool {
 
 /// Whether `expr` has the same value wherever it is evaluated: it reads no
 /// variable and calls nothing that is not constant.
-fn expr_is_constant(state: &AnalysisState, expr: &Expr) -> bool {
+fn expr_is_constant(tree: &AnalysisContext<'_>, expr: &Expr) -> bool {
+    let state = &*tree.state;
     fn constant(expr: &ConstExpr) -> bool {
         match expr {
             ConstExpr::Ident(_) | ConstExpr::Function { .. } => false,
@@ -1133,38 +1134,40 @@ fn expr_is_constant(state: &AnalysisState, expr: &Expr) -> bool {
         Expr::Call { args, .. } => {
             args.iter()
                 .flatten()
-                .all(|expr| expr_is_constant(state, expr))
+                .all(|expr| expr_is_constant(tree, expr))
                 && expr_to_const(state, expr.clone())
-                    .and_then(|call| eval_ast_const_expr(state, &call, &HashMap::default()))
+                    .and_then(|call| {
+                        eval_ast_const_expr(&tree.functions, &call, &HashMap::default())
+                    })
                     .is_some()
         }
         Expr::Literal(_) => true,
         Expr::Select { expr, msb, lsb, .. } => {
-            expr_is_constant(state, expr) && constant(msb) && constant(lsb)
+            expr_is_constant(tree, expr) && constant(msb) && constant(lsb)
         }
-        Expr::Concat(parts) => parts.iter().all(|expr| expr_is_constant(state, expr)),
+        Expr::Concat(parts) => parts.iter().all(|expr| expr_is_constant(tree, expr)),
         Expr::RepeatConcat { count, parts } => {
-            constant(count) && parts.iter().all(|expr| expr_is_constant(state, expr))
+            constant(count) && parts.iter().all(|expr| expr_is_constant(tree, expr))
         }
-        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => expr_is_constant(state, expr),
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => expr_is_constant(tree, expr),
         Expr::Binary { left, right, .. } => {
-            expr_is_constant(state, left) && expr_is_constant(state, right)
+            expr_is_constant(tree, left) && expr_is_constant(tree, right)
         }
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            expr_is_constant(state, condition)
-                && expr_is_constant(state, then_expr)
-                && expr_is_constant(state, else_expr)
+            expr_is_constant(tree, condition)
+                && expr_is_constant(tree, then_expr)
+                && expr_is_constant(tree, else_expr)
         }
         Expr::Inside { expr, items } => {
-            expr_is_constant(state, expr)
+            expr_is_constant(tree, expr)
                 && items.iter().all(|item| match item {
-                    InsideItem::Value(value) => expr_is_constant(state, value),
+                    InsideItem::Value(value) => expr_is_constant(tree, value),
                     InsideItem::Range { low, high } => {
-                        expr_is_constant(state, low) && expr_is_constant(state, high)
+                        expr_is_constant(tree, low) && expr_is_constant(tree, high)
                     }
                 })
         }

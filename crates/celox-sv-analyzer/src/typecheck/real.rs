@@ -76,6 +76,14 @@ pub(crate) fn round_to_i128(value: f64) -> i128 {
 }
 
 pub(crate) fn evaluate(expr: &ConstExpr, constants: &dyn ConstantEnvironment) -> Option<f64> {
+    evaluate_budgeted(expr, constants, &mut Budget::default())
+}
+
+pub(crate) fn evaluate_budgeted(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
+) -> Option<f64> {
     if !needs_real_evaluation(expr) {
         let integral = ConstExpr::Unary {
             op: UnaryOp::ToTwoState,
@@ -93,7 +101,8 @@ pub(crate) fn evaluate(expr: &ConstExpr, constants: &dyn ConstantEnvironment) ->
             let value = magnitude.to_str_radix(10).parse::<f64>().ok()?;
             return Some(if negative { -value } else { value });
         }
-        return eval_const_expr_in_env(&integral, constants).map(|value| value as f64);
+        return eval_const_expr_in_env_budgeted(&integral, constants, budget)
+            .map(|value| value as f64);
     }
     match expr {
         ConstExpr::Literal(text) => text.replace('_', "").parse::<f64>().ok(),
@@ -105,7 +114,7 @@ pub(crate) fn evaluate(expr: &ConstExpr, constants: &dyn ConstantEnvironment) ->
             if function.is_real_math() {
                 let args = args
                     .iter()
-                    .map(|arg| evaluate(arg, constants))
+                    .map(|arg| evaluate_budgeted(arg, constants, budget))
                     .collect::<Option<Vec<_>>>()?;
                 return function.eval_real_math(&args);
             }
@@ -121,24 +130,24 @@ pub(crate) fn evaluate(expr: &ConstExpr, constants: &dyn ConstantEnvironment) ->
                                 round: true,
                             },
                             celox_design::FloatPrecision::F64,
-                            evaluate(arg, constants)?.to_bits(),
+                            evaluate_budgeted(arg, constants, budget)?.to_bits(),
                         ) as u32 as i32
                     } else {
-                        eval_const_expr_in_env(arg, constants)? as i32
+                        eval_const_expr_in_env_budgeted(arg, constants, budget)? as i32
                     };
                     Some(f64::from(value))
                 }
-                SystemFunction::Bitstoreal => Some(f64::from_bits(eval_const_expr_in_env(
-                    arg, constants,
-                )? as u64)),
+                SystemFunction::Bitstoreal => Some(f64::from_bits(
+                    eval_const_expr_in_env_budgeted(arg, constants, budget)? as u64,
+                )),
                 SystemFunction::Bitstoshortreal => Some(f64::from(f32::from_bits(
-                    eval_const_expr_in_env(arg, constants)? as u32,
+                    eval_const_expr_in_env_budgeted(arg, constants, budget)? as u32,
                 ))),
                 _ => None,
             }
         }
         ConstExpr::Unary { op, expr } => {
-            let value = evaluate(expr, constants)?;
+            let value = evaluate_budgeted(expr, constants, budget)?;
             match op {
                 UnaryOp::Plus | UnaryOp::ToTwoState => Some(value),
                 UnaryOp::Minus => Some(-value),
@@ -147,14 +156,14 @@ pub(crate) fn evaluate(expr: &ConstExpr, constants: &dyn ConstantEnvironment) ->
             }
         }
         ConstExpr::Binary { left, op, right } => {
-            let left = evaluate(left, constants)?;
+            let left = evaluate_budgeted(left, constants, budget)?;
             if *op == BinaryOp::LogicAnd && left == 0.0 {
                 return Some(0.0);
             }
             if *op == BinaryOp::LogicOr && left != 0.0 {
                 return Some(1.0);
             }
-            let right = evaluate(right, constants)?;
+            let right = evaluate_budgeted(right, constants, budget)?;
             Some(match op {
                 BinaryOp::Add => left + right,
                 BinaryOp::Sub => left - right,
@@ -181,13 +190,14 @@ pub(crate) fn evaluate(expr: &ConstExpr, constants: &dyn ConstantEnvironment) ->
             condition,
             then_expr,
             else_expr,
-        } => evaluate(
-            if evaluate(condition, constants)? != 0.0 {
+        } => evaluate_budgeted(
+            if evaluate_budgeted(condition, constants, budget)? != 0.0 {
                 then_expr
             } else {
                 else_expr
             },
             constants,
+            budget,
         ),
         _ => None,
     }

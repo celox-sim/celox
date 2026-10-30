@@ -2,12 +2,14 @@
 use super::*;
 
 pub(super) fn bound_query(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     query: ArrayQuery,
     bounds: &[(i128, i128)],
     dimension: Option<Expr>,
     context: &PackedDimensions,
 ) -> Option<Expr> {
+    let state = &*tree.state;
+    let functions = &tree.functions;
     let integer = |value| Expr::Literal(format_typed_parameter_literal(value, 32, true));
     let env = &context.const_env;
     let dimensions = Some(context);
@@ -28,7 +30,7 @@ pub(super) fn bound_query(
     };
     let dimension = dimension.unwrap_or_else(|| integer(1));
     if let Some(index) = expr_to_const(state, dimension.clone())
-        .and_then(|expr| eval_ast_const_expr(state, &expr, env))
+        .and_then(|expr| eval_ast_const_expr(functions, &expr, env))
     {
         return Some(
             usize::try_from(index)
@@ -44,7 +46,7 @@ pub(super) fn bound_query(
     // the sign bit. The dimension appears once, preserving function effects.
     // Widen the index so a large dimension cannot wrap into a valid slot.
     let index_width = dimensions
-        .and_then(|context| expr_static_width(state, &dimension, context))
+        .and_then(|context| expr_static_width(tree, &dimension, context))
         .unwrap_or(32)
         .max(32)
         .checked_add(6)?;

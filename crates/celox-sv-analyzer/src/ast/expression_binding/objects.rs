@@ -1419,7 +1419,7 @@ pub(super) fn randomize_with(
             ));
         }
         let value = Expr::Ident(name);
-        let width = expr_static_width(&tree.state, &value, dimensions)
+        let width = expr_static_width(tree, &value, dimensions)
             .filter(|width| (1..=64).contains(width))
             .ok_or_else(|| unsupported("inline input width"))?;
         let mut ty = classes::unsigned_type(width);

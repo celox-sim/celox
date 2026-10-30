@@ -5,7 +5,7 @@ use celox_sv_syntax::{DimensionKind, ExprId, ExprKind};
 
 fn integer(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> Converted<i128> {
     constant_binding::bind(root, tree, dims)?
-        .and_then(|value| eval_ast_const_expr(&tree.state, &value, &dims.const_env))
+        .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
         .ok_or_else(|| unsupported("parameter shape expression that is not a known constant"))
 }
 
@@ -17,7 +17,7 @@ fn bound(
 ) -> Converted<()> {
     let value = constant_binding::bind(root, tree, dims)?
         .ok_or_else(|| unsupported("parameter selection bound that is not constant"))?;
-    if eval_ast_const_expr(&tree.state, &value, &dims.const_env).is_none()
+    if eval_ast_const_expr(&tree.functions, &value, &dims.const_env).is_none()
         && !(unknown && selects::const_index_has_unknown_value(&value, dims))
     {
         return Err(unsupported(
@@ -65,7 +65,7 @@ fn dimension(
 }
 
 fn value_name(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     name: &str,
     query: bool,
     dims: &PackedDimensions,
@@ -91,12 +91,10 @@ fn value_name(
     }
     // A zero-argument constant call may omit parentheses. A visible value
     // with the same spelling still shadows that callable, as in ordinary binding.
-    if dims.get(name).is_none()
-        && const_functions::is_constant_function(&state.const_functions, name)
-    {
+    if dims.get(name).is_none() && const_functions::is_constant_function(functions, name) {
         let (actuals, _) = expression_binding::arguments(name, &[], dims)?;
         return const_functions::validate_argument_bindings(
-            &state.const_functions,
+            functions,
             name,
             &actuals.iter().map(Option::is_some).collect::<Vec<_>>(),
         );
@@ -129,7 +127,7 @@ pub(in crate::ast) fn validate(
             ExprKind::Name(name) => {
                 let name = instances::normalize_identifier(&name.spelling);
                 if names {
-                    value_name(&tree.state, &name, query, dims, unavailable)?;
+                    value_name(&tree.functions, &name, query, dims, unavailable)?;
                 }
             }
             ExprKind::Group(inner) => jobs.push((*inner, query, receiving)),
@@ -156,7 +154,7 @@ pub(in crate::ast) fn validate(
                     && let Some(name) = expression_binding::native_name(tree, id, native)
                 {
                     if names {
-                        value_name(&tree.state, &name, query, dims, unavailable)?;
+                        value_name(&tree.functions, &name, query, dims, unavailable)?;
                     }
                 } else {
                     push(&mut jobs, *expression);
@@ -208,7 +206,7 @@ pub(in crate::ast) fn validate(
                     }
                     let (actuals, _) = expression_binding::arguments(&name, arguments, dims)?;
                     const_functions::validate_argument_bindings(
-                        &tree.state.const_functions,
+                        &tree.functions,
                         &name,
                         &actuals.iter().map(Option::is_some).collect::<Vec<_>>(),
                     )?;
@@ -319,7 +317,7 @@ pub(in crate::ast) fn validate(
                     let valid = if let ExprKind::Type(ty) = native.expression(*slice).kind {
                         type_binding::bind(ty, tree, dims)?
                             .and_then(|ty| {
-                                casts::expr_type_from_type(&tree.state, &ty, &dims.const_env)
+                                casts::expr_type_from_type(&tree.functions, &ty, &dims.const_env)
                             })
                             .is_some_and(|ty| ty.width > 0)
                     } else {
@@ -327,7 +325,7 @@ pub(in crate::ast) fn validate(
                             .and_then(|(name, dimensions)| dimensions.is_empty().then_some(name))
                             .and_then(|name| dims.type_aliases.get(&name))
                             .and_then(|ty| {
-                                casts::expr_type_from_type(&tree.state, ty, &dims.const_env)
+                                casts::expr_type_from_type(&tree.functions, ty, &dims.const_env)
                             })
                             .is_some_and(|ty| ty.width > 0)
                             || integer(*slice, tree, dims).is_ok_and(|size| size > 0)
@@ -462,9 +460,9 @@ fn pattern_items(
     }
     let (count, low, high, element) = if let Some((dim, rest)) = shape.unpacked.split_first() {
         let left =
-            eval_ast_const_expr(&tree.state, &dim.left, &dims.const_env).ok_or_else(wrong)?;
+            eval_ast_const_expr(&tree.functions, &dim.left, &dims.const_env).ok_or_else(wrong)?;
         let right =
-            eval_ast_const_expr(&tree.state, &dim.right, &dims.const_env).ok_or_else(wrong)?;
+            eval_ast_const_expr(&tree.functions, &dim.right, &dims.const_env).ok_or_else(wrong)?;
         let count = usize::try_from(left.abs_diff(right))
             .ok()
             .and_then(|v| v.checked_add(1))
@@ -487,9 +485,9 @@ fn pattern_items(
         && !rest.is_empty()
     {
         let left =
-            eval_ast_const_expr(&tree.state, &dim.left, &dims.const_env).ok_or_else(wrong)?;
+            eval_ast_const_expr(&tree.functions, &dim.left, &dims.const_env).ok_or_else(wrong)?;
         let right =
-            eval_ast_const_expr(&tree.state, &dim.right, &dims.const_env).ok_or_else(wrong)?;
+            eval_ast_const_expr(&tree.functions, &dim.right, &dims.const_env).ok_or_else(wrong)?;
         let count = usize::try_from(left.abs_diff(right))
             .ok()
             .and_then(|v| v.checked_add(1))
@@ -509,7 +507,7 @@ fn pattern_items(
             },
         )
     } else {
-        let count = patterns::shape_width(&tree.state, shape, dims).ok_or_else(wrong)?;
+        let count = patterns::shape_width(&tree.functions, shape, dims).ok_or_else(wrong)?;
         (
             count,
             0,
@@ -747,7 +745,7 @@ pub(in crate::ast) fn literal_widths(
             true,
         )
         && ty.width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
-        && let Some(value) = eval_ast_const_expr(&tree.state, &proof, &dims.const_env)
+        && let Some(value) = eval_ast_const_expr(&tree.functions, &proof, &dims.const_env)
     {
         for id in visited {
             match &native.expression(id).kind {
@@ -829,7 +827,7 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                         dims.parameter_values
                             .get(&name)
                             .filter(|value| {
-                                expr_static_width(&tree.state, value, dims).is_some_and(|width| {
+                                expr_static_width(tree, value, dims).is_some_and(|width| {
                                     width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
                                 })
                             })
@@ -863,7 +861,7 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                         expression_binding::native_name(tree, base, native).is_some_and(|name| {
                             dims.parameter_values
                                 .get(&name)
-                                .and_then(|value| expr_static_width(&tree.state, value, dims))
+                                .and_then(|value| expr_static_width(tree, value, dims))
                                 .is_some_and(|width| {
                                     width <= constant_folding::MAX_CONSTANT_CONCAT_BITS
                                 })
@@ -874,7 +872,7 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                         expression_binding::bind(id, tree, &context)
                             .ok()
                             .and_then(|value| {
-                                selects::indexed_expression_value(&tree.state, value, &context)
+                                selects::indexed_expression_value(tree, value, &context)
                             })
                             .map(const_expr_to_expr)
                             .unwrap_or_else(unknown)
@@ -1387,7 +1385,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                eval_ast_const_expr(&tree.state, &value, &HashMap::default()),
+                eval_ast_const_expr(&tree.functions, &value, &HashMap::default()),
                 Some(expected)
             );
         }

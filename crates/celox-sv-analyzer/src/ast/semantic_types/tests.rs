@@ -18,7 +18,7 @@ fn typedefs(items: &str) -> (TyTable, HashMap<String, TyId>) {
     let ids = aliases
         .iter()
         .map(|(name, ty)| {
-            let id = of_type(&table, &tree.state, ty, &env)
+            let id = of_type(&table, &tree.functions, ty, &env)
                 .unwrap_or_else(|| panic!("`{name}` has no semantic type"));
             (name.clone(), id)
         })
@@ -153,7 +153,7 @@ fn aggregates_of_each_generate_scope_are_types_of_their_own() {
         let aliases =
             types::type_aliases_of_generate_scope(&tree, &items, &env, &HashMap::default(), path)
                 .unwrap();
-        ["p_t", "u_t"].map(|name| of_type(&table, &tree.state, &aliases[name], &env).unwrap())
+        ["p_t", "u_t"].map(|name| of_type(&table, &tree.functions, &aliases[name], &env).unwrap())
     };
     let (first, second, again) = (scope("g[0]"), scope("g[1]"), scope("g[0]"));
     for index in 0..2 {

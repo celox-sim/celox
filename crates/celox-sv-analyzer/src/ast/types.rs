@@ -153,24 +153,30 @@ fn type_aliases_in_scope(
     // widen the index arithmetic of a run-time select to 128 bits.
     for ty in aliases.values_mut() {
         for range in &mut ty.packed_ranges {
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.left, const_env) {
+            if let Some(value) = eval_ast_const_expr(&syntax_tree.functions, &range.left, const_env)
+            {
                 range.left = bound_literal(value);
             }
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.right, const_env) {
+            if let Some(value) =
+                eval_ast_const_expr(&syntax_tree.functions, &range.right, const_env)
+            {
                 range.right = bound_literal(value);
             }
         }
         for range in &mut ty.unpacked_ranges {
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.left, const_env) {
+            if let Some(value) = eval_ast_const_expr(&syntax_tree.functions, &range.left, const_env)
+            {
                 range.left = bound_literal(value);
             }
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.right, const_env) {
+            if let Some(value) =
+                eval_ast_const_expr(&syntax_tree.functions, &range.right, const_env)
+            {
                 range.right = bound_literal(value);
             }
             if let Some(value) = range
                 .size
                 .as_ref()
-                .and_then(|size| eval_ast_const_expr(&syntax_tree.state, size, const_env))
+                .and_then(|size| eval_ast_const_expr(&syntax_tree.functions, size, const_env))
             {
                 range.size = Some(bound_literal(value));
             }
@@ -276,14 +282,14 @@ pub(super) fn type_with_unpacked_ranges(mut r#type: Type, ranges: Vec<UnpackedRa
 }
 
 pub(super) fn validate_unpacked_dimension_sizes(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     ranges: &[UnpackedRange],
     const_env: &HashMap<String, i128>,
 ) -> Result<(), AnalyzerError> {
     if ranges.iter().any(|range| {
         range
             .size()
-            .and_then(|size| eval_ast_const_expr(state, size, const_env))
+            .and_then(|size| eval_ast_const_expr(functions, size, const_env))
             .is_some_and(|size| size <= 0)
     }) {
         return Err(AnalyzerError::Unsupported(

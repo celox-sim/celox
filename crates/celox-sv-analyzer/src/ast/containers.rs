@@ -22,7 +22,7 @@ pub(super) fn with_dimensions(
                 None => 0,
                 Some(id) => {
                     let bound = constant_binding::bind(id, tree, context)?
-                        .and_then(|v| eval_ast_const_expr(&tree.state, &v, &context.const_env))
+                        .and_then(|v| eval_ast_const_expr(&tree.functions, &v, &context.const_env))
                         .and_then(|v| u32::try_from(v).ok())
                         .filter(|v| *v > 0 && *v < u32::MAX)
                         .ok_or_else(|| {
@@ -55,8 +55,9 @@ pub(super) fn with_dimensions(
                     index_type = Some(ty.clone());
                     let string = ty.kind() == TypeKind::String;
                     let object = ty.kind() == TypeKind::Object && ty.container.is_none();
-                    let shape = casts::expr_type_from_type(&tree.state, &ty, &context.const_env)
-                        .ok_or_else(|| unsupported("associative index type"))?;
+                    let shape =
+                        casts::expr_type_from_type(&tree.functions, &ty, &context.const_env)
+                            .ok_or_else(|| unsupported("associative index type"))?;
                     // A process handle is an identity that the simulation
                     // keeps until it ends, so it serves as an integral key
                     // whose entry outlives the process (IEEE 1800-2023 7.8.5,
@@ -106,10 +107,12 @@ pub(super) fn with_dimensions(
     if matches!(base.kind(), TypeKind::Real | TypeKind::Shortreal) {
         return Err(unsupported("real dynamic container elements"));
     }
-    let shape = casts::expr_type_from_type(&tree.state, &base, &context.const_env)
+    let shape = casts::expr_type_from_type(&tree.functions, &base, &context.const_env)
         .ok_or_else(|| unsupported("dynamic container element type"))?;
     let record = match base.unpacked_struct() {
-        Some(aggregate) => unpacked_structs::record(&tree.state, aggregate, &context.const_env)?,
+        Some(aggregate) => {
+            unpacked_structs::record(&tree.functions, aggregate, &context.const_env)?
+        }
         // An integral element wider than a container word is held in a
         // record of one field, like a structure element.
         None if shape.width > 64
@@ -119,7 +122,7 @@ pub(super) fn with_dimensions(
                 TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
             ) =>
         {
-            let mut field = classes::field(&tree.state, &base, &context.const_env, 0)?;
+            let mut field = classes::field(&tree.functions, &base, &context.const_env, 0)?;
             // A missing element reads as the default of its type.
             field.nullable = true;
             Some(crate::system_functions::Record {
@@ -882,7 +885,7 @@ fn query(
     let dimension = match arguments.get(1).and_then(|a| a.value) {
         None => 1,
         Some(id) => constant_binding::bind(id, tree, dims)?
-            .and_then(|v| eval_ast_const_expr(&tree.state, &v, &dims.const_env))
+            .and_then(|v| eval_ast_const_expr(&tree.functions, &v, &dims.const_env))
             .ok_or_else(|| unsupported("nonconstant dynamic array query dimension"))?,
     };
     if dimension != 1 {
@@ -1421,7 +1424,7 @@ pub(super) fn element_member(
         if member.is_tagged() {
             return Err(unsupported("tagged union member of a container element"));
         }
-        let width = casts::expr_type_from_type(&tree.state, member.r#type(), &dims.const_env)
+        let width = casts::expr_type_from_type(&tree.functions, member.r#type(), &dims.const_env)
             .ok_or_else(|| unsupported("structure member width"))?
             .width;
         value = Expr::Select {

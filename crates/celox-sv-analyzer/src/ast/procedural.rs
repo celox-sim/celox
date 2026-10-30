@@ -447,7 +447,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 scoped_type(r#type, &self.dims.const_env),
                 &const_functions::Environment {
                     constants: &*self.dims.const_env,
-                    functions: &self.tree.state.const_functions,
+                    functions: &self.tree.functions,
                 },
             ),
         });
@@ -808,7 +808,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         } else {
             let value =
                 expression_binding::value(right, self.tree.declarations(), self.tree, &self.dims)?;
-            assignment_op_expr(&self.tree.state, &written, op, value, &self.dims)?
+            assignment_op_expr(self.tree, &written, op, value, &self.dims)?
         };
         // Preserve assignment sizing before checked accesses introduce a temporary
         // (IEEE 1800-2023 11.8.2), using the selected destination width.
@@ -823,10 +823,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .as_ref()
             .is_some_and(|(guards, _)| !guards.is_empty())
         {
-            rhs = coerce_procedural_assignment_rhs(&self.tree.state, rhs, &written, &self.dims);
+            rhs = coerce_procedural_assignment_rhs(self.tree, rhs, &written, &self.dims);
         }
         if let Some((guards, _)) = member_context {
-            rhs = packed_structs::checked_value(guards, rhs, &self.tree.state, &self.dims)?;
+            rhs = packed_structs::checked_value(guards, rhs, self.tree, &self.dims)?;
         }
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
@@ -1099,7 +1099,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if expression_binding::real_value(&current, &self.dims) {
             return Err(unsupported("`$sformat` output that is not a string"));
         }
-        let ty = dimensions::bound_bits_type(&self.tree.state, &current, &self.dims)
+        let ty = dimensions::bound_bits_type(self.tree, &current, &self.dims)
             .ok_or_else(|| unsupported("`$sformat` output that is not a string"))?;
         let mut bits = Type::new(TypeKind::Logic);
         if ty.width > 1 {
@@ -1305,7 +1305,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 let rhs = if op == "=" {
                     value.clone()
                 } else {
-                    assignment_op_expr(&self.tree.state, &lhs, op, value.clone(), &self.dims)?
+                    assignment_op_expr(self.tree, &lhs, op, value.clone(), &self.dims)?
                 };
                 Ok(vec![Stmt::Assign {
                     lhs,
@@ -1947,7 +1947,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let entry = self.take_binding(name, None, parameter.packed_ranges.len());
             types.remove(name);
             if !parameters::bind_parameter(
-                &self.tree.state,
+                self.tree,
                 &mut self.dims.const_env,
                 &mut types,
                 &mut self.dims.parameter_values,
@@ -2403,7 +2403,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None
             } else {
                 expr_to_const(&self.tree.state, condition.clone()).and_then(|condition| {
-                    eval_ast_const_expr(&self.tree.state, &condition, &self.dims.const_env)
+                    eval_ast_const_expr(&self.tree.functions, &condition, &self.dims.const_env)
                 })
             };
             if let Some(value) = constant {
@@ -2443,7 +2443,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.tree,
             &self.dims,
         )?;
-        let mut condition = statements::simplify_condition(&self.tree.state, condition, &self.dims);
+        let mut condition = statements::simplify_condition(self.tree, condition, &self.dims);
         self.rename_expr(&mut condition);
         Ok(condition)
     }
@@ -2569,9 +2569,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let (left, right) = bounds
                 .get(position)
                 .ok_or_else(|| unsupported("foreach index beyond the array dimensions"))?;
-            let left = eval_ast_const_expr(&self.tree.state, left, &self.dims.const_env)
+            let left = eval_ast_const_expr(&self.tree.functions, left, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
-            let right = eval_ast_const_expr(&self.tree.state, right, &self.dims.const_env)
+            let right = eval_ast_const_expr(&self.tree.functions, right, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
             let name = self.declare(&variable, int_type());
             loops.push(ForeachLoop::Static(name, left, right));
@@ -2788,7 +2788,7 @@ pub(super) fn subroutine_argument_names(
         let tree = &item.scoped(tree);
         for native_id in subroutine_owners::item(item.id, tree)? {
             let native = tree.declarations().subroutine(native_id);
-            let _constant_functions = item.enter();
+            let tree = &item.enter(tree);
             let params = subroutine_param_declarations(
                 native,
                 tree,
@@ -2810,7 +2810,7 @@ pub(super) fn subroutine_argument_names(
             shapes.insert(qualified, param_shapes);
         }
         for class in classes::item_classes(item.id, tree) {
-            let _constant_functions = item.enter();
+            let tree = &item.enter(tree);
             let aliases = item.type_aliases(type_aliases);
             // A specialization's methods see its parameters (8.25).
             let (env, aliases) = classes::specializations::scope(tree, &class, &item.env, &aliases);
@@ -3006,7 +3006,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 )
             };
 
-            let _constant_functions = item.enter();
+            let tree = &item.enter(tree);
             let type_aliases = item.type_aliases(module_type_aliases);
             let name = instances::normalize_identifier(
                 &tree.declarations().subroutine(native_id).name.spelling,
@@ -3044,7 +3044,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
         }
         for class in classes::item_classes(item.id, tree) {
             let (item_dimensions, literals) = views.get(item);
-            let _constant_functions = item.enter();
+            let tree = &item.enter(tree);
             let type_aliases = item.type_aliases(module_type_aliases);
             match (
                 lower_class(
@@ -3334,7 +3334,7 @@ pub(super) fn lower_subroutine(
                 scoped_type(r#type, declaration_env),
                 &const_functions::Environment {
                     constants: &*item.env,
-                    functions: &tree.state.const_functions,
+                    functions: &tree.functions,
                 },
             ),
             default,
@@ -3524,7 +3524,7 @@ pub(super) fn lower_subroutine(
                 scoped_type(r#type, declaration_env),
                 &const_functions::Environment {
                     constants: &*item.env,
-                    functions: &tree.state.const_functions,
+                    functions: &tree.functions,
                 },
             )
         }),
@@ -3539,13 +3539,13 @@ pub(super) fn lower_subroutine(
         .chain(&mut subroutine.sensitivity_body)
     {
         qualify_stmt(item, stmt);
-        substitute_stmt_constants(&tree.state, stmt, declaration_env, literals);
+        substitute_stmt_constants(tree, stmt, declaration_env, literals);
     }
     for param in &mut subroutine.params {
         if let Some(default) = &mut param.default {
             item.expr(default);
             *default = substitute_expr_constants_with_parameter_literals(
-                &tree.state,
+                tree,
                 default.clone(),
                 &item.env,
                 literals,
@@ -3577,12 +3577,12 @@ pub(super) fn lower_subroutine(
         }
     }
     if suspends {
-        lifetimes::check_constant_initializers(&tree.state, &subroutine.body, &statics)?;
+        lifetimes::check_constant_initializers(tree, &subroutine.body, &statics)?;
     }
     if !builder.state.constant_evaluation {
         let retain_result = !builder.automatic
             && lifetimes::check_static_result(
-                &tree.state,
+                tree,
                 &builder.dims.const_env,
                 builder.state.locals,
                 &subroutine,
@@ -3595,7 +3595,7 @@ pub(super) fn lower_subroutine(
             .filter(|(name, _)| {
                 suspends
                     || lifetimes::check_subroutine_statics(
-                        &tree.state,
+                        tree,
                         &subroutine,
                         &builder.dims.const_env,
                         builder.state.locals,
@@ -3607,7 +3607,7 @@ pub(super) fn lower_subroutine(
             .map(|(name, ty)| (name.clone(), ty.clone()))
             .collect::<HashMap<_, _>>();
         let (mut kept, mut initializers) = lifetimes::keep_static_locals(
-            &tree.state,
+            tree,
             &retained_types,
             builder.state.subroutine_directions,
             std::iter::once((&mut subroutine.body, false)),
@@ -3631,7 +3631,7 @@ pub(super) fn lower_subroutine(
         }
         for initializer in &mut initializers {
             qualify_stmt(item, initializer);
-            substitute_stmt_constants(&tree.state, initializer, declaration_env, literals);
+            substitute_stmt_constants(tree, initializer, declaration_env, literals);
         }
         for name in &kept {
             let ty = static_types
@@ -4062,16 +4062,14 @@ impl BodyBuilder<'_, '_, '_> {
             self.dims.property_select_base = Some(base);
             let target = expression_binding::value(left, native, self.tree, &self.dims);
             self.dims.property_select_base = None;
-            dimensions::bound_bits_type(&self.tree.state, &target.ok()?, &self.dims)
-                .map(|ty| ty.width)
+            dimensions::bound_bits_type(self.tree, &target.ok()?, &self.dims).map(|ty| ty.width)
         });
         let rhs = lhs.and_then(|lhs| {
             let rhs = if op == "=" {
                 expression_binding::expression(right, native, &lhs, self.tree, &self.dims)
             } else {
-                expression_binding::value(right, native, self.tree, &self.dims).and_then(|value| {
-                    assignment_op_expr(&self.tree.state, &lhs, op, value, &self.dims)
-                })
+                expression_binding::value(right, native, self.tree, &self.dims)
+                    .and_then(|value| assignment_op_expr(self.tree, &lhs, op, value, &self.dims))
             };
             let mut lhs = lhs;
             self.rename_lvalue(&mut lhs);
@@ -4164,7 +4162,7 @@ impl BodyBuilder<'_, '_, '_> {
         reads: &mut Vec<(ConstExpr, String)>,
         body: &mut Vec<Stmt>,
     ) -> Converted<()> {
-        if eval_ast_const_expr(&self.tree.state, expr, &self.dims.const_env).is_some() {
+        if eval_ast_const_expr(&self.tree.functions, expr, &self.dims.const_env).is_some() {
             return Ok(());
         }
         match expr {
@@ -4205,7 +4203,7 @@ impl BodyBuilder<'_, '_, '_> {
             Some((_, source)) => source.clone(),
             None => {
                 let mut value = parameters::const_expr_to_expr(expr.clone());
-                let ty = dimensions::bound_bits_type(&self.tree.state, &value, &self.dims)
+                let ty = dimensions::bound_bits_type(self.tree, &value, &self.dims)
                     .ok_or_else(|| unsupported("index of a select of a class property"))?;
                 let (source, unique) = self.hidden(vector_type(ty.width, ty.signed));
                 self.rename_expr(&mut value);
@@ -4451,7 +4449,7 @@ fn lower_class(
             scoped_type(handle.clone(), declaration_env),
             &const_functions::Environment {
                 constants: &*item.env,
-                functions: &tree.state.const_functions,
+                functions: &tree.functions,
             },
         );
         let mut builder = BodyBuilder::new(
@@ -4496,7 +4494,7 @@ fn lower_class(
         };
         for stmt in &mut subroutine.body {
             qualify_stmt(item, stmt);
-            substitute_stmt_constants(&tree.state, stmt, declaration_env, literals);
+            substitute_stmt_constants(tree, stmt, declaration_env, literals);
         }
         subroutines.push(subroutine);
     }
@@ -4539,7 +4537,7 @@ fn lower_cast(
 ) -> Converted<Subroutine> {
     let environment = const_functions::Environment {
         constants: &*item.env,
-        functions: &tree.state.const_functions,
+        functions: &tree.functions,
     };
     let handle =
         classes::handle_type(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
@@ -4640,7 +4638,7 @@ pub(super) fn qualify_stmt(item: &generate::Item, stmt: &mut Stmt) {
 
 /// Replace parameters and genvars by their values.
 pub(super) fn substitute_stmt_constants(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     stmt: &mut Stmt,
     const_env: &HashMap<String, i128>,
     literals: &HashMap<String, Expr>,
@@ -4648,7 +4646,7 @@ pub(super) fn substitute_stmt_constants(
     stmt.visit_mut(
         &mut |expr| {
             *expr = substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 expr.clone(),
                 const_env,
                 literals,
@@ -4681,7 +4679,7 @@ pub(super) fn initial_processes_from_scope(
         if item.is_parameter_declaration(tree.declarations()) {
             continue;
         }
-        let _constant_functions = item.enter();
+        let tree = &item.enter(tree);
         let mut assignments = Vec::new();
         if let celox_sv_syntax::BodyItemKind::Data(id) = tree.declarations().body_item(item.id).kind
         {
@@ -4796,7 +4794,7 @@ pub(super) fn initial_processes_from_scope(
                 // The parameters of the class are its own constants.
                 if scoped.is_some() {
                     substitute_stmt_constants(
-                        &tree.state,
+                        tree,
                         &mut stmt,
                         &item_dimensions.const_env,
                         literals,
@@ -4806,9 +4804,9 @@ pub(super) fn initial_processes_from_scope(
             }
             let (_, literals) = views.get(item);
             for stmt in &mut body {
-                substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
+                substitute_stmt_constants(tree, stmt, &item.env, literals);
                 qualify_stmt(item, stmt);
-                substitute_stmt_constants(&tree.state, stmt, const_env, parameter_literals);
+                substitute_stmt_constants(tree, stmt, const_env, parameter_literals);
             }
             if !body.is_empty() {
                 initializers.push(InitialProcess {
@@ -4883,9 +4881,9 @@ pub(super) fn initial_processes_from_scope(
             body
         };
         for stmt in body.iter_mut().chain(&mut validation_body) {
-            substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
+            substitute_stmt_constants(tree, stmt, &item.env, literals);
             qualify_stmt(item, stmt);
-            substitute_stmt_constants(&tree.state, stmt, const_env, parameter_literals);
+            substitute_stmt_constants(tree, stmt, const_env, parameter_literals);
         }
         processes.push(InitialProcess {
             creation_order,
@@ -5151,7 +5149,7 @@ fn dump_selection_name(
                 let mut value = constant_binding::bind(*index, tree, dimensions)?
                     .ok_or_else(|| unsupported("$dumpvars hierarchy index must be constant"))?;
                 rename(&mut value);
-                let index = eval_ast_const_expr(&tree.state, &value, &dimensions.const_env)
+                let index = eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env)
                     .ok_or_else(|| {
                         unsupported("$dumpvars hierarchy index must be a known constant integer")
                     })?;

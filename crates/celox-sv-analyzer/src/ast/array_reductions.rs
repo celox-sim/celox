@@ -95,7 +95,7 @@ pub(super) fn bind(
         .try_fold(1usize, |width, dim| {
             width.checked_mul(
                 usize::try_from(eval_ast_const_expr(
-                    &tree.state,
+                    &tree.functions,
                     &dim.width,
                     &dims.const_env,
                 )?)
@@ -104,7 +104,7 @@ pub(super) fn bind(
         })
         .ok_or_else(|| unsupported("array reduction element width"))?;
     let count = usize::try_from(
-        eval_ast_const_expr(&tree.state, &shape.unpacked[0].width, &dims.const_env)
+        eval_ast_const_expr(&tree.functions, &shape.unpacked[0].width, &dims.const_env)
             .ok_or_else(|| unsupported("array reduction length"))?,
     )
     .map_err(|_| unsupported("array reduction length"))?;

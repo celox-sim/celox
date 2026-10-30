@@ -10,27 +10,33 @@ mod binding;
 pub(super) use binding::expression as native_expression;
 pub(super) use binding::{bind_native, constant_native, typed_shape};
 
-fn eval(state: &AnalysisState, expr: &ConstExpr, dims: &PackedDimensions) -> Option<i128> {
-    eval_ast_const_expr(state, expr, &dims.const_env)
+fn eval(
+    functions: &const_functions::ConstantFunctions,
+    expr: &ConstExpr,
+    dims: &PackedDimensions,
+) -> Option<i128> {
+    eval_ast_const_expr(functions, expr, &dims.const_env)
 }
 
 pub(super) fn shape_width(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Option<usize> {
     let mut width = 1usize;
     for dimension in &shape.unpacked {
-        width = width.checked_mul(usize::try_from(eval(state, &dimension.width, dims)?).ok()?)?;
+        width =
+            width.checked_mul(usize::try_from(eval(functions, &dimension.width, dims)?).ok()?)?;
     }
     for dimension in &shape.packed {
-        width = width.checked_mul(usize::try_from(eval(state, &dimension.width, dims)?).ok()?)?;
+        width =
+            width.checked_mul(usize::try_from(eval(functions, &dimension.width, dims)?).ok()?)?;
     }
     Some(width)
 }
 
 fn constant_pattern_value(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     value: Expr,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
@@ -43,27 +49,29 @@ fn constant_pattern_value(
         .collect();
     let value = substitute_expr_idents(value, &dims.array_parameter_values);
     let value =
-        substitute_expr_constants_with_parameter_literals(state, value, &dims.const_env, &values);
+        substitute_expr_constants_with_parameter_literals(tree, value, &dims.const_env, &values);
     let Expr::Literal(value) =
-        fold_const_integral_expr_preserving_mask(state, value, &dims.const_env)
+        fold_const_integral_expr_preserving_mask(tree, value, &dims.const_env)
     else {
         return Err(unsupported("nonconstant typed parameter pattern"));
     };
     let value = typecheck::parse_integral_literal(&value)
         .ok_or_else(|| unsupported("typed parameter pattern value"))?;
-    pattern_value(state, &value, shape, 0, dims)
+    pattern_value(tree, &value, shape, 0, dims)
 }
 
 fn pattern_value(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     value: &typecheck::IntegralLiteral,
     shape: &VariableDimensions,
     offset: usize,
     dims: &PackedDimensions,
 ) -> Converted<bound_patterns::Value> {
+    let functions = &tree.functions;
     let mut parts = Vec::new();
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
-        let (_, _, count) = dimension_bounds(state, &dimension.left, &dimension.right, dims)?;
+        let (_, _, count) =
+            dimension_bounds(&tree.functions, &dimension.left, &dimension.right, dims)?;
         let element = VariableDimensions {
             declared: type_names::Declared::default(),
             container: None,
@@ -73,11 +81,11 @@ fn pattern_value(
             unpacked: rest.to_vec(),
             ..shape.clone()
         };
-        let width = shape_width(state, &element, dims)
+        let width = shape_width(&tree.functions, &element, dims)
             .ok_or_else(|| unsupported("typed pattern element width"))?;
         for position in 0..count {
             parts.push(pattern_value(
-                state,
+                tree,
                 value,
                 &element,
                 offset + position * width,
@@ -85,7 +93,7 @@ fn pattern_value(
             )?);
         }
     } else {
-        let width = shape_width(state, shape, dims)
+        let width = shape_width(&tree.functions, shape, dims)
             .ok_or_else(|| unsupported("typed pattern value width"))?;
         let mask = (num_bigint::BigUint::from(1u8) << width) - num_bigint::BigUint::from(1u8);
         let mut literal = typecheck::IntegralLiteral {
@@ -101,21 +109,21 @@ fn pattern_value(
         return Ok(bound_patterns::Value::Expression {
             expr: Expr::Literal(typecheck::format_integral_literal_binary(&literal)),
             signed: Some(shape.signed),
-            value_type: bound_patterns::ValueType::Known(shape.pattern_type(state, dims)),
+            value_type: bound_patterns::ValueType::Known(shape.pattern_type(functions, dims)),
         });
     }
     Ok(bound_patterns::Value::list(parts))
 }
 
 fn dimension_bounds(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     left: &ConstExpr,
     right: &ConstExpr,
     dims: &PackedDimensions,
 ) -> Converted<(i128, i128, usize)> {
     let bounds = || unsupported("assignment pattern target bounds");
-    let left = eval(state, left, dims).ok_or_else(bounds)?;
-    let right = eval(state, right, dims).ok_or_else(bounds)?;
+    let left = eval(functions, left, dims).ok_or_else(bounds)?;
+    let right = eval(functions, right, dims).ok_or_else(bounds)?;
     let count = usize::try_from(left.abs_diff(right))
         .ok()
         .and_then(|count| count.checked_add(1))
@@ -127,7 +135,7 @@ fn dimension_bounds(
 /// descends through subarrays and structures; state conversion happens at
 /// the leaf so mixed bit/logic aggregates preserve their member types.
 pub(super) fn assignment_value(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     value: &Expr,
     signed: bool,
     value_type: Option<&Type>,
@@ -135,6 +143,7 @@ pub(super) fn assignment_value(
     dims: &PackedDimensions,
     default: bool,
 ) -> Converted<Expr> {
+    let functions = &tree.functions;
     // A structure-valued default of the member's own type is one whole
     // value. Preserve its leaf expressions instead of resizing the handles
     // and state bits together as an integral vector (10.9.2).
@@ -150,7 +159,8 @@ pub(super) fn assignment_value(
         return Ok(value.clone());
     }
     let default = default
-        && !value_type.is_some_and(|ty| shape.pattern_type(state, dims).as_ref() == Some(ty));
+        && !value_type
+            .is_some_and(|ty| shape.pattern_type(&tree.functions, dims).as_ref() == Some(ty));
     if default {
         let array = if let Some((dim, rest)) = shape.unpacked.split_first() {
             Some((
@@ -183,12 +193,12 @@ pub(super) fn assignment_value(
             None
         };
         if let Some((width, element)) = array {
-            let count = eval_ast_const_expr(state, width, &dims.const_env)
+            let count = eval_ast_const_expr(functions, width, &dims.const_env)
                 .and_then(|n| usize::try_from(n).ok())
                 .ok_or_else(|| unsupported("pattern target array size"))?;
             return Ok(Expr::Concat(vec![
                 assignment_value(
-                    state, value, signed, value_type, &element, dims, true
+                    tree, value, signed, value_type, &element, dims, true
                 )?;
                 count
             ]));
@@ -200,7 +210,7 @@ pub(super) fn assignment_value(
                     .iter()
                     .map(|member| {
                         assignment_value(
-                            state,
+                            tree,
                             value,
                             signed,
                             value_type,
@@ -228,7 +238,7 @@ pub(super) fn assignment_value(
                     .iter()
                     .map(|member| {
                         assignment_value(
-                            state,
+                            tree,
                             value,
                             signed,
                             value_type,
@@ -251,11 +261,11 @@ pub(super) fn assignment_value(
     let actual_shape = value_type.map(procedural::dimensions_from_type);
     let actual = actual_shape
         .as_ref()
-        .and_then(|actual| array_compatibility::unpacked_array_type(state, actual, dims));
-    let target = array_compatibility::unpacked_array_type(state, shape, dims);
+        .and_then(|actual| array_compatibility::unpacked_array_type(&tree.functions, actual, dims));
+    let target = array_compatibility::unpacked_array_type(&tree.functions, shape, dims);
     if let Some((actual, target)) = actual_shape
         .as_ref()
-        .and_then(|actual| array_compatibility::incompatible(state, actual, shape, dims))
+        .and_then(|actual| array_compatibility::incompatible(tree, actual, shape, dims))
     {
         return Err(AnalyzerError::IncompatibleUnpackedArray {
             context: "assignment pattern element".into(),
@@ -276,7 +286,7 @@ pub(super) fn assignment_value(
         }
         _ => {}
     }
-    let width = shape_width(state, shape, dims)
+    let width = shape_width(&tree.functions, shape, dims)
         .ok_or_else(|| unsupported("assignment pattern element width"))?;
     let resized = Expr::Resize {
         expr: Box::new(value.clone()),

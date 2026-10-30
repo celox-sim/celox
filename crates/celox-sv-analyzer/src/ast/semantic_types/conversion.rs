@@ -2,7 +2,7 @@
 //! [`VariableDimensions`] of variables.
 use super::*;
 use crate::ast::{
-    AnalysisState, ConstExpr, ContainerKind, ContainerType, Type, TypeKind, VariableDimensions,
+    ConstExpr, ContainerKind, ContainerType, Type, TypeKind, VariableDimensions, const_functions,
     enums::EnumDomain, eval_ast_const_expr, packed_structs::PackedMember, type_names,
     unpacked_structs::UnpackedStruct, virtual_interfaces::VirtualInterface,
 };
@@ -11,7 +11,7 @@ use crate::ast::{
 /// if a range is not constant or the type has no semantic type yet.
 pub(in crate::ast) fn of_type(
     table: &TyTable,
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     ty: &Type,
     env: &HashMap<String, i128>,
 ) -> Option<TyId> {
@@ -39,7 +39,7 @@ pub(in crate::ast) fn of_type(
         .unpacked_ranges
         .iter()
         .map(|range| (range.left(), range.right()));
-    parts.intern(table, state, env, unpacked)
+    parts.intern(table, functions, env, unpacked)
 }
 
 /// The semantic type of a variable of `shape`, whose dimensions name
@@ -47,7 +47,7 @@ pub(in crate::ast) fn of_type(
 /// (which only `$typename` tells apart).
 pub(in crate::ast) fn of_shape(
     table: &TyTable,
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     shape: &VariableDimensions,
     env: &HashMap<String, i128>,
 ) -> Option<TyId> {
@@ -87,7 +87,7 @@ pub(in crate::ast) fn of_shape(
         .unpacked
         .iter()
         .map(|dimension| (&dimension.left, &dimension.right));
-    parts.intern(table, state, env, unpacked)
+    parts.intern(table, functions, env, unpacked)
 }
 
 /// What a type is made of, from a [`Type`] or a [`VariableDimensions`].
@@ -116,17 +116,17 @@ impl Parts<'_> {
     fn intern<'b>(
         &self,
         table: &TyTable,
-        state: &AnalysisState,
+        functions: &const_functions::ConstantFunctions,
         env: &HashMap<String, i128>,
         unpacked: impl DoubleEndedIterator<Item = (&'b ConstExpr, &'b ConstExpr)>,
     ) -> Option<TyId> {
         let range = |left: &ConstExpr, right: &ConstExpr| {
             Some(Range {
-                left: eval_ast_const_expr(state, left, env)?,
-                right: eval_ast_const_expr(state, right, env)?,
+                left: eval_ast_const_expr(functions, left, env)?,
+                right: eval_ast_const_expr(functions, right, env)?,
             })
         };
-        let mut id = table.intern(self.element(table, state, env, &range)?);
+        let mut id = table.intern(self.element(table, functions, env, &range)?);
         for (left, right) in unpacked.rev() {
             id = table.intern(TyData::Array {
                 kind: ArrayKind::Fixed(range(left, right)?),
@@ -140,7 +140,7 @@ impl Parts<'_> {
     fn element(
         &self,
         table: &TyTable,
-        state: &AnalysisState,
+        functions: &const_functions::ConstantFunctions,
         env: &HashMap<String, i128>,
         range: &dyn Fn(&ConstExpr, &ConstExpr) -> Option<Range>,
     ) -> Option<TyData> {
@@ -152,12 +152,12 @@ impl Parts<'_> {
                     bound: capacity.checked_sub(1),
                 },
                 ContainerKind::Associative { .. } => ArrayKind::Associative {
-                    key: of_type(table, state, container.key.as_ref()?, env)?,
+                    key: of_type(table, functions, container.key.as_ref()?, env)?,
                 },
             };
             return Some(TyData::Array {
                 kind,
-                element: of_type(table, state, &container.element, env)?,
+                element: of_type(table, functions, &container.element, env)?,
             });
         }
         // Events and processes are handles of built-in classes.

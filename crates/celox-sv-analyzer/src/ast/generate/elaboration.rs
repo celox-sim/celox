@@ -134,17 +134,19 @@ pub(super) fn needs_functions(tree: &AnalysisContext<'_>) -> Converted<bool> {
 }
 struct Context<'b> {
     outer: Cow<'b, HashMap<String, Type>>,
-    _functions: Option<const_functions::Installed>,
+    /// The constant functions outside the block, if its imports rebind some.
+    outer_functions: Option<const_functions::ConstantFunctions>,
 }
 struct Contexts<'b>(Vec<Context<'b>>);
-impl Drop for Contexts<'_> {
-    fn drop(&mut self) {
-        while let Some(context) = self.0.pop() {
-            drop(context);
+impl<'a, 'b> Elaborator<'a, 'b> {
+    /// Leave the generate block that `context` entered.
+    fn leave(&mut self, context: Context<'b>) {
+        self.aliases = context.outer;
+        if let Some(functions) = context.outer_functions {
+            self.tree.functions = functions;
         }
     }
-}
-impl<'a, 'b> Elaborator<'a, 'b> {
+
     pub(super) fn elaborate_root(
         &mut self,
         scope: Scope,
@@ -187,8 +189,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         while let Some(job) = jobs.pop() {
             if let Err(error) = self.execute_job(job, &mut jobs, &mut contexts) {
                 while let Some(context) = contexts.0.pop() {
-                    self.aliases = context.outer;
-                    drop(context._functions);
+                    self.leave(context);
                 }
                 return Err(error);
             }
@@ -207,8 +208,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         match job {
             Job::ExitScope => {
                 let context = contexts.0.pop().ok_or_else(mismatch)?;
-                self.aliases = context.outer;
-                drop(context._functions);
+                self.leave(context);
                 Ok(())
             }
             Job::Item { id, scope, ordinal } => self.item_job(id, scope, ordinal, jobs),
@@ -385,19 +385,22 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         } else {
             format!("{}.{name}", parent.path)
         };
-        let imported = scope::imported(self.tree);
+        let imported = scope::imported(&self.tree);
         if let Some(bindings) = imported.generate_imports.get(&id) {
             for (name, target) in bindings {
                 bind_import(&mut scope, name, target);
             }
         }
         let index_ref = index.as_ref().map(|(name, value)| (name.as_str(), *value));
-        let functions = scope.block_imports().install_constant_functions();
+        let outer_functions = scope
+            .block_imports()
+            .visible_constant_functions(&self.tree.functions)
+            .map(|functions| std::mem::replace(&mut self.tree.functions, functions));
         let aliases = scope.type_aliases(self.module_aliases);
         let outer = std::mem::replace(&mut self.aliases, aliases);
         contexts.0.push(Context {
             outer,
-            _functions: functions,
+            outer_functions,
         });
         let scope = Rc::new(self.prepare_block_contents(&children, scope, index_ref)?);
         jobs.push(Job::ExitScope);
@@ -502,7 +505,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
             } => {
                 let rhs = self.expression(*right, scope)?;
                 rhs.and_then(|rhs| {
-                    next_assignment(&self.tree.state, value, operator, rhs, &scope.env)
+                    next_assignment(&self.tree.functions, value, operator, rhs, &scope.env)
                 })
             }
         };
@@ -592,14 +595,14 @@ fn step_name(step: &ForStep, native: &celox_sv_syntax::Declarations) -> Option<S
     }
 }
 fn next_assignment(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     value: i128,
     operator: &str,
     rhs: ConstExpr,
     env: &HashMap<String, i128>,
 ) -> Option<i128> {
     if operator == "=" {
-        return eval_ast_const_expr(state, &rhs, env);
+        return eval_ast_const_expr(functions, &rhs, env);
     }
     let op = match operator {
         "+=" => BinaryOp::Add,
@@ -612,7 +615,7 @@ fn next_assignment(
         _ => return None,
     };
     eval_ast_const_expr(
-        state,
+        functions,
         &ConstExpr::Binary {
             left: Box::new(ConstExpr::Literal(format_typed_parameter_literal(
                 value, 32, true,

@@ -6,7 +6,7 @@ const MAX_BITS: usize = 65536;
 const MAX_STEPS: usize = 65536;
 
 pub(super) fn proves(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     subroutine: &Subroutine,
     constants: &HashMap<String, i128>,
     locals: &[LocalVariable],
@@ -22,11 +22,11 @@ pub(super) fn proves(
     else {
         return false;
     };
-    proves_variable(state, name, width, &subroutine.body, constants, locals)
+    proves_variable(tree, name, width, &subroutine.body, constants, locals)
 }
 
 pub(super) fn proves_local(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: &str,
     body: &[Stmt],
     constants: &HashMap<String, i128>,
@@ -39,11 +39,11 @@ pub(super) fn proves_local(
     let Some(width) = local.r#type.resolved_width() else {
         return false;
     };
-    proves_variable(state, name, width, body, constants, locals)
+    proves_variable(tree, name, width, body, constants, locals)
 }
 
 pub(super) fn proves_variable(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: &str,
     width: usize,
     body: &[Stmt],
@@ -76,7 +76,7 @@ pub(super) fn proves_variable(
         }
     }
     let mut proof = Proof {
-        state,
+        tree,
         name,
         width,
         written: BigUint::default(),
@@ -89,7 +89,7 @@ pub(super) fn proves_variable(
 }
 
 struct Proof<'a> {
-    state: &'a AnalysisState,
+    tree: &'a AnalysisContext<'a>,
     name: &'a str,
     width: usize,
     written: BigUint,
@@ -109,8 +109,8 @@ impl Proof<'_> {
             return None;
         }
         let dims = PackedDimensions::new(HashMap::default(), &self.env, &HashMap::default());
-        let value = expr_to_index_const(self.state, expression.clone(), &dims)?;
-        eval_ast_const_expr(self.state, &value, &self.env)
+        let value = expr_to_index_const(self.tree, expression.clone(), &dims)?;
+        eval_ast_const_expr(&self.tree.functions, &value, &self.env)
     }
 
     fn store(&mut self, name: &str, value: Option<i128>) -> Option<()> {
@@ -163,8 +163,10 @@ impl Proof<'_> {
                                 if !pure_constant(msb) || !pure_constant(lsb) {
                                     return None;
                                 }
-                                let left = eval_ast_const_expr(self.state, msb, &self.env)?;
-                                let right = eval_ast_const_expr(self.state, lsb, &self.env)?;
+                                let left =
+                                    eval_ast_const_expr(&self.tree.functions, msb, &self.env)?;
+                                let right =
+                                    eval_ast_const_expr(&self.tree.functions, lsb, &self.env)?;
                                 let low = usize::try_from(left.min(right)).ok()?;
                                 let high = usize::try_from(left.max(right)).ok()?;
                                 if high >= self.width {

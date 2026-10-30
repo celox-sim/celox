@@ -36,7 +36,7 @@ pub(in crate::ast) fn construction_member(
 }
 
 pub(in crate::ast) fn construct(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     plan: Construction,
     value: Option<Expr>,
     dims: &PackedDimensions,
@@ -49,7 +49,7 @@ pub(in crate::ast) fn construct(
         )));
     }
     let width = match &plan.shape {
-        Some(shape) => patterns::shape_width(state, shape, dims)
+        Some(shape) => patterns::shape_width(&tree.functions, shape, dims)
             .ok_or_else(|| unsupported("tagged payload width"))?,
         None => 0,
     };
@@ -64,7 +64,7 @@ pub(in crate::ast) fn construct(
             let signed =
                 dimensions::expression_signedness(&value, dims, &dims.const_env).unwrap_or(false);
             parts.push(patterns::assignment_value(
-                state, &value, signed, None, &shape, dims, false,
+                tree, &value, signed, None, &shape, dims, false,
             )?);
         }
         (None, None) => {}
@@ -130,14 +130,14 @@ pub(in crate::ast) fn member_access(
 pub(in crate::ast) fn checked_value(
     guards: Vec<Expr>,
     mut value: Expr,
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     if guards.is_empty() {
         return Ok(value);
     }
     let width =
-        expr_static_width(state, &value, dims).ok_or_else(|| unsupported("tagged access width"))?;
+        expr_static_width(tree, &value, dims).ok_or_else(|| unsupported("tagged access width"))?;
     let signed = dimensions::expression_signedness(&value, dims, &dims.const_env).unwrap_or(false);
     for guard in guards.into_iter().rev() {
         value = Expr::Call {

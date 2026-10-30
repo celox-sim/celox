@@ -5248,7 +5248,8 @@ fn named_constant_calls_retain_parameter_dependencies() {
             .unwrap();
     let source = ast::Source::from_syntax(&syntax).unwrap();
     let module = &source.modules()[0];
-    let state = module.constant_function_state();
+    let empty = crate::source_tree::SourceTree::empty();
+    let evaluation = module.constant_context(&empty);
     let expression: ir::ConstExpr = module
         .parameters()
         .iter()
@@ -5264,7 +5265,7 @@ fn named_constant_calls_retain_parameter_dependencies() {
             &expression,
             &ast::const_functions::Environment {
                 constants: &values,
-                functions: &state.const_functions
+                functions: &evaluation.functions
             }
         ),
         Some(17)

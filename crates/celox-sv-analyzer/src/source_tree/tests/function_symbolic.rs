@@ -9,8 +9,9 @@ fn inline(tree: &SourceTree, input: i128) -> i128 {
         args: vec![ConstExpr::Literal(input.to_string())],
         site: None,
     };
+    let syntax = crate::source_tree::SourceTree::empty();
     let expression = source.modules()[0].declaration_expr(
-        &crate::ast::AnalysisState::default(),
+        &crate::ast::AnalysisContext::unspecialized(&syntax),
         &expression,
         &HashMap::default(),
     );

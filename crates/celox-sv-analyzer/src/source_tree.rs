@@ -40,6 +40,11 @@ pub(crate) struct SourceTree {
 }
 
 impl SourceTree {
+    /// The tree of an empty source, for evaluation outside any scope.
+    pub(crate) fn empty() -> Self {
+        parse_source("", Path::new("")).expect("an empty source parses")
+    }
+
     pub(crate) fn compilation_path(&self) -> &Path {
         &self.compilation_path
     }

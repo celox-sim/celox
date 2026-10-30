@@ -41,7 +41,7 @@ fn query_number(
         .ok()
         .flatten()
         .and_then(|value| expr_to_const(&tree.state, value))
-        .and_then(|value| eval_ast_const_expr(&tree.state, &value, env))
+        .and_then(|value| eval_ast_const_expr(&tree.functions, &value, env))
         .and_then(|value| usize::try_from(value).ok())
 }
 
@@ -133,13 +133,12 @@ fn function_result_queries_preserve_expression_bodies() {
     let tree = AnalysisContext::unspecialized(&tree);
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
-    let env = const_env_from_parameters(&tree.state, module.parameters());
+    let env = const_env_from_parameters(&tree, module.parameters());
     let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values =
-        parameter_value_env(&tree.state, module.parameters(), &env).into();
+    dimensions.parameter_values = parameter_value_env(&tree, module.parameters(), &env).into();
     let functions = functions_from_scope(&tree, &env, &dimensions).unwrap();
     assert!(functions["f"].body.is_some(), "{:?}", functions["f"]);
 }
@@ -172,13 +171,12 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
     let tree = AnalysisContext::unspecialized(&tree);
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
-    let env = const_env_from_parameters(&tree.state, module.parameters());
+    let env = const_env_from_parameters(&tree, module.parameters());
     let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values =
-        parameter_value_env(&tree.state, module.parameters(), &env).into();
+    dimensions.parameter_values = parameter_value_env(&tree, module.parameters(), &env).into();
     let functions = functions_from_scope(&tree, &env, &dimensions).unwrap();
     dimensions
         .function_return_types
@@ -329,7 +327,7 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
         let tree = AnalysisContext::unspecialized(&tree);
         let source = Source::from_syntax(&tree).unwrap();
         let module = &source.modules()[0];
-        let env = const_env_from_parameters(&tree.state, module.parameters());
+        let env = const_env_from_parameters(&tree, module.parameters());
         let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
         let dimensions = packed_dimensions_from_ports_and_signals(
             module.ports(),
@@ -583,7 +581,11 @@ fn recursive_generate_dimension_discovery_uses_explicit_specialization() {
             query_context_for_operand(operand, context, &PackedDimensions::default()).unwrap();
         let data = dimensions.get("g.data").unwrap();
         assert_eq!(
-            eval_ast_const_expr(&context.state, &data.packed[0].width, &dimensions.const_env),
+            eval_ast_const_expr(
+                &context.functions,
+                &data.packed[0].width,
+                &dimensions.const_env
+            ),
             Some(expected),
         );
     }

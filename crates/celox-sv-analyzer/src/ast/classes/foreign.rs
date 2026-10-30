@@ -318,6 +318,7 @@ impl Registry {
             state: state.clone(),
             parameter_overrides: Cow::Owned(HashMap::default()),
             imported: Arc::default(),
+            functions: const_functions::ConstantFunctions::default(),
             // Inside the package, `p::x` names its own item `x`.
             package: Some(name.into()),
         };

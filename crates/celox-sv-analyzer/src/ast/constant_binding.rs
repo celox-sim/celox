@@ -202,7 +202,7 @@ fn bind_in_context(
                     let expr =
                         expression_binding::bind_value(id, native, tree, query_dimensions, None)?;
                     let Some(value) =
-                        selects::indexed_expression_value(&tree.state, expr, query_dimensions)
+                        selects::indexed_expression_value(tree, expr, query_dimensions)
                     else {
                         return Ok(None);
                     };
@@ -309,13 +309,9 @@ fn bind_in_context(
                                 .array_parameter_values
                                 .contains_key(&name_key)
                             {
-                                selects::indexed_expression_value(
-                                    &tree.state,
-                                    value,
-                                    query_dimensions,
-                                )
+                                selects::indexed_expression_value(tree, value, query_dimensions)
                             } else {
-                                expr_to_index_const(&tree.state, value, query_dimensions)
+                                expr_to_index_const(tree, value, query_dimensions)
                             };
                             values.push(
                                 value.ok_or_else(|| unsupported("parameter selection shape"))?,
@@ -335,7 +331,7 @@ fn bind_in_context(
                             Err(error) => return Err(error),
                         };
                         let Some(value) =
-                            selects::indexed_expression_value(&tree.state, value, query_dimensions)
+                            selects::indexed_expression_value(tree, value, query_dimensions)
                         else {
                             return Ok(None);
                         };
@@ -350,7 +346,7 @@ fn bind_in_context(
                         dimensions.clone()
                     };
                     context.subroutine_param_names =
-                        const_functions::argument_names(&tree.state.const_functions);
+                        Arc::new(const_functions::argument_names(&tree.functions));
                     let value =
                         match expression_binding::bind_value(id, native, tree, &context, None) {
                             Ok(value) => value,
@@ -377,13 +373,9 @@ fn bind_in_context(
                         }
                     );
                     let Some(value) = (if countbits {
-                        constants::countbits_constant_call(
-                            &tree.state,
-                            value,
-                            &dimensions.const_env,
-                        )
+                        constants::countbits_constant_call(tree, value, &dimensions.const_env)
                     } else {
-                        constants::user_call_value(&tree.state, value, &dimensions.const_env)
+                        constants::user_call_value(tree, value, &dimensions.const_env)
                     }) else {
                         return Ok(None);
                     };
@@ -396,12 +388,9 @@ fn bind_in_context(
             },
             Job::Cast(target) => {
                 let value = values.pop().ok_or_else(disagreement)?;
-                let Some(value) = casts::cast_constant_target(
-                    &tree.state,
-                    value,
-                    target,
-                    &query_dimensions.const_env,
-                ) else {
+                let Some(value) =
+                    casts::cast_constant_target(tree, value, target, &query_dimensions.const_env)
+                else {
                     return Ok(None);
                 };
                 values.push(value);
@@ -464,7 +453,7 @@ fn bind_in_context(
                 let mut indices = values.split_off(start);
                 if let Some(indices) = indices
                     .iter()
-                    .map(|index| eval_ast_const_expr(&tree.state, index, &dimensions.const_env))
+                    .map(|index| eval_ast_const_expr(&tree.functions, index, &dimensions.const_env))
                     .collect::<Option<Vec<_>>>()
                     && let Some(literal) =
                         parameter_element_literal(&name, &indices, &dimensions.const_env)
@@ -596,7 +585,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                eval_ast_const_expr(&tree.state, &value, &HashMap::default()),
+                eval_ast_const_expr(&tree.functions, &value, &HashMap::default()),
                 Some(expected)
             );
         }

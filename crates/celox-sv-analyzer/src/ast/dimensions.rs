@@ -35,13 +35,13 @@ fn extend_interface_dimensions(tree: &AnalysisContext<'_>, dimensions: &mut Pack
 }
 
 pub(super) fn bound_bits_type(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expression: &Expr,
     dimensions: &PackedDimensions,
 ) -> Option<ExprType> {
     bound_query_type(
         expression,
-        expr_static_width(state, expression, dimensions)?,
+        expr_static_width(tree, expression, dimensions)?,
         dimensions,
         &dimensions.const_env,
     )
@@ -438,7 +438,7 @@ fn variable_type_is_signed(const_env: &HashMap<String, i128>, name: &str) -> boo
 }
 
 pub(super) fn extend_const_env_with_variable_types<'a>(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     const_env: &mut HashMap<String, i128>,
     variables: impl Iterator<Item = (&'a str, &'a Type)>,
 ) {
@@ -465,7 +465,7 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
         {
             for (bound, value) in [("left", left), ("right", right)] {
                 let key = variable_dimension_marker(name, index, bound);
-                if let Some(value) = eval_ast_const_expr(state, value, const_env) {
+                if let Some(value) = eval_ast_const_expr(functions, value, const_env) {
                     const_env.insert(key, value);
                 } else {
                     const_env.remove(&key);
@@ -473,16 +473,16 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
             }
         }
         let dimension_width = |range: &PackedRange| {
-            let left = eval_ast_const_expr(state, range.left(), const_env)?;
-            let right = eval_ast_const_expr(state, range.right(), const_env)?;
+            let left = eval_ast_const_expr(functions, range.left(), const_env)?;
+            let right = eval_ast_const_expr(functions, range.right(), const_env)?;
             usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
         };
         let unpacked_widths = r#type
             .unpacked_ranges()
             .iter()
             .map(|range| {
-                let left = eval_ast_const_expr(state, range.left(), const_env)?;
-                let right = eval_ast_const_expr(state, range.right(), const_env)?;
+                let left = eval_ast_const_expr(functions, range.left(), const_env)?;
+                let right = eval_ast_const_expr(functions, range.right(), const_env)?;
                 usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
             })
             .collect::<Option<Vec<_>>>();

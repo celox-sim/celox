@@ -96,7 +96,7 @@ fn indexed_items(
     }
 }
 fn select<'a>(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     kind: NativeKind,
     bindings: Vec<Pair>,
     shape: Shape<'a>,
@@ -112,7 +112,7 @@ fn select<'a>(
         ));
     }
     if let Some((dim, rest)) = shape.unpacked.split_first() {
-        let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
+        let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
             declared: type_names::Declared::default(),
             container: None,
@@ -145,7 +145,7 @@ fn select<'a>(
     if let Some((dim, rest)) = shape.packed.split_first()
         && !rest.is_empty()
     {
-        let (left, right, count) = dimension_bounds(state, &dim.left, &dim.right, dims)?;
+        let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
         let sub = Shape::Owned(Rc::new(VariableDimensions {
             declared: type_names::Declared::default(),
             container: None,
@@ -259,7 +259,7 @@ fn select<'a>(
             false,
         ));
     }
-    let width = shape_width(state, &shape, dims)
+    let width = shape_width(functions, &shape, dims)
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
     let bit = Shape::Owned(Rc::new(VariableDimensions {
         declared: type_names::Declared::default(),
@@ -347,7 +347,7 @@ pub(in crate::ast) fn constant_native(
     let shape =
         typed_shape(root, tree, dims)?.ok_or_else(|| unsupported("assignment pattern type"))?;
     let value = bind_native(root, tree.declarations(), tree, dims, Some(&shape))?;
-    super::constant_pattern_value(&tree.state, value, &shape, dims)
+    super::constant_pattern_value(tree, value, &shape, dims)
 }
 pub(in crate::ast) fn expression(
     root: ExprId,
@@ -386,7 +386,7 @@ pub(in crate::ast) fn bind_native(
             Job::Pattern(id, shape) => {
                 let plan = bound_patterns::prepare_native(id, tree, dims, Some(&shape))?;
                 let (items, reverse, keep) =
-                    select(&tree.state, plan.kind, plan.bindings, shape, dims)?;
+                    select(&tree.functions, plan.kind, plan.bindings, shape, dims)?;
                 jobs.push(Job::Finish {
                     count: items.len(),
                     reverse,
@@ -410,7 +410,8 @@ pub(in crate::ast) fn bind_native(
                     && !pattern
                     && native_rank(id, native, dims) < shape.unpacked.len()
                 {
-                    let (_, _, count) = dimension_bounds(&tree.state, &dim.left, &dim.right, dims)?;
+                    let (_, _, count) =
+                        dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
                     let sub = Shape::Owned(Rc::new(VariableDimensions {
                         declared: type_names::Declared::default(),
                         container: None,
@@ -516,7 +517,7 @@ pub(in crate::ast) fn bind_native(
                             || native_rank(id, native, dims) < shape.unpacked.len());
                     let value_type = bound_patterns::native_value_type(id, tree, &type_dims)?;
                     values.push(assignment_value(
-                        &tree.state,
+                        tree,
                         &value,
                         signed,
                         value_type.as_ref(),

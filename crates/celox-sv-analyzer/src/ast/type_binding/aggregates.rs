@@ -97,7 +97,6 @@ mod tests {
             &HashMap::default(),
             &HashMap::default(),
         );
-        let state = tree.state.clone();
         drop(tree);
         drop(original);
         let ty = result.unwrap().unwrap();
@@ -109,9 +108,13 @@ mod tests {
         }
         assert_eq!(depth, 500);
         assert_eq!(
-            expr_type_from_type(&state, &ty, &HashMap::default())
-                .unwrap()
-                .width,
+            expr_type_from_type(
+                &const_functions::ConstantFunctions::default(),
+                &ty,
+                &HashMap::default()
+            )
+            .unwrap()
+            .width,
             1
         );
         drop(ty);

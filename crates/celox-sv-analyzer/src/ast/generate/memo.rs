@@ -2,9 +2,10 @@
 //!
 //! The collectors of a module each ask for the active items of the same
 //! scope. A window opened for the module keeps each elaboration, keyed by its
-//! arguments, the imports and package of its context, and the revisions of
-//! the analysis state that elaboration reads (constant functions, active
-//! interface instances, time scopes), so a change of that state makes
+//! arguments, the imports, package and constant functions of its context,
+//! and the revisions of
+//! the analysis state that elaboration reads (active interface instances,
+//! time scopes), so a change of that state makes
 //! earlier results unreachable.
 //! A repeated elaboration allocates as many call sites as the first one did,
 //! so later calls keep their sites.
@@ -49,10 +50,11 @@ struct Window {
 }
 
 struct Entry {
-    revisions: [u64; 3],
+    revisions: [u64; 2],
     /// The symbols the scope imported and the package it was in.
     imported: Arc<scope::ScopeSymbols>,
     package: Option<Arc<str>>,
+    functions: const_functions::ConstantFunctions,
     literal_use: LiteralUse,
     overrides: HashMap<String, ConstExpr>,
     env: HashMap<String, i128>,
@@ -94,10 +96,9 @@ fn address(tree: &SyntaxTree) -> usize {
     tree as *const SyntaxTree as usize
 }
 
-fn revisions(state: &AnalysisState) -> [u64; 3] {
+fn revisions(state: &AnalysisState) -> [u64; 2] {
     [
         state.revision.get(),
-        const_functions::revision(&state.const_functions).get(),
         timescales::revision(&state.timescales).get(),
     ]
 }
@@ -132,6 +133,7 @@ pub(super) fn items(
             entry.revisions == current
                 && Arc::ptr_eq(&entry.imported, &tree.imported)
                 && entry.package == tree.package
+                && entry.functions.same(&tree.functions)
                 && entry.literal_use == literal_use
                 && entry.overrides == *tree.parameter_overrides
                 && entry.env == *env
@@ -161,6 +163,7 @@ pub(super) fn items(
             revisions: current,
             imported: tree.imported.clone(),
             package: tree.package.clone(),
+            functions: tree.functions.clone(),
             literal_use,
             overrides: tree.parameter_overrides.clone().into_owned(),
             env: env.clone(),
