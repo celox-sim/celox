@@ -1,0 +1,273 @@
+(group property_selects (category types))
+
+; IEEE 1800-2023 11.5.1: a bit-select or part-select of a class property reads
+; and writes part of the property like a select of a variable: a write outside
+; the declared range changes nothing, and a read of bits outside it gives X
+; (0 for two-state). The property is read through its object once per select.
+
+(case property_selects_through_handles_and_this
+  (source "property_selects.sv" #"
+module Top(output bit done);
+    class C;
+        logic [15:0] p;
+        int n = 8;
+        function logic [3:0] nibble(int i);
+            return p[i +: 4];
+        endfunction
+        function void set(int i);
+            p[i -: 2] = 2'b11;
+        endfunction
+    endclass
+    C c;
+    int i = 4;
+    logic [15:0] r;
+    initial begin
+        c = new;
+        c.p = 16'h1234;
+        $display("read %b %h %h %h %h", c.p[2], c.p[7:4], c.p[i +: 4], c.p[i -: 3], c.n[3]);
+        $display("method %h", c.nibble(8));
+        c.p[3] = 1'b1;
+        $display("bit %h", c.p);
+        c.p[11:8] = 4'h0;
+        $display("range %h", c.p);
+        c.p[i +: 4] = 4'hf;
+        $display("indexed %h", c.p);
+        c.set(15);
+        $display("method write %h", c.p);
+        c.p[i -: 2] += 2'd1;
+        $display("compound %h", c.p);
+        c.p[7:4]++;
+        r = 16'(c.p[3:0]--);
+        $display("step %h %h", c.p, r);
+        c.p[i + 14 +: 4] = 4'h0;
+        $display("outside %h", c.p);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "read 1 3 3 5 1\nmethod 2\nbit 123c\nrange 103c\nindexed 10fc\nmethod write d0fc\ncompound d0e4\nstep d0f3 0004\noutside d0f3\n"))
+
+(case property_selects_keep_unknown_bits
+  (four_state)
+  (source "property_select_states.sv" #"
+module Top(output bit done);
+    class C;
+        logic [15:0] p;
+        logic signed [4095:0] wide;
+    endclass
+    C c;
+    int i = 14;
+    initial begin
+        c = new;
+        $display("default %b", c.p[3:0]);
+        c.p = 16'h0000;
+        c.p[5 +: 3] = 3'b1zx;
+        $display("written %b %b", c.p[7:4], c.p[i +: 4]);
+        c.wide[4095] = 1'b0;
+        c.wide[10 +: 3] = 3'b1z0;
+        $display("wide %b %b %0d", c.wide[4095 -: 2], c.wide[12:10], $isunknown(c.wide[100]));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "default xxxx\nwritten 1zx0 xx00\nwide 0x 1z0 1\n"))
+
+(case wide_property_selects_pack_and_unpack
+  (source "wide_property_selects.sv" #"
+module Top(output bit done);
+    class Packer;
+        bit signed [1023:0] m_bits;
+        int m_pack_iter = 64;
+        function void pack(bit [31:0] v);
+            m_bits[m_pack_iter +: 32] = v;
+            m_pack_iter += 32;
+        endfunction
+        function bit [31:0] unpack(int at);
+            return m_bits[at * 32 +: 32];
+        endfunction
+    endclass
+    Packer p;
+    initial begin
+        p = new;
+        p.m_bits[31:0] = 32'd7;
+        p.m_bits[63:32] = 32'd9;
+        for (int k = 0; k < 28; k++) p.pack(32'(k * 3));
+        $display("%0d %0d %0d %0d", p.m_bits[31:0], p.m_bits[63:32], p.unpack(3), p.unpack(29));
+        $display("%0d", p.m_bits[1023 -: 8]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "7 9 3 81\n0\n"))
+
+(case property_selects_evaluate_the_object_and_value_once
+  (source "property_select_order.sv" #"
+module Top(output bit done);
+    class C;
+        logic [7:0] p;
+        function logic set_high();
+            p = 8'h80;
+            return 1'b1;
+        endfunction
+        function logic [1:0] bump_high();
+            p[7:6] = 2'b11;
+            return 2'd1;
+        endfunction
+        function int high_at(int at);
+            p = 8'h80;
+            return at;
+        endfunction
+    endclass
+    C a, b;
+    C hs[2];
+    int calls;
+    logic [7:0] r;
+    function automatic int next();
+        calls++;
+        return calls - 1;
+    endfunction
+    initial begin
+        a = new;
+        b = new;
+        hs[0] = a;
+        hs[1] = b;
+        a.p = 8'h12;
+        a.p[0] = 1'b1;
+        a.p = 8'h34;
+        b.p = 8'h56;
+        b.p[1] = 1'b0;
+        $display("again %h %h %h", a.p[7:0], b.p[7:0], a.p);
+        hs[next()].p[7:4] = 4'h9;
+        $display("object %0d %h %h", calls, a.p, b.p);
+        a.p = 8'h00;
+        a.p[0] = a.set_high();
+        $display("value %h", a.p);
+        a.p = 8'h02;
+        a.p[1:0] += a.bump_high();
+        $display("compound %h", a.p);
+        a.p = 8'h05;
+        b.p = 8'h02;
+        r = a.p[a.p[2:0]];
+        $display("index %b %b", r[0], a.p[b.p[1:0]]);
+        a.p[b.p[1:0]] = 1'b0;
+        $display("target index %h", a.p);
+        a.p = 8'h00;
+        a.p[a.high_at(0)] = 1'b1;
+        $display("index call %h", a.p);
+        a.p = 8'h00;
+        calls = 2;
+        a.p[calls] = a.set_high();
+        a.p[calls + 1 +: 2] = a.bump_high();
+        $display("runtime position %h", a.p);
+        a.p = 8'h00;
+        calls = 1;
+        a.p[calls == 1 ? 0 : a.high_at(0)] = 1'b1;
+        a.p[(calls == 1 || a.high_at(0) == 0) ? 1 : 2] = 1'b1;
+        $display("skipped calls %h", a.p);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "again 34 54 34\nobject 1 94 54\nvalue 81\ncompound c3\nindex 0 1\ntarget index 01\nindex call 81\nruntime position cc\nskipped calls 03\n"))
+
+(case property_selects_of_parameterized_classes
+  (source "parameterized_property_selects.sv" #"
+module Top(output bit done);
+    class P #(int W = 8);
+        logic [W-1:0] p;
+        bit [W+3:4] q;
+    endclass
+    P #(16) h;
+    int i = 12;
+    initial begin
+        h = new;
+        h.p = 16'hbeef;
+        $display("%h %h %b", h.p[15:8], h.p[i +: 4], h.p[0]);
+        h.p[i -: 5] = 5'h0;
+        h.q = 16'h1234;
+        h.q[19:16] = 4'hf;
+        $display("%h %h", h.p, h.q);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "be b 1\na0ef f234\n"))
+
+(case property_selects_compound_indices_evaluate_once
+  (source "property_select_compound_indices.sv" #"
+module Top(output bit done);
+    class C;
+        logic [7:0] p;
+        int i;
+        function logic [1:0] move_i();
+            i = 1;
+            return 2'd0;
+        endfunction
+    endclass
+    C a, none;
+    int i;
+    bit choose = 1;
+    function automatic logic [1:0] move_index();
+        i = 1;
+        return 2'd0;
+    endfunction
+    int n;
+    function automatic int next_bit();
+        n++;
+        return n - 1;
+    endfunction
+    initial begin
+        a = new;
+        a.p = 8'h01;
+        i = 0;
+        a.p[i] += move_index();
+        i = 0;
+        a.p[i + 4 +: 2] += move_index();
+        $display("index %h %0d", a.p, i);
+        a.i = 0;
+        a.p[a.i] += a.move_i();
+        $display("property index %h %0d", a.p, a.i);
+        a.p = 8'h01;
+        a.p[choose ? 1 : none.p[0]] += 1'b1;
+        $display("guarded %h", a.p);
+        a.p = 8'h00;
+        a.p[next_bit() + next_bit()] = 1'b1;
+        a.p[next_bit() +: 2] += 2'd1;
+        $display("calls %h %0d", a.p, n);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "index 01 1\nproperty index 01 1\nguarded 03\ncalls 06 3\n"))
+
+(case property_selects_compound_receivers_evaluate_once
+  (source "property_select_compound_receivers.sv" #"
+module Top(output bit done);
+    class C;
+        logic [7:0] p;
+    endclass
+    C a, b, keep;
+    function automatic logic swap_handle();
+        a = b;
+        return 1'b0;
+    endfunction
+    initial begin
+        a = new;
+        b = new;
+        keep = a;
+        a.p = 8'h01;
+        b.p = 8'h00;
+        a.p[1] += swap_handle();
+        $display("handle %h %h", keep.p, b.p);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "handle 01 00\n"))

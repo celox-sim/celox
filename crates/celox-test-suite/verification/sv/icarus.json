@@ -22,6 +22,7 @@
     "icarus/packed_structs.json",
     "icarus/procedural.json",
     "icarus/program.json",
+    "icarus/property_selects.json",
     "icarus/random_plusargs.json",
     "icarus/references.json",
     "icarus/review_regressions.json",

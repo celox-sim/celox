@@ -7,7 +7,7 @@
     "passed": 0,
     "rejected": 0,
     "unexpected_accept": 0,
-    "mismatch": 30,
+    "mismatch": 31,
     "emission_error": 0,
     "compile_error": 18,
     "runtime_error": 2,
@@ -496,6 +496,14 @@
       "detail": "class::untyped_class_parameters_take_the_type_of_their_value at 1045:3: expect_output: expected [56, 32, 51, 50, 10], got [51, 50, 32, 51, 50, 10]",
       "expectation": "Simulation",
       "name": "class::untyped_class_parameters_take_the_type_of_their_value",
+      "phase": "execute",
+      "status": "mismatch"
+    },
+    {
+      "category": "Types",
+      "detail": "property_selects::property_selects_through_handles_and_this at 49:3: expect_output: expected [114, 101, 97, 100, 32, 49, 32, 51, 32, 51, 32, 53, 32, 49, 10, 109, 101, 116, 104, 111, 100, 32, 50, 10, 98, 105, 116, 32, 49, 50, 51, 99, 10, 114, 97, 110, 103, 101, 32, 49, 48, 51, 99, 10, 105, 110, 100, 101, 120, 101, 100, 32, 49, 48, 102, 99, 10, 109, 101, 116, 104, 111, 100, 32, 119, 114, 105, 116, 101, 32, 100, 48, 102, 99, 10, 99, 111, 109, 112, 111, 117, 110, 100, 32, 100, 48, 101, 52, 10, 115, 116, 101, 112, 32, 100, 48, 102, 51, 32, 48, 48, 48, 52, 10, 111, 117, 116, 115, 105, 100, 101, 32, 100, 48, 102, 51, 10], got [114, 101, 97, 100, 32, 49, 32, 51, 32, 51, 32, 53, 32, 49, 10, 109, 101, 116, 104, 111, 100, 32, 50, 10, 98, 105, 116, 32, 49, 50, 51, 99, 10, 114, 97, 110, 103, 101, 32, 49, 48, 51, 99, 10, 105, 110, 100, 101, 120, 101, 100, 32, 49, 48, 102, 99, 10, 109, 101, 116, 104, 111, 100, 32, 119, 114, 105, 116, 101, 32, 100, 48, 102, 99, 10, 99, 111, 109, 112, 111, 117, 110, 100, 32, 100, 48, 101, 52, 10, 115, 116, 101, 112, 32, 100, 48, 102, 51, 32, 48, 48, 48, 52, 10, 111, 117, 116, 115, 105, 100, 101, 32, 100, 48, 99, 51, 10]",
+      "expectation": "Simulation",
+      "name": "property_selects::property_selects_through_handles_and_this",
       "phase": "execute",
       "status": "mismatch"
     }

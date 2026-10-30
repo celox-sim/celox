@@ -1983,6 +1983,12 @@ pub(super) fn path(
     if let Some(variable) = objects::static_property(tree, root, native, dimensions)? {
         return Ok((vec![variable], None));
     }
+    // The property whose select is being bound is bound as its template.
+    if dimensions.property_select_base == Some(ungroup(root, native))
+        && let Some((property, _)) = objects::property(tree, root, native, dimensions)?
+    {
+        return Ok((vec![objects::select_template(&property)], None));
+    }
     let mut parts = Vec::new();
     let mut qualified = None;
     loop {
@@ -2073,6 +2079,48 @@ fn selected_value(
             .is_some_and(|ty| ty.real && suffix.len() > ty.unpacked.len())
     {
         return Err(unsupported("bit-select or part-select of a real variable"));
+    }
+    // A select of a class property is bound as a select of its template,
+    // a variable of the property's type, which the property's value then
+    // replaces: the select keeps the semantics of a variable select
+    // (IEEE 1800-2023 11.5.1).
+    if !suffix.is_empty()
+        && let Some((property, receiver)) = objects::property(tree, base, native, dimensions)?
+        && property.field.handle.is_none()
+        && property.r#type.container.is_none()
+        && property.r#type.unpacked_struct().is_none()
+    {
+        let base = ungroup(base, native);
+        let template = objects::select_template(&property);
+        if dimensions.property_select_base != Some(base) {
+            // The value replaces the template as a `[N-1:0]` vector.
+            let zero_based = match property.r#type.packed_ranges() {
+                [range] => {
+                    eval_ast_const_expr(&tree.state, range.right(), &dimensions.const_env)
+                        == Some(0)
+                        && eval_ast_const_expr(&tree.state, range.left(), &dimensions.const_env)
+                            .is_some_and(|left| left >= 0)
+                }
+                _ => false,
+            };
+            if !zero_based || !property.r#type.members.is_empty() {
+                return Err(unsupported(
+                    "read of a select of a class property that is not declared [N-1:0]",
+                ));
+            }
+            let mut scope = dimensions.clone();
+            scope.insert(
+                template.clone(),
+                procedural::dimensions_from_type(&property.r#type),
+            );
+            scope.property_select_base = Some(base);
+            let selected = selected_value(root, native, tree, &scope)?;
+            let handle = objects::receiver(tree, receiver, native, dimensions)?;
+            return Ok(crate::ast::inlining::substitute_expr_idents(
+                selected,
+                &HashMap::from_iter([(template, objects::load(&property, handle))]),
+            ));
+        }
     }
     // A select of a member of a container element reads the member first.
     let element_member = if suffix.is_empty() {

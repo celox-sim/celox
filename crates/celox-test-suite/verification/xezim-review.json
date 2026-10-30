@@ -910,6 +910,14 @@
     "sv_static_task_implicit_local": {
       "title": "A local declared without a lifetime in a static task gets a copy per call instead of being shared by all calls",
       "standard": "IEEE 1800-2023 6.21, 13.3.1"
+    },
+    "sv_handle_array_property_writes": {
+      "title": "In an instantiated module, a write of a class property through an element of an array of class handles (`hs[0].p = v`, `hs[i].p[3:0] = v`) changes nothing",
+      "standard": "IEEE 1800-2023 8.4, 7.4, 11.5.1"
+    },
+    "sv_compound_assignment_index": {
+      "title": "An assignment operator such as `+=` evaluates a left-hand index expression again after its value: `v[i] += f()` where f() changes i reads one bit and writes another",
+      "standard": "IEEE 1800-2023 11.4.1"
     }
   },
   "cases": [
@@ -5167,6 +5175,22 @@
       "classification": "xezim_bug",
       "bug": "sv_static_task_implicit_local",
       "note": "In the static task count, `int seen;` is static (6.21) and shared by all calls (13.3.1), so the call from time 0 reads at 2 ns the value 2 that the overlapping call at 1 ns wrote, giving a = 2 as Verilator 5.052, Icarus 13.0 and Celox do. xezim 0.11.3 keeps a copy per call and gives a = 1, while the same local declared `static` is shared. See verification/repros/sv_static_task_implicit_local_xezim.json."
+    },
+    {
+      "suite": "sv",
+      "name": "property_selects::property_selects_evaluate_the_object_and_value_once",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_handle_array_property_writes",
+      "note": "hs[0] and hs[1] hold the handles a and b, and next() returns 0 the first time, so hs[next()].p[7:4] = 4'h9 calls next() once and writes a.p, giving a.p = 8'h94 (8.4, 11.5.1). xezim 0.11.3 leaves a.p at 8'h34 under the suite's testbench; the same source as the top module prints 94. Without the adapter, writes through hs[0] and hs[i] are lost as Wrapped and work as Top. See verification/repros/sv_handle_array_property_writes_xezim.{sv,json}; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "property_selects::property_selects_compound_indices_evaluate_once",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_compound_assignment_index",
+      "note": "With a.p = 8'h01 and i = 0, a.p[i] += move_index(), where move_index() sets i = 1 and returns 0, must read and write bit 0 and leave a.p at 8'h01; 11.4.1 evaluates a left-hand index expression only once. xezim 0.11.3 prints 03: it reads bit 0 and writes the sum into bit 1, and does the same for a.p[a.i] += a.move_i() with a property index. The adapter-free source shows the same for a module variable, as Top and as Wrapped. See verification/repros/sv_compound_assignment_index_xezim.{sv,json}; Verilator 5.052 passes the shared case."
     }
   ]
 }

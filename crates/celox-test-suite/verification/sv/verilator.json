@@ -22,6 +22,7 @@
     "verilator/packed_structs.json",
     "verilator/procedural.json",
     "verilator/program.json",
+    "verilator/property_selects.json",
     "verilator/random_plusargs.json",
     "verilator/references.json",
     "verilator/review_regressions.json",
