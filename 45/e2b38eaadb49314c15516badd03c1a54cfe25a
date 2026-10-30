@@ -1,0 +1,1 @@
+Fix runner extraction of same-repository actions: exclude dangling generated playground links from source archives
