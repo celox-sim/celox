@@ -31,11 +31,11 @@ test("qualification fails on every missing, skipped, failed or cancelled require
 });
 
 test("queue accepts deferred coverage but rejects any failed queue producer", () => {
-  const needs = Object.fromEntries(["lint", "rust", "js-ubuntu", "docs"].map(name => [name, { result: "success" }]));
+  const needs = Object.fromEntries(["workflow-lockfile", "lint", "rust", "js-ubuntu", "docs"].map(name => [name, { result: "success" }]));
   for (const name of ["napi-windows", "napi-linux-arm64", "js-windows", "playground-browser"]) needs[name] = { result: "skipped" };
   needs.changes = { result: "success", outputs: { queue: "true", fast_queue: "true", full_validation: "false", rust: "true", napi: "true", napi_arm64: "true", javascript: "true", docs: "true" } };
   assert.equal(runGate("queue-validation", needs), 0);
-  for (const name of ["lint", "rust", "js-ubuntu", "docs", "changes"]) {
+  for (const name of ["workflow-lockfile", "lint", "rust", "js-ubuntu", "docs", "changes"]) {
     for (const result of ["failure", "cancelled", "skipped"]) {
       assert.notEqual(runGate("queue-validation", { ...needs, [name]: { ...needs[name], result } }), 0);
     }

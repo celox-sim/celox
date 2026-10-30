@@ -28,6 +28,9 @@ permissions:
   contents: read
 
 jobs:
+  workflow-lockfile:
+    uses: ./.github/workflows/verify-lockfile.yml
+
   changes:
     name: Detect changes
     runs-on: ubuntu-latest
@@ -941,7 +944,7 @@ jobs:
 
   queue-validation:
     name: Queue validation
-    needs: [changes, lint, rust, napi-windows, napi-linux-arm64, js-ubuntu, js-windows, playground-browser, docs]
+    needs: [changes, workflow-lockfile, lint, rust, napi-windows, napi-linux-arm64, js-ubuntu, js-windows, playground-browser, docs]
     if: ${{ !cancelled() && needs.changes.outputs.queue != 'false' }}
     runs-on: ubuntu-latest
     env:
@@ -953,6 +956,7 @@ jobs:
             const jobs = JSON.parse(process.env.NEEDS);
             const changed = jobs.changes.outputs;
             const required = {
+              "workflow-lockfile": true,
               docs: changed.docs === "true",
               lint: [changed.rust, changed.javascript, changed.scripts].includes("true"),
               rust: [changed.rust, changed.napi].includes("true"),
@@ -976,6 +980,7 @@ jobs:
       [
         changes,
         queue-validation,
+        workflow-lockfile,
         docs,
         lint,
         rust-tests,
@@ -1012,6 +1017,7 @@ jobs:
         changes,
         full-validation,
         queue-validation,
+        workflow-lockfile,
         docs,
         lint,
         rust-tests,

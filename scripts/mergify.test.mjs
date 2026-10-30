@@ -33,6 +33,7 @@ test("all queue categories preserve combined-tree validation and merge protectio
       /max_checks_retries: 0/,
       /checks_timeout: 3 hours/,
       /merge_conditions:\n\s+- check-success = Queue validation\n\s+- check-success = Conventional Commit title/,
+      /check-success = Verify workflow lockfile/,
       /merge_method: merge/,
       /update_method: merge/,
       /title: pr-title\n\s+body: empty\n\s+trailers: \[\]/,

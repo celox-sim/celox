@@ -125,6 +125,7 @@ workflows:
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
     '.github/workflows/taxi-bench.yml':
+        - 'actions/cache@v6'
         - 'actions/checkout@v7'
         - 'actions/download-artifact@v8'
         - 'actions/setup-node@v7'
@@ -132,7 +133,6 @@ workflows:
         - 'actions/upload-artifact@v7'
         - 'dtolnay/rust-toolchain@master'
         - 'swatinem/rust-cache@v2'
-        - 'veryl-lang/setup-verilator@v2'
     '.github/workflows/update-mbx.yml':
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
@@ -144,6 +144,10 @@ workflows:
         - 'updatecli/updatecli-action@v3.10.0'
     '.github/workflows/verify-lockfile.yml':
         - 'actions/checkout@v7'
+    '.github/workflows/verilator-setup.yml':
+        - 'actions/cache@v6'
+        - 'actions/checkout@v7'
+        - 'actions/setup-python@v7'
     '.github/workflows/veryl-head.yml':
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
@@ -152,6 +156,11 @@ dependencies:
     'actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7':
         ref: 'v5.0.4'
         commit: 'sha1-668228422ae6a00e4ad889ee87cd7109ec5666a7'
+        owner_id: 44036562
+        repo_id: 215566462
+    'actions/cache@v6':
+        ref: 'v6'
+        commit: 'sha1-55cc8345863c7cc4c66a329aec7e433d2d1c52a9'
         owner_id: 44036562
         repo_id: 215566462
     'actions/checkout@v7':
