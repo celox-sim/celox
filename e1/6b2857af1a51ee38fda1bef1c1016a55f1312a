@@ -1,0 +1,1 @@
+Rebase PR #2760 onto current master, preserving assignment-expression semantics, shared cases and reviewed external evidence.
