@@ -1,0 +1,6 @@
+Revision history for #2760:
+
+rev 2 (content) 2026-10-31 17:09 UTC — Add the missing retained rows for the already reviewed assignment-expression exclusions; focused Verilator/Icarus results and retained-report tests verify the metadata.
+rev 1 (initial) 2026-10-31 17:09 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2760,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"b7a9c8f59d2e88bf144d51f1e13b60e5d0bbcf52","timestamp_iso":"2026-10-31T17:09:20Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"b7a9c8f59d2e88bf144d51f1e13b60e5d0bbcf52","new_sha":"e609d62f13ffae0e4d15d5bcfb8313327646dc02","timestamp_iso":"2026-10-31T17:09:20Z","reason":"Add the missing retained rows for the already reviewed assignment-expression exclusions; focused Verilator/Icarus results and retained-report tests verify the metadata.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/b7a9c8f59d2e88bf144d51f1e13b60e5d0bbcf52...e609d62f13ffae0e4d15d5bcfb8313327646dc02"}]} -->
