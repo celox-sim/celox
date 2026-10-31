@@ -3029,36 +3029,29 @@ fn schedule_sources_collecting(
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         let module_id = module_ids[&key];
-        let mut probe_warnings = Vec::new();
-        let analysis = analyze_specialization(base, &mut design, &key, &[], &mut probe_warnings);
-        if analysis.is_err() {
-            // A hierarchy-only fallback must retain diagnostics from the probe.
-            warnings.append(&mut probe_warnings);
-        }
-        // Successful IR warnings are published by `specialize_module`.
-        let discovery = analysis.and_then(|ir| {
-            let lowered = specialize_module(
-                base,
-                &mut design,
-                &key,
-                four_state,
-                false,
-                warnings,
-                LevelLists::Processes,
-                HierarchicalNames {
-                    analyzed: Some(&ir),
-                    ..HierarchicalNames::default()
-                },
-            )?;
-            Ok((lowered, ir))
-        });
-        let module = match discovery {
-            Ok((lowered, ir)) => {
-                discovery_analyses.insert(module_id, ir);
+        // Discovery needs only instance bindings and reflected declarations.
+        // Executable lowering is deferred until hierarchy and foreign writers
+        // are known, rather than constructing and discarding a full SimModule.
+        let discovery =
+            analyze_specialization(base, &mut design, &key, &[], warnings).and_then(|ir| {
+                let source = ir
+                    .modules()
+                    .iter()
+                    .find(|module| module.name() == base.name)
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(format!("module `{}`", base.name))
+                    })?;
+                let declarations =
+                    hierarchy::ElaboratedModule::from_declarations(source, &key.force_signals)?;
                 if instances_known {
-                    virtual_sources.insert(module_id, lowered.source.clone());
+                    virtual_sources.insert(module_id, source.clone());
                 }
-                hierarchy::ElaboratedModule::from_lowered(lowered)
+                Ok((declarations, ir))
+            });
+        let module = match discovery {
+            Ok((declarations, ir)) => {
+                discovery_analyses.insert(module_id, ir);
+                declarations
             }
             // Elaborate the hierarchy below the module before resolving its
             // hierarchical names.
@@ -12128,6 +12121,7 @@ endmodule
                       endmodule";
         for four_state in [false, true] {
             ANALYSES.set(Some(Vec::new()));
+            SPECIALIZATIONS.set(Some(Vec::new()));
             let result = schedule_sources(
                 &[(source, Path::new("discovery.sv"))],
                 "Top",
@@ -12141,11 +12135,21 @@ endmodule
                 &mut Vec::new(),
             );
             let observations = ANALYSES.take().unwrap();
+            let lowerings = SPECIALIZATIONS.take().unwrap();
             result.unwrap_or_else(|error| panic!("{error}"));
             let mut counts = HashMap::<LoweredSvModuleKey, usize>::default();
             for key in observations {
                 *counts.entry(key).or_default() += 1;
             }
+            assert_eq!(
+                lowerings.len(),
+                3,
+                "lower each specialization only for execution"
+            );
+            assert!(
+                lowerings.iter().all(|(_, final_lowering)| *final_lowering),
+                "hierarchy discovery must not lower executable bodies: {lowerings:?}"
+            );
             assert_eq!(counts.len(), 3, "Top and two Leaf parameterizations");
             assert!(counts.values().all(|&count| count == 1), "{counts:?}");
         }
