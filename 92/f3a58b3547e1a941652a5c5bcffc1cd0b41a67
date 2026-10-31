@@ -1,0 +1,1 @@
+Fix CI cache tests: cold offline workspace metadata can lack unrelated dynasm archives; use a conservative complete-verifier fingerprint fallback and test cache invalidation.
