@@ -3136,6 +3136,10 @@ fn schedule_sources_collecting(
     let mut demoted: HashMap<ModuleId, HashSet<usize>> = HashMap::default();
     let mut trace = trace;
     let no_foreign_writes = HashMap::default();
+    // Specialization keys, resolved hierarchical names and foreign writers are
+    // fixed above. A retry changes only the demoted level lists of the modules
+    // reported by `demote_level_lists`; retain every other lowered module.
+    let mut lowered_modules = HashMap::default();
     loop {
         let mut specialize = |key: &LoweredSvModuleKey,
                               module_id: ModuleId|
@@ -3167,10 +3171,13 @@ fn schedule_sources_collecting(
                 },
             )?)
         };
-        let mut lowered_modules = module_ids
-            .iter()
-            .map(|(key, &module_id)| Ok((module_id, specialize(key, module_id)?)))
-            .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+        for (key, &module_id) in &module_ids {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                lowered_modules.entry(module_id)
+            {
+                entry.insert(specialize(key, module_id)?);
+            }
+        }
         resolve_inout_drivers(&module_ids, &mut lowered_modules);
         validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
         let root = &lowered_modules[&root_id];
@@ -3291,20 +3298,25 @@ fn schedule_sources_collecting(
             Ok(scheduled) => return Ok(scheduled),
             Err(error) => error,
         };
-        if !demote_level_lists(&loop_members, &lowered_modules, &mut demoted) {
+        let changed = demote_level_lists(&loop_members, &lowered_modules, &mut demoted);
+        if changed.is_empty() {
             return Err(error.into());
+        }
+        for module_id in changed {
+            lowered_modules.remove(&module_id);
         }
     }
 }
 
 /// Demote the `always @(list)` processes lowered like `always @*` which
-/// drive a range of a combinational loop. Whether any was demoted.
+/// drive a range of a combinational loop. Return the changed modules so only
+/// their lowering is invalidated before scheduling again.
 fn demote_level_lists(
     loop_members: &[celox_frontend_core::symbolic::assembly::LoopMember],
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
     demoted: &mut HashMap<ModuleId, HashSet<usize>>,
-) -> bool {
-    let mut changed = false;
+) -> HashSet<ModuleId> {
+    let mut changed = HashSet::default();
     for (module_id, member) in loop_members {
         let Some(lowered) = lowered_modules.get(module_id) else {
             continue;
@@ -3337,7 +3349,7 @@ fn demote_level_lists(
                     .entry(*module_id)
                     .or_default()
                     .insert(creation_order);
-                changed = true;
+                changed.insert(*module_id);
             }
         }
     }
@@ -3527,6 +3539,8 @@ fn specialize_module(
     level_lists: LevelLists<'_>,
     hierarchical: HierarchicalNames<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    #[cfg(test)]
+    tests::record_specialization(key, level_lists);
     let analyzed;
     let ir = match hierarchical.analyzed {
         Some(ir) => {
@@ -11313,6 +11327,23 @@ fn inferred_clock(
 mod tests {
     use super::*;
 
+    std::thread_local! {
+        // Observe the real compilation path without sharing counters between
+        // concurrently running tests or adding instrumentation to release builds.
+        #[allow(clippy::disallowed_types, reason = "test-local specialization observations")]
+        static SPECIALIZATIONS: std::cell::RefCell<Option<Vec<(LoweredSvModuleKey, bool)>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn record_specialization(key: &LoweredSvModuleKey, lists: LevelLists<'_>) {
+        SPECIALIZATIONS.with_borrow_mut(|records| {
+            if let Some(records) = records {
+                records.push((key.clone(), matches!(lists, LevelLists::Lowered { .. })));
+            }
+        });
+    }
+
     #[test]
     fn stateless_function_scratch_loops_do_not_become_runtime_loops() {
         // The second result keeps bit 15 of every row between calls; nothing
@@ -11956,6 +11987,40 @@ endmodule
         ] {
             assert_eq!(procedure_kernels(source), kernels, "{source}");
         }
+    }
+
+    #[test]
+    fn level_list_retry_reuses_unaffected_parameter_specializations() {
+        let source = "module Leaf #(parameter N = 8)
+                        (input bit [N-1:0] d, output wire [N-1:0] q);
+                        for (genvar i = 0; i < N; i++) assign q[i] = ~d[i];
+                      endmodule
+                      module Top(output bit [7:0] a, b, output wire [7:0] y,
+                                 output wire [15:0] z);
+                        initial begin #1; a = 1; end
+                        always @(a) if (a < 4) b = a;
+                        always @(b) if (b < 4) a = b + 1;
+                        Leaf #(8) byte_leaf(.d(a), .q(y));
+                        Leaf #(16) word_leaf(.d({a, b}), .q(z));
+                      endmodule";
+        SPECIALIZATIONS.set(Some(Vec::new()));
+        let kernels = procedure_kernels(source);
+        let observations = SPECIALIZATIONS.take().unwrap();
+        assert_eq!(kernels, 3, "the affected level lists remain processes");
+        let mut lowered = HashMap::<LoweredSvModuleKey, usize>::default();
+        for (key, final_lowering) in observations {
+            if final_lowering {
+                *lowered.entry(key).or_default() += 1;
+            }
+        }
+        assert_eq!(lowered.len(), 3, "Top and two distinct Leaf parameters");
+        assert_eq!(lowered[&LoweredSvModuleKey::base("Top".into())], 2);
+        let leaves: Vec<_> = lowered
+            .iter()
+            .filter(|(key, _)| key.name == "Leaf")
+            .collect();
+        assert_eq!(leaves.len(), 2);
+        assert!(leaves.iter().all(|(_, count)| **count == 1), "{leaves:?}");
     }
 
     #[test]
