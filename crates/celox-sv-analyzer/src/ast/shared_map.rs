@@ -10,6 +10,18 @@ impl<V> SharedMap<V> {
     pub fn identity(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
+
+    /// Whether another snapshot shares the entries, which an edit copies.
+    #[cfg(test)]
+    pub fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
+    }
+
+    /// A handle to this snapshot that does not keep its entries alive but
+    /// keeps its identity from being reused.
+    pub fn downgrade(&self) -> std::sync::Weak<HashMap<String, V>> {
+        Arc::downgrade(&self.0)
+    }
 }
 
 impl<V> Default for SharedMap<V> {

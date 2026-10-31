@@ -17,7 +17,7 @@ pub(in crate::ast) fn class(
     dimensions: &PackedDimensions,
     name: &str,
 ) -> Converted<Rc<Class>> {
-    classes::class(tree, name, &dimensions.const_env, &dimensions.type_aliases)
+    classes::shared_class(tree, name, &dimensions.const_env, &dimensions.type_aliases)
 }
 
 /// The class of native expression `id` when it is an object handle, judged
