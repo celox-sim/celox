@@ -66,6 +66,9 @@ impl Ff<'_, '_> {
                 let buffer = self.append_bits(buffer, &args[0])?;
                 self.heap_call(ops::FREEZE, &[buffer])
             }
+            StringOp::FromHandle => {
+                self.eval(&args[0], Some((celox_design::HANDLE_WIDTH, false)))?
+            }
             StringOp::Concat => {
                 let mut buffer = self.heap_call(ops::NEW, &[]);
                 for arg in &args {
@@ -160,6 +163,7 @@ impl Ff<'_, '_> {
         value: sv::ir::Expr,
     ) -> sv::ir::Expr {
         if self.m.var(target).value_kind == celox_design::ValueKind::StrRef
+            && self.m.var(target).array_dims.is_empty()
             && !self.m.expr_is_string(&value)
         {
             sv::ir::Expr::Call {

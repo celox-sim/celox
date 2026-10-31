@@ -962,6 +962,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             )?;
             assignment_op_expr(self.tree, self.session, &written, op, value, &self.dims)?
         };
+        if op == "="
+            && expression_binding::native_string(
+                self.tree,
+                self.session,
+                left,
+                self.tree.declarations(),
+                &self.dims,
+            )
+        {
+            rhs = expression_binding::string_operand(rhs, &self.dims);
+        }
         // Preserve assignment sizing before checked accesses introduce a temporary
         // (IEEE 1800-2023 11.8.2), using the selected destination width.
         // A two-state member of a four-state packed struct also drops unknown bits.
