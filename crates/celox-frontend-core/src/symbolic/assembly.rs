@@ -892,7 +892,25 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .values()
         .map(|module| modules[module].processes.len())
         .sum();
-    let scheduler_slots = declare_scheduler_slots(&mut modules, root_id, process_count);
+    // At most one event per trigger signal of each instance's domains;
+    // instances connected to one clock share its event. A design with more
+    // events than its slots hold runs without the compiled scheduler.
+    let expected_events = instance_modules
+        .values()
+        .map(|module| {
+            let module = &modules[module];
+            module
+                .eval_apply_ff_blocks
+                .keys()
+                .chain(module.eval_only_ff_blocks.keys())
+                .chain(module.apply_ff_blocks.keys())
+                .flat_map(|triggers| std::iter::once(&triggers.clock).chain(&triggers.resets))
+                .collect::<HashSet<_>>()
+                .len()
+        })
+        .sum::<usize>();
+    let scheduler_slots =
+        declare_scheduler_slots(&mut modules, root_id, process_count, expected_events);
     // Each package with variables is one instance outside the hierarchy,
     // named by a path segment no instance name can take.
     let mut package_instances = HashMap::default();
@@ -2754,12 +2772,15 @@ fn declare_settle_flags(
 
 /// Declare the hidden objects a compiled scheduler exchanges with the
 /// runtime (`RuntimeSchema::scheduler`) as variables of the top module, for
-/// a design with `process_count` process kernels. A design without kernels
-/// has them too: host clocks may run in a compiled scheduler.
+/// a design with `process_count` process kernels and about
+/// `expected_events` events, whose edge and level masks hold one bit per
+/// event in whole 64-bit words. A design without kernels has them too: host
+/// clocks may run in a compiled scheduler.
 fn declare_scheduler_slots(
     modules: &mut HashMap<ModuleId, SimModule>,
     root: ModuleId,
     process_count: usize,
+    expected_events: usize,
 ) -> Option<celox_design::SchedulerSlots<SourceVarId>> {
     let variables = &mut modules.get_mut(&root)?.variables;
     let mut next = variables.keys().map(|id| id.0 + 1).max().unwrap_or(0);
@@ -2791,19 +2812,20 @@ fn declare_scheduler_slots(
     use celox_design::{
         SCHEDULER_CLOCKS as CLOCKS, SCHEDULER_FLAG_WIDTH as FLAG, SCHEDULER_TIME_WIDTH as TIME,
     };
+    let events = expected_events.next_multiple_of(TIME).max(TIME);
     Some(celox_design::SchedulerSlots {
         limit: declare("limit".into(), TIME),
         now: declare("now".into(), TIME),
         exit: declare("exit".into(), FLAG),
-        exit_arg: declare("exit_arg".into(), TIME),
+        exit_arg: declare("exit_arg".into(), events),
         finish: declare("finish".into(), FLAG),
         cont: declare("cont".into(), FLAG),
         dirty: declare("dirty".into(), FLAG),
         defer_limit_settle: declare("defer_limit_settle".into(), FLAG),
         count: declare("count".into(), TIME),
         current: declare("current".into(), TIME),
-        levels: declare("levels".into(), TIME),
-        unknown_levels: declare("unknown_levels".into(), TIME),
+        levels: declare("levels".into(), events),
+        unknown_levels: declare("unknown_levels".into(), events),
         ready: declare("ready".into(), TIME),
         wake: (0..process_count)
             .map(|index| declare(format!("wake[{index}]"), TIME))

@@ -544,6 +544,13 @@ fn generate(
             .layout()
             .four_state
             .then_some(&program.layout().is_4states),
+        // The unit judges no event masks; they keep the slot's width.
+        event_bits: program
+            .layout()
+            .widths
+            .get(&slots.levels)
+            .copied()
+            .unwrap_or(SCHEDULER_TIME_WIDTH),
     };
     let initialize = g.b.new_block();
     let start = g.b.new_block();
