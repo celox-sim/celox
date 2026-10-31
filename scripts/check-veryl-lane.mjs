@@ -70,9 +70,17 @@ function headRevision(name, declaration) {
       `Veryl HEAD dependency ${name} must use an inline git dependency`,
     );
   }
-  if (/\b(?:version|path|branch|tag|registry|package)\s*=/.test(declaration)) {
+  if (/\b(?:path|branch|tag|registry|package)\s*=/.test(declaration)) {
     throw new Error(
       `Veryl HEAD dependency ${name} mixes incompatible source fields`,
+    );
+  }
+
+  // cargo-deny rejects a git dependency without a version as a wildcard.
+  const versions = fieldValues(declaration, "version");
+  if (versions.length !== 1 || !exactVersion.test(versions[0])) {
+    throw new Error(
+      `Veryl HEAD dependency ${name} must declare its exact locked version`,
     );
   }
 

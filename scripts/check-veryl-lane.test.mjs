@@ -5,7 +5,7 @@ import {
   checkVerylLane,
   detectVerylLane,
 } from "./check-veryl-lane.mjs";
-import { useVerylHead } from "./use-veryl-head.mjs";
+import { useVerylHead, verylDependencyNames } from "./use-veryl-head.mjs";
 
 const revision = "0123456789abcdef0123456789abcdef01234567";
 const stableManifest = `[workspace.dependencies]
@@ -17,6 +17,9 @@ veryl-path = "0.20.3"
 veryl-simulator = "0.20.3"
 veryl-std = "0.20.3"
 `;
+const lockedVersions = Object.fromEntries(
+  verylDependencyNames.map((name) => [name, "0.20.3"]),
+);
 
 test("detects a complete released lane", () => {
   assert.deepEqual(detectVerylLane(stableManifest), {
@@ -28,7 +31,7 @@ test("detects a complete released lane", () => {
 });
 
 test("detects a complete HEAD lane at one exact upstream revision", () => {
-  const headManifest = useVerylHead(stableManifest, revision);
+  const headManifest = useVerylHead(stableManifest, revision, lockedVersions);
   assert.deepEqual(detectVerylLane(headManifest), { lane: "head", revision });
   assert.equal(checkVerylLane(headManifest, "head"), revision);
   assert.throws(() => checkVerylLane(headManifest, "stable"), /detected head/);
@@ -37,13 +40,13 @@ test("detects a complete HEAD lane at one exact upstream revision", () => {
 test("allows a stable develop sync before an atomic HEAD roll", () => {
   assert.equal(detectVerylLane(stableManifest).lane, "stable");
   assert.equal(
-    detectVerylLane(useVerylHead(stableManifest, revision)).lane,
+    detectVerylLane(useVerylHead(stableManifest, revision, lockedVersions)).lane,
     "head",
   );
 });
 
 test("rejects mixed released and HEAD declarations", () => {
-  const headManifest = useVerylHead(stableManifest, revision);
+  const headManifest = useVerylHead(stableManifest, revision, lockedVersions);
   const mixedManifest = headManifest.replace(
     /^veryl-std = .*$/m,
     'veryl-std = "0.20.3"',
@@ -63,7 +66,7 @@ test("rejects mismatched released versions and HEAD revisions", () => {
     /different versions/,
   );
 
-  const headManifest = useVerylHead(stableManifest, revision);
+  const headManifest = useVerylHead(stableManifest, revision, lockedVersions);
   assert.throws(
     () =>
       detectVerylLane(
@@ -91,7 +94,7 @@ test("rejects missing and malformed dependency declarations", () => {
   assert.throws(
     () =>
       detectVerylLane(
-        useVerylHead(stableManifest, revision).replace(
+        useVerylHead(stableManifest, revision, lockedVersions).replace(
           "https://github.com/veryl-lang/veryl.git",
           "https://github.com/example/veryl.git",
         ),
@@ -101,9 +104,13 @@ test("rejects missing and malformed dependency declarations", () => {
   assert.throws(
     () =>
       detectVerylLane(
-        useVerylHead(stableManifest, revision).replace(revision, "master"),
+        useVerylHead(stableManifest, revision, lockedVersions).replace(revision, "master"),
       ),
     /full revision/,
+  );
+  assert.throws(
+    () => detectVerylLane(useVerylHead(stableManifest, revision)),
+    /exact locked version/,
   );
 });
 
