@@ -1988,26 +1988,30 @@ mod tests {
         }
     }
 
+    /// A linear congruential generator for [`generated_function`].
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) % bound
+        }
+    }
+
     /// A generated function: branches, jumps forward and back, phis at
     /// joins, and up to `max_instructions` stores and adds per block over a
     /// small set of values.
     fn generated_function(seed: u64, max_instructions: u64) -> MFunction {
-        let state = std::cell::Cell::new(seed);
-        let next = |bound: u64| {
-            state.set(
-                state
-                    .get()
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407),
-            );
-            (state.get() >> 33) % bound
-        };
+        let mut rng = Lcg(seed);
         const VALUES: u32 = 48;
         let mut vregs = VRegAllocator::new();
         let values = (0..VALUES).map(|_| vregs.alloc()).collect::<Vec<_>>();
-        let pick = || values[next(u64::from(VALUES)) as usize];
+        let pick = |rng: &mut Lcg| values[rng.next(u64::from(VALUES)) as usize];
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); VALUES as usize]);
-        let count = 2 + next(10) as usize;
+        let count = 2 + rng.next(10) as usize;
         let mut defined = 8;
         let mut blocks = (0..count)
             .map(|index| MBlock::new(BlockId(index as u32)))
@@ -2020,19 +2024,19 @@ mod tests {
         }
         let mut targets = vec![Vec::new(); count];
         for (index, block) in blocks.iter_mut().enumerate() {
-            for _ in 0..next(max_instructions + 1) {
-                if next(3) == 0 && defined < VALUES as usize {
+            for _ in 0..rng.next(max_instructions + 1) {
+                if rng.next(3) == 0 && defined < VALUES as usize {
                     block.push(MInst::Add {
                         dst: values[defined],
-                        lhs: pick(),
-                        rhs: pick(),
+                        lhs: pick(&mut rng),
+                        rhs: pick(&mut rng),
                     });
                     defined += 1;
                 } else {
                     block.push(MInst::Store {
                         base: BaseReg::SimState,
                         offset: 0,
-                        src: pick(),
+                        src: pick(&mut rng),
                         size: OpSize::S64,
                     });
                 }
@@ -2044,14 +2048,14 @@ mod tests {
                 continue;
             }
             let following = BlockId(index as u32 + 1);
-            let other = BlockId(1 + next(count as u64 - 1) as u32);
-            if next(2) == 0 || other == following {
+            let other = BlockId(1 + rng.next(count as u64 - 1) as u32);
+            if rng.next(2) == 0 || other == following {
                 targets[index].push(following);
                 block.push(MInst::Jump { target: following });
             } else {
                 targets[index].extend([following, other]);
                 block.push(MInst::Branch {
-                    cond: pick(),
+                    cond: pick(&mut rng),
                     true_bb: following,
                     false_bb: other,
                 });
@@ -2064,7 +2068,7 @@ mod tests {
             if predecessors.len() < 2 {
                 continue;
             }
-            for _ in 0..next(3) {
+            for _ in 0..rng.next(3) {
                 if defined == VALUES as usize {
                     break;
                 }
@@ -2072,7 +2076,7 @@ mod tests {
                     dst: values[defined],
                     sources: predecessors
                         .iter()
-                        .map(|&block| (BlockId(block as u32), pick()))
+                        .map(|&block| (BlockId(block as u32), pick(&mut rng)))
                         .collect(),
                 });
                 defined += 1;
