@@ -25,7 +25,7 @@ pub(in crate::ast) fn prepare_native(
     };
     let integer = |id| {
         constant_binding::bind(id, tree, dims)?
-            .and_then(|value| eval_ast_const_expr(&tree.state, &value, &dims.const_env))
+            .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
             .ok_or_else(|| unsupported("nonconstant assignment pattern key or count"))
     };
     if let [item] = items.as_slice()
@@ -130,7 +130,7 @@ pub(super) fn value_mode(
                             );
                             let signed =
                                 dimensions::expression_signedness(&expr, &types, &types.const_env);
-                            let expr = frozen(&tree.state, expr, dims)?;
+                            let expr = frozen(tree, expr, dims)?;
                             let signed = Some(signed.unwrap_or_else(|| {
                                 dimensions::expression_signedness(&expr, &types, &types.const_env)
                                     .unwrap_or(false)

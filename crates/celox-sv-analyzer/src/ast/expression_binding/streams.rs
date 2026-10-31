@@ -42,7 +42,7 @@ fn constant(
     what: &str,
 ) -> Converted<i128> {
     constant_binding::bind(id, tree, dims)?
-        .and_then(|value| eval_ast_const_expr(&tree.state, &value, &dims.const_env))
+        .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
         .ok_or_else(|| {
             unsupported(format!(
                 "streaming concatenation {what} that is not constant"
@@ -65,7 +65,7 @@ fn slice_size(
             .and_then(|name| dims.type_aliases.get(&name).cloned()),
     };
     if let Some(ty) = ty {
-        return casts::expr_type_from_type(&tree.state, &ty, &dims.const_env)
+        return casts::expr_type_from_type(&tree.functions, &ty, &dims.const_env)
             .map(|ty| ty.width)
             .filter(|width| *width > 0)
             .ok_or_else(|| unsupported("streaming concatenation slice type of unknown width"));
@@ -81,13 +81,13 @@ fn slice_size(
 /// their number.
 fn fixed_array(
     shape: &VariableDimensions,
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     dims: &PackedDimensions,
 ) -> Converted<Option<(usize, usize)>> {
     if shape.unpacked.is_empty() {
         return Ok(None);
     }
-    let array = array_compatibility::unpacked_array_type(state, shape, dims)
+    let array = array_compatibility::unpacked_array_type(functions, shape, dims)
         .ok_or_else(|| unsupported("streaming concatenation of an array of unknown size"))?;
     let count = array
         .dims
@@ -154,7 +154,7 @@ fn stream_container(container: &ContainerType) -> Converted<ContainerLayout> {
 /// The receiver of a variable of `shape` of bit-stream type.
 pub(in crate::ast) fn receiver(
     shape: &VariableDimensions,
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     dims: &PackedDimensions,
 ) -> Converted<Receiver> {
     if let Some(container) = &shape.container {
@@ -176,14 +176,14 @@ pub(in crate::ast) fn receiver(
             "streaming concatenation into an unpacked structure",
         ));
     }
-    if let Some((element, count)) = fixed_array(shape, state, dims)? {
+    if let Some((element, count)) = fixed_array(shape, functions, dims)? {
         return Ok(Receiver::Fixed(StreamArg {
             width: element * count,
             bits: None,
             element: Some(element),
         }));
     }
-    patterns::shape_width(state, shape, dims)
+    patterns::shape_width(functions, shape, dims)
         .map(|width| Receiver::Fixed(StreamArg::packed(width)))
         .ok_or_else(|| unsupported("streaming concatenation into a variable of unknown width"))
 }
@@ -194,7 +194,7 @@ pub(in crate::ast) fn receiver(
 pub(in crate::ast) fn selection_receiver(
     lhs: &LValue,
     width: usize,
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     dims: &PackedDimensions,
 ) -> Receiver {
     let element = match lhs {
@@ -203,7 +203,7 @@ pub(in crate::ast) fn selection_receiver(
             .filter(|shape| !shape.unpacked.is_empty())
             .and_then(|shape| {
                 patterns::shape_width(
-                    state,
+                    functions,
                     &VariableDimensions {
                         unpacked: Vec::new(),
                         ..shape.clone()
@@ -384,7 +384,7 @@ fn operand(
         return Ok(vec![Item::Dynamic(StreamItem::String, vec![value])]);
     }
     let array = match &shape {
-        Some(shape) => fixed_array(shape, &tree.state, dims)?.map(|array| (array, shape)),
+        Some(shape) => fixed_array(shape, &tree.functions, dims)?.map(|array| (array, shape)),
         None => None,
     };
     if let Expr::Concat(leaves) = &value
@@ -414,7 +414,7 @@ fn operand(
         if range.is_some() {
             return Err(invalid("with applies to a one-dimensional unpacked array"));
         }
-        let width = expr_static_width(&tree.state, &value, dims)
+        let width = expr_static_width(tree, &value, dims)
             .filter(|width| *width > 0)
             .ok_or_else(|| unsupported("streaming concatenation operand of unknown width"))?;
         return Ok(vec![Item::Fixed(value, StreamArg::packed(width))]);
@@ -434,7 +434,7 @@ fn operand(
         return Err(invalid("with applies to a one-dimensional unpacked array"));
     };
     let bound = |expr| {
-        eval_ast_const_expr(&tree.state, expr, &dims.const_env)
+        eval_ast_const_expr(&tree.functions, expr, &dims.const_env)
             .ok_or_else(|| unsupported("streaming concatenation with an array of unknown bounds"))
     };
     let bounds = (bound(&dimension.left)?, bound(&dimension.right)?);
@@ -840,7 +840,7 @@ pub(in crate::ast) fn unpack(
                 }
                 let width = dims
                     .get(leaf.name())
-                    .and_then(|shape| patterns::shape_width(&tree.state, shape, dims))
+                    .and_then(|shape| patterns::shape_width(&tree.functions, shape, dims))
                     .ok_or_else(|| unsupported("streaming concatenation unpack target"))?;
                 takes.push(Take::Fixed(StreamArg::packed(width)));
                 lvalues.push(leaf);
@@ -852,7 +852,7 @@ pub(in crate::ast) fn unpack(
                 "streaming concatenation into an unpacked structure member",
             ));
         }
-        let Receiver::Fixed(target) = receiver(&shape, &tree.state, dims)? else {
+        let Receiver::Fixed(target) = receiver(&shape, &tree.functions, dims)? else {
             unreachable!("a fixed-size variable receives fixed-size data");
         };
         takes.push(Take::Fixed(target));

@@ -26,7 +26,11 @@ struct Message {
 
 impl Message {
     /// The message type of `mailbox #(ty)`.
-    fn of(state: &AnalysisState, ty: &Type, env: &HashMap<String, i128>) -> Converted<Self> {
+    fn of(
+        functions: &const_functions::ConstantFunctions,
+        ty: &Type,
+        env: &HashMap<String, i128>,
+    ) -> Converted<Self> {
         if !ty.unpacked_ranges.is_empty()
             || ty.container.is_some()
             || ty.unpacked_struct().is_some()
@@ -36,7 +40,7 @@ impl Message {
                 "mailbox messages that are not integral values, strings or handles",
             ));
         }
-        let shape = casts::expr_type_from_type(state, ty, env)
+        let shape = casts::expr_type_from_type(functions, ty, env)
             .ok_or_else(|| unsupported("mailbox message type"))?;
         if shape.width == 0 || shape.width > 64 {
             return Err(unsupported("mailbox messages wider than 64 bits"));
@@ -149,7 +153,7 @@ pub(super) fn named_type(
     let Some(message) = classes::specializations::type_argument(tree, argument, context)? else {
         return Ok(None);
     };
-    let name = Message::of(&tree.state, &message, &context.const_env)?.class_name(&message);
+    let name = Message::of(&tree.functions, &message, &context.const_env)?.class_name(&message);
     Ok(Some(Box::new(classes::handle(&name))))
 }
 

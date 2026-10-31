@@ -439,16 +439,17 @@ pub(super) fn native_selected_member(
 /// read from the instance that virtual interface `handle` of type `ty`
 /// denotes; an error for `null`.
 pub(super) fn selected_read(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     handle: Expr,
     ty: &VirtualInterface,
     member: &str,
     selected: Expr,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    let state = &*tree.state;
     let (_, signals) = self::member(state, ty, member)?;
     check_pure(&handle)?;
-    let width = expr_static_width(state, &selected, dimensions)
+    let width = expr_static_width(tree, &selected, dimensions)
         .ok_or_else(|| unsupported(format!("width of a select of `{member}`")))?;
     let signed = dimensions::expression_signedness(&selected, dimensions, &dimensions.const_env)
         .unwrap_or(false);
@@ -621,13 +622,15 @@ pub(super) fn null_access(handle: &Expr, width: usize, signed: bool) -> Expr {
 /// interface `handle` of type `ty` denotes, with `select` applied to the
 /// member of each instance.
 pub(super) fn read(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     handle: Expr,
     ty: &VirtualInterface,
     member: &str,
     dimensions: &PackedDimensions,
     select: impl Fn(Expr) -> Converted<Expr>,
 ) -> Converted<Expr> {
+    let state = &*tree.state;
+    let functions = &tree.functions;
     let (found, signals) = self::member(state, ty, member)?;
     check_pure(&handle)?;
     let mut arms = Vec::new();
@@ -636,12 +639,12 @@ pub(super) fn read(
     }
     let (width, signed) = match arms.first() {
         Some((_, value)) => (
-            expr_static_width(state, value, dimensions),
+            expr_static_width(tree, value, dimensions),
             dimensions::expression_signedness(value, dimensions, &dimensions.const_env)
                 .unwrap_or(false),
         ),
         None => {
-            let shape = casts::expr_type_from_type(state, &found.r#type, &HashMap::default());
+            let shape = casts::expr_type_from_type(functions, &found.r#type, &HashMap::default());
             (shape.map(|shape| shape.width), found.r#type.is_signed())
         }
     };
@@ -1151,13 +1154,15 @@ pub(super) fn null_check(handle: &Expr) -> Expr {
 /// selection among the instances, which changes when `handle` does, and
 /// zero for `null`.
 pub(super) fn watched(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     handle: Expr,
     ty: &VirtualInterface,
     member: &str,
 ) -> Converted<Expr> {
+    let state = &*tree.state;
+    let functions = &tree.functions;
     let (found, signals) = self::member(state, ty, member)?;
-    let width = casts::expr_type_from_type(state, &found.r#type, &HashMap::default())
+    let width = casts::expr_type_from_type(functions, &found.r#type, &HashMap::default())
         .map(|shape| shape.width)
         .ok_or_else(|| unsupported(format!("width of virtual interface member `{member}`")))?;
     let mut value = Expr::Literal(format!("{width}'d0"));

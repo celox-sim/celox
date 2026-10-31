@@ -82,7 +82,7 @@ pub(super) fn ports_from_scope(
                         &dimensions,
                     )?;
                     let value = fold_const_integral_expr_preserving_mask(
-                        &syntax_tree.state,
+                        syntax_tree,
                         expression,
                         const_env,
                     );
@@ -293,7 +293,7 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
                 item.env.remove(&local_parameter_marker(&name));
             }
         }
-        let _constant_functions = item.enter();
+        let syntax_tree = &item.enter(syntax_tree);
         let start = signals.len();
         signals_from_body_item(
             item.id,

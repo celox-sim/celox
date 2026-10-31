@@ -154,7 +154,7 @@ pub(in crate::ast) fn query_value(
                     .try_fold(1usize, |value, width| {
                         value.checked_mul(
                             usize::try_from(eval_ast_const_expr(
-                                &tree.state,
+                                &tree.functions,
                                 width,
                                 &context.const_env,
                             )?)
@@ -191,7 +191,7 @@ pub(in crate::ast) fn query_value(
             let index = dimension
                 .map(|value| expr_to_const(&tree.state, value))
                 .unwrap_or_else(|| Some(ConstExpr::Literal("1".into())))
-                .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env));
+                .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &context.const_env));
             let width = if let (Some(shape), Some(index)) = (&shape, index) {
                 let index = usize::try_from(index).ok().and_then(|i| i.checked_sub(1));
                 if index == Some(0)
@@ -209,7 +209,7 @@ pub(in crate::ast) fn query_value(
                                 .nth(index)
                         })
                         .and_then(|width| {
-                            eval_ast_const_expr(&tree.state, width, &context.const_env)
+                            eval_ast_const_expr(&tree.functions, width, &context.const_env)
                         })
                 }
                 .or_else(|| {
@@ -233,7 +233,7 @@ pub(in crate::ast) fn query_value(
                         .chain(shape.packed.iter().map(|d| &d.width))
                         .next()
                         .and_then(|width| {
-                            eval_ast_const_expr(&tree.state, width, &context.const_env)
+                            eval_ast_const_expr(&tree.functions, width, &context.const_env)
                         })?;
                     return Some(vec![(width - 1, 0)]);
                 }
@@ -244,14 +244,14 @@ pub(in crate::ast) fn query_value(
                     .chain(shape.packed.iter().map(|d| (&d.left, &d.right)))
                     .map(|(l, r)| {
                         Some((
-                            eval_ast_const_expr(&tree.state, l, &context.const_env)?,
-                            eval_ast_const_expr(&tree.state, r, &context.const_env)?,
+                            eval_ast_const_expr(&tree.functions, l, &context.const_env)?,
+                            eval_ast_const_expr(&tree.functions, r, &context.const_env)?,
                         ))
                     })
                     .collect::<Option<Vec<_>>>()
             });
             bounds.and_then(|bounds| {
-                super::queries::bound_query(&tree.state, query, &bounds, dimension, &context)
+                super::queries::bound_query(tree, query, &bounds, dimension, &context)
             })
         }
         _ => unreachable!(),
@@ -319,7 +319,7 @@ fn interface_array_size(
     }
     let dimension = match dimension {
         Some(id) => constant_binding::bind(id, tree, context)?
-            .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env))
+            .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &context.const_env))
             .ok_or_else(|| unsupported("nonconstant interface array query dimension"))?,
         None => 1,
     };
@@ -518,7 +518,7 @@ fn validate_index(
 ) -> Converted<()> {
     let native = tree.declarations();
     let value = expression_binding::bind(root, tree, context)?;
-    if expr_static_width(&tree.state, &value, context).is_none() {
+    if expr_static_width(tree, &value, context).is_none() {
         return Err(unsupported("query index type"));
     }
     let mut jobs = vec![root];
@@ -736,7 +736,7 @@ pub(in crate::ast) fn shape(
                     let shape = if matches!(name.spelling.as_str(), "pop_front" | "pop_back") {
                         procedural::dimensions_from_type(&container.element)
                     } else {
-                        let ty = bound_bits_type(&tree.state, &value, context)
+                        let ty = bound_bits_type(tree, &value, context)
                             .ok_or_else(|| unsupported("container method result type"))?;
                         scalar(ty.width, ty.signed, ty.width > 1)
                     };
@@ -873,7 +873,7 @@ pub(in crate::ast) fn shape(
                             values.push(procedural::dimensions_from_type(&ty));
                         } else {
                             let value = expression_binding::bind(id, tree, context)?;
-                            let Some(ty) = bound_bits_type(&tree.state, &value, context) else {
+                            let Some(ty) = bound_bits_type(tree, &value, context) else {
                                 return Ok(None);
                             };
                             values.push(scalar(ty.width, ty.signed, true));
@@ -884,7 +884,7 @@ pub(in crate::ast) fn shape(
                             return Ok(None);
                         }
                         let value = expression_binding::bind(id, tree, context)?;
-                        let Some(ty) = bound_bits_type(&tree.state, &value, context) else {
+                        let Some(ty) = bound_bits_type(tree, &value, context) else {
                             return Ok(None);
                         };
                         let mut shape = scalar(
@@ -938,11 +938,11 @@ pub(in crate::ast) fn shape(
                     constant_binding::bind(left, tree, context)?
                 };
                 let right = constant_binding::bind(right, tree, context)?
-                    .and_then(|v| eval_ast_const_expr(&tree.state, &v, &context.const_env));
+                    .and_then(|v| eval_ast_const_expr(&tree.functions, &v, &context.const_env));
                 let width = if indexed {
                     right
                 } else {
-                    left.and_then(|v| eval_ast_const_expr(&tree.state, &v, &context.const_env))
+                    left.and_then(|v| eval_ast_const_expr(&tree.functions, &v, &context.const_env))
                         .zip(right)
                         .and_then(|(l, r)| i128::try_from(l.abs_diff(r)).ok()?.checked_add(1))
                 };
@@ -1064,7 +1064,9 @@ mod tests {
             .map(|(root, _)| {
                 let value = query_value(root, &tree, &context).unwrap().unwrap();
                 expr_to_const(&tree.state, value)
-                    .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env))
+                    .and_then(|value| {
+                        eval_ast_const_expr(&tree.functions, &value, &context.const_env)
+                    })
                     .unwrap()
             })
             .collect::<Vec<_>>();

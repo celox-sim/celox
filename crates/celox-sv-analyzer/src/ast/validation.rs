@@ -282,7 +282,7 @@ pub(super) fn reject_silently_ignored_constructs(
         for item in &active {
             item.procedure(syntax_tree.declarations())?;
             item.continuous_assignment(syntax_tree.declarations())?;
-            let _constant_functions = item.enter();
+            let syntax_tree = &item.enter(syntax_tree);
             let syntax_tree = &item.scoped(syntax_tree);
             validate_scope(Some(item), syntax_tree, views.dimensions(item))?;
         }
@@ -1103,10 +1103,8 @@ fn reject_constant_calls(
                     detail: "not permitted in a constant-value expression".into(),
                 });
             }
-        } else if !const_functions::is_constant_function(&tree.state.const_functions, &name) {
-            if let Some(error) =
-                const_functions::conversion_error(&tree.state.const_functions, &name)
-            {
+        } else if !const_functions::is_constant_function(&tree.functions, &name) {
+            if let Some(error) = const_functions::conversion_error(&tree.functions, &name) {
                 return Err(error);
             }
             let context = dimensions::query_context_for_operand(id, tree, dimensions)?;
@@ -1147,9 +1145,9 @@ fn check_indexed_width(
         syntax_tree,
         &context,
     )?;
-    let width = selects::indexed_expression_value(&syntax_tree.state, value, &context)
+    let width = selects::indexed_expression_value(syntax_tree, value, &context)
         .ok_or_else(|| unsupported("constant index expression"))?;
-    match eval_ast_const_expr(&syntax_tree.state, &width, &dimensions.const_env) {
+    match eval_ast_const_expr(&syntax_tree.functions, &width, &dimensions.const_env) {
         Some(width) if width > 0 => Ok(()),
         Some(width) => Err(unsupported(format!("indexed part-select width {width}"))),
         None => Err(unsupported(

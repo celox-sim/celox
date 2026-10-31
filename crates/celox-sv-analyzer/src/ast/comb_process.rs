@@ -23,7 +23,7 @@ pub(super) fn comb_processes_from_scope(
         ) {
             continue;
         }
-        let _constant_functions = item.enter();
+        let syntax_tree = &item.enter(syntax_tree);
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
         comb_processes_from_item(
@@ -71,7 +71,7 @@ fn comb_processes_from_item(
             )? {
                 process.condition = condition.clone();
                 processes.push(substitute_process_constants_with_parameter_literals(
-                    &syntax_tree.state,
+                    syntax_tree,
                     process,
                     const_env,
                     parameter_literals,
@@ -91,7 +91,7 @@ fn comb_processes_from_item(
                 state,
             )? {
                 processes.push(substitute_process_constants(
-                    &syntax_tree.state,
+                    syntax_tree,
                     process,
                     const_env,
                 ));
@@ -105,7 +105,7 @@ fn comb_processes_from_item(
                 packed_dimensions,
             )? {
                 let assignment = substitute_assignment_constants_with_parameter_literals(
-                    &syntax_tree.state,
+                    syntax_tree,
                     assignment,
                     const_env,
                     parameter_literals,
@@ -285,7 +285,7 @@ fn continuous_assignments(
                     ..
                 }
             ) {
-                coerce_procedural_assignment_rhs(&tree.state, rhs, &lhs, dimensions)
+                coerce_procedural_assignment_rhs(tree, rhs, &lhs, dimensions)
             } else {
                 rhs
             };
@@ -324,7 +324,7 @@ fn comb_process_from_procedure(
     let mut body = builder.native_body(&[body], &procedure.authored_statements)?;
     for stmt in &mut body {
         procedural::substitute_stmt_constants(
-            &syntax_tree.state,
+            syntax_tree,
             stmt,
             &HashMap::default(),
             parameter_literals,

@@ -377,8 +377,9 @@ mod tests {
     }
     fn evaluate(expr: Expr, bindings: &HashMap<String, Expr>) -> i128 {
         let expr = substitute_expr_idents(expr, bindings);
+        let syntax = crate::source_tree::SourceTree::empty();
         let expr = expr_to_index_const(
-            &AnalysisState::default(),
+            &AnalysisContext::unspecialized(&syntax),
             expr,
             &PackedDimensions::default(),
         )

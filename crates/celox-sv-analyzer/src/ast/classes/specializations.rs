@@ -497,7 +497,7 @@ pub(in crate::ast) fn export_member_types(
                 }
                 for (member, ty) in &specialization.declared_aliases {
                     if let Some(ty) =
-                        type_parameters::resolve(&tree.state, ty.clone(), &specialization.env)
+                        type_parameters::resolve(&tree.functions, ty.clone(), &specialization.env)
                     {
                         members.insert(member.clone(), ty);
                     }
@@ -966,7 +966,7 @@ fn finish_specialization(
                         // container (IEEE 1800-2023 7.5, 7.8, 7.10).
                         let ty = containers::with_dimensions(ty, &alias.dimensions, tree, &context)
                             .ok()?;
-                        type_parameters::resolve(&tree.state, ty, &env)
+                        type_parameters::resolve(&tree.functions, ty, &env)
                     });
                 if let Some(mut ty) = ty {
                     let alias = instances::normalize_identifier(&alias.name.spelling);
@@ -1146,7 +1146,7 @@ impl Parameters {
                         }
                     };
                     // The type is fixed in the scope that assigns it.
-                    let ty = type_parameters::resolve(&tree.state, ty, env)
+                    let ty = type_parameters::resolve(&tree.functions, ty, env)
                         .ok_or_else(|| unsupported(format!("type of type parameter `{name}`")))?;
                     if port {
                         self.spelled.push(format!("{name}={}", spelling(&ty)));
@@ -1186,7 +1186,7 @@ impl Parameters {
                             parameter.packed_ranges.len(),
                         ));
                         constants::bind_generate_parameter(
-                            &tree.state,
+                            tree,
                             parameter,
                             env,
                             &mut self.literals,
@@ -1381,7 +1381,7 @@ fn finish(
 ) -> Converted<Option<Type>> {
     let ty = ty.ok_or_else(|| unsupported("class type parameter value"))?;
     // The bounds are those of the scope that assigns the type.
-    let Some(ty) = type_parameters::resolve(&tree.state, ty, &context.const_env) else {
+    let Some(ty) = type_parameters::resolve(&tree.functions, ty, &context.const_env) else {
         return Ok(None);
     };
     // Each enumeration declaration is a type of its own (6.19), and so is
@@ -1420,7 +1420,7 @@ fn value_argument(
     {
         return Ok(expr);
     }
-    let Some(value) = eval_ast_const_expr(&tree.state, &expr, &context.const_env) else {
+    let Some(value) = eval_ast_const_expr(&tree.functions, &expr, &context.const_env) else {
         // A string or four-state value is its literal, and so is the value
         // of a real expression, or of a parameter with such a value.
         return match expr {

@@ -518,6 +518,7 @@ fn analyze_package(
         parameter_overrides: Cow::Owned(HashMap::default()),
         imported: Arc::default(),
         package: None,
+        functions: const_functions::ConstantFunctions::default(),
     };
     let tree = &context;
     let _timescales =

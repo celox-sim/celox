@@ -65,7 +65,7 @@ impl LocalSink {
                 procedural::scoped_type(r#type, &dims.const_env),
                 &const_functions::Environment {
                     constants: &*dims.const_env,
-                    functions: &tree.state.const_functions,
+                    functions: &tree.functions,
                 },
             ),
         });
@@ -295,7 +295,7 @@ fn array(
         return Err(unsupported("array locator method on real elements"));
     }
     let bound = |expr: &ConstExpr| {
-        eval_ast_const_expr(&tree.state, expr, &dims.const_env)
+        eval_ast_const_expr(&tree.functions, expr, &dims.const_env)
             // The index local is an `int` (7.12.4).
             .and_then(|value| i32::try_from(value).ok())
             .map(i64::from)
@@ -326,7 +326,7 @@ fn array(
         ty.signed_element_depth = shape.signed_element_depth;
         ty
     };
-    let width = casts::expr_type_from_type(&tree.state, &element, &dims.const_env)
+    let width = casts::expr_type_from_type(&tree.functions, &element, &dims.const_env)
         .map(|shape| shape.width)
         .filter(|width| (1..=64).contains(width))
         .ok_or_else(|| unsupported("array locator method on elements wider than 64 bits"))?;
@@ -470,7 +470,7 @@ pub(super) fn bind(
                 if expression_binding::real_value(&value, &scope) {
                     return Err(unsupported("array locator method on real values"));
                 }
-                let r#type = dimensions::bound_bits_type(&tree.state, &value, &scope)
+                let r#type = dimensions::bound_bits_type(tree, &value, &scope)
                     .filter(|r#type| (1..=64).contains(&r#type.width))
                     .ok_or_else(|| {
                         unsupported("array locator with expression wider than 64 bits")
@@ -538,7 +538,7 @@ pub(super) fn bind(
             };
             let name = instances::normalize_identifier(&name.spelling);
             let lvalue = selects::lvalue_from_indices(
-                &tree.state,
+                tree,
                 name,
                 vec![ConstExpr::Ident(index.clone())],
                 dims,
@@ -548,7 +548,7 @@ pub(super) fn bind(
                     left: *left,
                     right: *right,
                 },
-                statements::expr_from_lvalue(&tree.state, &lvalue, dims),
+                statements::expr_from_lvalue(tree, &lvalue, dims),
             )
         }
     };
@@ -640,8 +640,9 @@ pub(super) fn index(
         [] => {}
         [argument] if argument.name.is_none() => {
             let dimension = match argument.value {
-                Some(value) => constant_binding::bind(value, tree, dims)?
-                    .and_then(|value| eval_ast_const_expr(&tree.state, &value, &dims.const_env)),
+                Some(value) => constant_binding::bind(value, tree, dims)?.and_then(|value| {
+                    eval_ast_const_expr(&tree.functions, &value, &dims.const_env)
+                }),
                 None => None,
             };
             if dimension != Some(1) {

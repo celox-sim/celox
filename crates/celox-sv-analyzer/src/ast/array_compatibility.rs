@@ -50,7 +50,7 @@ fn element_identity(shape: &VariableDimensions) -> Option<String> {
 /// The type of an unpacked array of `shape`, or `None` when `shape` is not an
 /// unpacked array or its type cannot be resolved.
 pub(super) fn unpacked_array_type(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Option<UnpackedArrayType> {
@@ -58,7 +58,7 @@ pub(super) fn unpacked_array_type(
         return None;
     }
     let count = |width: &ConstExpr| {
-        eval_ast_const_expr(state, width, &dims.const_env)
+        eval_ast_const_expr(functions, width, &dims.const_env)
             .and_then(|width| usize::try_from(width).ok())
     };
     Some(UnpackedArrayType {
@@ -101,12 +101,15 @@ fn incompatible_types(
 /// How fixed-size unpacked arrays of `actual` and `target` are spelled if
 /// the first may not be assigned to the second (see [`incompatible_types`]).
 pub(super) fn incompatible(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     actual: &VariableDimensions,
     target: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Option<(String, String)> {
-    let of_shape = |shape| semantic_types::of_shape(&state.types, state, shape, &dims.const_env);
+    let state = &*tree.state;
+    let functions = &tree.functions;
+    let of_shape =
+        |shape| semantic_types::of_shape(&state.types, functions, shape, &dims.const_env);
     incompatible_types(&state.types, of_shape(actual)?, of_shape(target)?)
 }
 
@@ -147,7 +150,7 @@ fn native_selection(
         constant_binding::bind(id, tree, dims)
             .ok()
             .flatten()
-            .and_then(|value| eval_ast_const_expr(&tree.state, &value, &dims.const_env))
+            .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
     };
     let mut indices = 0;
     // A slice selects from the dimension that the indices inside it leave
@@ -221,7 +224,8 @@ fn native_unpacked_type(
     use semantic_types::{ArrayKind, Range, TyData};
     let (path, indices, slice) = native_selection(id, tree, dims)?;
     let table = &tree.state.types;
-    let mut ty = semantic_types::of_shape(table, &tree.state, dims.get(&path)?, &dims.const_env)?;
+    let mut ty =
+        semantic_types::of_shape(table, &tree.functions, dims.get(&path)?, &dims.const_env)?;
     for _ in 0..indices {
         let TyData::Array { element, .. } = table.data(ty) else {
             return None;
@@ -297,7 +301,7 @@ fn check_assignment(
     }
     let table = &tree.state.types;
     let Some((actual, target)) =
-        semantic_types::of_shape(table, &tree.state, target, &dims.const_env)
+        semantic_types::of_shape(table, &tree.functions, target, &dims.const_env)
             .zip(native_unpacked_type(id, tree, dims))
             .and_then(|(target, actual)| incompatible_types(table, actual, target))
     else {

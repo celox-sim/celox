@@ -13,7 +13,7 @@ pub(in crate::ast) enum AggregateKind {
 /// Freeze member bounds in the declaration environment before generated scopes
 /// can shadow their parameter names. Shared by both syntax owners.
 pub(in crate::ast) fn capture_member_type(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     mut ty: Type,
     env: &HashMap<String, i128>,
 ) -> Option<Type> {
@@ -25,12 +25,12 @@ pub(in crate::ast) fn capture_member_type(
     }
     for range in &mut ty.packed_ranges {
         range.left = ConstExpr::Literal(format_typed_parameter_literal(
-            eval_ast_const_expr(state, &range.left, env)?,
+            eval_ast_const_expr(functions, &range.left, env)?,
             128,
             true,
         ));
         range.right = ConstExpr::Literal(format_typed_parameter_literal(
-            eval_ast_const_expr(state, &range.right, env)?,
+            eval_ast_const_expr(functions, &range.right, env)?,
             128,
             true,
         ));
@@ -40,7 +40,7 @@ pub(in crate::ast) fn capture_member_type(
 
 /// Syntax-independent IEEE7.2.1/7.3.1 layout kernel.
 pub(in crate::ast) fn native_type(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     kind: AggregateKind,
     signed: bool,
     owner: Arc<str>,
@@ -48,6 +48,7 @@ pub(in crate::ast) fn native_type(
     ranges: Vec<PackedRange>,
     env: &HashMap<String, i128>,
 ) -> Option<Type> {
+    let functions = &tree.functions;
     let mut names = HashSet::default();
     let members = fields
         .into_iter()
@@ -61,14 +62,14 @@ pub(in crate::ast) fn native_type(
                 offset: 0,
                 tag: None,
                 is_void,
-                r#type: capture_member_type(state, ty, env)?,
+                r#type: capture_member_type(functions, ty, env)?,
             })
         })
         .collect::<Option<Vec<_>>>()?;
-    finish_type(state, kind, signed, members, ranges, env)
+    finish_type(&tree.functions, kind, signed, members, ranges, env)
 }
 fn finish_type(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     kind: AggregateKind,
     signed: bool,
     mut members: Vec<PackedMember>,
@@ -81,7 +82,7 @@ fn finish_type(
         let member_width = if member.is_void {
             0
         } else {
-            expr_type_from_type(state, &member.r#type, const_env)?.width
+            expr_type_from_type(functions, &member.r#type, const_env)?.width
         };
         if !matches!(kind, AggregateKind::Struct) {
             // IEEE 1800-2023 7.3.1: hard packed members share all bits

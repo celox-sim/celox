@@ -254,7 +254,9 @@ fn parameter(
             if local
                 && let Some(value) = default
                     .and_then(|id| constant_binding::bind(id, tree, context).ok().flatten())
-                    .and_then(|value| eval_ast_const_expr(&tree.state, &value, &context.const_env))
+                    .and_then(|value| {
+                        eval_ast_const_expr(&tree.functions, &value, &context.const_env)
+                    })
             {
                 context.const_env.insert(n.clone(), value);
             }
@@ -390,18 +392,19 @@ fn formal_types(
     Ok(result)
 }
 fn return_metadata(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     ty: Option<&Type>,
     arguments: Arc<[FunctionArgumentMetadata]>,
     context: &PackedDimensions,
 ) -> FunctionReturnMetadata {
+    let functions = &tree.functions;
     let widths = ty.map(|ty| {
         ty.packed_ranges()
             .iter()
             .map(|range| {
                 usize::try_from(
-                    eval_ast_const_expr(state, range.left(), &context.const_env)?.abs_diff(
-                        eval_ast_const_expr(state, range.right(), &context.const_env)?,
+                    eval_ast_const_expr(functions, range.left(), &context.const_env)?.abs_diff(
+                        eval_ast_const_expr(functions, range.right(), &context.const_env)?,
                     ),
                 )
                 .ok()?
@@ -410,7 +413,7 @@ fn return_metadata(
             .collect::<Option<Vec<_>>>()
     });
     let width = ty
-        .and_then(|ty| expr_type_from_type(state, ty, &context.const_env))
+        .and_then(|ty| expr_type_from_type(&tree.functions, ty, &context.const_env))
         .map(|ty| ty.width);
     FunctionReturnMetadata {
         arguments: Some(arguments),
@@ -447,7 +450,7 @@ fn return_metadata(
             .and_then(|ty| {
                 ty.pattern_target(&const_functions::Environment {
                     constants: &*context.const_env,
-                    functions: &state.const_functions,
+                    functions,
                 })
             }),
     }
@@ -1004,7 +1007,7 @@ fn publish_signature(
         Arc::make_mut(&mut context.subroutine_param_names).insert(n.clone(), names);
     }
     if let Some(ty) = result {
-        let metadata = return_metadata(&tree.state, ty.as_ref(), arguments, context);
+        let metadata = return_metadata(tree, ty.as_ref(), arguments, context);
         if context.function_return_types.get(&n) != Some(&metadata) {
             context.function_return_types.insert(n, metadata);
         }
@@ -1286,7 +1289,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
             let Some(declared) = declared else {
                 continue;
             };
-            let _functions = item.enter();
+            let tree = &item.enter(tree);
             let tree = &item.scoped(tree);
             let mut signals = Vec::new();
             declarations::signals_from_body_item(
@@ -1324,13 +1327,13 @@ mod tests {
         }).unwrap()
     }
     fn width(
-        state: &AnalysisState,
+        functions: &const_functions::ConstantFunctions,
         shape: &VariableDimensions,
         context: &PackedDimensions,
     ) -> Option<i128> {
         shape.packed.iter().try_fold(1i128, |all, dimension| {
             all.checked_mul(eval_ast_const_expr(
-                state,
+                functions,
                 &dimension.width,
                 &context.const_env,
             )?)
@@ -1349,7 +1352,7 @@ mod tests {
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, &input).unwrap();
         assert_eq!(
-            width(&tree.state, context.get("N").unwrap(), &context),
+            width(&tree.functions, context.get("N").unwrap(), &context),
             Some(4)
         );
         assert!(!context.const_env.contains_key("N"));
@@ -1386,9 +1389,13 @@ mod tests {
             PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
         let context = query_operand_dimensions_id(argument(&tree), &tree, &input).unwrap();
         let shape = context.get("a").unwrap();
-        assert_eq!(width(&tree.state, shape, &context), Some(3));
+        assert_eq!(width(&tree.functions, shape, &context), Some(3));
         assert_eq!(
-            eval_ast_const_expr(&tree.state, &shape.unpacked[0].width, &context.const_env),
+            eval_ast_const_expr(
+                &tree.functions,
+                &shape.unpacked[0].width,
+                &context.const_env
+            ),
             Some(2)
         );
     }
@@ -1402,7 +1409,7 @@ mod tests {
             query_operand_dimensions_id(argument(&tree), &tree, &PackedDimensions::default())
                 .unwrap();
         assert_eq!(
-            width(&tree.state, context.get("ordinary").unwrap(), &context),
+            width(&tree.functions, context.get("ordinary").unwrap(), &context),
             Some(32)
         );
         assert!(context.get("dyn").unwrap().container.is_some());

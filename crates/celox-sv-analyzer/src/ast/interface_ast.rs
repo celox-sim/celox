@@ -132,9 +132,9 @@ pub(super) fn signature(
     // execution. A public declaration must retain those dependencies so its
     // consumers can specialize the interface with different header values.
     let tree = &tree.importing(Arc::new(imported.clone()));
-    let _functions = const_functions::install(&tree.state, module.constant_functions.clone());
+    let tree = &tree.with_functions(module.constant_functions.clone());
     let mut env = imported.const_env.clone();
-    extend_const_env_with_parameters(&tree.state, &mut env, &module.parameters);
+    extend_const_env_with_parameters(tree, &mut env, &module.parameters);
     let aliases = type_aliases_from_scope_with_env(tree, &env)?;
     let declarations =
         declarations::signals_from_scope_with_declaration_ranges(tree, &env, &aliases, true)?;

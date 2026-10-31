@@ -197,7 +197,7 @@ impl ArrayParameter {
         let name = self.signal.name().to_string();
         let shape = procedural::dimensions_from_type(self.signal.r#type());
         let value = if let Some(bound) = &self.bound {
-            bound.lower(&tree.state, &shape, dims)?
+            bound.lower(tree, &shape, dims)?
         } else {
             match self.native_pattern {
                 Some(root) => match patterns::native_expression(root, &shape, tree, dims)? {

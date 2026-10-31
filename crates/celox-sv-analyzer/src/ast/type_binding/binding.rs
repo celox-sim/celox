@@ -410,7 +410,7 @@ fn bind_in_mode(
                     }
                     let fields = names.into_iter().zip(values.split_off(start)).collect();
                     let Some(ty) = unpacked_structs::native_type(
-                        &tree.state,
+                        &tree.functions,
                         owner,
                         fields,
                         &context.const_env,
@@ -427,7 +427,7 @@ fn bind_in_mode(
                     .map(|((name, ty), is_void)| (name, ty, is_void))
                     .collect();
                 let Some(mut ty) = packed_structs::native_type(
-                    &tree.state,
+                    tree,
                     if tagged {
                         packed_structs::AggregateKind::TaggedUnion
                     } else if soft {
@@ -589,7 +589,7 @@ pub(in crate::ast) fn expression_type(
 ) -> Converted<Option<ExprType>> {
     if let ExprKind::Type(id) = tree.declarations().expression(root).kind {
         return Ok(bind(id, tree, context)?
-            .and_then(|ty| expr_type_from_type(&tree.state, &ty, &context.const_env)));
+            .and_then(|ty| expr_type_from_type(&tree.functions, &ty, &context.const_env)));
     }
     if let Some((name, ranges)) = argument_alias(root, tree.declarations())
         && context.get(&name).is_none()
@@ -602,7 +602,11 @@ pub(in crate::ast) fn expression_type(
     {
         let ty =
             types::enclose_aliased_packed_type(ty.clone(), packed_ranges(&ranges, tree, context)?);
-        return Ok(expr_type_from_type(&tree.state, &ty, &context.const_env));
+        return Ok(expr_type_from_type(
+            &tree.functions,
+            &ty,
+            &context.const_env,
+        ));
     }
     let mut query = context.clone();
     query.expression_signedness.extend(
@@ -613,7 +617,7 @@ pub(in crate::ast) fn expression_type(
     query.type_query = true;
     query.functions = Arc::default();
     let value = expression_binding::bind(root, tree, &query)?;
-    Ok(dimensions::bound_bits_type(&tree.state, &value, &query))
+    Ok(dimensions::bound_bits_type(tree, &value, &query))
 }
 
 /// IEEE 1800-2023 6.19 imposes declaration rules even when no enum member
@@ -628,7 +632,7 @@ pub(in crate::ast) fn validate_enum_initializers(
     let DataTypeKind::Enum { base, items } = &native.data_type(id).kind else {
         return Ok(());
     };
-    let Some(shape) = casts::expr_type_from_type(&tree.state, ty, &context.const_env) else {
+    let Some(shape) = casts::expr_type_from_type(&tree.functions, ty, &context.const_env) else {
         return Ok(());
     };
     let mut env = context.const_env.clone();
@@ -680,7 +684,7 @@ pub(in crate::ast) fn validate_enum_initializers(
                 expr_to_const(
                     &tree.state,
                     constants::substitute_expr_constants_with_parameter_literals(
-                        &tree.state,
+                        tree,
                         const_expr_to_expr(expr),
                         &env,
                         &unknown_literals,
@@ -731,7 +735,7 @@ pub(in crate::ast) fn validate_enum_initializers(
         }
         next = expr
             .as_ref()
-            .and_then(|expr| eval_ast_const_expr(&tree.state, expr, &env))
+            .and_then(|expr| eval_ast_const_expr(&tree.functions, expr, &env))
             .map(|value| {
                 parameters::coerce_const_parameter_value(value, shape.width, shape.signed)
             });
@@ -761,7 +765,7 @@ fn enum_values(
     let DataTypeKind::Enum { items, .. } = &data.kind else {
         return None;
     };
-    let shape = casts::expr_type_from_type(&tree.state, ty, &context.const_env)?;
+    let shape = casts::expr_type_from_type(&tree.functions, ty, &context.const_env)?;
     if shape.width > 64 {
         return None;
     }
@@ -785,7 +789,7 @@ fn enum_values(
                 ),
                 expr => expr,
             };
-            let value = eval_ast_const_expr(&tree.state, &expr, &env)?;
+            let value = eval_ast_const_expr(&tree.functions, &expr, &env)?;
             let value_type = infer_const_expr_type(&expr, &parameter_types_from_const_env(&env))?;
             if !parameters::enum_initializer_fits_base_type(value, value_type, shape) {
                 return None;

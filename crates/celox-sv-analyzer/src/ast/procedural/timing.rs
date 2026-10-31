@@ -178,7 +178,7 @@ impl BodyBuilder<'_, '_, '_> {
                             }),
                         });
                     }
-                    virtual_interfaces::watched(&self.tree.state, handle, &ty, &member)?
+                    virtual_interfaces::watched(self.tree, handle, &ty, &member)?
                 }
                 None => self.native_value(item.expression)?,
             };
