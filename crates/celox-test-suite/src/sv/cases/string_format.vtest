@@ -488,6 +488,80 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "'{\"a\":20, \"x\":10}|'{-2:65, 7:0}|'{null, null}|null|\"lit\"\n'{\"a\":20, \"x\":10}|'{-2:65, 7:0}|'{null, null}|null|\"lit\"\n\"str\" \"n2\"\nnull null null\nnull null\n'{1, 2} '{9}\n"))
 
+; IEEE 1800-2023 21.2.1.6: %p prints an unpacked structure as an assignment
+; pattern with named members, and a dynamic array, queue or associative
+; array of them as a pattern of those, labeled by index for an associative
+; array; a string member prints in quotes.
+(case pattern_format_structure_containers
+  (source "pattern_structures.sv" #"
+module Top(output bit done);
+    typedef struct { string name; string regex; } acs_t;
+    typedef struct { acs_t names; string tag; } nest_t;
+    class Q #(type T = int);
+        protected T queue[$];
+        function void push_back(T item); queue.push_back(item); endfunction
+        virtual function string convert2string(); return $sformatf("%p", queue); endfunction
+    endclass
+    Q #(acs_t) names;
+    nest_t by_name[string];
+    acs_t d[];
+    acs_t a;
+    string s;
+    initial begin
+        names = new();
+        $display("%s", names.convert2string());
+        a.name = "top.env";
+        a.regex = "";
+        names.push_back(a);
+        a.name = "*";
+        a.regex = "agent";
+        names.push_back(a);
+        $display("%s", names.convert2string());
+        by_name["k"] = '{'{"x", "y"}, "second"};
+        by_name["b"] = '{a, "first"};
+        $display("%p", by_name);
+        d = new[2];
+        d[1] = a;
+        s = $sformatf("%p|%p", d, a);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "'{}\n'{'{name:\"top.env\", regex:\"\"}, '{name:\"*\", regex:\"agent\"}}\n'{\"b\":'{names:'{name:\"*\", regex:\"agent\"}, tag:\"first\"}, \"k\":'{names:'{name:\"x\", regex:\"y\"}, tag:\"second\"}}\n'{'{name:\"\", regex:\"\"}, '{name:\"*\", regex:\"agent\"}}|'{name:\"*\", regex:\"agent\"}\n"))
+
+; IEEE 1800-2023 21.2.1.6: integral members print as they would unformatted,
+; in decimal, and a null class handle as null; an associative array labels
+; each element with its index.
+(case pattern_format_structure_values
+  (source "pattern_structure_values.sv" #"
+module Top(output bit done);
+    class Obj; endclass
+    typedef struct { int a; bit [7:0] b; } num_t;
+    typedef struct { num_t n; Obj h; } ref_t;
+    class Holder; ref_t p; endclass
+    num_t q[$];
+    ref_t m[int];
+    num_t v;
+    Holder holder;
+    initial begin
+        holder = new();
+        holder.p.n.a = 6;
+        q.push_back('{-3, 8'hff});
+        q.push_back('{7, 8'h0});
+        m[5] = '{'{1, 2}, null};
+        m[3] = '{'{0, 9}, null};
+        v = '{12, 8'h10};
+        $display("%p %p %p", q, m, v);
+        $display("%p %p", holder.p, m[5].n);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "'{'{a:-3, b:255}, '{a:7, b:0}} '{3:'{n:'{a:0, b:9}, h:null}, 5:'{n:'{a:1, b:2}, h:null}} '{a:12, b:16}\n'{n:'{a:6, b:0}, h:null} '{a:1, b:2}\n"))
+
 (case formatted_strings_into_integral_outputs
   (source "top.sv" #"
 module Top(output bit [15:0] a, output bit [39:0] b, output logic signed [15:0] c,

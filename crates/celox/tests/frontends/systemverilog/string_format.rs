@@ -19,6 +19,8 @@ sv_backends! {
     fn display_later_formats(sim) { @case "string_format::display_later_formats"; }
     fn pattern_format(sim) { @case "string_format::pattern_format"; }
     fn pattern_format_keys_and_handles(sim) { @case "string_format::pattern_format_keys_and_handles"; }
+    fn pattern_format_structure_containers(sim) { @case "string_format::pattern_format_structure_containers"; }
+    fn pattern_format_structure_values(sim) { @case "string_format::pattern_format_structure_values"; }
     fn formatted_strings_into_integral_outputs(sim) { @case "string_format::formatted_strings_into_integral_outputs"; }
     // A string literal operand leaves a conditional integral (5.9): `%p`
     // prints it unformatted, not in quotes.
@@ -201,8 +203,8 @@ fn pattern_format_rejects_unsupported_types() {
             "%p of an associative array with class handle keys",
         ),
         (
-            "typedef struct { int n; string s; } r_t; r_t v[$];",
-            "%p of a container of aggregate elements",
+            "typedef enum {A, B} e_t; typedef struct { e_t e; } r_t; r_t v[$];",
+            "%p of a structure with an enum member",
         ),
     ] {
         check_rejected(declarations, "v", expected);
@@ -215,21 +217,7 @@ fn pattern_format_rejects_unsupported_types() {
         ),
         ("int m[2][3];", "m[1]"),
         ("int a[4];", "a[1:2]"),
-        ("typedef struct { int n; string s; } r_t; r_t v;", "v"),
         ("typedef struct { int n; string s; } r_t; r_t q[$];", "q[0]"),
-        (
-            "typedef struct { int n; } r_t; class C; r_t p; endclass C c;",
-            "c.p",
-        ),
-        (
-            "typedef struct { int n; } i_t; typedef struct { i_t i; int m; } r_t; r_t v;",
-            "v.i",
-        ),
-        (
-            "typedef struct { int n; } i_t; typedef struct { i_t i; int m; } r_t; \
-             class C; r_t p; endclass C c;",
-            "c.p.i",
-        ),
         (
             "typedef struct { int n; } r_t; \
              function automatic r_t make(); r_t r; r.n = 1; return r; endfunction",

@@ -934,6 +934,14 @@
     "sv_wide_associative_keys": {
       "title": "Associative arrays with integral indices wider than 64 bits do not order their indices numerically: bit [64:0] indices 'h0_ffff_ffff_ffff_ffff and 'h1_ffff_ffff_ffff_ffff come before 5, and a signed bit [127:0] index of -1 orders as 2^128-1 between 0 and 5",
       "standard": "IEEE 1800-2023 7.8.4"
+    },
+    "sv_pattern_structure_item_strings": {
+      "title": "An unpacked structure value with string members used as an item of a structure assignment pattern stores both members' text, padded, in each string member: '{a, \"first\"} with a = '{\"*\", \"agent\"} gives name and regex \"*<spaces>agent\"",
+      "standard": "IEEE 1800-2023 10.9.2"
+    },
+    "sv_pattern_structure_members": {
+      "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
+      "standard": "IEEE 1800-2023 21.2.1.6"
     }
   },
   "cases": [
@@ -4863,6 +4871,22 @@
       "classification": "xezim_bug",
       "bug": "sv_pattern_handles_and_literals",
       "note": "xezim 0.11.3 prints '{0, 0} for a queue of two null class handles 7104884 for the string literal \"lit\", and the packed bytes of a string-valued conditional (7566450 for \"str\"); 21.2.1.6 prints a null handle as null and a string literal in quotes. It also prints the bit [7:0] elements of an associative array as 'h41 and 'h0, where unformatted $display prints decimal. See verification/sv/limitations/pattern-format.json."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::pattern_format_structure_containers",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_pattern_structure_item_strings",
+      "note": "by_name[\"b\"] = '{a, \"first\"} stores \"*\" and \"agent\" padded together in both name and regex, so %p of by_name prints them in each; the other patterns print as expected."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::pattern_format_structure_values",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_pattern_structure_members",
+      "note": "%p prints the bit [7:0] members in hexadecimal ('hff, 'h0), the null handle members of the associative array elements as 0, and m[5].n as 0 instead of '{a:1, b:2}."
     },
     {
       "suite": "sv",

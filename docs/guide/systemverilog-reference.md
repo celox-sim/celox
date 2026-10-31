@@ -1395,8 +1395,14 @@ the file output and the severity tasks, prints an integral value as `%0d`
 does, a real as an unformatted real, a string or string literal in quotes, a
 class handle as `null` or `@` and its handle, and a queue, dynamic array or
 associative array of such elements as an assignment pattern, `'{1, 2}` or
-`'{"key":1}` (IEEE 1800-2023 21.2.1.6). `%p` of enums, structures, unpacked
-arrays and containers of them is rejected. A `%p` of a format read at run time
+`'{"key":1}` (IEEE 1800-2023 21.2.1.6). An unpacked structure variable,
+member or class property prints as an assignment pattern with named members,
+`'{name:"a", n:1}`, nested for structure members, and so does each element of
+a queue, dynamic array or associative array of unpacked structures,
+`'{1:'{name:"a", n:1}}`, in a procedural body. `%p` of enums, packed
+structures, fixed-size unpacked arrays, structures with enum or real members,
+other structure values (such as function results) and containers of other
+aggregates is rejected. A `%p` of a format read at run time
 prints a string in quotes and any other value as `%0d`.
 
 Each call with conversions is a host request of a timed `Simulation`, like the

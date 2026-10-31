@@ -3,8 +3,8 @@
 //! element after the operands before it and only when the call is reached.
 use super::*;
 use sv::ir::{
-    BinaryOp, Callee, ContainerKind, ContainerLayout, ContainerOp, Expr, LValue, Locator,
-    LocatorKey, LocatorMethod, LocatorSource, LoopKind, ObjectOp, Stmt, UnaryOp,
+    AggregatePattern, BinaryOp, Callee, ContainerKind, ContainerLayout, ContainerOp, Expr, LValue,
+    Locator, LocatorKey, LocatorMethod, LocatorSource, LoopKind, ObjectOp, Stmt, UnaryOp,
 };
 
 fn container(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {
@@ -255,13 +255,48 @@ impl Ff<'_, '_> {
                 }
             }
         }
-        let backward = method.last();
+        let (element, init, condition, step, last) =
+            self.traversal(locator.source, array, index, method.last(), &mut stmts);
+        body.insert(0, local(item, Some(element)));
+        body.extend(last);
+        stmts.push(Stmt::Loop {
+            kind: LoopKind::For,
+            init,
+            condition: Some(condition),
+            step,
+            body,
+        });
+        stmts.extend(after);
+        if !self.exec_block(&stmts)? {
+            return Err(unsupported("array locator method that does not complete"));
+        }
+        Ok(ident(&result))
+    }
+
+    /// The loop that visits the elements of the array of a locator call or
+    /// an [`AggregatePattern`] in order, or backward from the last: the
+    /// element at the index local, the loop's initialization, condition and
+    /// step, and a statement that ends the visit of a fixed-size array after
+    /// its last element. A container is first copied into a temporary.
+    fn traversal(
+        &mut self,
+        source: LocatorSource,
+        array: &Expr,
+        index: &str,
+        backward: bool,
+        stmts: &mut Vec<Stmt>,
+    ) -> (Expr, Vec<Stmt>, Expr, Vec<Stmt>, Option<Stmt>) {
         let mut last = None;
-        let (element, init, condition, step) = match locator.source {
+        let (element, init, condition, step) = match source {
             LocatorSource::Container(layout) => {
                 // Contents are immutable: the loop reads the array as the
                 // call found it.
-                let source = handle(self, "locator_array");
+                let source = {
+                    let (id, name) = self.m.temp("locator_array", 32, false, false);
+                    self.m.variables.get_mut(&id).unwrap().value_kind =
+                        celox_design::ValueKind::ObjRef;
+                    name
+                };
                 stmts.push(local(&source, Some(array.clone())));
                 let element =
                     container(ContainerOp::Get, layout, vec![ident(&source), ident(index)]);
@@ -334,7 +369,44 @@ impl Ff<'_, '_> {
                 )
             }
         };
-        body.insert(0, local(item, Some(element)));
+        (element, init, condition, step, last)
+    }
+
+    /// The `%p` text of a container of unpacked structures, see
+    /// [`AggregatePattern`]. The arguments are the array, the element, index
+    /// and text locals, and the texts that start the pattern, append the
+    /// first and each later element, and finish it.
+    pub(super) fn aggregate_pattern(
+        &mut self,
+        pattern: AggregatePattern,
+        args: &[Option<Expr>],
+    ) -> Result<Expr, sv::AnalyzerError> {
+        let [
+            Some(array),
+            Some(Expr::Ident(item)),
+            Some(Expr::Ident(index)),
+            Some(Expr::Ident(text)),
+            Some(start),
+            Some(first),
+            Some(next),
+            Some(finish),
+        ] = args
+        else {
+            return Err(unsupported("invalid %p of a container of structures"));
+        };
+        let mut stmts = vec![local(text, Some(start.clone()))];
+        let (_, empty) = self.m.temp("pattern_empty", 1, false, false);
+        stmts.push(local(&empty, Some(literal("1'b1"))));
+        let (element, init, condition, step, last) =
+            self.traversal(pattern.source, array, index, false, &mut stmts);
+        let mut body = vec![
+            local(item, Some(element)),
+            Stmt::If {
+                condition: ident(&empty),
+                then_body: vec![assign(text, first.clone()), assign(&empty, literal("1'b0"))],
+                else_body: vec![assign(text, next.clone())],
+            },
+        ];
         body.extend(last);
         stmts.push(Stmt::Loop {
             kind: LoopKind::For,
@@ -343,11 +415,11 @@ impl Ff<'_, '_> {
             step,
             body,
         });
-        stmts.extend(after);
+        stmts.push(assign(text, finish.clone()));
         if !self.exec_block(&stmts)? {
-            return Err(unsupported("array locator method that does not complete"));
+            return Err(unsupported("%p of a container that does not complete"));
         }
-        Ok(ident(&result))
+        Ok(ident(text))
     }
 
     /// A temporary for a value of the `with` expression of `min`, `max` or
