@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793454760414,
+  "lastUpdate": 1793455336300,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -425293,6 +425293,37 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-veryl-cc-aarch64/heliodor_suite_66_linux_boot_execution",
             "unit": "ms",
             "value": 180245.982442
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "7e0eb5b7cad00e8e2156be7ea1d9721e193d58eb",
+          "message": "feat(sv): support increment and decrement in expressions (#2541)",
+          "timestamp": "2026-10-29T08:15:21Z",
+          "url": "https://github.com/celox-sim/celox/commit/7e0eb5b7cad00e8e2156be7ea1d9721e193d58eb"
+        },
+        "date": 1793455336300,
+        "cpu": "Neoverse-N2",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-native-aarch64/heliodor_suite_66_linux_boot_compilation",
+            "unit": "ms",
+            "value": 62493.729094
+          },
+          {
+            "name": "heliodor-native-aarch64/heliodor_suite_66_linux_boot_execution",
+            "unit": "ms",
+            "value": 500839.783863
           }
         ]
       }
