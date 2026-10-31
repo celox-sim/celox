@@ -257,6 +257,16 @@ length, payload and checksum as they were packed, greedily and with
 `with [0 +: o_len]`. Full official runs at the pinned revision report 1297
 passing cases in 2state and 1308 in 4state, and change only these 6 verdicts.
 
+Repeated identical literal drivers on resolved nets (6.6.1, 10.3.1) update
+46 rows in `generated/equality_operators_sim`: all 26 cases now pass in 4state
+and 20 pass in 2state. These cases declare a wire with an initializer and drive
+it again with the same literal in an `assign`; their comparisons were previously
+blocked by the multiple-driver diagnostic. A focused official simulation run
+checked all 52 case/mode combinations. Six 2state cases remain failures because
+their expected comparisons depend on retaining X/Z values in the nets. This
+change does not implement general resolution of differing or dynamic drivers,
+and does not coalesce `uwire` or variable drivers.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
