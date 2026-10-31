@@ -604,6 +604,28 @@ unsafe extern "C" fn record_callback(data: *mut VpiCbData) -> i32 {
         }
         CB_AFTER_DELAY => {
             assert_eq!(celox_vpi_current_time(), 5);
+            std::thread::spawn(|| {
+                // Bridge threads may read the clock without gaining access to
+                // the owner's simulation or RefCell-backed callback state.
+                assert_eq!(celox_vpi_current_time(), 5);
+                for type_ in [VPI_SIM_TIME, VPI_SCALED_REAL_TIME] {
+                    let mut time = VpiTime {
+                        type_,
+                        ..VpiTime::default()
+                    };
+                    unsafe { vpi_get_time(ptr::null_mut(), &mut time) };
+                    if type_ == VPI_SIM_TIME {
+                        assert_eq!((time.high, time.low), (0, 5));
+                    } else {
+                        assert_eq!(time.real, 5.0);
+                    }
+                }
+                assert!(
+                    unsafe { vpi_handle_by_name(c"Top.a".as_ptr(), ptr::null_mut()) }.is_null()
+                );
+            })
+            .join()
+            .unwrap();
             // Safety: this callback was registered with live time storage.
             let delivered = unsafe { &*(*data).time };
             assert_eq!(delivered.type_, VPI_SCALED_REAL_TIME);

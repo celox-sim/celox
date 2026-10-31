@@ -408,4 +408,7 @@ supported. Callbacks cover Start, ReadWrite, ReadOnly, NextTimeStep, Timer,
 ValueChange, and End regions.
 
 The [upstream regression runner](https://github.com/celox-sim/celox/tree/master/conformance/cocotb) runs pinned,
-unmodified cocotb tests against the generated executable.
+unmodified cocotb tests against the generated executable. Its default 23
+configurations pass 534 tests with 5 upstream skips, including bridge-thread
+clock reads, force/release and both inertial-write modes. An inventory records
+the remaining upstream groups and their unresolved requirements.
