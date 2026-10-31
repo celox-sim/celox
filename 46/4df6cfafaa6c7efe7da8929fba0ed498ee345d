@@ -1,0 +1,7 @@
+Revision history for #2658:
+
+rev 3 (content) 2026-10-31 06:50 UTC — Rebased onto master after #2672 merged: bind_class_signatures now passes #2672's ClassScopes through class_signatures, including in the retry loop; tests from both PRs are kept.
+rev 2 (content) 2026-10-30 16:00 UTC
+rev 1 (initial) 2026-10-30 16:00 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2658,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"a21efa38df8ad418bad482539bf947a982ec5377","timestamp_iso":"2026-10-30T16:00:40Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"a21efa38df8ad418bad482539bf947a982ec5377","new_sha":"84e3957994e6c1b2a1abc4f85562658fbb663b55","timestamp_iso":"2026-10-30T16:00:40Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/a21efa38df8ad418bad482539bf947a982ec5377...84e3957994e6c1b2a1abc4f85562658fbb663b55"},{"number":3,"change_type":"content","old_sha":"ef05adb4b305d528e26ad1a647f2dbe5b1c51dd2","new_sha":"0ab8f0654a92ad69443985e06600543fe58f7ea3","timestamp_iso":"2026-10-31T06:50:35Z","reason":"Rebased onto master after #2672 merged: bind_class_signatures now passes #2672's ClassScopes through class_signatures, including in the retry loop; tests from both PRs are kept.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ef05adb4b305d528e26ad1a647f2dbe5b1c51dd2...0ab8f0654a92ad69443985e06600543fe58f7ea3"}]} -->
