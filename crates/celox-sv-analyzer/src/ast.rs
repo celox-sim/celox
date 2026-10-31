@@ -24,16 +24,10 @@ pub(super) struct AnalysisState {
     foreign_arguments: RefCell<Vec<(String, classes::specializations::BoundArguments)>>,
     foreign_names: RefCell<Vec<(String, classes::specializations::BoundArguments, String)>>,
     foreign_error: RefCell<Option<AnalyzerError>>,
-    interfaces: interface_ast::State,
     dimensions: dimensions::State,
-    root_subroutines: std::cell::Cell<bool>,
     inline_randomizations: RefCell<Vec<classes::constraints::Inline>>,
     next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
-    timescales: timescales::State,
     diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
-    /// Revision of the imported scope, the analyzed package, the active
-    /// interface instances and the root-subroutine mode.
-    revision: generate::Revision,
     generate_items: generate::Memo,
     /// Classes laid out so far, by name.
     classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
@@ -85,6 +79,16 @@ pub(crate) struct AnalysisContext<'a> {
     /// The constant functions that calls in constant expressions of the
     /// scope call (IEEE 1800-2023 13.4.3).
     pub(crate) functions: const_functions::ConstantFunctions,
+    /// Whether generate scopes elaborate only their items, and their
+    /// subroutines are collected later.
+    root_subroutines: bool,
+    /// The interface instances being analyzed, outermost first.
+    active_interfaces: Arc<Vec<interface_ast::ActiveInstance>>,
+    /// The time scopes that time queries of the scope read (IEEE 1800-2023
+    /// 3.14.2).
+    timescale: Arc<timescales::QueryContext>,
+    /// The hierarchical path of the interface instance being analyzed.
+    interface_instance: Option<Arc<str>>,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -100,6 +104,10 @@ impl<'a> AnalysisContext<'a> {
             imported: Arc::default(),
             package: None,
             functions: const_functions::ConstantFunctions::default(),
+            root_subroutines: false,
+            active_interfaces: Arc::default(),
+            timescale: Arc::default(),
+            interface_instance: None,
         }
     }
 
@@ -111,6 +119,10 @@ impl<'a> AnalysisContext<'a> {
             imported: Arc::default(),
             package: None,
             functions: const_functions::ConstantFunctions::default(),
+            root_subroutines: false,
+            active_interfaces: Arc::default(),
+            timescale: Arc::default(),
+            interface_instance: None,
         }
     }
 
@@ -128,6 +140,10 @@ impl<'a> AnalysisContext<'a> {
             imported: Arc::default(),
             package: None,
             functions: const_functions::ConstantFunctions::default(),
+            root_subroutines: false,
+            active_interfaces: Arc::default(),
+            timescale: Arc::default(),
+            interface_instance: None,
         }
     }
 
@@ -143,6 +159,10 @@ impl<'a> AnalysisContext<'a> {
             imported: self.imported.clone(),
             package: self.package.clone(),
             functions: self.functions.clone(),
+            root_subroutines: self.root_subroutines,
+            active_interfaces: self.active_interfaces.clone(),
+            timescale: self.timescale.clone(),
+            interface_instance: self.interface_instance.clone(),
         }
     }
 
@@ -394,15 +414,15 @@ impl Source {
             .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
-        let _timescales = timescales::install_for_tree(
-            &syntax_tree.state.timescales,
-            packages.timescales.clone(),
-            syntax_tree,
-        )?;
+        let timed = AnalysisContext {
+            timescale: timescales::for_tree(packages.timescales.clone(), syntax_tree)?,
+            ..syntax_tree.clone()
+        };
+        let syntax_tree = &timed;
         let mut modules = Vec::new();
         for handle in syntax_tree.root_scopes()? {
             let scoped = syntax_tree.scoped(handle)?;
-            let scoped_context = context.child(&scoped, &parameter_overrides);
+            let scoped_context = timed.child(&scoped, &parameter_overrides);
             let syntax_tree = &scoped_context;
             let unit = syntax_tree.root_unit()?;
             if !unit.kind.is_module_like() {
@@ -504,11 +524,10 @@ impl Source {
     ) -> Result<Self, AnalyzerError> {
         let context = AnalysisContext::with_packages(syntax_tree, packages);
         let syntax_tree = &context;
-        let _timescales = timescales::install_for_tree(
-            &syntax_tree.state.timescales,
-            packages.timescales.clone(),
-            syntax_tree,
-        )?;
+        let timed = AnalysisContext {
+            timescale: timescales::for_tree(packages.timescales.clone(), syntax_tree)?,
+            ..syntax_tree.clone()
+        };
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
             extra: extra_interfaces,
@@ -517,7 +536,7 @@ impl Source {
         let interface_plan = packages.interface_plan.modules.get(module_name);
         let original_name = interface_plan.map_or(module_name, |plan| plan.original.as_str());
         for scope_tree in index.scopes(original_name) {
-            let scope_context = context.child(scope_tree, bindings.values);
+            let scope_context = timed.child(scope_tree, bindings.values);
             let syntax_tree = &scope_context;
             match syntax_tree.root_unit()?.port_style {
                 celox_sv_syntax::PortStyle::Ansi => {

@@ -32,7 +32,7 @@ pub(super) fn bind(
         "xor" => ContainerOp::ReduceXor,
         _ => return Ok(None),
     };
-    if timescales::analysis_options(&tree.state.timescales).legacy_empty_reductions {
+    if timescales::analysis_options(tree).legacy_empty_reductions {
         op = match op {
             ContainerOp::ReduceProduct => ContainerOp::LegacyReduceProduct,
             ContainerOp::ReduceAnd => ContainerOp::LegacyReduceAnd,

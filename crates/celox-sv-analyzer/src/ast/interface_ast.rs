@@ -1,27 +1,12 @@
 //! Native interface scope analysis and public type contracts.
 use super::*;
 
-type ActiveInstance = (
+pub(super) type ActiveInstance = (
     std::path::PathBuf,
     String,
     HashMap<String, ConstExpr>,
     Vec<(String, Type)>,
 );
-#[derive(Default)]
-pub(super) struct State {
-    active_instances: RefCell<Vec<ActiveInstance>>,
-}
-struct InstanceGuard {
-    state: std::rc::Rc<AnalysisState>,
-    revision: u64,
-}
-impl Drop for InstanceGuard {
-    fn drop(&mut self) {
-        self.state.interfaces.active_instances.borrow_mut().pop();
-        self.state.revision.restore(self.revision);
-    }
-}
-
 /// Analyze the original interface body and retain its symbols for the scope
 /// that instantiates it. The structural view borrows every token's original
 /// source location, including the lexical time scope of processes/functions.
@@ -44,24 +29,25 @@ pub(super) fn analyze(
         overrides.clone(),
         types.to_vec(),
     );
-    {
-        let mut instances = tree.state.interfaces.active_instances.borrow_mut();
-        if instances.len() >= 64 {
-            return Err(unsupported("interface instance nesting exceeds 64 levels"));
-        }
-        if instances.contains(&instance) {
-            return Err(unsupported(format!(
-                "recursive interface instantiation `{name}`"
-            )));
-        }
-        instances.push(instance);
+    if tree.active_interfaces.len() >= 64 {
+        return Err(unsupported("interface instance nesting exceeds 64 levels"));
     }
-    let _instance = InstanceGuard {
-        state: tree.state.clone(),
-        revision: tree.state.revision.change(),
+    if tree.active_interfaces.contains(&instance) {
+        return Err(unsupported(format!(
+            "recursive interface instantiation `{name}`"
+        )));
+    }
+    let mut active = (*tree.active_interfaces).clone();
+    active.push(instance);
+    let tree = &AnalysisContext {
+        active_interfaces: Arc::new(active),
+        ..tree.clone()
     };
-    let _timescales =
-        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
+    let timed = AnalysisContext {
+        timescale: timescales::for_tree(packages.timescales.clone(), tree)?,
+        ..tree.clone()
+    };
+    let tree = &timed;
     let lookup = InterfaceLookup {
         local: interfaces,
         extra: &ModuleInterfaces::default(),
@@ -114,8 +100,11 @@ pub(super) fn signature(
     let context = AnalysisContext::unspecialized(&projected_tree);
     let tree = &context;
     let imported = imports::imported_symbols(tree, packages, packages.unit(path))?;
-    let _timescales =
-        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
+    let timed = AnalysisContext {
+        timescale: timescales::for_tree(packages.timescales.clone(), tree)?,
+        ..tree.clone()
+    };
+    let tree = &timed;
     let empty = ModuleInterfaces::default();
     let interfaces = InterfaceLookup {
         local: &empty,

@@ -319,11 +319,14 @@ impl Registry {
             parameter_overrides: Cow::Owned(HashMap::default()),
             imported: Arc::default(),
             functions: const_functions::ConstantFunctions::default(),
+            root_subroutines: false,
+            active_interfaces: Arc::default(),
             // Inside the package, `p::x` names its own item `x`.
             package: Some(name.into()),
+            timescale: timescales::for_tree(owner.timescales.clone(), &owner.tree)?,
+            interface_instance: None,
         };
-        let _timescales =
-            timescales::install_for_tree(&state.timescales, owner.timescales.clone(), &owner.tree)?;
+
         let mut imports = owner.imports.clone();
         if let Some(caller) = caller {
             // Preserve the owner's existing bindings when caller metadata also

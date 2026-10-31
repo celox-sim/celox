@@ -7,7 +7,7 @@ use super::*;
 use celox_sv_syntax::ExprId;
 mod elaboration;
 mod memo;
-pub(super) use memo::{CallSites, Revision, memoize};
+pub(super) use memo::{CallSites, memoize};
 
 mod dependency_order;
 use dependency_order::DependencyOrder;
@@ -17,35 +17,6 @@ pub(super) use scope_views::ScopeViews;
 // Temporary identifiers protect definition-site bindings while functions are
 // inlined into a generate scope. They are removed when that item's names are
 // qualified, and never reach the public analyzer IR.
-pub(super) fn root_subroutines_only(state: &AnalysisState) -> bool {
-    state.root_subroutines.get()
-}
-
-/// Seed module functions before conditions need to call them. The full pass
-/// still selects generate scopes and reports every generate diagnostic.
-pub(super) fn with_root_subroutines<T>(
-    state: &std::rc::Rc<AnalysisState>,
-    f: impl FnOnce() -> T,
-) -> T {
-    struct Restore {
-        state: std::rc::Rc<AnalysisState>,
-        previous: bool,
-        revision: u64,
-    }
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            self.state.root_subroutines.set(self.previous);
-            self.state.revision.restore(self.revision);
-        }
-    }
-    let _restore = Restore {
-        state: state.clone(),
-        revision: state.revision.change(),
-        previous: state.root_subroutines.replace(true),
-    };
-    f()
-}
-
 const OUTER_BINDING: &str = "\0generate_outer:";
 
 // Whitespace terminates an escaped identifier (IEEE 1800-2023 5.6.1).
@@ -610,7 +581,7 @@ pub(super) fn subroutine_items(
         tree,
         env,
         aliases,
-        if root_subroutines_only(&tree.state) {
+        if tree.root_subroutines {
             LiteralUse::RootSubroutines
         } else {
             LiteralUse::Subroutines

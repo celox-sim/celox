@@ -2,43 +2,17 @@
 //!
 //! The collectors of a module each ask for the active items of the same
 //! scope. A window opened for the module keeps each elaboration, keyed by its
-//! arguments, the imports, package and constant functions of its context,
-//! and the revisions of
-//! the analysis state that elaboration reads (active interface instances,
-//! time scopes), so a change of that state makes
-//! earlier results unreachable.
+//! arguments and by the parts of its context that elaboration reads: the
+//! imports, package, constant functions, active interface instances and time
+//! scopes, so a change of any of them makes earlier results unreachable.
 //! A repeated elaboration allocates as many call sites as the first one did,
 //! so later calls keep their sites.
 use super::*;
+#[cfg(test)]
 use std::cell::Cell;
 
 mod sites;
 pub(in crate::ast) use sites::CallSites;
-
-/// Names a value of analysis state that elaboration reads. Each change gives
-/// a new revision; a guard that restores the previous value restores its
-/// revision too, so equal revisions mean equal state.
-#[derive(Default)]
-pub(in crate::ast) struct Revision {
-    current: Cell<u64>,
-    last: Cell<u64>,
-}
-
-impl Revision {
-    /// Record a change, returning the revision to restore with the value.
-    pub(in crate::ast) fn change(&self) -> u64 {
-        self.last.set(self.last.get() + 1);
-        self.current.replace(self.last.get())
-    }
-
-    pub(in crate::ast) fn restore(&self, previous: u64) {
-        self.current.set(previous);
-    }
-
-    pub(in crate::ast) fn get(&self) -> u64 {
-        self.current.get()
-    }
-}
 
 #[derive(Default)]
 pub(in crate::ast) struct State(RefCell<Option<Window>>);
@@ -50,11 +24,13 @@ struct Window {
 }
 
 struct Entry {
-    revisions: [u64; 2],
     /// The symbols the scope imported and the package it was in.
     imported: Arc<scope::ScopeSymbols>,
     package: Option<Arc<str>>,
     functions: const_functions::ConstantFunctions,
+    active_interfaces: Arc<Vec<interface_ast::ActiveInstance>>,
+    timescale: Arc<timescales::QueryContext>,
+    interface_instance: Option<Arc<str>>,
     literal_use: LiteralUse,
     overrides: HashMap<String, ConstExpr>,
     env: HashMap<String, i128>,
@@ -96,13 +72,6 @@ fn address(tree: &SyntaxTree) -> usize {
     tree as *const SyntaxTree as usize
 }
 
-fn revisions(state: &AnalysisState) -> [u64; 2] {
-    [
-        state.revision.get(),
-        timescales::revision(&state.timescales).get(),
-    ]
-}
-
 /// The items `elaborate` gives for these arguments, elaborated once per window.
 pub(super) fn items(
     tree: &AnalysisContext<'_>,
@@ -128,12 +97,13 @@ pub(super) fn items(
             drop(window);
             return elaborate();
         };
-        let current = revisions(state);
         if let Some(entry) = window.entries.iter().find(|entry| {
-            entry.revisions == current
-                && Arc::ptr_eq(&entry.imported, &tree.imported)
+            Arc::ptr_eq(&entry.imported, &tree.imported)
                 && entry.package == tree.package
                 && entry.functions.same(&tree.functions)
+                && Arc::ptr_eq(&entry.active_interfaces, &tree.active_interfaces)
+                && Arc::ptr_eq(&entry.timescale, &tree.timescale)
+                && entry.interface_instance == tree.interface_instance
                 && entry.literal_use == literal_use
                 && entry.overrides == *tree.parameter_overrides
                 && entry.env == *env
@@ -145,12 +115,7 @@ pub(super) fn items(
         }
     }
     let first_site = state.next_call_site.get();
-    let current = revisions(state);
     let items = elaborate()?;
-    // Elaboration that leaves the state changed is not repeatable.
-    if revisions(state) != current {
-        return Ok(items);
-    }
     let sites = first_site..state.next_call_site.get();
     // Effectful calls the items retain must get new sites when they are
     // elaborated again.
@@ -160,10 +125,12 @@ pub(super) fn items(
     let mut window = state.generate_items.0.borrow_mut();
     if let Some(window) = window.as_mut().filter(|window| applies(window)) {
         window.entries.push(Entry {
-            revisions: current,
             imported: tree.imported.clone(),
             package: tree.package.clone(),
             functions: tree.functions.clone(),
+            active_interfaces: tree.active_interfaces.clone(),
+            timescale: tree.timescale.clone(),
+            interface_instance: tree.interface_instance.clone(),
             literal_use,
             overrides: tree.parameter_overrides.clone().into_owned(),
             env: env.clone(),
