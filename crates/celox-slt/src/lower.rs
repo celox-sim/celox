@@ -29,7 +29,6 @@ use celox_sir::{
 };
 use num_bigint::{BigInt, BigUint};
 use num_traits::{ToPrimitive, Zero};
-use std::cell::RefCell;
 use std::hash::Hash;
 
 /// The `(value, wildcard mask, width)` of a `==?` pattern that is a constant,
@@ -357,11 +356,11 @@ impl MuxLowerStats {
 pub struct SLTToSIRLowerer {
     four_state: bool,
     unpacked_input_element_widths: crate::HashMap<NodeId, usize>,
-    cost_cache: RefCell<LoweringCostCache>,
-    cache_insert_log: RefCell<Vec<NodeId>>,
-    region_slice_cache: RefCell<crate::HashMap<(NodeId, BitAccess), RegisterId>>,
-    region_slice_cache_insert_log: RefCell<Vec<(NodeId, BitAccess)>>,
-    mux_stats: Option<RefCell<MuxLowerStats>>,
+    cost_cache: LoweringCostCache,
+    cache_insert_log: Vec<NodeId>,
+    region_slice_cache: crate::HashMap<(NodeId, BitAccess), RegisterId>,
+    region_slice_cache_insert_log: Vec<(NodeId, BitAccess)>,
+    mux_stats: Option<MuxLowerStats>,
 }
 
 #[derive(Clone, Copy)]
@@ -438,12 +437,11 @@ impl SLTToSIRLowerer {
         Self {
             four_state,
             unpacked_input_element_widths: crate::HashMap::default(),
-            cost_cache: RefCell::new(LoweringCostCache::default()),
-            cache_insert_log: RefCell::new(Vec::new()),
-            region_slice_cache: RefCell::new(crate::HashMap::default()),
-            region_slice_cache_insert_log: RefCell::new(Vec::new()),
-            mux_stats: tracing::enabled!(tracing::Level::DEBUG)
-                .then(|| RefCell::new(MuxLowerStats::default())),
+            cost_cache: LoweringCostCache::default(),
+            cache_insert_log: Vec::new(),
+            region_slice_cache: crate::HashMap::default(),
+            region_slice_cache_insert_log: Vec::new(),
+            mux_stats: tracing::enabled!(tracing::Level::DEBUG).then(MuxLowerStats::default),
         }
     }
 
@@ -465,15 +463,15 @@ impl SLTToSIRLowerer {
     }
 
     #[inline(always)]
-    fn with_mux_stats(&self, update: impl FnOnce(&mut MuxLowerStats)) {
-        if let Some(stats) = &self.mux_stats {
-            update(&mut stats.borrow_mut());
+    fn with_mux_stats(&mut self, update: impl FnOnce(&mut MuxLowerStats)) {
+        if let Some(stats) = &mut self.mux_stats {
+            update(stats);
         }
     }
 
     /// Expand SLT nodes into SIR instructions.
     pub fn lower<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         arena: &SLTNodeArena<A>,
@@ -484,7 +482,7 @@ impl SLTToSIRLowerer {
     }
 
     pub fn lower_with_inputs<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         arena: &SLTNodeArena<A>,
@@ -617,7 +615,7 @@ impl SLTToSIRLowerer {
     }
 
     fn lower_leaf<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         arena: &SLTNodeArena<A>,
@@ -788,7 +786,6 @@ impl Drop for SLTToSIRLowerer {
         let Some(stats) = &self.mux_stats else {
             return;
         };
-        let stats = stats.borrow();
         tracing::debug!(
             "[mux-lower-stats] normal_seen={} slice_seen={} constant_folded={} cfg_cost={} cfg_div_rem={} cfg_slice_cost={} cfg_slice_div_rem={} shared_nodes_hoisted={} kept_four_state={} kept_impure={} kept_dynamic_env={} kept_unprofitable={} kept_deep_shared={} biased_conditions={} owned_cost_sum={} owned_cost_max={} unprofitable_buckets_0_7_15_31_63_127_255_inf={:?}",
             stats.normal_seen,

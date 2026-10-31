@@ -459,7 +459,7 @@ fn cached_popcount_accumulator_only_lowers_new_increment() {
 
     let mut builder = SIRBuilder::new();
     let mut cache = crate::HashMap::default();
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     let base_reg = lowerer.lower(&mut builder, base, &arena, &mut cache);
     let root_reg = lowerer.lower(&mut builder, root, &arena, &mut cache);
     let eu = finish_lowering(builder);
@@ -531,7 +531,7 @@ fn cached_additive_popcount_accumulator_only_lowers_new_bit() {
 
     let mut builder = SIRBuilder::new();
     let mut cache = crate::HashMap::default();
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     let base_reg = lowerer.lower(&mut builder, base, &arena, &mut cache);
     let root_reg = lowerer.lower(&mut builder, root, &arena, &mut cache);
     let eu = finish_lowering(builder);
@@ -595,7 +595,7 @@ fn cached_popcount_delta_preserves_wrapping_semantics() {
 
     let mut builder = SIRBuilder::new();
     let mut cache = crate::HashMap::default();
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     lowerer.lower(&mut builder, base, &arena, &mut cache);
     let result = lowerer.lower(&mut builder, root, &arena, &mut cache);
     let eu = finish_lowering(builder);
@@ -674,7 +674,7 @@ fn cached_accumulator_is_not_reused_for_non_unit_update() {
 
     let mut builder = SIRBuilder::new();
     let mut cache = crate::HashMap::default();
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     lowerer.lower(&mut builder, base, &arena, &mut cache);
     lowerer.lower(&mut builder, root, &arena, &mut cache);
     let eu = finish_lowering(builder);
@@ -809,7 +809,8 @@ fn compacted_unpacked_input_preserves_packed_elements_provenance() {
         })
         .unwrap();
     let element_widths = crate::HashMap::from_iter([(variable, 1)]);
-    let lowerer = SLTToSIRLowerer::new(false).with_unpacked_input_types(&arena, &element_widths);
+    let mut lowerer =
+        SLTToSIRLowerer::new(false).with_unpacked_input_types(&arena, &element_widths);
     let mut builder = SIRBuilder::new();
     lowerer.lower_slt_vector_expr(
         &mut builder,

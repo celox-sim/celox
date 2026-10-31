@@ -123,7 +123,7 @@ fn static_input_slice_preserves_a_cached_snapshot() {
         })
         .unwrap();
 
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     let mut builder = SIRBuilder::new();
     let mut cache = crate::HashMap::default();
     let snapshot = lowerer.lower(&mut builder, packed, &arena, &mut cache);

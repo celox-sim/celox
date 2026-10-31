@@ -209,7 +209,7 @@ fn unsigned_target_bound_zero_extends_signed_slice_without_losing_state_kind() {
         .unwrap();
     let mut builder = SIRBuilder::<u32>::new();
     let mut cache = crate::HashMap::default();
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     let reg = lowerer.lower_bound(
         &mut builder,
         &SLTLoopBound::Expr(casted),
