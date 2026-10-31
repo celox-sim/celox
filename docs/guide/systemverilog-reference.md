@@ -483,7 +483,9 @@ Traversal leaves its index unchanged when no key is found. A container
 declared with several dynamic dimensions, `T m[a][b]`, holds containers as
 elements: `m[a][b] = v` updates the inner container of `m[a]`, which reads as
 empty when absent, and methods apply to an element (`m[a].exists(b)`).
-`foreach` iterates one dimension at a time.
+`foreach (m[a, b])` iterates each dimension with its loop variable, the
+first the outermost, an associative array in index order; a skipped
+variable (`m[, b]`) still iterates its dimension (12.7.3).
 
 A dynamic array, queue or associative array formal of any direction holds a
 copy unless it is a [reference](#reference-arguments) (IEEE 1800-2023 13.5.1).

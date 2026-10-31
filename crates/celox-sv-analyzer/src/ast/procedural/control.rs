@@ -839,8 +839,12 @@ impl BodyBuilder<'_, '_, '_> {
                 }
                 Job::Foreach { loops, start } => {
                     let body = output.split_off(start);
+                    // A `break` leaves the whole foreach, not only the loop
+                    // of its innermost dimension (IEEE 1800-2023 12.8).
+                    let stop = (loops.len() > 1 && breaks(&body))
+                        .then(|| self.declare("$celox_foreach_break", int_type()));
                     self.pop_scope();
-                    output.extend(Self::fold_foreach(loops, body));
+                    output.extend(Self::fold_foreach(loops, body, stop));
                 }
             }
         }
@@ -874,6 +878,71 @@ impl BodyBuilder<'_, '_, '_> {
             })
             .collect()
     }
+}
+
+/// Whether `body` has a `break` of the loop that holds it, outside nested
+/// loops and fork branches.
+fn breaks(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Break => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => breaks(then_body) || breaks(else_body),
+        Stmt::Case { items, default, .. } => {
+            items.iter().any(|item| breaks(&item.body)) || default.as_deref().is_some_and(breaks)
+        }
+        Stmt::WaitImplicit(body) => breaks(body),
+        _ => false,
+    })
+}
+
+/// `body` with each `break` of the loop that holds it, outside nested loops
+/// and fork branches, first setting `stop`.
+pub(super) fn mark_breaks(body: Vec<Stmt>, stop: &str) -> Vec<Stmt> {
+    let mut marked = Vec::with_capacity(body.len());
+    for stmt in body {
+        match stmt {
+            Stmt::Break => {
+                marked.push(Stmt::Assign {
+                    lhs: LValue::Ident(stop.to_owned()),
+                    rhs: Expr::Literal("1".into()),
+                    nonblocking: false,
+                });
+                marked.push(Stmt::Break);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => marked.push(Stmt::If {
+                condition,
+                then_body: mark_breaks(then_body, stop),
+                else_body: mark_breaks(else_body, stop),
+            }),
+            Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => marked.push(Stmt::Case {
+                kind,
+                selector,
+                items: items
+                    .into_iter()
+                    .map(|mut item| {
+                        item.body = mark_breaks(item.body, stop);
+                        item
+                    })
+                    .collect(),
+                default: default.map(|body| mark_breaks(body, stop)),
+            }),
+            Stmt::WaitImplicit(body) => marked.push(Stmt::WaitImplicit(mark_breaks(body, stop))),
+            stmt => marked.push(stmt),
+        }
+    }
+    marked
 }
 
 #[cfg(test)]

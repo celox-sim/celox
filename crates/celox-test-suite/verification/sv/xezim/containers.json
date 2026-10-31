@@ -13,6 +13,28 @@
     },
     {
       "category": "Types",
+      "detail": "containers::multidimensional_foreach_break at 1539:3: expect_output: expected [50, 32, 50, 32, 49, 10], got [48, 32, 50, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "containers::multidimensional_foreach_break",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::nested_container_foreach at 1484:3: expect_output: expected [97, 108, 108, 32, 49, 32, 48, 32, 49, 48, 10, 97, 108, 108, 32, 51, 32, 48, 32, 51, 48, 10, 97, 108, 108, 32, 51, 32, 49, 32, 51, 49, 10, 111, 117, 116, 101, 114, 32, 49, 32, 49, 10, 111, 117, 116, 101, 114, 32, 51, 32, 50, 10, 111, 117, 116, 101, 114, 32, 55, 32, 48, 10, 100, 32, 48, 32, 48, 32, 49, 10, 100, 32, 48, 32, 49, 32, 50, 10, 100, 32, 50, 32, 48, 32, 51, 10, 115, 32, 97, 32, 48, 32, 121, 10, 115, 32, 97, 32, 49, 32, 122, 10, 115, 32, 98, 32, 48, 32, 120, 10, 115, 117, 109, 32, 54, 10], got [97, 108, 108, 32, 49, 32, 120, 32, 49, 48, 10, 97, 108, 108, 32, 51, 32, 120, 32, 51, 48, 10, 97, 108, 108, 32, 55, 32, 120, 32, 48, 10, 111, 117, 116, 101, 114, 32, 49, 32, 49, 10, 111, 117, 116, 101, 114, 32, 51, 32, 50, 10, 111, 117, 116, 101, 114, 32, 55, 32, 48, 10, 115, 32, 97, 32, 48, 32, 121, 10, 115, 32, 97, 32, 49, 32, 122, 10, 115, 32, 98, 32, 48, 32, 120, 10, 115, 117, 109, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "containers::nested_container_foreach",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "containers::nested_containers_and_class_keys at 1007:3: expect_output: expected [49, 32, 48, 32, 49, 10, 50, 32, 49, 32, 50, 32, 49, 10, 50, 32, 48, 10, 102, 105, 114, 115, 116, 32, 97, 10, 107, 101, 121, 32, 97, 10, 107, 101, 121, 32, 98, 10, 48, 32, 55, 10], got [49, 32, 48, 32, 49, 10, 50, 32, 49, 32, 50, 32, 49, 10, 50, 32, 48, 10, 107, 101, 121, 32, 97, 10, 107, 101, 121, 32, 98, 10, 48, 32, 49, 10]",
       "expectation": "Simulation",
       "name": "containers::nested_containers_and_class_keys",
