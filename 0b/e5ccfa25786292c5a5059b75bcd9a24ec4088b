@@ -1,0 +1,1 @@
+Provision pinned PyYAML in general script CI after reproducing review r4433604155 in a clean Python environment.
