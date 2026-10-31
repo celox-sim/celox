@@ -84,13 +84,39 @@ pub(super) fn lvalue_expr_type(
         LValue::Select {
             msb, lsb, signed, ..
         } => {
-            let msb = eval_ast_const_expr(functions, msb, &packed_dimensions.const_env)?;
-            let lsb = eval_ast_const_expr(functions, lsb, &packed_dimensions.const_env)?;
+            let (msb_base, msb) = offset_from_base(functions, msb, packed_dimensions)?;
+            let (lsb_base, lsb) = offset_from_base(functions, lsb, packed_dimensions)?;
+            if msb_base != lsb_base {
+                return None;
+            }
             Some(ExprType {
                 width: usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)?,
                 signed: *signed,
             })
         }
+    }
+}
+
+/// A bound of a selection as a run-time base and a constant offset from it:
+/// the bounds of a constant range in an element selected at run time, such
+/// as `m[i].y`, are the element's position plus constants, so the selection
+/// still has a constant width. A constant bound has no base.
+fn offset_from_base<'e>(
+    functions: &const_functions::ConstantFunctions,
+    bound: &'e ConstExpr,
+    packed_dimensions: &PackedDimensions,
+) -> Option<(Option<&'e ConstExpr>, i128)> {
+    let constant = |expr| eval_ast_const_expr(functions, expr, &packed_dimensions.const_env);
+    if let Some(value) = constant(bound) {
+        return Some((None, value));
+    }
+    match bound {
+        ConstExpr::Binary {
+            left,
+            op: BinaryOp::Add,
+            right,
+        } if let Some(offset) = constant(right) => Some((Some(left), offset)),
+        _ => Some((Some(bound), 0)),
     }
 }
 
@@ -200,8 +226,13 @@ pub(super) fn expr_from_lvalue(
             ..
         }
     ) {
+        // A selection at run-time positions, such as a member of an element
+        // `m[i].b`, has no constant bounds; the conversion keeps its width.
         let Some(r#type) = lvalue_expr_type(&tree.functions, lhs, packed_dimensions) else {
-            return base;
+            return Expr::Unary {
+                op: UnaryOp::ToTwoState,
+                expr: Box::new(base),
+            };
         };
         Expr::Resize {
             expr: Box::new(Expr::Unary {

@@ -988,6 +988,36 @@ sv_backends! {
             }]);
         }
     }
+    /// The file name is a `string` parameter passed down the hierarchy,
+    /// which holds the characters of the name (IEEE 1800-2023 21.4).
+    fn readmem_file_name_from_string_parameter(sim) {
+        @setup {
+            let dir = tempfile::tempdir().unwrap();
+            let hex = dir.path().join("words.hex");
+            std::fs::write(&hex, "12 34 56 78").unwrap();
+            let source = format!(r#"
+                module Memory #(parameter string PATH = "") (input logic [1:0] address, output logic [7:0] word);
+                    logic [7:0] mem [4];
+                    initial if (PATH != "") $readmemh(PATH, mem);
+                    assign word = mem[address];
+                endmodule
+                module Top #(parameter string FILE = "") (input logic [1:0] address, output logic [7:0] word);
+                    Memory #(.PATH(FILE)) memory (.address(address), .word(word));
+                endmodule
+                module Bench(input logic [1:0] address, output logic [7:0] word);
+                    Top #(.FILE("{}")) top (.address(address), .word(word));
+                endmodule
+            "#, hex.display());
+        }
+        @build Simulator::from_sv_sources(vec![(&source, Path::new("readmem_parameter.sv"))], "Bench");
+        let address = sim.signal("address");
+        let word = sim.signal("word");
+        for (index, expected) in [0x12u8, 0x34, 0x56, 0x78].into_iter().enumerate() {
+            sim.set(address, index as u8);
+            assert_eq!(sim.get(word), expected.into());
+        }
+    }
+
     fn readmem_descending_ranges_and_absolute_addresses(sim) {
         @setup {
             let dir = tempfile::tempdir().unwrap();
