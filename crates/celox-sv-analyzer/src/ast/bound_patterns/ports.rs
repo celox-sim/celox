@@ -272,7 +272,9 @@ impl VariableDimensions {
         functions: &const_functions::ConstantFunctions,
         dims: &PackedDimensions,
     ) -> Option<Type> {
-        let mut ty = Type::new(if self.is_2state {
+        let mut ty = Type::new(if self.string {
+            TypeKind::String
+        } else if self.is_2state {
             TypeKind::Bit
         } else {
             TypeKind::Logic

@@ -3922,6 +3922,23 @@ fn lower_module_with_overrides(
     let mut port_order = Vec::new();
     let mut initial_memory_values = Vec::new();
 
+    // Array-valued subroutine slots need to preserve their array shape in
+    // captured arguments and results; keep their existing unsupported boundary.
+    let string_array = |ty: &sv::ir::Type| {
+        ty.kind() == sv::ir::TypeKind::String && !ty.unpacked_ranges().is_empty()
+    };
+    if module.subroutines().iter().any(|routine| {
+        routine.return_type.as_ref().is_some_and(string_array)
+            || routine
+                .params
+                .iter()
+                .any(|param| string_array(&param.r#type))
+    }) {
+        return Err(sv::AnalyzerError::Unsupported(
+            "fixed string arrays in subroutine interfaces".into(),
+        ));
+    }
+
     for port in module.ports() {
         if port.r#type().structure_identity().is_some() {
             continue;
@@ -8101,13 +8118,6 @@ fn signal_type_from_sv(
         sv::ir::TypeKind::Object => celox_design::ValueKind::ObjRef,
         _ => celox_design::ValueKind::Bits,
     };
-    if value_kind == celox_design::ValueKind::StrRef && !array_dims.is_empty() {
-        // Selects of such an array would need to tell element selects from
-        // character selects.
-        return Err(sv::AnalyzerError::Unsupported(
-            "unpacked array of strings".into(),
-        ));
-    }
     Ok(SvSignalType {
         float,
         value_kind,

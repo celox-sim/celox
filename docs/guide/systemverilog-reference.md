@@ -464,6 +464,13 @@ string, and an integral value assigned or cast to a string contributes its
 bytes from the most significant one. A character read as `s[i]` or `s.getc(i)` is a `byte`,
 which is signed (6.16, 6.11): a code above 127 reads as a negative value.
 
+Fixed unpacked arrays of strings support assignment patterns, whole-array and
+subarray copies, indexed reads and assignments, and string methods that do not
+modify the receiver. A full element selection yields a string; a further index
+reads a character. Invalid element indices read as the empty string and writes
+are ignored (7.4.5). Mutating methods and character writes on array elements,
+and array-valued string arguments or return values, remain unsupported.
+
 Not yet supported: `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
 VCD output and the TypeScript API.

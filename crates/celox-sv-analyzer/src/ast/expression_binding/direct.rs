@@ -1423,7 +1423,14 @@ fn bind_value_in(
                         continue;
                     }
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
-                        values.push(selected_value(id, native, tree, session, dimensions)?);
+                        let value = selected_value(id, native, tree, session, dimensions)?;
+                        values.push(
+                            if strings::fixed_array_element(tree, id, native, dimensions) {
+                                strings::call(StringOp::FromHandle, vec![value])
+                            } else {
+                                value
+                            },
+                        );
                         continue;
                     }
                     ExprKind::Pattern { .. } => {

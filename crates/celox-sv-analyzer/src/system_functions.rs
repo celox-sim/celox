@@ -787,6 +787,9 @@ pub enum StringOp {
     /// The text `%p` prints for a class handle, or with a layout for a
     /// container (21.2.1.6).
     Pattern(Option<ContainerLayout>),
+    /// Interpret the bits of a selected fixed string-array element as its
+    /// existing heap handle, without converting or allocating string bytes.
+    FromHandle,
 }
 
 impl StringOp {
@@ -795,6 +798,7 @@ impl StringOp {
         matches!(
             self,
             Self::FromBits
+                | Self::FromHandle
                 | Self::Concat
                 | Self::Replicate
                 | Self::Putc
@@ -852,6 +856,7 @@ impl fmt::Display for StringOp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let name = match self {
             Self::FromBits => "string cast",
+            Self::FromHandle => "string array element",
             Self::Concat => "string concatenation",
             Self::Replicate => "string replication",
             Self::Compare => "compare",

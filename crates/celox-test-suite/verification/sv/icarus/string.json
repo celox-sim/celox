@@ -104,6 +104,167 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 aborts in eval_vec4.c:1359 (draw_eval_vec4: ivl_expr_value must be BOOL or VECTOR) while compiling these continuous assignments to string-array elements. IEEE 1800-2023 10.3.2 permits continuous assignments to variables; Celox, Verilator and Xezim pass the case.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_continuous_elements",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_continuous_string_array_elements",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 aborts in eval_vec4.c:1359 (draw_eval_vec4: ivl_expr_value must be BOOL or VECTOR) while compiling these continuous assignments to string-array elements. IEEE 1800-2023 10.3.2 permits continuous assignments to variables; Celox, Verilator and Xezim pass the case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-array-review-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_dynamic_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_arrays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-arrays-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_invalid_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_arrays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-arrays-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_loops_and_copy",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_arrays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-arrays-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_multidimensional_slices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_arrays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-arrays-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects the array-valued default and replicated row items in this multidimensional string-array assignment pattern with syntax errors. IEEE 1800-2023 10.9.1 permits array-valued subarray items, defaults and whole-dimension replication. Verilator passes the case.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_pattern_rows",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_string_array_row_patterns",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects the array-valued default and replicated row items in this multidimensional string-array assignment pattern with syntax errors. IEEE 1800-2023 10.9.1 permits array-valued subarray items, defaults and whole-dimension replication. Verilator passes the case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-array-review-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_ports_and_local_lifetime",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_arrays",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-arrays-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not implement the string methods getc, putc, compare, icompare, toupper, tolower, substr, atoi/atohex/atooct/atobin and itoa/hextoa/octtoa/bintoa (\"Method getc is not a string method\"), and requires a constant replication count for a string (\"A reference to a net or variable is not allowed in a constant expression\"). IEEE 1800-2023 6.16 defines the methods and 11.4.12.2 permits a non-constant count for a string replication. Verilator passes the cases.",
       "expectation": "Simulation",
       "known_issue": {

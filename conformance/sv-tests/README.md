@@ -429,10 +429,16 @@ state modes for `5.13-builtin-methods-strings`, `6.16--string`, the sixteen
 `11.4.12.2--string_concat_op` and `11.4.12.2--string_repl_op` change from fail
 to pass. Each was simulated and its values checked, not only elaborated. Full
 official runs at the pinned revision report 507 passing cases in 2state and 509
-in 4state. No passing case regresses. The `12.7.3--foreach`, `12.7.4--while` and
-`12.7.5--dowhile` cases keep failing: they use an unpacked array of strings,
-which is rejected because its element and character selects are not yet told
-apart.
+in 4state. No passing case regresses.
+
+Fixed unpacked string arrays additionally update six reviewed expectation rows:
+`12.7.3--foreach`, `12.7.4--while` and `12.7.5--dowhile` pass simulation in both
+state modes. This is a focused official-runner result, not a new full-corpus
+measurement. Shared cases cover assignment patterns, copies and slices,
+multidimensional and invalid indices, character reads, read-only methods,
+module ports, automatic locals across suspension and heap collections. State
+file round trips are also checked. Array-element mutating methods, character
+writes and array-valued string subroutine interfaces remain unsupported.
 
 The real system-function extension updates twenty expectation rows: `$realtime`
 passes elaboration and the nine `20.8` probes for `atan2`, `ceil`, `exp`, `floor`,

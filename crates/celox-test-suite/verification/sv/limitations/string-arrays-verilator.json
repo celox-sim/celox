@@ -1,0 +1,22 @@
+{
+  "schema_version": 3,
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "scope": "Focused fixed-string-array failures retained before the exclusions; passing cases and four-state unsupported cases omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "string::fixed_array_invalid_indices at 57:3: assert_eq outer_empty: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_invalid_indices",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "mismatch": 1
+  }
+}

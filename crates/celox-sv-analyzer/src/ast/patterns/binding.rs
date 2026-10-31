@@ -117,7 +117,6 @@ fn select<'a>(
             declared: type_names::Declared::default(),
             container: None,
             real: false,
-            string: false,
             class: None,
             unpacked: rest.to_vec(),
             ..(*shape).clone()
@@ -421,7 +420,6 @@ pub(in crate::ast) fn bind_native(
                         declared: type_names::Declared::default(),
                         container: None,
                         real: false,
-                        string: false,
                         class: None,
                         unpacked: rest.to_vec(),
                         ..(*shape).clone()
@@ -495,10 +493,11 @@ pub(in crate::ast) fn bind_native(
                         || "assignment pattern member".into(),
                     )?;
                 }
-                if (shape.string || shape.class.is_some()) && !pattern {
+                let scalar_string = shape.string && shape.unpacked.is_empty();
+                if (scalar_string || shape.class.is_some()) && !pattern {
                     let value =
                         expression_binding::bind_value(id, native, tree, session, dims, None)?;
-                    values.push(if shape.string {
+                    values.push(if scalar_string {
                         expression_binding::string_operand(value, dims)
                     } else {
                         value

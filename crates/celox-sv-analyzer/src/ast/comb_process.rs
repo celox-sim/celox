@@ -399,6 +399,19 @@ fn continuous_assignments(
                     dimensions,
                 )?,
             };
+            // A selected string-array element receives text as a heap handle,
+            // just as an identifier does; the flattened lvalue has no scalar shape.
+            let rhs = if expression_binding::native_string(
+                tree,
+                session,
+                assignment.left,
+                native_tree,
+                dimensions,
+            ) {
+                expression_binding::string_operand(rhs, dimensions)
+            } else {
+                rhs
+            };
             // A variable of unpacked structure type: drive its leaves.
             if let LValue::Ident(name) = &lhs
                 && let Some(parts) = unpacked_structs::targets(name, dimensions)
