@@ -29,7 +29,7 @@ Celox/Verilator results for five fixed configurations (472 tests per sample).
 Its tab separates test-body, whole-process and HDL compilation time.
 
 The [RTLMeter comparison](./rtlmeter.md) measures cold source-to-finish latency for
-XuanTie-E902/E906 hello programs in separate 2-state and 4-state charts, with
+XuanTie-E902/E906 and HummingbirdV2-E203 hello programs in separate 2-state and 4-state charts, with
 Verilator and the stable xezim release pinned by Nix. Unsupported modes and
 failed qualifications remain visible in its status tables.
 

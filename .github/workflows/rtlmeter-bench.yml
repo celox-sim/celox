@@ -39,7 +39,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        case: [e902, e906]
+        case: [e902, e906, e203]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
@@ -109,9 +109,9 @@ jobs:
           path: artifacts
       - name: Validate every report before publishing
         run: |
-          for case in e902 e906; do
+          for case in e902 e906 e203; do
             node scripts/publish-rtlmeter-bench.mjs "artifacts/rtlmeter-$case/result/results.json" "artifacts/rtlmeter-$case/host.txt" --validate-only
           done
-          for case in e902 e906; do
+          for case in e902 e906 e203; do
             node scripts/publish-rtlmeter-bench.mjs "artifacts/rtlmeter-$case/result/results.json" "artifacts/rtlmeter-$case/host.txt"
           done
