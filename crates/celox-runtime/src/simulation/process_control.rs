@@ -107,8 +107,9 @@ impl<B: SimBackend> SimulationState<B> {
         backend: &B,
     ) -> SuspendedProcess {
         let state = &self.process_state;
-        let runnable =
-            target == current || state.ready.contains(&target) || state.reactive.contains(&target);
+        let runnable = target == current
+            || (state.ready.contains(&target) || state.deferred_ready.contains(&target))
+            || state.reactive.contains(&target);
         let wake_time = self
             .process_wakeups
             .iter()
@@ -121,6 +122,7 @@ impl<B: SimBackend> SimulationState<B> {
             self.process_slot(backend, current, target, self.model.processes[target].delay)
         });
         self.process_state.ready.remove(&target);
+        self.process_state.deferred_ready.remove(&target);
         self.process_state.reactive.remove(&target);
         self.process_state.inactive.remove(&target);
         self.process_state.re_inactive.remove(&target);
@@ -235,7 +237,8 @@ impl<B: SimBackend> SimulationState<B> {
                     3
                 } else if target == current
                     || Some(target) == final_identity
-                    || self.process_state.ready.contains(&target)
+                    || (self.process_state.ready.contains(&target)
+                        || self.process_state.deferred_ready.contains(&target))
                     || self.process_state.reactive.contains(&target)
                 {
                     1

@@ -374,6 +374,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     .nbas
                     .iter()
                     .map(|site| NbaSiteRefs {
+                        delay: site.delay,
                         target: resolve(&site.target),
                         lsb: site.lsb,
                         width: site.width,

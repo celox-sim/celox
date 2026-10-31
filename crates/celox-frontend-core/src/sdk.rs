@@ -1422,6 +1422,7 @@ fn lower_statements(
                     .contains(&target.signal())
                     .then(|| lowering.hidden.declare(name("pending"), 1, false));
                 let site = NbaSite {
+                    delay: 0,
                     process: lowering.process,
                     target: source_id(target.signal()),
                     lsb: target.lsb(),

@@ -149,6 +149,16 @@ impl<B: SimBackend> SimulationState<B> {
     {
         self.host_pending = false;
         self.slot_passes = 0;
+        self.slot_resumed.clear();
+        if let Some(updates) = self.process_state.delayed_nba.remove(&current_time) {
+            for (program, update) in updates {
+                if program {
+                    self.process_state.re_nba_queue.push(update);
+                } else {
+                    self.process_state.nba_queue.push(update);
+                }
+            }
+        }
         let events_to_process = if self.scheduler.next_event_time() == Some(current_time) {
             self.scheduler
                 .pop_all_at_next_time()
@@ -266,15 +276,32 @@ impl<B: SimBackend> SimulationState<B> {
         if returns <= budget {
             return Ok(());
         }
+        let name = |process: usize| {
+            self.process_names
+                .get(process)
+                .cloned()
+                .unwrap_or_else(|| format!("process {process}"))
+        };
         Err(Halt::Error(SimulatorErrorCode::Runtime {
             message: match process {
                 Some(process) => {
-                    format!("process {process} does not suspend within one time slot")
+                    format!("{} does not suspend within one time slot", name(process))
                 }
-                None => format!(
-                    "time {} does not settle: processes keep resuming",
-                    self.scheduler.time
-                ),
+                None => {
+                    let mut resumed: Vec<usize> = self.slot_resumed.iter().copied().collect();
+                    resumed.sort_unstable();
+                    resumed.dedup();
+                    let resumed: Vec<String> = resumed.into_iter().map(name).collect();
+                    format!(
+                        "time {} does not settle: processes keep resuming{}",
+                        self.scheduler.time,
+                        if resumed.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {}", resumed.join(", "))
+                        }
+                    )
+                }
             },
             signals: Vec::new(),
         }))
@@ -324,11 +351,21 @@ impl<B: SimBackend> SimulationState<B> {
         if self.finalizing.is_some()
             || !self.process_state.observed.is_empty()
             || !self.process_state.ready.is_empty()
+            || !self.process_state.deferred_ready.is_empty()
             || !self.process_state.reactive.is_empty()
         {
             return Some(self.scheduler.time);
         }
         let process = self.process_wakeups.peek().map(|&Reverse((time, _))| time);
+        let delayed_nba = self
+            .process_state
+            .delayed_nba
+            .first_key_value()
+            .map(|(&time, _)| time);
+        let process = match (process, delayed_nba) {
+            (Some(process), Some(nba)) => Some(process.min(nba)),
+            (process, nba) => process.or(nba),
+        };
         match (self.scheduler.next_event_time(), process) {
             (Some(event), Some(process)) => Some(event.min(process)),
             (event, process) => event.or(process),
