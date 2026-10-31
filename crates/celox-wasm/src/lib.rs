@@ -112,7 +112,9 @@ impl SimHandle {
 
     /// Returns the signal layout as a JSON string.
     ///
-    /// The layout maps signal paths to their memory offsets and widths.
+    /// The layout maps signal paths to their memory offsets and logical widths.
+    /// Strided arrays also report their element width/count, byte stride and
+    /// plane size through the `arrayElement*` and `arrayPlaneSize` fields.
     #[wasm_bindgen(js_name = "layoutJson")]
     pub fn layout_json(&self) -> String {
         use std::collections::BTreeMap;
@@ -134,14 +136,18 @@ impl SimHandle {
                 let name = self.program().get_path(addr);
                 let width = self.layout().widths.get(addr).copied().unwrap_or(0);
                 let byte_size = celox::get_byte_size(width);
-                layout_map.insert(
-                    name,
-                    serde_json::json!({
-                        "offset": offset,
-                        "width": width,
-                        "byteSize": byte_size,
-                    }),
-                );
+                let mut entry = serde_json::json!({
+                    "offset": offset,
+                    "width": width,
+                    "byteSize": byte_size,
+                });
+                if let Some(array) = self.layout().unpacked_arrays.get(addr) {
+                    entry["arrayElementWidth"] = serde_json::json!(array.element_width);
+                    entry["arrayElementCount"] = serde_json::json!(array.element_count);
+                    entry["arrayElementStride"] = serde_json::json!(array.element_stride);
+                    entry["arrayPlaneSize"] = serde_json::json!(array.plane_size);
+                }
+                layout_map.insert(name, entry);
             }
         }
 
@@ -173,5 +179,38 @@ impl SimHandle {
     #[wasm_bindgen(js_name = "totalSize")]
     pub fn total_size(&self) -> usize {
         self.layout().merged_total_size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn array_metadata_describes_padded_storage() {
+        let source = r#"
+            module Top (
+                data: input logic<20> [6],
+                head_index: input logic<3>, tail_index: input logic<3>,
+                first: output logic<20>, last: output logic<20>,
+            ) {
+                assign first = data[head_index];
+                assign last = data[tail_index];
+            }
+        "#;
+        let handle = SimHandle::new(source, "Top").unwrap();
+        assert_eq!(
+            handle.layout().mode,
+            celox::MemoryLayoutMode::ElementStrided
+        );
+        let metadata: serde_json::Value = serde_json::from_str(&handle.layout_json()).unwrap();
+        let array = &metadata["data"];
+        assert_eq!(array["width"], 120);
+        assert_eq!(array["arrayElementWidth"], 20);
+        assert_eq!(array["arrayElementCount"], 6);
+        assert_eq!(array["arrayElementStride"], 4);
+        assert_eq!(array["arrayPlaneSize"], 24);
+        assert!(metadata["first"].get("arrayElementStride").is_none());
+        assert!(!handle.comb_wasm_bytes().is_empty());
     }
 }
