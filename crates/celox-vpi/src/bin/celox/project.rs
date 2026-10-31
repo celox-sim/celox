@@ -60,6 +60,12 @@ pub(super) struct DesignArgs {
     /// Ordered SV file list; relative entries resolve from the list's directory.
     #[arg(short = 'f', long = "filelist", value_name = "FILE")]
     filelists: Vec<PathBuf>,
+    /// Treat ordered SV files as one compilation unit (default; overrides project).
+    #[arg(long, conflicts_with = "separate_units")]
+    single_unit: bool,
+    /// Treat each SV file as a separate compilation unit, isolating source macros.
+    #[arg(long)]
+    separate_units: bool,
     /// SystemVerilog include search directory (repeatable).
     #[arg(short = 'I', long = "include-dir", value_name = "DIR")]
     include_dirs: Vec<PathBuf>,
@@ -106,6 +112,7 @@ struct Manifest {
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
     defines: BTreeMap<String, String>,
+    single_unit: Option<bool>,
     parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
@@ -140,6 +147,7 @@ struct Target {
     filelists: Vec<PathBuf>,
     include_dirs: Vec<PathBuf>,
     defines: BTreeMap<String, String>,
+    single_unit: Option<bool>,
     parameters: BTreeMap<String, ParameterValue>,
     top: Option<String>,
     opt_level: Option<String>,
@@ -157,6 +165,7 @@ pub(super) struct Design {
     pub sources: Vec<PathBuf>,
     pub include_dirs: Vec<PathBuf>,
     pub defines: BTreeMap<String, String>,
+    single_unit: Option<bool>,
     pub parameters: BTreeMap<String, u64>,
     sv_parameters: BTreeMap<String, String>,
     pub top: String,
@@ -329,6 +338,7 @@ impl DesignArgs {
                     config.force_signals.clone().unwrap_or_default();
                 design.max_steps = config.max_steps;
                 design.four_state = config.four_state;
+                design.single_unit = config.single_unit;
                 if let Some(target) = selected {
                     design.extend_parameters(&target.parameters)?;
                     design.diagnostics.0.extend(target.diagnostics.0.clone());
@@ -352,6 +362,7 @@ impl DesignArgs {
                     }
                     design.max_steps = target.max_steps.or(design.max_steps);
                     design.four_state = target.four_state.or(design.four_state);
+                    design.single_unit = target.single_unit.or(design.single_unit);
                 }
                 design.timescale = timescale.map(str::parse).transpose()?;
                 design.opt_level = opt_level
@@ -381,6 +392,12 @@ impl DesignArgs {
         design.opt_level = self.opt_level.or(design.opt_level);
         if let Some(timescale) = self.timescale {
             design.timescale = Some(timescale.parse()?);
+        }
+        if self.single_unit {
+            design.single_unit = Some(true);
+        }
+        if self.separate_units {
+            design.single_unit = Some(false);
         }
         if self.two_state {
             design.four_state = Some(false);
@@ -437,6 +454,9 @@ impl DesignArgs {
         }
         if design.top.trim().is_empty() {
             return Err("provide --top MODULE or set top in celox.toml".to_string());
+        }
+        if !design.is_sv() && design.single_unit.is_some() {
+            return Err("compilation-unit options require SystemVerilog sources".into());
         }
         if !design.is_sv() && design.timescale.is_some() {
             return Err("timescale requires SystemVerilog sources".into());
@@ -591,10 +611,15 @@ impl Design {
     }
 
     pub fn is_sv(&self) -> bool {
-        !self.sources.is_empty()
+        let is_module_source = |path: &PathBuf| {
+            path.extension()
+                .is_some_and(|extension| extension == "sv" || extension == "v")
+        };
+        self.sources.iter().any(is_module_source)
             && self.sources.iter().all(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "sv" || extension == "v")
+                path.extension().is_some_and(|extension| {
+                    matches!(extension.to_str(), Some("sv" | "v" | "svh" | "vh" | "h"))
+                })
             })
     }
 
@@ -705,19 +730,36 @@ impl Design {
             .iter()
             .map(PathBuf::as_path)
             .collect::<Vec<_>>();
+        if self.single_unit.unwrap_or(true) {
+            let sources = self
+                .sources
+                .iter()
+                .map(|path| {
+                    std::fs::read_to_string(path)
+                        .map(|text| (text, path))
+                        .map_err(|error| format!("failed to read {}: {error}", path.display()))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let borrowed = sources
+                .iter()
+                .map(|(text, path)| (text.as_str(), path.as_path()))
+                .collect::<Vec<_>>();
+            let text = celox_sv_analyzer::syntax::preprocess_sources(&borrowed, &macros, &includes)
+                .map_err(|error| format!("preprocessing compilation unit failed: {error}"))?;
+            return Ok(vec![(
+                text,
+                self.sources.first().cloned().unwrap_or_default(),
+            )]);
+        }
         self.sources
             .iter()
             .map(|path| {
                 let text = std::fs::read_to_string(path)
                     .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
-                let text = if macros.is_empty() && includes.is_empty() {
-                    text
-                } else {
-                    celox_sv_analyzer::syntax::preprocess_source(&text, path, &macros, &includes)
-                        .map_err(|error| {
-                            format!("preprocessing {} failed: {error}", path.display())
-                        })?
-                };
+                let text = celox_sv_analyzer::syntax::preprocess_source(
+                    &text, path, &macros, &includes,
+                )
+                .map_err(|error| format!("preprocessing {} failed: {error}", path.display()))?;
                 Ok((text, path.clone()))
             })
             .collect()

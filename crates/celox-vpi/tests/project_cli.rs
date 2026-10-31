@@ -882,3 +882,152 @@ fn attached_simulation(executable: &Path) -> celox::Simulation<celox::NativeBack
         .build_native_from_image(image)
         .unwrap()
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn single_unit_shares_header_macros_and_unit_declarations_in_filelist_order() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("include")).unwrap();
+    fs::write(
+        root.path().join("include/defs.vh"),
+        "`define WIDTH 8\n`define ADD(x) ((x)+1)\n`undef COMMAND\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("defs.h"),
+        "`include \"defs.vh\"\ntypedef logic [`WIDTH-1:0] Word;\nlocalparam Word VALUE=41;\n",
+    )
+    .unwrap();
+    fs::write(
+        root.path().join("dut.sv"),
+        "module Dut(output Word y); assign y=`ADD(VALUE); endmodule\n`undef WIDTH\n",
+    )
+    .unwrap();
+    fs::write(root.path().join("tb.sv"), "`ifdef WIDTH\ninvalid\n`endif\n`ifdef COMMAND\ninvalid\n`endif\nmodule Tb; wire [7:0] y; Dut dut(y); initial begin #1; $display(\"y=%0d\",y); $finish; end endmodule").unwrap();
+    fs::write(root.path().join("all.f"), "defs.h\ndut.sv\ntb.sv\n").unwrap();
+    let args = [
+        "run",
+        "-f",
+        "all.f",
+        "--top",
+        "Tb",
+        "-Iinclude",
+        "-DCOMMAND",
+        "--single-unit",
+    ];
+    let output = invoke(root.path(), &args);
+    success(&output);
+    assert_eq!(output.stdout, b"y=42\n");
+    let output = invoke(root.path(), &args[..args.len() - 1]);
+    success(&output);
+    assert_eq!(output.stdout, b"y=42\n");
+    let mut separate = args[..args.len() - 1].to_vec();
+    separate.push("--separate-units");
+    assert!(
+        !invoke(root.path(), &separate).status.success(),
+        "separate files must not share source macros"
+    );
+    success(&invoke(
+        root.path(),
+        &[
+            "vpi",
+            "build",
+            "-f",
+            "all.f",
+            "--top",
+            "Dut",
+            "-Iinclude",
+            "--single-unit",
+            "-o",
+            "dut-sim",
+        ],
+    ));
+    fs::write(root.path().join("celox.toml"), "sources=['defs.h','dut.sv','tb.sv']\ninclude_dirs=['include']\ntop='Tb'\nsingle_unit=true\n[targets.separate]\nsingle_unit=false\n").unwrap();
+    let output = invoke(root.path(), &["run"]);
+    success(&output);
+    assert_eq!(output.stdout, b"y=42\n");
+    assert!(
+        !invoke(root.path(), &["run", "--separate-units"])
+            .status
+            .success()
+    );
+    assert!(
+        !invoke(root.path(), &["run", "--target", "separate"])
+            .status
+            .success()
+    );
+    success(&invoke(
+        root.path(),
+        &["run", "--target", "separate", "--single-unit"],
+    ));
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn separate_units_resolve_relative_headers_without_command_macros_or_include_paths() {
+    let root = tempfile::tempdir().unwrap();
+    fs::create_dir(root.path().join("rtl")).unwrap();
+    fs::write(root.path().join("rtl/width.svh"), "`define WIDTH 8\n").unwrap();
+    fs::write(
+        root.path().join("rtl/child.sv"),
+        "`include \"width.svh\"\nmodule Child(output logic [`WIDTH-1:0] y); assign y=42; endmodule",
+    )
+    .unwrap();
+    fs::write(root.path().join("tb.sv"), "`ifdef WIDTH\ninvalid\n`endif\nmodule Tb; wire [7:0] y; Child dut(y); initial begin #1; $display(\"y=%0d\",y); $finish; end endmodule").unwrap();
+    let output = invoke(
+        root.path(),
+        &[
+            "run",
+            "rtl/child.sv",
+            "tb.sv",
+            "--top",
+            "Tb",
+            "--separate-units",
+        ],
+    );
+    success(&output);
+    assert_eq!(output.stdout, b"y=42\n");
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn macro_expansion_preserves_operator_boundaries_in_both_compilation_modes() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("tb.sv"), "`define NEG -\n`define POS +\n`define DIGIT 3\n`define WIDTH 4\n`define DIV /\nmodule Tb; int y; initial begin y=`NEG-1; $display(\"y=%0d\", y); y=`POS+1; $display(\"y=%0d\", y); y=4'd`DIGIT; $display(\"y=%0d\", y); y=`WIDTH'd3; $display(\"y=%0d\", y); y=6`DIV/*block*/2; $display(\"y=%0d\", y); y=6`DIV//line\n2; $display(\"y=%0d\", y); $finish; end endmodule").unwrap();
+    for mode in ["--single-unit", "--separate-units"] {
+        let output = invoke(root.path(), &["run", "tb.sv", "--top", "Tb", mode]);
+        success(&output);
+        assert_eq!(output.stdout, b"y=1\ny=1\ny=3\ny=3\ny=3\ny=3\n");
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn expanded_escaped_identifiers_are_terminated_before_block_and_line_comments() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(root.path().join("tb.sv"), "`define ESC1 \\escaped1\n`define ESC2 \\escaped2\nmodule Tb; wire `ESC1/*block*/ =1'b1; wire `ESC2//line\n=1'b0; wire \\literal/*part*/ =1'b1; initial begin #1; $display(\"%b%b%b\", \\escaped1 , \\escaped2 , \\literal/*part*/ ); $finish; end endmodule").unwrap();
+    for mode in [None, Some("--single-unit"), Some("--separate-units")] {
+        let mut args = vec!["run", "tb.sv", "--top", "Tb"];
+        args.extend(mode);
+        let output = invoke(root.path(), &args);
+        success(&output);
+        assert_eq!(output.stdout, b"101\n");
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn line_comments_at_included_file_eof_do_not_swallow_the_caller() {
+    let root = tempfile::tempdir().unwrap();
+    fs::write(
+        root.path().join("header.svh"),
+        "// header without final newline",
+    )
+    .unwrap();
+    fs::write(root.path().join("tb.sv"), "`include \"header.svh\"\nmodule Tb; initial begin $display(\"alive\"); $finish; end endmodule").unwrap();
+    for mode in ["--single-unit", "--separate-units"] {
+        let output = invoke(root.path(), &["run", "tb.sv", "--top", "Tb", mode]);
+        success(&output);
+        assert_eq!(output.stdout, b"alive\n");
+    }
+}
