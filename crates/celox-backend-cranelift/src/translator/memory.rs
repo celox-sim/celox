@@ -4,8 +4,65 @@ use cranelift::{
 };
 
 use super::core::{TransValue, cast_type, get_chunk_as_i64, get_cl_type, promote_to_physical};
-use super::{SIRTranslator, TranslationState, get_byte_size};
-use crate::{RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION, TriggerIdWithKind};
+use super::{MemoryLayout, SIRTranslator, TranslationState, get_byte_size};
+use crate::{
+    AbsoluteAddr, RegionedAbsoluteAddr, RegisterId, SIROffset, STABLE_REGION, TriggerIdWithKind,
+};
+
+/// Convert a logical array access to physical bits. Layout selection keeps
+/// ordinary accesses within one element; aggregate zeroing/commits are split
+/// before calling this helper.
+fn physical_offset(layout: &MemoryLayout, address: &AbsoluteAddr, offset: &SIROffset) -> SIROffset {
+    let Some(array) = layout.unpacked_arrays.get(address) else {
+        return offset.clone();
+    };
+    match offset {
+        SIROffset::Static(start)
+        | SIROffset::PackedElements {
+            bit_offset: start, ..
+        } => {
+            let (byte, bit) = layout.map_static_bit_offset(address, *start);
+            SIROffset::Static(byte * 8 + bit)
+        }
+        SIROffset::Element {
+            index,
+            bit_offset,
+            dynamic_bit_offset,
+            ..
+        } => SIROffset::Element {
+            index: *index,
+            element_width: array.element_stride * 8,
+            bit_offset: *bit_offset,
+            dynamic_bit_offset: *dynamic_bit_offset,
+        },
+        SIROffset::Dynamic(_) => unreachable!("dynamic packed access to strided array"),
+    }
+}
+
+fn strided_pieces(
+    layout: &MemoryLayout,
+    address: &AbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let array = layout.unpacked_arrays.get(address)?;
+    let start = offset.constant_bit_offset()?;
+    if width == 0
+        || array.element_stride * 8 == array.element_width
+        || width <= array.element_width - start % array.element_width
+    {
+        return None;
+    }
+    let mut pieces = Vec::new();
+    let mut copied = 0;
+    while copied < width {
+        let position = start + copied;
+        let count = (array.element_width - position % array.element_width).min(width - copied);
+        pieces.push((position, count));
+        copied += count;
+    }
+    Some(pieces)
+}
 
 fn isub_from_imm(state: &mut TranslationState, imm: i64, rhs: Value) -> Value {
     let lhs = state.builder.ins().iconst(types::I64, imm);
@@ -133,7 +190,7 @@ impl SIRTranslator {
         debug_assert_eq!(dst_addr.region, STABLE_REGION);
         let abs = src_addr.absolute_addr();
         let sparse = &self.layout.sparse_layouts[&abs];
-        let byte_size = get_byte_size(self.layout.widths[&abs]);
+        let byte_size = self.layout.plane_size(&abs);
         let src_base = (self.layout.sparse_base_offset + self.layout.sparse_offsets[&abs]) as i64;
         let dst_base = self.layout.offsets[&abs] as i64;
         let plane_count = if self.options.four_state && self.layout.is_4states[&abs] {
@@ -309,7 +366,7 @@ impl SIRTranslator {
         let stable_base = self.layout.offsets[&abs] as i64;
         let sparse_base =
             (self.layout.sparse_base_offset + self.layout.sparse_offsets[&abs]) as i64;
-        let byte_size = get_byte_size(self.layout.widths[&abs]) as i64;
+        let byte_size = self.layout.plane_size(&abs) as i64;
         let bit_offset = logical_bit_offset(state, offset);
         let start_chunk = state.builder.ins().ushr_imm_s(bit_offset, 6);
         let end_bit = state
@@ -350,37 +407,62 @@ impl SIRTranslator {
                 .icmp_imm_s(IntCC::NotEqual, dirty_test, 0);
             let data_index = state.builder.ins().ishl_imm_s(chunk, 3);
 
-            for plane_delta in [0, byte_size].into_iter().take(
-                if self.options.four_state && self.layout.is_4states[&abs] {
-                    2
-                } else {
-                    1
-                },
-            ) {
-                let stable_addr = state
-                    .builder
-                    .ins()
-                    .iadd_imm_s(state.mem_ptr, stable_base + plane_delta);
-                let stable_addr = state.builder.ins().iadd(stable_addr, data_index);
-                let sparse_addr = state
-                    .builder
-                    .ins()
-                    .iadd_imm_s(state.mem_ptr, sparse_base + plane_delta);
-                let sparse_addr = state.builder.ins().iadd(sparse_addr, data_index);
-                let stable = state
-                    .builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), stable_addr, 0);
-                let working = state
-                    .builder
-                    .ins()
-                    .load(types::I64, MemFlags::new(), sparse_addr, 0);
-                let initialized = state.builder.ins().select(was_dirty, working, stable);
-                state
-                    .builder
-                    .ins()
-                    .store(MemFlags::new(), initialized, sparse_addr, 0);
+            // The last packed chunk can be shorter than eight bytes. Never
+            // initialize across the value/mask boundary: another dirty chunk
+            // may already contain updated mask bits there.
+            let initialize = state.builder.create_block();
+            let initialized = state.builder.create_block();
+            state
+                .builder
+                .ins()
+                .brif(was_dirty, initialized, &[], initialize, &[]);
+            state.builder.switch_to_block(initialize);
+            let last_len = byte_size as usize - (sparse.chunk_count - 1) * 8;
+            let planes = if self.options.four_state && self.layout.is_4states[&abs] {
+                2
+            } else {
+                1
+            };
+            if last_len == 8 {
+                for plane in 0..planes {
+                    let delta = plane as i64 * byte_size;
+                    self.copy_sparse_chunk(
+                        state,
+                        stable_base + delta,
+                        sparse_base + delta,
+                        data_index,
+                        8,
+                    );
+                }
+                state.builder.ins().jump(initialized, &[]);
+            } else {
+                let full = state.builder.create_block();
+                let partial = state.builder.create_block();
+                let is_last = state.builder.ins().icmp_imm_s(
+                    IntCC::Equal,
+                    chunk,
+                    (sparse.chunk_count - 1) as i64,
+                );
+                state.builder.ins().brif(is_last, partial, &[], full, &[]);
+                for (block, len) in [(full, 8), (partial, last_len)] {
+                    state.builder.switch_to_block(block);
+                    for plane in 0..planes {
+                        let delta = plane as i64 * byte_size;
+                        self.copy_sparse_chunk(
+                            state,
+                            stable_base + delta,
+                            sparse_base + delta,
+                            data_index,
+                            len,
+                        );
+                    }
+                    state.builder.ins().jump(initialized, &[]);
+                    state.builder.seal_block(block);
+                }
             }
+            state.builder.switch_to_block(initialized);
+            state.builder.seal_block(initialize);
+            state.builder.seal_block(initialized);
 
             let new_dirty = state.builder.ins().bor(dirty_bits, dirty_mask);
             state
@@ -418,6 +500,8 @@ impl SIRTranslator {
         offset: &SIROffset,
         op_width: &usize,
     ) {
+        let physical = physical_offset(&self.layout, &addr.absolute_addr(), offset);
+        let offset = &physical;
         let d_phys_width = state.register_map[dst].width();
 
         // 1. Calculate base memory address
@@ -442,7 +526,7 @@ impl SIRTranslator {
                     );
                     if self.options.four_state {
                         let m = if self.layout.is_4states[&abs] {
-                            let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                            let var_byte_size = self.layout.plane_size(&abs);
                             let static_addr_m = state
                                 .builder
                                 .ins()
@@ -478,7 +562,7 @@ impl SIRTranslator {
                     );
                     if self.options.four_state {
                         let chunks_m = if self.layout.is_4states[&abs] {
-                            let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                            let var_byte_size = self.layout.plane_size(&abs);
                             let static_addr_m = state
                                 .builder
                                 .ins()
@@ -540,7 +624,7 @@ impl SIRTranslator {
         if self.options.four_state {
             let is_var_4state = self.layout.is_4states[&abs];
             let res_chunks_m = if is_var_4state {
-                let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                let var_byte_size = self.layout.plane_size(&abs);
                 let final_addr_m = state
                     .builder
                     .ins()
@@ -593,6 +677,24 @@ impl SIRTranslator {
         triggers: &[TriggerIdWithKind],
         comb_capture_sites: &[u32],
     ) {
+        if let Some(pieces) = strided_pieces(&self.layout, &addr.absolute_addr(), offset, *op_width)
+        {
+            // Only exact-zero aggregate stores are admitted by layout selection.
+            for (start, width) in pieces {
+                self.translate_store_inst(
+                    state,
+                    addr,
+                    &SIROffset::Static(start),
+                    &width,
+                    src_reg,
+                    triggers,
+                    comb_capture_sites,
+                );
+            }
+            return;
+        }
+        let physical = physical_offset(&self.layout, &addr.absolute_addr(), offset);
+        let offset = &physical;
         if addr.region == crate::SPARSE_WORKING_REGION && *op_width != 0 {
             self.prepare_sparse_store(state, addr, offset, *op_width);
         }
@@ -696,7 +798,7 @@ impl SIRTranslator {
         let old_mask_chunks = if comb_capture_sites.is_empty() || !captures_four_state {
             Vec::new()
         } else {
-            let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+            let var_byte_size = self.layout.plane_size(&abs);
             let final_addr_m = state
                 .builder
                 .ins()
@@ -758,7 +860,7 @@ impl SIRTranslator {
             if no_rmw_width && is_static_aligned {
                 self.translate_store_native_aligned(state, final_addr, *op_width, val_v);
                 if self.options.four_state && self.layout.is_4states[&abs] {
-                    let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                    let var_byte_size = self.layout.plane_size(&abs);
                     let final_addr_m = state
                         .builder
                         .ins()
@@ -780,7 +882,7 @@ impl SIRTranslator {
                     max_bit_shift(offset),
                 );
                 if self.options.four_state && self.layout.is_4states[&abs] {
-                    let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                    let var_byte_size = self.layout.plane_size(&abs);
                     let final_addr_m = state
                         .builder
                         .ins()
@@ -804,7 +906,7 @@ impl SIRTranslator {
                     state, final_addr, *op_width, &v_chunks,
                 );
                 if self.options.four_state && self.layout.is_4states[&abs] {
-                    let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                    let var_byte_size = self.layout.plane_size(&abs);
                     let final_addr_m = state
                         .builder
                         .ins()
@@ -825,7 +927,7 @@ impl SIRTranslator {
                     &v_chunks,
                 );
                 if self.options.four_state && self.layout.is_4states[&abs] {
-                    let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                    let var_byte_size = self.layout.plane_size(&abs);
                     let final_addr_m = state
                         .builder
                         .ins()
@@ -874,7 +976,7 @@ impl SIRTranslator {
             let mut changed =
                 self.translate_chunks_changed(state, &old_value_chunks, &new_value_chunks);
             if captures_four_state {
-                let var_byte_size = get_byte_size(self.layout.widths[&abs]);
+                let var_byte_size = self.layout.plane_size(&abs);
                 let final_addr_m = state
                     .builder
                     .ins()
@@ -1022,6 +1124,23 @@ impl SIRTranslator {
         op_width: &usize,
         triggers: &[TriggerIdWithKind],
     ) {
+        if let Some(pieces) =
+            strided_pieces(&self.layout, &src_addr.absolute_addr(), offset, *op_width)
+        {
+            for (start, width) in pieces {
+                self.translate_commit_inst(
+                    state,
+                    src_addr,
+                    dst_addr,
+                    &SIROffset::Static(start),
+                    &width,
+                    triggers,
+                );
+            }
+            return;
+        }
+        let physical = physical_offset(&self.layout, &src_addr.absolute_addr(), offset);
+        let offset = &physical;
         let src_abs = src_addr.absolute_addr();
         let (src_mem_base, src_base_offset_bytes) =
             (state.mem_ptr, self.layout.region_base_offset(src_addr));
@@ -1051,8 +1170,8 @@ impl SIRTranslator {
             self.translate_copy_bytes(state, src_addr_val, dst_addr_val, byte_len);
 
             if self.options.four_state {
-                let var_byte_size_src = get_byte_size(self.layout.widths[&src_abs]);
-                let var_byte_size_dst = get_byte_size(self.layout.widths[&dst_abs]);
+                let var_byte_size_src = self.layout.plane_size(&src_abs);
+                let var_byte_size_dst = self.layout.plane_size(&dst_abs);
                 let src_addr_m = state
                     .builder
                     .ins()
@@ -1100,8 +1219,8 @@ impl SIRTranslator {
             );
 
             if self.options.four_state {
-                let var_byte_size_src = get_byte_size(self.layout.widths[&src_abs]);
-                let var_byte_size_dst = get_byte_size(self.layout.widths[&dst_abs]);
+                let var_byte_size_src = self.layout.plane_size(&src_abs);
+                let var_byte_size_dst = self.layout.plane_size(&dst_abs);
                 let src_final_addr_m = state
                     .builder
                     .ins()
@@ -1144,8 +1263,8 @@ impl SIRTranslator {
             );
 
             if self.options.four_state {
-                let var_byte_size_src = get_byte_size(self.layout.widths[&src_abs]);
-                let var_byte_size_dst = get_byte_size(self.layout.widths[&dst_abs]);
+                let var_byte_size_src = self.layout.plane_size(&src_abs);
+                let var_byte_size_dst = self.layout.plane_size(&dst_abs);
                 let src_final_addr_m = state
                     .builder
                     .ins()

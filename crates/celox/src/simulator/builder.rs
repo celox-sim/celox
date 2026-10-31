@@ -3130,7 +3130,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
-                    crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                    crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     false,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
@@ -3564,7 +3564,7 @@ mod host {
         ) -> Result<Simulator<crate::backend::wasm_runtime::WasmBackend>, SimulatorError> {
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
-                    crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                    crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     false,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
@@ -3933,7 +3933,7 @@ mod host {
         #[cfg(feature = "cranelift")]
         pub fn build_cranelift(self) -> Result<crate::Simulation<JitBackend>, SimulatorError> {
             self.build_with_backend(
-                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 false,
                 |program, options| {
                     let mut trace = crate::debug::CompilationTrace::default();
@@ -4036,7 +4036,7 @@ mod host {
         ) -> Result<crate::Simulation<crate::backend::wasm_runtime::WasmBackend>, SimulatorError>
         {
             self.build_with_backend(
-                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 false,
                 crate::backend::wasm_runtime::WasmBackend::new,
             )

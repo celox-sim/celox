@@ -8850,6 +8850,9 @@ fn timed_task_edge_processes_of_several_instances_may_write_a_package_variable()
 
 mod aggregate_regressions {
     sv_backends! {
+        fn wide_unpacked_ff_array_masks(sim) { @case "aggregate_regressions::wide_unpacked_ff_array_masks"; }
+    }
+    sv_backends! {
         fn continuous_function_dynamic_scratch_write(sim) { @case "aggregate_regressions::continuous_function_dynamic_scratch_write"; }
         fn masked_feed_forward_dependencies(sim) { @case "aggregate_regressions::masked_feed_forward_dependencies"; }
         fn shared_memory_reads_pre_edge_values(sim) { @case "aggregate_regressions::shared_memory_reads_pre_edge_values"; }

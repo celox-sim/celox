@@ -2513,7 +2513,8 @@ impl NativeSimulatorHandle {
         )
         .map_err(|error| Error::from_reason(error.to_string()))?;
 
-        let laid_out = program.into_laid_out(opts.four_state);
+        let laid_out = program
+            .into_laid_out_with_mode(opts.four_state, celox::MemoryLayoutMode::ElementStrided);
         let layout = laid_out.layout();
         let layout_json = Self::build_layout_json(&laid_out, layout, opts.four_state);
         let events_json = Self::build_events_json(&laid_out);
@@ -2591,7 +2592,8 @@ impl NativeSimulatorHandle {
         )
         .map_err(|e| Error::from_reason(format!("{}", e)))?;
 
-        let laid_out = program.into_laid_out(opts.four_state);
+        let laid_out = program
+            .into_laid_out_with_mode(opts.four_state, celox::MemoryLayoutMode::ElementStrided);
         let layout = laid_out.layout();
 
         let layout_json = Self::build_layout_json(&laid_out, layout, opts.four_state);
@@ -2670,7 +2672,8 @@ impl NativeSimulatorHandle {
             &Default::default(),
         )
         .map_err(|error| Error::from_reason(error.to_string()))?;
-        let laid_out = program.into_laid_out(opts.four_state);
+        let laid_out = program
+            .into_laid_out_with_mode(opts.four_state, celox::MemoryLayoutMode::ElementStrided);
         let layout = laid_out.layout();
 
         let layout_json = Self::build_layout_json(&laid_out, layout, opts.four_state);
@@ -3076,6 +3079,10 @@ impl NativeSimulatorHandle {
             });
             if let Some(array_dims) = array_dims {
                 entry["array_dims"] = serde_json::json!(array_dims);
+            }
+            if let Some(array) = layout.unpacked_arrays.get(addr) {
+                entry["array_element_stride"] = serde_json::json!(array.element_stride);
+                entry["array_plane_size"] = serde_json::json!(array.plane_size);
             }
             layout_map.insert(name, entry);
         }
