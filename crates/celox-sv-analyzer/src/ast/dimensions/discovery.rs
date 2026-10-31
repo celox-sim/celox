@@ -497,20 +497,11 @@ fn class_signatures(
     class_name: &str,
     tree: &AnalysisContext<'_>,
     context: &mut PackedDimensions,
+    scopes: &mut classes::specializations::ClassScopes,
 ) -> Converted<()> {
     let Some(handle) = classes::handle_type(tree, class_name) else {
         return Ok(());
     };
-    // Formals and results are bound in the scope of the specialization.
-    let mut scope = context.clone();
-    let (env, aliases) = classes::specializations::shared_scope(
-        tree,
-        class_name,
-        &context.const_env,
-        &context.type_aliases,
-    );
-    scope.const_env = env;
-    scope.type_aliases = aliases;
     let this = (
         FunctionArgumentMetadata {
             name: classes::THIS.into(),
@@ -520,18 +511,58 @@ fn class_signatures(
         handle.clone(),
     );
     let mut constructor = false;
+    // Formals and results are bound in the scope of the specialization.
+    let (env, aliases) = (context.const_env.clone(), context.type_aliases.clone());
+    let signatures = scopes.with(tree, class_name, &env, &aliases, |env, aliases| {
+        let mut scope = context.clone();
+        scope.const_env = env.clone();
+        scope.type_aliases = aliases.clone();
+        method_signatures(
+            class,
+            class_name,
+            tree,
+            &scope,
+            &this,
+            &handle,
+            &mut constructor,
+        )
+    })?;
+    drop((env, aliases));
+    for (name, formals, result) in signatures {
+        publish_signature(name, formals, result, tree, context);
+    }
+    class_builtin_signatures(class, class_name, tree, context, &handle, constructor)
+}
+
+type Signature = (
+    String,
+    Vec<(FunctionArgumentMetadata, Type)>,
+    Option<Option<Type>>,
+);
+
+/// The signatures of the declared methods of `class` as `class_name`, bound
+/// in `scope`.
+fn method_signatures(
+    class: &celox_sv_syntax::ClassDeclaration,
+    class_name: &str,
+    tree: &AnalysisContext<'_>,
+    scope: &PackedDimensions,
+    this: &(FunctionArgumentMetadata, Type),
+    handle: &Type,
+    constructor: &mut bool,
+) -> Converted<Vec<Signature>> {
     let mut signatures = Vec::new();
     for method in &class.methods {
         let subroutine = tree.declarations().subroutine(method.subroutine);
-        let mut formals = formal_types(subroutine, tree, &scope)?;
+        let mut formals = formal_types(subroutine, tree, scope)?;
         if !method.qualifiers.is_static {
             formals.insert(0, this.clone());
         }
         let result = if subroutine.kind == SubroutineKind::Constructor {
-            constructor = true;
+            *constructor = true;
             Some(Some(handle.clone()))
         } else {
-            return_type(subroutine, tree, &scope)?
+            return_type(subroutine, tree, scope)?
         };
         // A method that may be virtual also has a dispatcher (8.20).
         if !method.qualifiers.is_static && subroutine.kind != SubroutineKind::Constructor {
@@ -547,12 +578,19 @@ fn class_signatures(
             result,
         ));
     }
-    // `scope` shares the maps of `context` that publishing writes: while it
-    // lives, each signature would copy them whole.
-    drop(scope);
-    for (name, formals, result) in signatures {
-        publish_signature(name, formals, result, tree, context);
-    }
+    Ok(signatures)
+}
+
+/// Publish the built-in methods of `class` as `class_name`, and its
+/// implicit constructor unless it declares one.
+fn class_builtin_signatures(
+    class: &celox_sv_syntax::ClassDeclaration,
+    class_name: &str,
+    tree: &AnalysisContext<'_>,
+    context: &mut PackedDimensions,
+    handle: &Type,
+    constructor: bool,
+) -> Converted<()> {
     for method in ["randomize", "srandom", "rand_mode"] {
         let mut formals = vec![(
             FunctionArgumentMetadata {
@@ -568,7 +606,7 @@ fn class_signatures(
                 // Signature discovery must not require an otherwise unused class
                 // to have a supported layout. A call validates the layout before
                 // using this selection formal; lowering reports layout errors.
-                classes::class(tree, class_name, &context.const_env, &context.type_aliases)
+                classes::shared_class(tree, class_name, &context.const_env, &context.type_aliases)
                     .map_or_else(
                         |_| classes::unsigned_type(1),
                         |layout| layout.selection_type(),
@@ -594,6 +632,14 @@ fn class_signatures(
         );
     }
     if !constructor && !class.interface {
+        let this = (
+            FunctionArgumentMetadata {
+                name: classes::THIS.into(),
+                direction: ParamDirection::Input,
+                has_default: false,
+            },
+            handle.clone(),
+        );
         publish_signature(
             classes::Class::subroutine_name(class_name, "new"),
             vec![this],
@@ -634,9 +680,11 @@ pub(in crate::ast) fn all_class_signatures(
 ) {
     classes::specializations::collect(tree, context);
     // The classes of other scopes keep the signatures their scopes publish.
+    let mut scopes =
+        classes::specializations::ClassScopes::new(&context.const_env, &context.type_aliases);
     for class in classes::scope_declarations(tree) {
         for class_name in classes::specializations_of(tree, class) {
-            let _ = class_signatures(class, &class_name, tree, context);
+            let _ = class_signatures(class, &class_name, tree, context, &mut scopes);
         }
     }
     tree.state.class_specializations_frozen.set(true);
