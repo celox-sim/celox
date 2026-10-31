@@ -26,6 +26,8 @@ pub(in crate::ast) struct UnpackedStruct {
 pub(in crate::ast) struct Member {
     pub(in crate::ast) name: String,
     pub(in crate::ast) r#type: Type,
+    /// A constant initial value captured in the declaration scope (7.2.2).
+    pub(in crate::ast) default: Option<Expr>,
     /// Bits of the member in a flat value.
     pub(in crate::ast) width: usize,
 }
@@ -36,6 +38,7 @@ pub(in crate::ast) struct Leaf {
     /// Member names from the structure down to the leaf.
     pub(in crate::ast) path: Vec<String>,
     pub(in crate::ast) r#type: Type,
+    pub(in crate::ast) default: Option<Expr>,
     /// Least significant bit in a flat value.
     pub(in crate::ast) offset: usize,
     pub(in crate::ast) width: usize,
@@ -108,6 +111,7 @@ impl UnpackedStruct {
             leaves.push(Leaf {
                 path,
                 r#type: member.r#type.clone(),
+                default: member.default.clone(),
                 offset,
                 width: member.width,
             });
@@ -116,17 +120,82 @@ impl UnpackedStruct {
     }
 }
 
+/// Capture an integral member's constant initializer at the declared width.
+/// A later use of a typedef must not resolve its names in the use-site scope.
+pub(in crate::ast) fn member_default(
+    root: ExprId,
+    ty: &Type,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    if ty.is_enum
+        || ty.unpacked_struct().is_some()
+        || ty.class().is_some()
+        || ty.chandle
+        || !matches!(
+            ty.kind(),
+            TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+        )
+    {
+        return Err(unsupported(
+            "unsupported unpacked structure member initial value type",
+        ));
+    }
+    let shape = procedural::dimensions_from_type(ty);
+    let value = expression_binding::bind_value(root, native, tree, session, dims, Some(&shape))?;
+    let value = constants::substitute_expr_constants_with_parameter_literals(
+        tree,
+        session,
+        value,
+        &dims.const_env,
+        &dims.parameter_values,
+    );
+    let shape = casts::expr_type_from_type(&tree.functions, ty, &dims.const_env)
+        .ok_or_else(|| unsupported("unpacked structure member initial value type"))?;
+    let types = parameter_types_from_const_env(&dims.const_env)
+        .into_iter()
+        .map(|(name, ty)| (name, (ty.width, ty.signed)))
+        .collect();
+    let Some(constant) = constant_folding::constant_with_folded_selections(
+        tree,
+        session,
+        &value,
+        &dims.const_env,
+        &types,
+    ) else {
+        return Ok(None);
+    };
+    let Some(literal) = typecheck::eval_const_assignment_in_env(
+        &constant.into(),
+        &*dims.const_env,
+        &|name| {
+            dimensions::parameter_type_from_const_env(&dims.const_env, name)
+                .map(|ty| (ty.width, ty.signed))
+        },
+        shape.width,
+    ) else {
+        return Ok(None);
+    };
+    Ok(Some(Expr::Literal(resize_integral_literal_for_cast(
+        literal,
+        shape.width,
+        shape.signed,
+    ))))
+}
+
 /// The type of an unpacked structure with `fields`, or `None` when a member
 /// type has no supported unpacked-structure representation.
 pub(in crate::ast) fn native_type(
     functions: &const_functions::ConstantFunctions,
     owner: Arc<str>,
-    fields: Vec<(String, Type)>,
+    fields: Vec<(String, Type, Option<Expr>)>,
     env: &HashMap<String, i128>,
 ) -> Option<Type> {
     let members = fields
         .into_iter()
-        .map(|(name, ty)| {
+        .map(|(name, ty, default)| {
             // A chandle is no packed array element (IEEE 1800-2023 6.14).
             if !ty.unpacked_ranges.is_empty()
                 || ty.container.is_some()
@@ -151,6 +220,7 @@ pub(in crate::ast) fn native_type(
             Some(Member {
                 name,
                 r#type: ty,
+                default,
                 width,
             })
         })
@@ -496,6 +566,11 @@ pub(in crate::ast) fn record(
     aggregate: &UnpackedStruct,
     env: &HashMap<String, i128>,
 ) -> Converted<Option<crate::system_functions::Record>> {
+    if aggregate.leaves().iter().any(|leaf| leaf.default.is_some()) {
+        return Err(unsupported(
+            "dynamic container of an unpacked structure with member initial values",
+        ));
+    }
     let leaves = aggregate.leaves();
     let two_state = |leaf: &Leaf| {
         matches!(

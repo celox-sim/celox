@@ -218,6 +218,16 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 `T'{...}`。`default` は入れ子の構造体のメンバにも適用）による構築ができます。
 構造体全体へのその他の演算子、選択、キャストは拒否されます。
 
+モジュール変数、手続き内のローカル変数、クラスプロパティでは、整数型メンバの定数初期値に
+対応します（7.2.2）。インスタンスのパラメータ上書きを含め、型を宣言したスコープで値を確定します。
+変数に明示的な初期化子がある場合は、メンバの初期値を使いません。ネストしたメンバには、
+その型の初期値を使います。automatic ローカルは入るたびに、static ローカルは一度だけ初期化します。
+代入先の幅で式を評価し、広い値や X/Z を保持します。
+
+列挙型・整数型以外のメンバの初期値、ネストした構造体メンバ全体の初期化子、
+メンバ初期値を持つ構造体のモジュールポート・サブルーチン引数と戻り値・動的コンテナは未対応です。
+宣言元の環境で解決できない定数も `Unsupported` とします。
+
 ## 未対応の構文 {#what-is-not-supported}
 
 未対応の構文は、無視せずに、その構文名を示す `Unsupported` エラーを返します。エラーには
@@ -244,7 +254,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートの遅延・強度指定・インスタンス配列と、その他のゲート／スイッチプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・固定長配列の要素としての unpacked 構造体、配列（動的配列・キュー・連想配列を含む）・`real`・既定値を持つメンバ。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・固定長配列の要素としての unpacked 構造体、配列（動的配列・キュー・連想配列を含む）・`real` のメンバ。メンバ初期値の制限は[unpacked 構造体](#unpacked-structures)を参照。
 - 順序回路のプロセス：`always_ff` のイベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。

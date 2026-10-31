@@ -278,6 +278,167 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog 13.0",
+        "reason": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_assignment_context",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog 13.0",
+        "reason": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_class_properties",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog 13.0",
+        "reason": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_declaration_scope",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog 13.0",
+        "reason": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog 13.0",
+        "reason": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_local_lifetimes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog 13.0",
+        "reason": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_specialized_functions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog 13.0",
+        "reason": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not support unpacked structures (\"sorry: Unpacked structs not supported.\"), which IEEE 1800-2023 7.2 defines; the standalone source reproduces the diagnostic. Verilator passes all but the nested default pattern, see sv_verilator_nested_struct_default.",
       "expectation": "Simulation",
       "known_issue": {
