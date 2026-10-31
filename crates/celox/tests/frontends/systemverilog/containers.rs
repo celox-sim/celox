@@ -8,6 +8,7 @@ sv_backends! {
     fn wide_associative_keys(sim) { @case "containers::wide_associative_keys"; }
     fn wide_signed_associative_keys(sim) { @case "containers::wide_signed_associative_keys"; }
     fn wide_associative_keys_with_unknown_bits(sim) { @case "containers::wide_associative_keys_with_unknown_bits"; }
+    fn package_scoped_container_methods(sim) { @case "containers::package_scoped_container_methods"; }
     fn nested_containers_and_class_keys(sim) { @case "containers::nested_containers_and_class_keys"; }
     fn methods_of_nested_container_elements(sim) { @case "containers::methods_of_nested_container_elements"; }
     fn nested_updates_evaluate_indices_once(sim) { @case "containers::nested_updates_evaluate_indices_once"; }

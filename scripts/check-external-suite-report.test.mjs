@@ -315,6 +315,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::type_parameter_shadowing",
                 "containers::array_items_in_concatenations",
                 "containers::compound_element_assignments",
+                "containers::package_scoped_container_methods",
                 "containers::string_indices_from_calls",
                 "containers::wide_associative_keys",
                 "containers::wide_associative_keys_with_unknown_bits",

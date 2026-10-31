@@ -82,7 +82,10 @@ pub(super) fn bound_callable_name(
     else {
         return Ok(None);
     };
-    if separator != "." {
+    // Only a call through an interface handle names an interface method;
+    // other receivers, such as the package-scoped `p::q` of
+    // `p::q.push_back(x)`, are bound as values.
+    if separator != "." || !interface_binding::is_handle_path(*expression, native) {
         return Ok(None);
     }
     let handle = interface_binding::actual_handle_key(

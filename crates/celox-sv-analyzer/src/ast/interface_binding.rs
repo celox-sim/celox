@@ -1546,6 +1546,33 @@ fn selection_range(
     }
 }
 
+/// Whether native expression `root` has the form of an interface handle
+/// that [`actual_handle_key`] resolves: a name followed by member and
+/// index selects. A package-scoped name such as `p::q` never names an
+/// interface instance, as packages hold none (IEEE 1800-2023 26.2).
+pub(super) fn is_handle_path(
+    mut root: celox_sv_syntax::ExprId,
+    native: &celox_sv_syntax::Declarations,
+) -> bool {
+    use celox_sv_syntax::{DimensionKind, ExprKind};
+    loop {
+        root = expression_binding::ungroup(root, native);
+        match &native.expression(root).kind {
+            ExprKind::Name(_) => return true,
+            ExprKind::Member {
+                expression,
+                separator,
+                ..
+            } if separator == "." => root = *expression,
+            ExprKind::Select {
+                expression,
+                dimension,
+            } if matches!(dimension.kind, DimensionKind::Index(_)) => root = *expression,
+            _ => return false,
+        }
+    }
+}
+
 pub(super) fn actual_handle_key(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
