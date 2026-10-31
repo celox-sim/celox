@@ -361,7 +361,7 @@ impl<'a> ProcModule<'a> {
     /// Whether a process calls a system function that reads the state of
     /// the simulation, such as `$urandom` or `$time`, including through user
     /// subroutines and omitted argument defaults.
-    pub fn reads_simulation_state(&self, body: &[sv::ir::Stmt]) -> bool {
+    pub fn reads_simulation_state(&mut self, body: &[sv::ir::Stmt]) -> bool {
         let mut calls = Vec::new();
         for stmt in body {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -383,6 +383,10 @@ impl<'a> ProcModule<'a> {
                 | sv::ir::Callee::Checked { .. } => return true,
                 sv::ir::Callee::Subroutine(name) => name,
             };
+            // A call lowered as its constant value runs nothing.
+            if args.is_empty() && self.constant_functions.value(&name).is_some() {
+                continue;
+            }
             if let Some(subroutine) = self.subroutine(&name) {
                 if !subroutine.persistent_locals.is_empty() {
                     return true;
