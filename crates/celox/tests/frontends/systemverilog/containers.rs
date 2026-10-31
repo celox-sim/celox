@@ -1,6 +1,9 @@
 use super::*;
 
 sv_backends! {
+    fn queue_slice_runtime_bounds(sim) { @case "containers::queue_slice_runtime_bounds"; }
+    fn queue_slice_updates_and_copies(sim) { @case "containers::queue_slice_updates_and_copies"; }
+    fn queue_slice_wide_and_unknown_bounds(sim) { @case "containers::queue_slice_wide_and_unknown_bounds"; }
     fn class_container_inheritance_static(sim) { @case "containers::class_container_inheritance_static"; }
     fn wide_associative_keys(sim) { @case "containers::wide_associative_keys"; }
     fn wide_signed_associative_keys(sim) { @case "containers::wide_signed_associative_keys"; }

@@ -1065,6 +1065,8 @@ pub enum ContainerOp {
     /// A new sequence of the elements of the sequence in the first argument
     /// and then those of the one in the second.
     Concat,
+    /// A new queue containing the inclusive range of its source queue.
+    Slice,
     Size,
     Get,
     Set,
