@@ -285,6 +285,20 @@ remain unsupported; this is not a full-corpus measurement. Shared regressions
 cover sampled/history nesting, gated histories, X/Z transitions, history while
 assertions are disabled, and sampling before NBA and Reactive actions.
 
+Blocking intra-assignment controls (9.4.5, 10.4.1) update 12 rows: six of the
+seven `chapter-9/9.4.5--event_*` cases now pass in both state modes. The focused
+official run checked all 14 combinations. Several upstream filenames say
+`nonblocking`, but their source uses blocking `=` assignments; the actual
+`<= #10` case remains unsupported in both modes. Shared regressions check
+RHS sampling and destination conversion before suspension, LHS evaluation
+after suspension, delay/event/repeat controls, nonpositive and X/Z repeat
+counts, and concurrent automatic tasks. Nonblocking controls, implicit
+intra-assignment events, cycle controls, nonintegral targets, concatenations,
+and indirect writes such as object properties or dynamic-container elements
+remain explicitly unsupported.
+Repeat counts must be integral and at most 64 bits; wider counts are rejected
+rather than truncated. This is not a full-corpus measurement.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

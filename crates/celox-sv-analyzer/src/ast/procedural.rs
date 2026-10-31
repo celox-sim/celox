@@ -12,6 +12,7 @@ mod control;
 mod effects;
 mod final_procedures;
 mod foreach;
+mod intra_assignment;
 use foreach::ForeachLoop;
 pub(super) mod randomization;
 pub(super) mod references;
@@ -1839,10 +1840,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 right,
                 nonblocking,
                 timing,
-                ..
+                timing_control,
+                repeat_count,
             } => {
                 if timing.is_some() {
-                    return Err(unsupported("intra-assignment timing control"));
+                    return self.intra_assignment(
+                        operator,
+                        *nonblocking,
+                        *left,
+                        *right,
+                        *timing_control,
+                        *repeat_count,
+                    );
                 }
                 if (operator == "<=") != *nonblocking {
                     return Err(AnalyzerError::Parse(

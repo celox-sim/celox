@@ -1,0 +1,584 @@
+{
+  "standard": "IEEE 1800-2023 9.4.5, 10.4.1, 11.8.2, 6.11.2",
+  "source": "sv_blocking_intra_assignment.sv",
+  "tools": {
+    "verilator": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "cases": [
+        {
+          "name": "timing::blocking_intra_assignment_automatic_tasks",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_delays",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_events",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_four_state",
+          "status": "unsupported",
+          "phase": "compile",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_late_target",
+          "status": "mismatch",
+          "phase": "execute",
+          "detail": "timing::blocking_intra_assignment_late_target at 3290:47: assert_eq index: expected 0x0, got 0x1",
+          "protocol.log": "@suite assert timing::blocking_intra_assignment_late_target at 3290:47: assert_eq index: expected 0x0, got 0x1\n[0] %Fatal: testbench.sv:126: Assertion failed in TOP.celox_suite_tb: timing::blocking_intra_assignment_late_target at 3290:47\n%Error: <target>/sv-verilator/timing/blocking_intra_assignment_late_target/testbench.sv:126: Verilog $stop\nAborting...\n",
+          "error.log": "timing::blocking_intra_assignment_late_target at 3290:47: assert_eq index: expected 0x0, got 0x1"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_nonpositive_unknown_repeat",
+          "status": "unsupported",
+          "phase": "compile",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_repeat_events",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:6:20: Unsupported: repeat event control\n    6 |     repeat_value = repeat(n++) @(posedge clk) data+1;\n      |                    ^~~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n",
+          "diagnostic": "%Error-UNSUPPORTED: <target>/sv-verilator/timing/blocking_intra_assignment_repeat_events/source_0.sv:6:20: Unsupported: repeat event control\n    6 |     repeat_value = repeat(n++) @(posedge clk) data+1;\n      |                    ^~~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+        }
+      ]
+    },
+    "icarus": {
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "cases": [
+        {
+          "name": "timing::blocking_intra_assignment_automatic_tasks",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Reference ports not supported yet.\n1 error(s) during elaboration.\n",
+          "diagnostic": "<target>/sv-icarus/timing/blocking_intra_assignment_automatic_tasks/source_0.sv:3: sorry: Reference ports not supported yet.\n1 error(s) during elaboration.\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_delays",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_events",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_four_state",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_late_target",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_nonpositive_unknown_repeat",
+          "status": "mismatch",
+          "phase": "execute",
+          "detail": "timing::blocking_intra_assignment_nonpositive_unknown_repeat at 3344:35: assert_eq c: expected 0x9, got 0x0",
+          "protocol.log": "@suite assert timing::blocking_intra_assignment_nonpositive_unknown_repeat at 3344:35: assert_eq c: expected 0x9, got 0x0\nFATAL: <target>/sv-icarus/timing/blocking_intra_assignment_nonpositive_unknown_repeat/testbench.sv:137: timing::blocking_intra_assignment_nonpositive_unknown_repeat at 3344:35\n       Time: 0  Scope: celox_suite_tb\n",
+          "error.log": "timing::blocking_intra_assignment_nonpositive_unknown_repeat at 3344:35: assert_eq c: expected 0x9, got 0x0"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_repeat_events",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        }
+      ]
+    },
+    "xezim": {
+      "version": "xezim version 0.11.4",
+      "cases": [
+        {
+          "name": "timing::blocking_intra_assignment_automatic_tasks",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_delays",
+          "status": "mismatch",
+          "phase": "execute",
+          "detail": "timing::blocking_intra_assignment_delays at 3277:17: assert_eq sum: expected 0x100, got 0x0",
+          "protocol.log": "@suite assert timing::blocking_intra_assignment_delays at 3277:17: assert_eq sum: expected 0x100, got 0x0\n** Fatal: timing::blocking_intra_assignment_delays at 3277:17\n   Time: 2000  Scope: celox_suite_tb\n",
+          "error.log": "timing::blocking_intra_assignment_delays at 3277:17: assert_eq sum: expected 0x100, got 0x0"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_events",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_four_state",
+          "status": "mismatch",
+          "phase": "execute",
+          "detail": "timing::blocking_intra_assignment_four_state at 3363:3: assert_eq clean: expected 0x89, got 0xX9",
+          "protocol.log": "@suite assert timing::blocking_intra_assignment_four_state at 3363:3: assert_eq clean: expected 0x89, got 0xX9\n** Fatal: timing::blocking_intra_assignment_four_state at 3363:3\n   Time: 3000  Scope: celox_suite_tb\n",
+          "error.log": "timing::blocking_intra_assignment_four_state at 3363:3: assert_eq clean: expected 0x89, got 0xX9"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_late_target",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_nonpositive_unknown_repeat",
+          "status": "runtime_error",
+          "phase": "execute",
+          "detail": "xezim testbench failed: exit status: 124, without $finish; see runtime.log and protocol.log\n",
+          "error.log": "xezim testbench failed: exit status: 124, without $finish; see runtime.log and protocol.log"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_repeat_events",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        }
+      ]
+    }
+  },
+  "probes": [
+    {
+      "name": "icarus-late-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-o",
+        "work/intra-probes/late.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "icarus-late",
+      "command": [
+        "vvp",
+        "work/intra-probes/late.vvp"
+      ],
+      "exit_code": 0,
+      "output": "early index=0 data=42 (expected 0 42)\nlate index=9 selected=2900 (expected 9 2900)\ncrates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:43: $finish called at 9 (1s)\n"
+    },
+    {
+      "name": "xezim-late",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "5s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--error-exit",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nearly index=0 data=42 (expected 0 42)\nlate index=9 selected=2900 (expected 9 2900)\nSimulation finished at time 9 ($finish called)\n"
+    },
+    {
+      "name": "verilator-late-compile",
+      "command": [
+        "verilator",
+        "--binary",
+        "--assert",
+        "--timing",
+        "-Wno-fatal",
+        "--top-module",
+        "Top",
+        "--Mdir",
+        "work/intra-probes/verilator-late",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "verilator-late",
+      "command": [
+        "work/intra-probes/verilator-late/VTop"
+      ],
+      "exit_code": 0,
+      "output": "early index=1 data=42 (expected 0 42)\nlate index=8 selected=0029 (expected 9 2900)\n- crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:43: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 9ps; walltime 0.000 s; speed 103.791 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+    },
+    {
+      "name": "icarus-conversion-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-DCONVERSION",
+        "-o",
+        "work/intra-probes/conversion.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "icarus-conversion",
+      "command": [
+        "vvp",
+        "work/intra-probes/conversion.vvp"
+      ],
+      "exit_code": 0,
+      "output": "sum=0100 clean=89 (expected 0100 89)\ncrates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:27: $finish called at 3 (1s)\n"
+    },
+    {
+      "name": "xezim-conversion",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "5s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--error-exit",
+        "-D",
+        "CONVERSION",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nsum=0000 clean=89 (expected 0100 89)\nSimulation finished at time 3 ($finish called)\n"
+    },
+    {
+      "name": "verilator-conversion-compile",
+      "command": [
+        "verilator",
+        "--binary",
+        "--assert",
+        "--timing",
+        "-Wno-fatal",
+        "+define+CONVERSION",
+        "--top-module",
+        "Top",
+        "--Mdir",
+        "work/intra-probes/verilator-conversion",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "verilator-conversion",
+      "command": [
+        "work/intra-probes/verilator-conversion/VTop"
+      ],
+      "exit_code": 0,
+      "output": "sum=0100 clean=89 (expected 0100 89)\n- crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:27: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 3ps; walltime 0.000 s; speed 64.167 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+    },
+    {
+      "name": "icarus-repeat_event-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-DREPEAT_EVENT",
+        "-o",
+        "work/intra-probes/repeat_event.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "icarus-repeat_event",
+      "command": [
+        "vvp",
+        "work/intra-probes/repeat_event.vvp"
+      ],
+      "exit_code": 0,
+      "output": "result=9 (expected 9)\ncrates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:17: $finish called at 7 (1s)\n"
+    },
+    {
+      "name": "xezim-repeat_event",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "5s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--error-exit",
+        "-D",
+        "REPEAT_EVENT",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nresult=9 (expected 9)\nSimulation finished at time 7 ($finish called)\n"
+    },
+    {
+      "name": "verilator-repeat-lint",
+      "command": [
+        "verilator",
+        "--lint-only",
+        "--assert",
+        "--timing",
+        "-Wno-fatal",
+        "+define+REPEAT_EVENT",
+        "--top-module",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 1,
+      "output": "%Error-UNSUPPORTED: crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:16:20: Unsupported: repeat event control\n   16 |   initial result = repeat(count) @(posedge clk) 9;\n      |                    ^~~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+    },
+    {
+      "name": "icarus-unknown_repeat-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-DUNKNOWN_REPEAT",
+        "-o",
+        "work/intra-probes/unknown_repeat.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "icarus-unknown_repeat",
+      "command": [
+        "vvp",
+        "work/intra-probes/unknown_repeat.vvp"
+      ],
+      "exit_code": 0,
+      "output": "result=0 done=0 (expected 9 1)\ncrates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:10: $finish called at 1 (1s)\n"
+    },
+    {
+      "name": "xezim-unknown_repeat",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "5s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--error-exit",
+        "-D",
+        "UNKNOWN_REPEAT",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nresult=9 done=1 (expected 9 1)\nSimulation finished at time 1 ($finish called)\n"
+    },
+    {
+      "name": "icarus-reference_port-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-DREFERENCE_PORT",
+        "-o",
+        "work/intra-probes/reference_port.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 1,
+      "output": "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:31: sorry: Reference ports not supported yet.\n1 error(s) during elaboration.\n"
+    },
+    {
+      "name": "icarus-HIGH_Z-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-DUNKNOWN_REPEAT",
+        "-DHIGH_Z",
+        "-o",
+        "work/intra-probes/high_z.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "icarus-HIGH_Z",
+      "command": [
+        "vvp",
+        "work/intra-probes/high_z.vvp"
+      ],
+      "exit_code": 0,
+      "output": "result=0 done=0 (expected 9 1)\ncrates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:16: $finish called at 1 (1s)\n"
+    },
+    {
+      "name": "xezim-HIGH_Z",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "5s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--error-exit",
+        "-D",
+        "UNKNOWN_REPEAT",
+        "-D",
+        "HIGH_Z",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nresult=9 done=1 (expected 9 1)\nSimulation finished at time 1 ($finish called)\n"
+    },
+    {
+      "name": "icarus-MIXED_UNKNOWN-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-DUNKNOWN_REPEAT",
+        "-DMIXED_UNKNOWN",
+        "-o",
+        "work/intra-probes/mixed_unknown.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "icarus-MIXED_UNKNOWN",
+      "command": [
+        "vvp",
+        "work/intra-probes/mixed_unknown.vvp"
+      ],
+      "exit_code": 0,
+      "output": "result=0 done=0 (expected 9 1)\ncrates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:16: $finish called at 1 (1s)\n"
+    },
+    {
+      "name": "xezim-MIXED_UNKNOWN",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "5s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--error-exit",
+        "-D",
+        "UNKNOWN_REPEAT",
+        "-D",
+        "MIXED_UNKNOWN",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nresult=9 done=1 (expected 9 1)\nSimulation finished at time 1 ($finish called)\n"
+    },
+    {
+      "name": "icarus-NEGATIVE_REPEAT-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-DUNKNOWN_REPEAT",
+        "-DNEGATIVE_REPEAT",
+        "-o",
+        "work/intra-probes/negative_repeat.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "icarus-NEGATIVE_REPEAT",
+      "command": [
+        "vvp",
+        "work/intra-probes/negative_repeat.vvp"
+      ],
+      "exit_code": 0,
+      "output": "result=9 done=1 (expected 9 1)\ncrates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:31: $finish called at 1 (1s)\n"
+    },
+    {
+      "name": "xezim-NEGATIVE_REPEAT",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "5s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--error-exit",
+        "-D",
+        "UNKNOWN_REPEAT",
+        "-D",
+        "NEGATIVE_REPEAT",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": -9,
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\n"
+    },
+    {
+      "name": "icarus-CONVERSION_PORTS-compile",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-DCONVERSION_PORTS",
+        "-o",
+        "work/intra-probes/conversion_ports.vvp",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "Compilation succeeded."
+    },
+    {
+      "name": "icarus-CONVERSION_PORTS",
+      "command": [
+        "vvp",
+        "work/intra-probes/conversion_ports.vvp"
+      ],
+      "exit_code": 0,
+      "output": "clean=89 (expected 89)\ncrates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv:12: $finish called at 4 (1s)\n"
+    },
+    {
+      "name": "xezim-CONVERSION_PORTS",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "5s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--error-exit",
+        "-D",
+        "CONVERSION_PORTS",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_blocking_intra_assignment.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nclean=X9 (expected 89)\nSimulation finished at time 4 ($finish called)\n"
+    }
+  ]
+}
