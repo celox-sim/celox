@@ -1,6 +1,9 @@
-//! Increment and decrement operators (IEEE 1800-2023 11.4.2).
+//! Assignment expressions and increment/decrement (IEEE 1800-2023 11.3.6, 11.4.2).
 //!
-//! An operator is executed as statements before the statement that holds
+//! Assignment values are cast and saved before the target is updated, and
+//! the expression binds to that saved, destination-typed value.
+//!
+//! An increment/decrement operator is executed as statements before the statement that holds
 //! it: they read the operand into a hidden local, write the updated value
 //! back with a blocking assignment, and the operator binds to the local,
 //! the operand's value before (`x++`) or after (`++x`) the update. The
@@ -121,7 +124,7 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
     operands
 }
 
-/// The expressions of `roots` that hold an increment or decrement.
+/// The expressions of `roots` that hold an assignment, increment or decrement.
 fn updating(native: &Declarations, roots: &[ExprId]) -> HashSet<ExprId> {
     let mut updating = HashSet::default();
     let mut jobs: Vec<(ExprId, bool)> = roots.iter().map(|id| (*id, false)).collect();
@@ -131,7 +134,9 @@ fn updating(native: &Declarations, roots: &[ExprId]) -> HashSet<ExprId> {
             path.pop();
             continue;
         }
-        if update(native, id).is_some() {
+        if update(native, id).is_some()
+            || matches!(native.expression(id).kind, ExprKind::Assignment { .. })
+        {
             updating.insert(id);
             updating.extend(path.iter().copied());
         }
@@ -148,11 +153,11 @@ fn updating(native: &Declarations, roots: &[ExprId]) -> HashSet<ExprId> {
 }
 
 fn unsupported_context() -> AnalyzerError {
-    unsupported("increment or decrement expression in this context")
+    unsupported("assignment, increment or decrement expression in this context")
 }
 
 impl BodyBuilder<'_, '_, '_> {
-    /// Execute the increment and decrement operators of `roots`, evaluated
+    /// Execute assignment, increment and decrement operators of `roots`, evaluated
     /// in that order, and return the statements that do.
     pub(super) fn effects(&mut self, roots: &[ExprId]) -> Converted<Vec<Stmt>> {
         let native = self.tree.declarations();
@@ -180,6 +185,17 @@ impl BodyBuilder<'_, '_, '_> {
         if let Some((operand, postfix, increment)) = update(native, id) {
             self.effect(operand, updating, stmts)?;
             return self.update(id, operand, Some(postfix), increment, stmts);
+        }
+        if let ExprKind::Assignment {
+            left,
+            operator,
+            right,
+        } = &native.expression(id).kind
+        {
+            let (left, right, operator) = (*left, *right, operator.clone());
+            self.effect(left, updating, stmts)?;
+            self.effect(right, updating, stmts)?;
+            return self.assignment_expression(id, left, &operator, right, stmts);
         }
         match &native.expression(id).kind {
             ExprKind::Binary {
@@ -255,6 +271,109 @@ impl BodyBuilder<'_, '_, '_> {
             }
             _ => return Err(unsupported_context()),
         }
+        Ok(())
+    }
+
+    /// Stack the destination-typed value before updating the target (11.3.6).
+    /// Reuse ordinary assignment checking and compound-operator sizing.
+    fn assignment_expression(
+        &mut self,
+        id: ExprId,
+        left: ExprId,
+        operator: &str,
+        right: ExprId,
+        stmts: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        let native = self.tree.declarations();
+        let current = expression_binding::value(left, native, self.tree, self.session, &self.dims)?;
+        if inlining::effectful(&current) {
+            return Err(unsupported(
+                "assignment expression target selected with a side effect",
+            ));
+        }
+        let bits = dimensions::bound_bits_type(self.tree, &current, &self.dims)
+            .ok_or_else(|| unsupported("assignment expression target type"))?;
+        let shape = dimensions::operand_shape(left, self.tree, self.session, &self.dims)?;
+        if shape.as_ref().is_some_and(|shape| {
+            !shape.unpacked.is_empty()
+                || shape.container.is_some()
+                || shape.unpacked_struct.is_some()
+        }) {
+            return Err(unsupported(
+                "assignment expression to an unpacked aggregate",
+            ));
+        }
+        if !matches!(current, Expr::Ident(_))
+            && shape.as_ref().is_some_and(|shape| {
+                shape.enum_domain.is_some()
+                    || shape.class.is_some()
+                    || shape.virtual_interface.is_some()
+                    || shape.chandle
+                    || !shape.members.is_empty()
+            })
+        {
+            return Err(unsupported(
+                "assignment expression to this selected target type",
+            ));
+        }
+        let ty = shape
+            .as_ref()
+            .filter(|_| matches!(current, Expr::Ident(_)))
+            .and_then(type_names::declared_type)
+            .cloned()
+            .unwrap_or_else(|| {
+                if expression_binding::real_value(&current, &self.dims) {
+                    return type_binding::builtin_type(
+                        if bits.width == 32 {
+                            "shortreal"
+                        } else {
+                            "real"
+                        },
+                        None,
+                    )
+                    .expect("a builtin type");
+                }
+                let mut ty = Type::new(
+                    if if matches!(current, Expr::Concat(_)) {
+                        expr_is_two_state(self.tree, self.session, &current, &self.dims)
+                    } else {
+                        shape.as_ref().is_some_and(|shape| shape.is_2state)
+                    } {
+                        TypeKind::Bit
+                    } else {
+                        TypeKind::Logic
+                    },
+                );
+                ty.is_signed = bits.signed;
+                if bits.width > 1 {
+                    ty.packed_ranges = vec![PackedRange::new(
+                        ConstExpr::Literal((bits.width - 1).to_string()),
+                        ConstExpr::Literal("0".into()),
+                    )];
+                }
+                ty
+            });
+        let mut assignment = self.assignment_value(operator, false, (left, right))?;
+        let rhs = match &mut assignment {
+            Stmt::Assign { rhs, .. } | Stmt::AssignConcat { rhs, .. } => rhs,
+            _ => return Err(unsupported("assignment expression to this target")),
+        };
+        // Index reads must name the same target when a compound value is read
+        // and written. Calls in a selected target or RHS remain unsupported.
+        if !matches!(current, Expr::Ident(_)) && inlining::effectful(rhs) {
+            return Err(unsupported(
+                "assignment expression with an effectful RHS and a selected target",
+            ));
+        }
+        let (source, unique) = self.hidden(ty);
+        let value = std::mem::replace(rhs, Expr::Ident(unique.clone()));
+        stmts.push(Stmt::Assign {
+            lhs: LValue::Ident(unique),
+            rhs: value,
+            nonblocking: false,
+        });
+        stmts.push(assignment);
+        self.bind_effect(id, Expr::Ident(source));
         Ok(())
     }
 
@@ -450,6 +569,26 @@ impl BodyBuilder<'_, '_, '_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn assignment_expressions_keep_context_and_target_checks() {
+        for body in [
+            "int i; wire y; assign y=(i=1);",
+            "int i; always @((i=1)) i=2;",
+            "int i; initial begin static int t=(i=1); end",
+            "int a[4],i,d; function int f(); i++; return i; endfunction initial d=(a[f()]+=1);",
+            "int a[4],i,d; function int f(); i++; return i; endfunction initial d=(a[i]+=f());",
+            "int d; initial d=(5=1);",
+            "string s; initial s=(s+=1);",
+        ] {
+            let source = format!("module M; {body} endmodule");
+            assert!(
+                crate::analyze_source(&source, Path::new("assignment-expression-context.sv"))
+                    .is_err(),
+                "{body}"
+            );
+        }
+    }
 
     #[test]
     fn operators_in_contexts_that_skip_or_repeat_operands_are_rejected() {

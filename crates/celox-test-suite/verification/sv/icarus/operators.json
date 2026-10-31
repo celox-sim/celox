@@ -13,6 +13,174 @@
     },
     {
       "category": "Operators",
+      "detail": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_assignment_expressions",
+        "category": "language_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ]
+      },
+      "name": "operators::assignment_expression_compound_operators",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_assignment_expressions",
+        "category": "language_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ]
+      },
+      "name": "operators::assignment_expression_concat_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_assignment_expressions",
+        "category": "language_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ]
+      },
+      "name": "operators::assignment_expression_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_assignment_expressions",
+        "category": "language_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ]
+      },
+      "name": "operators::assignment_expression_guards_and_loops",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_assignment_expressions",
+        "category": "language_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ]
+      },
+      "name": "operators::assignment_expression_selected_index_once",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_assignment_expressions",
+        "category": "language_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ]
+      },
+      "name": "operators::assignment_expression_stacked_results",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_assignment_expressions",
+        "category": "language_limitation",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ]
+      },
+      "name": "operators::assignment_expression_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
       "name": "operators::converts_function_arguments_using_actual_signedness",

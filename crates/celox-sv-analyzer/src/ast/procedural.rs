@@ -2030,7 +2030,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     // process starts (IEEE 1800-2023 6.21).
                     if !automatic && !effects.is_empty() {
                         return Err(unsupported(
-                            "increment or decrement in a static variable initializer",
+                            "assignment, increment or decrement in a static variable initializer",
                         ));
                     }
                     stmts.extend(effects);
