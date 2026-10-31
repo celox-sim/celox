@@ -1,6 +1,1 @@
-Revision history for #2803:
-
-rev 2 (content) 2026-10-31 22:29 UTC — CI retained_reports requires aggregate exclusion rows for the eight newly reviewed fixed-string-array tool failures. Add only those rows; simulation behavior is unchanged.
-rev 1 (initial) 2026-10-31 22:29 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2803,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e212d9ff604ee0c5318c0e1a4ba76eca3cf7b892","timestamp_iso":"2026-10-31T22:29:03Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"e212d9ff604ee0c5318c0e1a4ba76eca3cf7b892","new_sha":"b6b4f7b4afbb4e853d8c7e225529ae28dc3c5bc7","timestamp_iso":"2026-10-31T22:29:03Z","reason":"CI retained_reports requires aggregate exclusion rows for the eight newly reviewed fixed-string-array tool failures. Add only those rows; simulation behavior is unchanged.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e212d9ff604ee0c5318c0e1a4ba76eca3cf7b892...b6b4f7b4afbb4e853d8c7e225529ae28dc3c5bc7"}]} -->
+Address review 5725286457: preserve string-array rows and their element type in patterns, and convert continuous string-element assignments. Add reproductions and focused external-tool evidence.
