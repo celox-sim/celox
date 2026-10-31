@@ -182,7 +182,7 @@ fn task_timing_control_is_rejected() {
 fn unsupported_constructs_name_their_tracking_issue() {
     {
         let (source, issue) = (
-            "module Top(input logic a, b, output logic y); and g(y, a, b); endmodule",
+            "module Top(input logic a, b, output logic y); tran g(y, a); endmodule",
             457,
         );
         let error = Simulator::from_sv_sources(vec![(source, Path::new("tracking.sv"))], "Top")

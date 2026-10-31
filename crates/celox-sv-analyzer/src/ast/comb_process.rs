@@ -23,6 +23,7 @@ pub(super) fn comb_processes_from_scope(
         if !matches!(
             &syntax_tree.declarations().body_item(item.id).kind,
             celox_sv_syntax::BodyItemKind::Assign(_)
+                | celox_sv_syntax::BodyItemKind::LogicGate(_)
                 | celox_sv_syntax::BodyItemKind::Procedure(_)
                 | celox_sv_syntax::BodyItemKind::Net(_)
                 | celox_sv_syntax::BodyItemKind::Unconverted { .. }
@@ -88,6 +89,19 @@ fn comb_processes_from_item(
                 ));
             }
         }
+        celox_sv_syntax::BodyItemKind::LogicGate(gate) => {
+            for mut process in logic_gate_processes(gate, syntax_tree, session, packed_dimensions)?
+            {
+                process.condition = condition.clone();
+                processes.push(substitute_process_constants_with_parameter_literals(
+                    syntax_tree,
+                    session,
+                    process,
+                    const_env,
+                    parameter_literals,
+                ));
+            }
+        }
         celox_sv_syntax::BodyItemKind::Procedure(id) => {
             let local_packed_dimensions =
                 always_dimensions(packed_dimensions, const_env, parameter_literals);
@@ -141,6 +155,88 @@ fn comb_processes_from_item(
         _ => {}
     }
     Ok(())
+}
+
+/// Scalar n-input truth tables: a one-input gate must also turn Z into X.
+fn logic_gate_processes(
+    gate: &celox_sv_syntax::LogicGate,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Vec<CombProcess>> {
+    if gate.strength.is_some()
+        || gate.delay.is_some()
+        || gate
+            .instances
+            .iter()
+            .any(|instance| !instance.dimensions.is_empty())
+    {
+        return Err(unsupported("gate primitive instantiation"));
+    }
+    let (op, identity, invert) = match gate.kind.as_str() {
+        "and" => (BinaryOp::BitAnd, "1'b1", false),
+        "nand" => (BinaryOp::BitAnd, "1'b1", true),
+        "or" => (BinaryOp::BitOr, "1'b0", false),
+        "nor" => (BinaryOp::BitOr, "1'b0", true),
+        "xor" => (BinaryOp::BitXor, "1'b0", false),
+        "xnor" => (BinaryOp::BitXor, "1'b0", true),
+        _ => return Err(unsupported("gate primitive instantiation")),
+    };
+    let mut processes = Vec::new();
+    for instance in &gate.instances {
+        // A scalar net lvalue can be wrapped in arbitrarily nested singleton
+        // concatenations. Multi-part outputs remain outside the scalar subset.
+        let mut output = instance.terminals[0];
+        while let celox_sv_syntax::ExprKind::Concatenation(parts) =
+            &tree.declarations().expression(output).kind
+        {
+            if parts.len() != 1 {
+                return Err(unsupported("non-scalar gate terminal"));
+            }
+            output = parts[0];
+        }
+        let lhs =
+            expression_binding::net_lvalue(output, tree.declarations(), tree, session, dimensions)?;
+        if !lvalue_expr_type(&tree.functions, &lhs, dimensions).is_some_and(|ty| ty.width == 1) {
+            return Err(unsupported("non-scalar gate terminal"));
+        }
+        let mut rhs = Expr::Literal(identity.into());
+        for &input in &instance.terminals[1..] {
+            let input =
+                expression_binding::value(input, tree.declarations(), tree, session, dimensions)?;
+            if expr_static_width(tree, &input, dimensions) != Some(1) {
+                return Err(unsupported("non-scalar gate terminal"));
+            }
+            rhs = Expr::Binary {
+                left: Box::new(rhs),
+                op,
+                right: Box::new(input),
+            };
+        }
+        if invert {
+            rhs = Expr::Unary {
+                op: UnaryOp::BitNot,
+                expr: Box::new(rhs),
+            };
+        }
+        let rhs = if matches!(
+            lhs,
+            LValue::Select {
+                is_2state: true,
+                ..
+            }
+        ) {
+            coerce_procedural_assignment_rhs(tree, rhs, &lhs, dimensions)
+        } else {
+            rhs
+        };
+        processes.push(CombProcess::new(
+            CombProcessKind::ContinuousAssign,
+            None,
+            vec![Assignment::new(lhs, rhs)],
+        ));
+    }
+    Ok(processes)
 }
 
 fn always_dimensions(

@@ -87,6 +87,13 @@ The main supported areas are:
 | Simulation helpers | Immediate and deferred immediate assertions, display tasks, `$readmemh` / `$readmemb`, time queries and random numbers |
 | Termination | `final` procedures on `$finish`, `$fatal` or explicit `Simulation::finish()`; see [termination semantics](./systemverilog-reference#final-procedures) |
 
+Scalar `and`, `nand`, `or`, `nor`, `xor`, and `xnor` gates are supported
+without explicit delays or strengths (IEEE 1800-2023 28.4). Terminals must
+be one-bit integral expressions; named and unnamed instances, multiple
+instances in a declaration, and generate scopes are supported. Other gate
+and switch primitives remain unsupported.
+
+
 Each area has restrictions. Use the
 [detailed support list](./systemverilog-reference#what-is-supported) to check
 ports, types, statements or system functions before porting a design.
@@ -99,7 +106,7 @@ Common reasons a design needs changes are:
 - `fork` / `join`, intra-assignment timing such as `a = #1 b`
   and `iff` in `always_ff` event controls ([#452](https://github.com/celox-sim/celox/issues/452)).
 - Nonblocking latch assignments, multiple drivers and tri-state buses. Inferred latches in `always_comb` require `inferred_latch = "warn"` or `"allow"` in the common `[diagnostics]` configuration.
-- Non-ANSI module ports, wildcard `.*` connections, gate primitives and `bind`.
+- Non-ANSI module ports, wildcard `.*` connections, gate primitives with delays, strengths or instance arrays, and `bind`.
 - `real`, unpacked structs in ports and fixed-size arrays, and several interface features.
 
 The [complete limitations list](./systemverilog-reference#what-is-not-supported)
