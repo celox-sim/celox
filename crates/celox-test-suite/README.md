@@ -408,9 +408,14 @@ exclusion. Script comments, whitespace and diagnostic positions do not change
 its identity; embedded HDL source strings remain verbatim. Changes to the
 compiled verifier, resolved dependency versions/features, local dependency
 sources, workspace manifests/lockfile, tools, compiler flags, or
-`--include-ignored` invalidate reuse. If tool/dependency identification is
-incomplete, the runner verifies the selection afresh. A malformed worktree
-report is an error; a damaged shared cache record is ignored and reverified.
+`--include-ignored` invalidate reuse. If tool identification or both verifier
+identities are unavailable, the runner verifies the selection afresh. A malformed
+worktree report is an error; a damaged shared cache record is ignored and reverified.
+
+If a cold scoped build cannot resolve the full offline Cargo dependency graph,
+the verifier hashes its complete executable instead. This conservatively
+invalidates cached results when the binary changes, including after embedded
+case edits. If neither identity can be read, result reuse remains disabled.
 
 `results.json` retains the original status and `verified_at_unix` for reused
 cases, marks them with `reused: true`, and counts fresh/reused results
