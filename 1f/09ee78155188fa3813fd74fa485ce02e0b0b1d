@@ -1,0 +1,1 @@
+Review fixes: a break leaves the whole multidimensional foreach (flag checked by each outer dimension loop, also fixing fixed-size multidimensional foreach); new shared case multidimensional_foreach_break; xezim nested_container_foreach row regenerated at its current location (1444:3).
