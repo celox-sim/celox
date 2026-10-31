@@ -6,7 +6,7 @@
 //! text. Types whose patterns are not supported yet are rejected.
 
 use super::*;
-use crate::system_functions::ContainerLayout;
+use crate::system_functions::{AggregatePattern, ContainerKind, ContainerLayout, LocatorSource};
 
 /// How `%p` prints a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -302,6 +302,253 @@ pub(in crate::ast) fn pattern(
     Ok(Pattern::Integral)
 }
 
+/// The `%p` text of native expression `id`, bound as `value`, as a string
+/// expression when it is an unpacked structure or a container of them:
+/// an assignment pattern with named members (IEEE 1800-2023 21.2.1.6).
+/// `None` for other values, which [`pattern`] classifies.
+pub(in crate::ast) fn aggregate_text(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    value: &Expr,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    if let Some(container) = containers::native_type(id, native, tree, session, dimensions)? {
+        let Some(aggregate) = container.element.unpacked_struct().cloned() else {
+            return Ok(None);
+        };
+        return container_text(tree, id, value, &container, &aggregate, native, dimensions)
+            .map(Some);
+    }
+    let Some(aggregate) = unpacked_structs::native_struct(id, native, tree, session, dimensions)?
+    else {
+        return Ok(None);
+    };
+    // A variable or pattern names each member value; other structure values
+    // are rejected by `pattern`.
+    let Some(leaves) = unpacked_structs::leaf_parts(&aggregate, value) else {
+        return Ok(None);
+    };
+    let mut text = Text::default();
+    text.structure(&aggregate, &mut leaves.into_iter(), dimensions)?;
+    Ok(Some(text.format()))
+}
+
+/// The `%p` text of `container`, a container of `aggregate` structures
+/// bound as `value`, visited by an [`AggregatePattern`] loop.
+fn container_text(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    value: &Expr,
+    container: &ContainerType,
+    aggregate: &unpacked_structs::UnpackedStruct,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Expr> {
+    let sink = dimensions
+        .locator_locals
+        .as_ref()
+        .ok_or_else(|| unsupported("%p of a container of structures outside a procedural body"))?;
+    let key = container.key.as_ref();
+    if key.is_some_and(|key| {
+        key.is_enum || key.enum_domain.is_some() || key.packed_enum || key.class.is_some()
+    }) {
+        return Err(unsupported(
+            "%p of an associative array of structures with enum or class handle keys",
+        ));
+    }
+    // The tokens of the argument tell its locals apart from others.
+    let tokens = native.expression(id).tokens;
+    let site = format!("{}.{}.pattern", tokens.start, tokens.end);
+    // An element kept as a record is read through its handle, any other as
+    // its flat value (see `containers::element_member`).
+    let item_type = match &container.record {
+        Some(_) => {
+            let mut handle = Type::new(TypeKind::Object);
+            handle.packed_ranges.push(PackedRange::new(
+                ConstExpr::Literal("31".into()),
+                ConstExpr::Literal("0".into()),
+            ));
+            handle
+        }
+        None => {
+            let mut flat = Type::new(if container.layout.two_state {
+                TypeKind::Bit
+            } else {
+                TypeKind::Logic
+            });
+            flat.packed_ranges.push(PackedRange::new(
+                ConstExpr::Literal((container.layout.width - 1).to_string()),
+                ConstExpr::Literal("0".into()),
+            ));
+            flat
+        }
+    };
+    let string = || type_binding::builtin_type("string", None).expect("string is a builtin type");
+    let item = sink.declare(&site, "item", item_type, tree, dimensions);
+    let index = sink.declare(
+        &site,
+        "index",
+        key.cloned().unwrap_or_else(procedural::int_type),
+        tree,
+        dimensions,
+    );
+    let text = sink.declare(&site, "text", string(), tree, dimensions);
+    let item_value = Expr::Ident(item);
+    let leaves = aggregate.leaves();
+    let leaf_values = leaves
+        .iter()
+        .enumerate()
+        .map(|(position, leaf)| match &container.record {
+            Some(record) => classes::object_call(
+                ObjectOp::Load(record.fields[position]),
+                vec![item_value.clone()],
+            ),
+            None => Expr::Select {
+                expr: Box::new(item_value.clone()),
+                msb: ConstExpr::Literal((leaf.offset + leaf.width - 1).to_string()),
+                lsb: ConstExpr::Literal(leaf.offset.to_string()),
+                signed: leaf.r#type.is_signed,
+            },
+        })
+        .collect::<Vec<_>>();
+    // The text of one element, after the text so far and a separator: an
+    // associative array labels it with its index (`'{1:'{...}}`).
+    let element = |separator: &[u8]| -> Converted<Expr> {
+        let mut text_so_far = Text::default();
+        text_so_far.template.extend_from_slice(b"%s");
+        text_so_far.args.push(Expr::Ident(text.clone()));
+        text_so_far.template.extend_from_slice(separator);
+        match key {
+            Some(key) if key.kind() == TypeKind::String => {
+                text_so_far.template.extend_from_slice(b"\"%s\":");
+                text_so_far.args.push(Expr::Ident(index.clone()));
+            }
+            Some(_) => {
+                text_so_far.template.extend_from_slice(b"%0d:");
+                text_so_far.args.push(Expr::Ident(index.clone()));
+            }
+            None => {}
+        }
+        text_so_far.structure(aggregate, &mut leaf_values.clone().into_iter(), dimensions)?;
+        Ok(text_so_far.format())
+    };
+    let first = element(b"")?;
+    let next = element(b", ")?;
+    let start = Text::literal(b"'{");
+    let mut finish = Text::default();
+    finish.template.extend_from_slice(b"%s}");
+    finish.args.push(Expr::Ident(text.clone()));
+    let source = match container.layout.kind {
+        ContainerKind::Dynamic
+        | ContainerKind::Queue { .. }
+        | ContainerKind::Associative { .. } => LocatorSource::Container(container.layout),
+    };
+    Ok(classes::object_call(
+        ObjectOp::Pattern(AggregatePattern { source }),
+        vec![
+            value.clone(),
+            item_value,
+            Expr::Ident(index),
+            Expr::Ident(text),
+            start.format(),
+            first,
+            next,
+            finish.format(),
+        ],
+    ))
+}
+
+/// A format template and the values it converts.
+#[derive(Default)]
+struct Text {
+    template: Vec<u8>,
+    args: Vec<Expr>,
+}
+
+impl Text {
+    fn literal(bytes: &[u8]) -> Self {
+        Self {
+            template: bytes.to_vec(),
+            args: Vec::new(),
+        }
+    }
+
+    /// Append the assignment pattern of structure `aggregate` with named
+    /// members, whose leaf values `leaves` gives in order.
+    fn structure(
+        &mut self,
+        aggregate: &unpacked_structs::UnpackedStruct,
+        leaves: &mut impl std::iter::Iterator<Item = Expr>,
+        dimensions: &PackedDimensions,
+    ) -> Converted<()> {
+        self.template.extend_from_slice(b"'{");
+        for (position, member) in aggregate.members().iter().enumerate() {
+            if position > 0 {
+                self.template.extend_from_slice(b", ");
+            }
+            self.template.extend_from_slice(member.name.as_bytes());
+            self.template.push(b':');
+            if let Some(inner) = member.r#type.unpacked_struct() {
+                self.structure(inner, leaves, dimensions)?;
+                continue;
+            }
+            let leaf = leaves.next().expect("a value for each leaf");
+            let ty = &member.r#type;
+            if ty.is_enum || ty.enum_domain.is_some() || ty.packed_enum {
+                return Err(unsupported("%p of a structure with an enum member"));
+            }
+            if !ty.members.is_empty() {
+                return Err(unsupported(
+                    "%p of a structure with a packed structure member",
+                ));
+            }
+            if ty.container.is_some()
+                || !ty.unpacked_ranges.is_empty()
+                || ty.chandle
+                || matches!(
+                    ty.kind,
+                    TypeKind::Real | TypeKind::Shortreal | TypeKind::Event | TypeKind::Process
+                )
+            {
+                return Err(unsupported(
+                    "%p of a structure with an array, real, chandle, event or process member",
+                ));
+            }
+            match ty.kind {
+                // A string prints in quotes.
+                TypeKind::String => {
+                    self.template.extend_from_slice(b"\"%s\"");
+                    self.args.push(leaf);
+                }
+                TypeKind::Object => {
+                    let (conversion, value) =
+                        pattern_argument(Pattern::Handle(None), leaf, dimensions);
+                    self.template.extend_from_slice(conversion);
+                    self.args.push(value);
+                }
+                _ => {
+                    self.template.extend_from_slice(b"%0d");
+                    self.args.push(leaf);
+                }
+            }
+        }
+        self.template.push(b'}');
+        Ok(())
+    }
+
+    /// The string that `$sformatf` makes of the template and its values.
+    fn format(self) -> Expr {
+        strings::call(
+            StringOp::Format { ticks_per_unit: 1 },
+            std::iter::once(bytes_literal(&self.template))
+                .chain(self.args)
+                .collect(),
+        )
+    }
+}
+
 /// Whether bound `value` is a class handle: a handle variable or property,
 /// an element of a container of handles, a call of a function that returns
 /// one, or a conditional with such an operand.
@@ -446,6 +693,10 @@ pub(in crate::ast) fn rewrite_format(
             // A conversion without an argument prints nothing.
             return Ok(&b"%0d"[..]);
         };
+        if let Some(text) = aggregate_text(tree, session, id, value, native, dimensions)? {
+            *value = text;
+            return Ok(&b"%s"[..]);
+        }
         let pattern = pattern(tree, session, id, value, native, dimensions)?;
         let (conversion, argument) = pattern_argument(
             pattern,
