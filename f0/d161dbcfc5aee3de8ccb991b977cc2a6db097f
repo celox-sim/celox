@@ -1,1 +1,6 @@
-Exclude queued writes from shared temporary eligibility and coerce signed constant NBA delays to time width; cover the IR policy and exact persisted due times from review 5725361321.
+Revision history for #2807:
+
+rev 2 (content) 2026-10-31 23:21 UTC — Exclude queued writes from shared temporary eligibility and coerce signed constant NBA delays to time width; cover the IR policy and exact persisted due times from review 5725361321.
+rev 1 (initial) 2026-10-31 23:21 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2807,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5932b12b65da64e652a535e8360fa0d5fc6f5401","timestamp_iso":"2026-10-31T23:21:18Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5932b12b65da64e652a535e8360fa0d5fc6f5401","new_sha":"f0d161dbcfc5aee3de8ccb991b977cc2a6db097f","timestamp_iso":"2026-10-31T23:21:18Z","reason":"Exclude queued writes from shared temporary eligibility and coerce signed constant NBA delays to time width; cover the IR policy and exact persisted due times from review 5725361321.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5932b12b65da64e652a535e8360fa0d5fc6f5401...f0d161dbcfc5aee3de8ccb991b977cc2a6db097f"}]} -->
