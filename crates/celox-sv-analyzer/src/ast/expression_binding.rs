@@ -7,7 +7,7 @@ mod direct;
 mod enums;
 mod format_patterns;
 mod lvalues;
-mod objects;
+pub(super) mod objects;
 mod references;
 #[cfg(test)]
 mod selected;
