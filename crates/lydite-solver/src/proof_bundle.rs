@@ -4,7 +4,6 @@ use crate::{Check, CutBudgetMode, QueryOptions, finite};
 use lydite_ir::*;
 use serde_json::{Value, json};
 use std::{
-    cell::Cell,
     collections::{HashMap, HashSet},
     rc::Rc,
     time::Instant,
@@ -63,7 +62,7 @@ pub struct ProofBundle<'a> {
     clauses: usize,
     charged_terms: usize,
     variables: usize,
-    poisoned: Cell<bool>,
+    poisoned: bool,
     steps: Vec<(Term, Term)>,
     graph: Vec<Value>,
     queries: Vec<Value>,
@@ -176,7 +175,7 @@ impl<'a> ProofBundle<'a> {
             clauses: 0,
             charged_terms: 0,
             variables: 0,
-            poisoned: Cell::new(false),
+            poisoned: false,
             steps: vec![],
             graph: vec![],
             queries: vec![],
@@ -208,9 +207,9 @@ impl<'a> ProofBundle<'a> {
     pub fn original_goal(&self) -> &Term {
         &self.goal
     }
-    fn check_scope(&self) -> Res<()> {
+    fn check_scope(&mut self) -> Res<()> {
         if !crate::finite_only() {
-            self.poisoned.set(true);
+            self.poisoned = true;
             return Err("proof bundle solver mode changed".into());
         }
         if self.context != self.frozen_context
@@ -218,12 +217,12 @@ impl<'a> ProofBundle<'a> {
             || self.pre != self.frozen_pre
             || self.goal != self.frozen_goal
         {
-            self.poisoned.set(true);
+            self.poisoned = true;
             return Err("proof source context changed".into());
         }
         Ok(())
     }
-    fn check_handle(&self, h: &SequentHandle) -> Res<()> {
+    fn check_handle(&mut self, h: &SequentHandle) -> Res<()> {
         self.check_scope()?;
         if !Rc::ptr_eq(&self.owner, &h.owner)
             || self.steps.get(h.id) != Some(&(h.pre.clone(), h.post.clone()))
@@ -233,7 +232,7 @@ impl<'a> ProofBundle<'a> {
         Ok(())
     }
     fn remaining(&self) -> Res<finite::Limits> {
-        if self.poisoned.get() {
+        if self.poisoned {
             return Err("proof bundle resource or scope failure".into());
         }
         if self.mode == CutBudgetMode::IndependentLemmas {
@@ -281,7 +280,7 @@ impl<'a> ProofBundle<'a> {
         ) {
             Ok(value) => value,
             Err(error) => {
-                self.poisoned.set(true);
+                self.poisoned = true;
                 return Err(error);
             }
         };
@@ -297,7 +296,7 @@ impl<'a> ProofBundle<'a> {
         );
         self.charge(work as u64)?;
         if result.is_err() {
-            self.poisoned.set(true);
+            self.poisoned = true;
         }
         result
     }
@@ -411,7 +410,7 @@ impl<'a> ProofBundle<'a> {
         let (found, work) = match contains(root, needle) {
             Ok(value) => value,
             Err(error) => {
-                self.poisoned.set(true);
+                self.poisoned = true;
                 return Err(error);
             }
         };
@@ -422,7 +421,7 @@ impl<'a> ProofBundle<'a> {
         match substitute(term, rules) {
             Ok(value) => Ok(value),
             Err(error) => {
-                self.poisoned.set(true);
+                self.poisoned = true;
                 Err(error)
             }
         }
@@ -627,7 +626,7 @@ impl<'a> ProofBundle<'a> {
         let replay_sat = self.replay.as_ref().is_some_and(|r| {
             r["solver_result"] == "sat" && r["finite"]["original_formula_validated"] == true
         });
-        let budget_ok = !self.poisoned.get()
+        let budget_ok = !self.poisoned
             && (self.mode == CutBudgetMode::IndependentLemmas || self.remaining().is_ok());
         let passed = budget_ok && (root.is_some() || replay_unsat);
         let sat = budget_ok && !passed && replay_sat;
