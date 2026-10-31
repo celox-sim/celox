@@ -672,11 +672,14 @@ fn resolved_type(module: &ElaboratedModule, r#type: &sv::ir::Type) -> Option<sv:
         .iter()
         .map(|range| unpacked_range_bounds(range, &module.constants, &module.parameter_types))
         .collect::<Option<Vec<_>>>()?;
-    Some(sv::ast::Type::resolved(
-        kind,
-        r#type.is_signed(),
-        r#type.signed_element_depth(),
-        &packed,
-        &unpacked,
-    ))
+    Some(
+        sv::ast::Type::resolved(
+            kind,
+            r#type.is_signed(),
+            r#type.signed_element_depth(),
+            &packed,
+            &unpacked,
+        )
+        .with_chandle(r#type.is_chandle()),
+    )
 }

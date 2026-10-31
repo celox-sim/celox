@@ -242,6 +242,9 @@ fn native_dpi_type(
                 signed: data_type.signed.unwrap_or(true),
             })
         }
+        // A C pointer (`void *`), a 64-bit integer on the supported hosts
+        // (IEEE 1800-2023 6.14, H.7.4).
+        DataTypeKind::Builtin(name) if name == "chandle" => Ok(DpiType::Chandle),
         DataTypeKind::Builtin(name) if matches!(name.as_str(), "integer" | "time") => Err(
             unsupported(format!("DPI-C {role} of four-state integer type")),
         ),

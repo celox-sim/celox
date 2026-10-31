@@ -99,6 +99,12 @@ fn fixed_array(
     Ok(Some((array.element_width, count)))
 }
 
+fn chandle() -> AnalyzerError {
+    AnalyzerError::IllegalChandleUse {
+        detail: "a chandle is not of bit-stream type".into(),
+    }
+}
+
 /// Reject the kinds of data a fixed-size stream cannot hold.
 fn check_fixed(shape: &VariableDimensions) -> Converted<()> {
     if shape.container.is_some() {
@@ -112,6 +118,9 @@ fn check_fixed(shape: &VariableDimensions) -> Converted<()> {
     if shape.real {
         // 6.24.3: real is not a bit-stream type.
         return Err(invalid("a real value is not of bit-stream type"));
+    }
+    if chandles::holds_chandle(shape) {
+        return Err(chandle());
     }
     if shape.class.is_some() {
         return Err(unsupported("streaming concatenation of a class handle"));
@@ -137,6 +146,9 @@ pub(in crate::ast) enum Receiver {
 /// array of integral or string elements.
 fn stream_container(container: &ContainerType) -> Converted<ContainerLayout> {
     let layout = container.layout;
+    if chandles::type_holds_chandle(&container.element) {
+        return Err(chandle());
+    }
     if matches!(layout.kind, ContainerKind::Associative { .. }) {
         // 6.24.3: an associative array is illegal as a destination type.
         return Err(invalid("an associative array cannot receive a stream"));
@@ -169,6 +181,9 @@ pub(in crate::ast) fn receiver(
         return Err(invalid(
             "the target of a stream shall be of bit-stream type",
         ));
+    }
+    if chandles::holds_chandle(shape) {
+        return Err(chandle());
     }
     if shape.class.is_some() {
         return Err(unsupported("streaming concatenation into a class handle"));
@@ -343,6 +358,9 @@ fn operand(
     };
     if let Some(container) = container {
         let layout = container.layout;
+        if chandles::type_holds_chandle(&container.element) {
+            return Err(chandle());
+        }
         if layout.handle == Some(HandleProperty::Object) {
             return Err(unsupported(
                 "streaming concatenation of class handles or structures in a container",
@@ -818,7 +836,7 @@ pub(in crate::ast) fn unpack(
                     second,
                 ]),
             });
-            lvalues.push(variable_lvalue(id, native, tree, session, dims)?);
+            lvalues.push(variable_lvalue(id, native, tree, session, dims, false)?);
             continue;
         }
         if dynamic {
@@ -833,7 +851,7 @@ pub(in crate::ast) fn unpack(
                 },
                 None => Take::String { reserve },
             });
-            lvalues.push(variable_lvalue(id, native, tree, session, dims)?);
+            lvalues.push(variable_lvalue(id, native, tree, session, dims, false)?);
             continue;
         }
         check_fixed(&shape)?;
@@ -869,7 +887,7 @@ pub(in crate::ast) fn unpack(
             unreachable!("a fixed-size variable receives fixed-size data");
         };
         takes.push(Take::Fixed(target));
-        lvalues.push(variable_lvalue(id, native, tree, session, dims)?);
+        lvalues.push(variable_lvalue(id, native, tree, session, dims, false)?);
     }
     let source = if is_stream(right, native) {
         vec![match packed(right, native, tree, session, dims)? {

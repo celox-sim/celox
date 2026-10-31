@@ -160,6 +160,9 @@ fn ff_event_control_and_body(
         {
             return Ok(None);
         }
+        // Bound without the types of the scope, so its value is checked
+        // with them.
+        expression_binding::check_chandle_read(item.expression, tree, native, dimensions, session)?;
         let expression = expression_binding::value(
             item.expression,
             native,

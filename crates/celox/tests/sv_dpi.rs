@@ -819,3 +819,59 @@ dpi_backends! {
         assert_eq!(QUERY_DPI_CALLS.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }
+
+static CHANDLE_TARGET: [i32; 2] = [17, 29];
+
+/// A `chandle` is a C pointer (IEEE 1800-2023 6.14): one function returns
+/// one, another dereferences it.
+extern "C" fn dpi_element_handle(index: i32) -> *const i32 {
+    if index < 0 {
+        std::ptr::null()
+    } else {
+        &CHANDLE_TARGET[index as usize]
+    }
+}
+
+extern "C" fn dpi_read_handle(handle: *const i32) -> i32 {
+    if handle.is_null() {
+        -1
+    } else {
+        // SAFETY: the handle comes from `dpi_element_handle`.
+        unsafe { *handle }
+    }
+}
+
+dpi_backends! {
+    fn chandles_pass_c_pointers_through(sim) {
+        @build unsafe {
+            builder(r#"
+                module Top(input logic clk, input int index, output int value, output bit is_null);
+                    import "DPI-C" function chandle element(input int index);
+                    import "DPI-C" function int read(input chandle handle);
+                    chandle handle;
+                    always_ff @(posedge clk) begin
+                        handle <= element(index);
+                        value <= read(handle);
+                        is_null <= handle == null;
+                    end
+                endmodule
+            "#)
+            .dpi_function("element", dpi_element_handle as *const ())
+            .dpi_function("read", dpi_read_handle as *const ())
+        };
+        let clk = sim.event("clk");
+        let (index, value, is_null) = (sim.signal("index"), sim.signal("value"), sim.signal("is_null"));
+        sim.modify(|io| io.set(index, 1u32)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(0xffff_ffffu32));
+        assert_eq!(sim.get(is_null), BigUint::from(1u32));
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(29u32));
+        assert_eq!(sim.get(is_null), BigUint::from(0u32));
+        sim.modify(|io| io.set(index, 0xffff_ffffu32)).unwrap();
+        sim.tick(clk).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(0xffff_ffffu32));
+        assert_eq!(sim.get(is_null), BigUint::from(1u32));
+    }
+}

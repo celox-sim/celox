@@ -76,6 +76,10 @@ modes of `13.3.1--task-static` now pass. Its `int a = 0;` in a static task is
 initialized once and shared by the four calls, which print 1, 2, 3 and 4 in
 the local simulation driver; the full run reports no other change.
 
+The `chandle` type updates two expectations: both state modes of
+`6.14--chandle`, which declares a chandle variable, now pass. It is the only
+fail-to-pass transition in the full local run; no failure expectation is broadened.
+
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
 rules from tool exit codes or `should_fail` metadata. A negative test may pass

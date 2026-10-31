@@ -562,3 +562,35 @@ module Top(output int sum);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 18324313))
+
+; IEEE 1800-2023 6.14: a chandle starts as null, compares with another
+; chandle or null, tests as a Boolean, and can be copied, kept in a class,
+; an associative array, and passed to and returned from subroutines.
+(case chandles_hold_null_and_copies
+  (source "chandles_hold_null_and_copies.sv" #"
+    module Top(output int checks);
+      class Holder;
+        local chandle h;
+        function void set(chandle x); h = x; endfunction
+        function bit is_null(); return h == null; endfunction
+      endclass
+      chandle a, b;
+      chandle lookup[string];
+      function automatic chandle pass(chandle h); return h; endfunction
+      initial begin
+        automatic Holder holder = new;
+        automatic chandle c = null;
+        checks = 0;
+        if (a == null && a === b && !a) checks++;
+        b = pass(a);
+        lookup["k"] = b;
+        c = lookup["k"];
+        if (c == a && !(c != null) && !(a || b)) checks++;
+        holder.set(c);
+        if (holder.is_null() && lookup.num() == 1) checks++;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq checks 3))

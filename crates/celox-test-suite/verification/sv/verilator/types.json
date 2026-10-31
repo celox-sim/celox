@@ -4,6 +4,17 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "types::chandles_hold_null_and_copies",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "types::packed_arrays_of_signed_named_types_have_signed_elements",
       "phase": "execute",
       "status": "passed",

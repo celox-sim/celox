@@ -2,6 +2,7 @@
 use super::*;
 use celox_sv_syntax::{Declarations, DimensionKind, ExprId, ExprKind};
 mod calls;
+mod chandles;
 mod direct;
 mod enums;
 mod format_patterns;
@@ -13,10 +14,16 @@ mod selected;
 mod streams;
 mod strings;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
+pub(super) use chandles::{
+    check_assignment as check_chandle_assignment, check_equality as check_chandle_equality,
+    check_memory as check_chandle_memory, check_target as check_chandle_target, holds_chandle,
+    native_chandle, read as check_chandle_read, type_holds_chandle,
+};
+pub(super) use direct::bind_argument;
 pub(super) use direct::{
-    arguments, bind_value, call_name as native_name, callable_name, cast_target_native,
-    formal_arguments, format_arguments, member_context, real_value, remove_real_division_guards,
-    string_literal_bytes, ungroup,
+    arguments, bind_chandle_value, bind_value, call_name as native_name, callable_name,
+    cast_target_native, formal_arguments, format_arguments, member_context, real_value,
+    remove_real_division_guards, string_literal_bytes, ungroup,
 };
 pub(super) use format_patterns::{
     bytes_literal, format as format_call, has_pattern, pattern as format_pattern,

@@ -48,7 +48,7 @@ pub(super) fn ports_from_scope(
                 const_env,
                 type_aliases,
             )?,
-        );
+        )?;
         if ty.container.is_some() {
             return Err(unsupported("dynamic container port"));
         }
@@ -411,7 +411,7 @@ pub(super) fn signals_from_body_item(
                             session,
                             &context,
                         )?,
-                    );
+                    )?;
                     values.push(Signal::new(name, ty));
                 }
             }

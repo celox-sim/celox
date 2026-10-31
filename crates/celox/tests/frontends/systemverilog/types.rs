@@ -74,6 +74,9 @@ sv_backends! {
     fn undriven_internal_nets_convert_to_two_state_zero(sim) {
         @case "types::undriven_internal_nets_convert_to_two_state_zero";
     }
+    fn chandles_hold_null_and_copies(sim) {
+        @case "types::chandles_hold_null_and_copies";
+    }
 }
 
 sv_backends! {

@@ -676,6 +676,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::foreign_generic_unit_type_constructor") => {
                             ("compile_error", "compile", "source_0.sv:3: syntax error")
                         }
+                        ("icarus", "types::chandles_hold_null_and_copies") => {
+                            ("compile_error", "compile", "Invalid class item")
+                        }
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };
                     assert_eq!(status, expected_status, "{name}");
