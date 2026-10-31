@@ -2088,36 +2088,41 @@ fn parse_based_decimal_digits(digits: &str) -> Option<IntegralLiteral> {
     })
 }
 
+/// Each digit fills its own bits of the value and mask words, so a wide
+/// literal is parsed in time linear in its length.
 fn parse_power_of_two_based_digits(digits: &str, bits_per_digit: usize) -> Option<IntegralLiteral> {
-    let mut value = BigUint::default();
-    let mut mask = BigUint::default();
-    for ch in digits.chars() {
-        value <<= bits_per_digit;
-        mask <<= bits_per_digit;
-        match ch {
+    let width = digits.chars().count().checked_mul(bits_per_digit)?;
+    let mut value = vec![0u32; width.div_ceil(32)];
+    let mut mask = vec![0u32; value.len()];
+    let all = (1u32 << bits_per_digit) - 1;
+    for (index, ch) in digits.chars().rev().enumerate() {
+        let (digit_value, digit_mask) = match ch {
             '0'..='9' | 'a'..='f' | 'A'..='F' => {
                 let digit = ch.to_digit(16)?;
-                if digit >= (1 << bits_per_digit) {
+                if digit > all {
                     return None;
                 }
-                value |= BigUint::from(digit);
+                (digit, 0)
             }
-            'x' | 'X' => {
-                let unknown = (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
-                value |= &unknown;
-                mask |= unknown;
-            }
-            'z' | 'Z' | '?' => {
-                mask |= (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
-            }
+            'x' | 'X' => (all, all),
+            'z' | 'Z' | '?' => (0, all),
             _ => return None,
+        };
+        let bit = index * bits_per_digit;
+        for (words, bits) in [(&mut value, digit_value), (&mut mask, digit_mask)] {
+            // An octal digit can straddle two words.
+            let shifted = u64::from(bits) << (bit % 32);
+            words[bit / 32] |= shifted as u32;
+            if let Some(next) = words.get_mut(bit / 32 + 1) {
+                *next |= (shifted >> 32) as u32;
+            }
         }
     }
     Some(IntegralLiteral {
-        width: digits.chars().count() * bits_per_digit,
+        width,
         signed: false,
-        value,
-        mask,
+        value: BigUint::new(value),
+        mask: BigUint::new(mask),
     })
 }
 
@@ -2326,6 +2331,78 @@ mod literal_tests {
             Some(0)
         );
         assert_eq!(eval_const_expr(&typed, &constants), Some(256));
+    }
+
+    /// The word-filling digit parser agrees with shifting the whole value in
+    /// once per digit, including unknown digits and octal digits that cross
+    /// a word boundary.
+    #[test]
+    fn power_of_two_digits_parse_like_shifting_parser() {
+        fn shifting(digits: &str, bits_per_digit: usize) -> Option<IntegralLiteral> {
+            let mut value = BigUint::default();
+            let mut mask = BigUint::default();
+            for ch in digits.chars() {
+                value <<= bits_per_digit;
+                mask <<= bits_per_digit;
+                match ch {
+                    '0'..='9' | 'a'..='f' | 'A'..='F' => {
+                        let digit = ch.to_digit(16)?;
+                        if digit >= (1 << bits_per_digit) {
+                            return None;
+                        }
+                        value |= BigUint::from(digit);
+                    }
+                    'x' | 'X' => {
+                        let unknown = (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
+                        value |= &unknown;
+                        mask |= unknown;
+                    }
+                    'z' | 'Z' | '?' => {
+                        mask |= (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
+                    }
+                    _ => return None,
+                }
+            }
+            Some(IntegralLiteral {
+                width: digits.chars().count() * bits_per_digit,
+                signed: false,
+                value,
+                mask,
+            })
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let unknown: Vec<char> = "xXzZ?".chars().collect();
+        let invalid: Vec<char> = "9fFg_".chars().collect();
+        for _ in 0..20_000 {
+            let bits_per_digit = [1, 3, 4][next(3)];
+            let radix = 1u32 << bits_per_digit;
+            let digits: String = (0..1 + next(80))
+                .map(|_| match next(64) {
+                    0..=5 => unknown[next(unknown.len())],
+                    6 => invalid[next(invalid.len())],
+                    _ => {
+                        let digit = std::char::from_digit(next(radix as usize) as u32, radix);
+                        let digit = digit.unwrap();
+                        if next(2) == 0 {
+                            digit.to_ascii_uppercase()
+                        } else {
+                            digit
+                        }
+                    }
+                })
+                .collect();
+            assert_eq!(
+                parse_power_of_two_based_digits(&digits, bits_per_digit),
+                shifting(&digits, bits_per_digit),
+                "{digits} with {bits_per_digit} bits per digit"
+            );
+        }
     }
 
     /// The fast parser of plain-digit literals agrees with the general one.
