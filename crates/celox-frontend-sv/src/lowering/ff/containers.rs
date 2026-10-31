@@ -37,6 +37,60 @@ impl Ff<'_, '_> {
         )
     }
 
+    /// Clamp arbitrary integral bounds before the signed 64-bit heap ABI.
+    /// Negative bounds need only retain their sign; positive overflow is past
+    /// every possible queue element. Unknown bounds make the range empty.
+    fn queue_slice_bound(
+        &mut self,
+        expr: &sv::ir::Expr,
+        lower: bool,
+    ) -> Result<RegisterId, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp as B, Expr as E, UnaryOp as U};
+        let value = self.heap_operand(expr, None, None)?;
+        let literal = |text: &str| E::Literal(text.into());
+        let binary = |left: E, op, right: E| E::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let mux = |condition: E, then_expr: E, else_expr: E| E::Mux {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        };
+        let max = literal("64'sh7fffffffffffffff");
+        let negative = literal("64'shffffffffffffffff");
+        let mut normalized = mux(
+            binary(value.clone(), B::Gt, max.clone()),
+            max.clone(),
+            E::Resize {
+                expr: Box::new(value.clone()),
+                width: 64,
+                signed: self.expr_signed(&value),
+            },
+        );
+        if self.expr_signed(&value) {
+            normalized = mux(
+                binary(value.clone(), B::Lt, literal("64'sd0")),
+                negative.clone(),
+                normalized,
+            );
+        }
+        let unknown = binary(
+            E::Unary {
+                op: U::RedXor,
+                expr: Box::new(value),
+            },
+            B::EqCase,
+            literal("1'bx"),
+        );
+        self.integer_of_width(
+            &mux(unknown, if lower { max } else { negative }, normalized),
+            64,
+            true,
+        )
+    }
+
     pub(super) fn container_call(
         &mut self,
         op: ContainerOp,
@@ -62,7 +116,10 @@ impl Ff<'_, '_> {
             .get(1)
             .and_then(|key| self.m.comparison_width(key, key));
         if op.reduction().is_none() && args.iter().any(|arg| self.m.calls(arg)) {
-            let value_receiver = matches!(op, New | Literal | Convert | Concat | Equal | CaseEqual);
+            let value_receiver = matches!(
+                op,
+                New | Literal | Convert | Concat | Slice | Equal | CaseEqual
+            );
             if !value_receiver {
                 // Preserve the receiver's location, not an old immutable copy
                 // of its contents: arguments may mutate this same container.
@@ -110,6 +167,8 @@ impl Ff<'_, '_> {
                     )
                 } else if op == New && index == 0 {
                     (Some((64, true)), None)
+                } else if op == Slice && index != 0 {
+                    (None, None)
                 } else if value_receiver {
                     (Some((32, false)), Some(celox_design::ValueKind::ObjRef))
                 } else {
@@ -139,12 +198,14 @@ impl Ff<'_, '_> {
         }
         // Evaluate the owning object once, before argument side effects. Read
         // its current container after the arguments, so a nested pop is kept.
-        let property = if !matches!(op, New | Literal | Convert | Concat | Equal | CaseEqual)
-            && let sv::ir::Expr::Call {
-                callee: sv::ir::Callee::Object(object),
-                args,
-                ..
-            } = &args[0]
+        let property = if !matches!(
+            op,
+            New | Literal | Convert | Concat | Slice | Equal | CaseEqual
+        ) && let sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(object),
+            args,
+            ..
+        } = &args[0]
             && let sv::ir::ObjectOp::Load(field) = **object
         {
             let owner = args[0]
@@ -159,7 +220,7 @@ impl Ff<'_, '_> {
         let element_result = matches!(op, Get | PopFront | PopBack);
         let four_state = (element_result || op == Equal) && !layout.two_state && self.m.four_state;
         let (temp, name) = self.m.temp("container", width, signed, four_state);
-        if matches!(op, New | Literal | Convert | Concat)
+        if matches!(op, New | Literal | Convert | Concat | Slice)
             || element_result && layout.handle == Some(HandleProperty::Object)
         {
             self.m.variables.get_mut(&temp).unwrap().value_kind = celox_design::ValueKind::ObjRef;
@@ -193,6 +254,12 @@ impl Ff<'_, '_> {
             }
             Convert if matches!(layout.kind, ContainerKind::Associative { .. }) => {
                 self.handle(&args[0])?
+            }
+            Slice => {
+                let source = self.handle(&args[0])?;
+                let lo = self.queue_slice_bound(&args[1], true)?;
+                let hi = self.queue_slice_bound(&args[2], false)?;
+                self.heap_call(code(heap::SLICE), &[source, lo, hi])
             }
             Concat => {
                 let first = self.handle(&args[0])?;

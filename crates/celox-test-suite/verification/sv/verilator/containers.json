@@ -2,6 +2,54 @@
   "cases": [
     {
       "category": "Types",
+      "detail": "IEEE 1800-2023 7.10.1 requires q[-2:-2] and a slice of an empty queue to be empty. Verilator 5.052 returns all six elements for the negative singleton slice and crashes for an empty queue sliced as q[0:$]. The shared update case aborts in std::deque::operator[]; the standalone EMPTY_QUEUE reproduction segfaults. Its VlQueue::slice compares signed bounds with size_t and accesses index -1 of an empty deque.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_queue_slices.sv",
+          "src/sv/cases/containers.vtest",
+          "LIMITATIONS.md#queue-slices"
+        ],
+        "id": "sv_verilator_queue_slice_boundaries",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "IEEE 1800-2023 7.10.1 requires q[-2:-2] and a slice of an empty queue to be empty. Verilator 5.052 returns all six elements for the negative singleton slice and crashes for an empty queue sliced as q[0:$]. The shared update case aborts in std::deque::operator[]; the standalone EMPTY_QUEUE reproduction segfaults. Its VlQueue::slice compares signed bounds with size_t and accesses index -1 of an empty deque.",
+        "upstream": []
+      },
+      "name": "containers::queue_slice_runtime_bounds",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 7.10.1 requires q[-2:-2] and a slice of an empty queue to be empty. Verilator 5.052 returns all six elements for the negative singleton slice and crashes for an empty queue sliced as q[0:$]. The shared update case aborts in std::deque::operator[]; the standalone EMPTY_QUEUE reproduction segfaults. Its VlQueue::slice compares signed bounds with size_t and accesses index -1 of an empty deque.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_queue_slices.sv",
+          "src/sv/cases/containers.vtest",
+          "LIMITATIONS.md#queue-slices"
+        ],
+        "id": "sv_verilator_queue_slice_boundaries",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "IEEE 1800-2023 7.10.1 requires q[-2:-2] and a slice of an empty queue to be empty. Verilator 5.052 returns all six elements for the negative singleton slice and crashes for an empty queue sliced as q[0:$]. The shared update case aborts in std::deque::operator[]; the standalone EMPTY_QUEUE reproduction segfaults. Its VlQueue::slice compares signed bounds with size_t and accesses index -1 of an empty deque.",
+        "upstream": []
+      },
+      "name": "containers::queue_slice_updates_and_copies",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "containers::wide_associative_keys",

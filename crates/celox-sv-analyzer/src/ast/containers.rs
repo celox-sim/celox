@@ -220,20 +220,29 @@ pub(super) fn native_type(
     {
         return Ok(Some(inner));
     }
-    // An element of a container of containers, `m[a]` of `m[a][b]`.
+    // A queue slice retains the element type; an index into a container of
+    // containers selects its inner type, as for `m[a]` of `m[a][b]`.
     if let ExprKind::Select {
         expression,
         dimension,
     } = &native
         .expression(expression_binding::ungroup(id, native))
         .kind
-        && matches!(
-            dimension.kind,
-            DimensionKind::Index(_) | DimensionKind::Queue(None)
-        )
         && let Some(outer) = native_type(*expression, native, tree, session, dims)?
     {
-        return Ok(outer.element.container.clone());
+        if matches!(dimension.kind, DimensionKind::Range { .. })
+            && matches!(outer.layout.kind, ContainerKind::Queue { .. })
+        {
+            let mut slice = (*outer).clone();
+            slice.layout.kind = ContainerKind::Queue { capacity: 0 };
+            return Ok(Some(Arc::new(slice)));
+        }
+        if matches!(
+            dimension.kind,
+            DimensionKind::Index(_) | DimensionKind::Queue(None)
+        ) {
+            return Ok(outer.element.container.clone());
+        }
     }
     locators::result_type(
         expression_binding::ungroup(id, native),
@@ -655,6 +664,31 @@ pub(super) fn value(
             let Some(target) = native_type(*expression, native, tree, session, dims)? else {
                 return Ok(None);
             };
+            if let DimensionKind::Range { left, right } = dimension.kind
+                && matches!(target.layout.kind, ContainerKind::Queue { .. })
+            {
+                let receiver = expression_binding::value(*expression, native, tree, session, dims)?;
+                let mut args = vec![receiver];
+                for id in [left, right] {
+                    let bound = index_value(id, *expression, tree, session, dims, &target)?;
+                    if expression_binding::real_value(&bound, dims)
+                        || expression_binding::native_string(tree, session, id, native, dims)
+                        || expression_types::type_of(tree, session, id, native, dims).is_some_and(
+                            |ty| {
+                                !matches!(session.types.data(ty), semantic_types::TyData::Packed(_))
+                            },
+                        )
+                    {
+                        return Err(unsupported(
+                            "queue slice bounds require integral expressions",
+                        ));
+                    }
+                    args.push(bound);
+                }
+                let mut layout = target.layout;
+                layout.kind = ContainerKind::Queue { capacity: 0 };
+                return Ok(Some(call(ContainerOp::Slice, layout, args)));
+            }
             let index = match dimension.kind {
                 DimensionKind::Index(index) => Some(index),
                 DimensionKind::Queue(None)
@@ -1129,6 +1163,30 @@ fn compound_value(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn queue_slice_rejects_nonintegral_bounds() {
+        for (declaration, bound) in [
+            ("real b;", "b"),
+            ("", "1.5"),
+            ("string b;", "b"),
+            ("int b[2];", "b"),
+            ("class C; endclass C b;", "b"),
+        ] {
+            for range in [format!("{bound}:2"), format!("0:{bound}")] {
+                let source = format!(
+                    "module Top; int q[$], r[$]; {declaration} initial r=q[{range}]; endmodule"
+                );
+                let error = crate::analyze_source(&source, Path::new("queue_slice_bounds.sv"))
+                    .unwrap_err()
+                    .to_string();
+                assert!(
+                    error.contains("queue slice bounds require integral expressions"),
+                    "{source}: {error}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn class_containers_preserve_access_and_compatibility_checks() {
         for (source, expected) in [

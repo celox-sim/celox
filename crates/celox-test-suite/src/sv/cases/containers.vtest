@@ -1295,3 +1295,112 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 7\n0 1\n"))
+
+(case queue_slice_runtime_bounds
+  (source "queue_slice_bounds.sv" #"
+    module Top(input logic clk, input int lo, hi,
+               output int count, first, last);
+      int q[$:5];
+      int r[$];
+      always @(posedge clk) begin
+        q = {0,1,2,3,4,5};
+        r = q[lo:hi];
+        count = r.size();
+        first = count ? r[0] : 0;
+        last = count ? r[$] : 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for lo (list -2 0 2 5 6 9)
+    (for hi (list -2 0 2 5 6 9)
+      (modify (set lo (trunc 32 lo)) (set hi (trunc 32 hi)))
+      (tick clk)
+      (let count (max 0 (+ 1 (- (min hi 5) (max lo 0)))))
+      (assert_eq count count)
+      (assert_eq first (? (> count 0) (max lo 0) 0))
+      (assert_eq last (? (> count 0) (min hi 5) 0)))))
+
+(case queue_slice_updates_and_copies
+  (source "queue_slice_updates.sv" #"
+    module Top(output int size, middle, original, evaluations, copied,
+               output logic strings_ok);
+      int q[$], r[$];
+      string words[$], tail[$];
+      int lo, hi;
+      initial begin
+        q = {1,2,3,4};
+        lo=1; hi=2;
+        r = q[lo++:hi++];
+        evaluations = lo*10+hi;
+        r[0] = 99;
+        original = q[1];
+        copied = r[1];
+        q = {q[0:1],10,q[2:$]};
+        q = q[1:$];
+        q = q[0:$-1];
+        size=q.size(); middle=q[1];
+        words={"first","second","third"};
+        tail=words[1:$];
+        words[1]="changed";
+        strings_ok = tail.size()==2 && tail[0]=="second" && tail[1]=="third";
+        r={};
+        r=r[0:$];
+        if(r.size()!=0) size=999;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq size 3)
+  (assert_eq middle 10)
+  (assert_eq original 2)
+  (assert_eq copied 3)
+  (assert_eq evaluations 23)
+  (assert_eq strings_ok 1))
+
+(case queue_slice_wide_and_unknown_bounds
+  (four_state)
+  (source "queue_slice_wide_bounds.sv" #"
+    module Top(input logic clk, signed_mode,
+               input logic [95:0] lo, hi,
+               input logic signed [95:0] signed_lo,
+               output int count, output logic [7:0] first, last);
+      logic [7:0] q[$], r[$];
+      always @(posedge clk) begin
+        q={8'h11,8'hxx,8'hzz};
+        if(signed_mode) r=q[signed_lo:hi];
+        else r=q[lo:hi];
+        count=r.size();
+        first=count ? r[0] : 0;
+        last=count ? r[$] : 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set lo 0) (set hi 2))
+  (tick clk)
+  (assert_eq count 3)
+  (assert_eq first 0x11)
+  (assert_eq last (fourstate 0 0xff))
+  (modify (set lo 1) (set hi 1))
+  (tick clk)
+  (assert_eq count 1)
+  (assert_eq first (fourstate 0xff 0xff))
+  (modify (set lo (<< 1 80)) (set hi (<< 1 90)))
+  (tick clk)
+  (assert_eq count 0)
+  (modify (set lo 0))
+  (tick clk)
+  (assert_eq count 3)
+  (modify (set lo (fourstate 0 (<< 1 80))) (set hi 2))
+  (tick clk)
+  (assert_eq count 0)
+  (modify (set lo 0) (set hi (fourstate 0 (<< 1 80))))
+  (tick clk)
+  (assert_eq count 0)
+  (modify (set signed_mode 1) (set signed_lo (- (<< 1 96) 1)) (set hi 1))
+  (tick clk)
+  (assert_eq count 2)
+  (assert_eq first 0x11)
+  (assert_eq last (fourstate 0xff 0xff)))

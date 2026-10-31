@@ -1609,3 +1609,24 @@ and subroutine arguments and results. Verilator 5.052 and the installed xezim
 0.11.3 build pass it. Icarus 13.0 rejects the `chandle` class property with
 "Invalid class item"; that compile failure remains executed evidence in
 [the Icarus report](verification/sv/icarus/types.json).
+
+
+### Queue slices
+
+IEEE 1800-2023 7.10.1 defines an inclusive queue slice, clipped to the source
+queue; negative singleton bounds, reversed ranges and unknown bounds can yield
+an empty queue. A slice of an empty queue is empty.
+
+The standalone [queue slice reproduction](verification/repros/sv_queue_slices.sv)
+prints a size of 6 for `q[-2:-2]` on both Verilator 5.052 and Icarus 13.0,
+where 0 is required. Icarus also returns all six elements for `q[1:1]`, where
+one is required. With `EMPTY_QUEUE` defined, Verilator segfaults on `q[0:$]`
+and Icarus rejects the slice syntax. Verilator's shared update case instead
+aborts in the checked `std::deque::operator[]` access. `VlQueue::slice` compares
+signed indices against an unsigned size, and can access index -1 of an empty
+queue.
+
+The exclusions cover only `queue_slice_runtime_bounds`,
+`queue_slice_updates_and_copies`, and (for Icarus) `queue_slice_wide_and_unknown_bounds`
+in the `containers` group. The four-state case remains unsupported by Verilator.
+The Celox cases retain their bounds, copy, side-effect and X/Z assertions.
