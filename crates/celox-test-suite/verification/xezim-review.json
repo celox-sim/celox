@@ -927,6 +927,10 @@
       "title": "A class that names a specialization with one of its own string parameters, `Name #(S)`, gets the default of Name's parameter instead of the value of S",
       "standard": "IEEE 1800-2023 8.25"
     },
+    "sv_class_scoped_typedef_static_properties": {
+      "title": "A static property read through a class-scoped typedef of a class specialization, `Obj::type_id::count` or `Impl #(byte)::type_id::count`, gives x or 0 instead of the property of the specialization the typedef names, which `Registry #(Obj)::count` reads correctly",
+      "standard": "IEEE 1800-2023 8.23, 8.25.1"
+    },
     "sv_conditional_unpacked_arrays": {
       "title": "A conditional operator whose operands are unpacked arrays yields an array of zeros instead of the selected operand: `h = s ? c : d` with s = 1 leaves h = '{0, 0}",
       "standard": "IEEE 1800-2023 11.4.11"
@@ -5275,6 +5279,14 @@
       "classification": "xezim_bug",
       "bug": "sv_class_typedef_specialization_values",
       "note": "Each `type_id` typedef names its own specialization of Registry (8.25), so get_type_name() returns \"unit\", \"pkg\" and \"local\" for the three handles and names is 15. xezim 0.11.3 returns \"pkg\" for all three, giving 10. The adapter-free source prints [pkg] for `UnitComp::type_id` once the package declares `typedef Registry #(PkgComp, \"pkg\") type_id;`. See verification/repros/sv_class_typedef_specialization_values_xezim.json; Verilator 5.052 passes the shared case."
+    },
+    {
+      "suite": "sv",
+      "name": "class::specialized_scope_typedef_properties",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_class_scoped_typedef_static_properties",
+      "note": "Each create() through a class-scoped typedef increments the static count of the Registry specialization that the typedef names (8.23, 8.25.1), so the counts of Impl #(byte), p::Obj and Impl #(shortint) are 1 each and count is 111. xezim 0.11.3 reads them with unknown bits. The adapter-free source prints [x x 0 1] for Obj::type_id::count, p::Obj::type_id::count, Impl #(byte)::type_id::count and Registry #(Obj)::count, as Top. See verification/repros/sv_class_scoped_typedef_static_properties_xezim.json; Verilator 5.052 passes the shared case."
     },
     {
       "suite": "sv",

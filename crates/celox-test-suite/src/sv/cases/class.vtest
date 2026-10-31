@@ -3466,6 +3466,101 @@ module Top(output int sum, output int names);
 endmodule"#)
  (top Top) (run_until 0) (assert_eq sum 735) (assert_eq names 15))
 
+; The class scope of a typedef may itself be specialized or qualified,
+; `C#(byte)::type_id` and `p::C::type_id` as the `uvm_resource_db` of UVM
+; names its default implementation, also inside a specialization by the
+; class parameter of the caller (8.23, 8.25.1).
+(case specialized_scope_typedef_calls
+ (source "specialized_scope_typedef_calls.sv" #"
+package p;
+ class Registry #(type T = int);
+  static int count;
+  static function T create();
+   T object = new;
+   count++;
+   return object;
+  endfunction
+ endclass
+ virtual class Base #(type T = int);
+  pure virtual function int width();
+ endclass
+ class Impl #(type T = int) extends Base #(T);
+  typedef Registry #(Impl #(T)) type_id;
+  virtual function int width();
+   return $bits(T);
+  endfunction
+ endclass
+ class Db #(type T = int);
+  static Base #(T) imp;
+  static function void set_imp(Base #(T) i = null);
+   if (i == null) i = Impl #(T)::type_id::create();
+   imp = i;
+  endfunction
+ endclass
+ class Obj;
+  int value = 3;
+  typedef Registry #(Obj) type_id;
+ endclass
+endpackage
+module Top(output int sum);
+ import p::*;
+ initial begin
+  automatic Impl #(byte) b = Impl #(byte)::type_id::create();
+  automatic Base #(int) i = p::Impl #(int)::type_id::create();
+  automatic Obj o = p::Obj::type_id::create();
+  Db #(shortint)::set_imp();
+  sum = b.width() + 100 * i.width() + 10000 * o.value
+   + 100000 * Db #(shortint)::imp.width();
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 1633208))
+
+; Static properties are reached through the same scopes, each specialization
+; with its own storage (8.25.1).
+(case specialized_scope_typedef_properties
+ (source "specialized_scope_typedef_properties.sv" #"
+package p;
+ class Registry #(type T = int);
+  static int count;
+  static function T create();
+   T object = new;
+   count++;
+   return object;
+  endfunction
+ endclass
+ virtual class Base #(type T = int);
+  pure virtual function int width();
+ endclass
+ class Impl #(type T = int) extends Base #(T);
+  typedef Registry #(Impl #(T)) type_id;
+  virtual function int width();
+   return $bits(T);
+  endfunction
+ endclass
+ class Db #(type T = int);
+  static Base #(T) imp;
+  static function void set_imp(Base #(T) i = null);
+   if (i == null) i = Impl #(T)::type_id::create();
+   imp = i;
+  endfunction
+ endclass
+ class Obj;
+  int value = 3;
+  typedef Registry #(Obj) type_id;
+ endclass
+endpackage
+module Top(output int count);
+ import p::*;
+ initial begin
+  automatic Impl #(byte) b = Impl #(byte)::type_id::create();
+  automatic Obj o = p::Obj::type_id::create();
+  Db #(shortint)::set_imp();
+  count = Impl #(byte)::type_id::count + 10 * p::Obj::type_id::count
+   + 100 * Impl #(shortint)::type_id::count + 1000 * Impl #(int)::type_id::count;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq count 111))
+
 ; A string class parameter wider than 128 bits is passed on by name to the
 ; specializations its typedefs, property, return and local types name (8.25).
 (case parameter_strings_wider_than_a_constant

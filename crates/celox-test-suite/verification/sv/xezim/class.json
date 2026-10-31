@@ -684,6 +684,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::specialized_scope_typedef_properties reads count with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "class::specialized_scope_typedef_properties",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::static_properties_and_methods",

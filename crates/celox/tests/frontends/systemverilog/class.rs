@@ -1484,6 +1484,8 @@ sv_backends! {
 
 sv_backends! {
     fn class_scoped_typedef_handles(sim) { @case "class::scoped_typedef_handles"; }
+    fn class_specialized_scope_typedef_calls(sim) { @case "class::specialized_scope_typedef_calls"; }
+    fn class_specialized_scope_typedef_properties(sim) { @case "class::specialized_scope_typedef_properties"; }
     fn class_parameter_strings_wider_than_a_constant(sim) { @case "class::parameter_strings_wider_than_a_constant"; }
     fn class_new_initializers_of_scoped_and_alias_types(sim) { @case "class::new_initializers_of_scoped_and_alias_types"; }
     fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
