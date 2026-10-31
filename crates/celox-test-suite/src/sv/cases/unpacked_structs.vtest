@@ -1,5 +1,140 @@
 (group unpacked_structs (category types))
 
+(case member_initial_values
+  (source "struct_defaults.sv" #"
+    module Top(output bit same);
+      parameter BASE = 5;
+      typedef struct { bit [3:0] low = BASE; int high = -2; int zero; } inner_t;
+      typedef struct { inner_t inner; bit flag = 1; } outer_t;
+      outer_t first, second;
+      outer_t explicit_value = '{'{9, 8, 7}, 0};
+      initial begin
+        same = first.inner.low == 5 && first.inner.high == -2 && first.inner.zero == 0
+          && first.flag && second.inner.low == 5
+          && explicit_value.inner.low == 9 && explicit_value.inner.high == 8
+          && explicit_value.inner.zero == 7 && !explicit_value.flag;
+        first.inner.low = 1;
+        same = same && second.inner.low == 5;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case member_initial_values_local_lifetimes
+  (source "struct_defaults.sv" #"
+    module Top(output int automatic_sum, static_sum, output bit same);
+      typedef struct { int value = 3; int other = 7; } row_t;
+      function automatic int automatic_value();
+        row_t row;
+        row.value++;
+        return row.value;
+      endfunction
+      function automatic int static_value();
+        static row_t row;
+        row.value++;
+        return row.value;
+      endfunction
+      initial begin
+        automatic row_t local_row;
+        automatic row_t explicit_row = '{default:0};
+        automatic_sum = automatic_value() + automatic_value();
+        static_sum = static_value() + static_value();
+        same = local_row.value == 3 && local_row.other == 7
+          && explicit_row.value == 0 && explicit_row.other == 0;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq automatic_sum 8) (assert_eq static_sum 9) (assert_eq same 1))
+
+(case member_initial_values_declaration_scope
+  (source "struct_defaults.sv" #"
+    package defs;
+      parameter VALUE = 9;
+      typedef struct { int value = VALUE + 2; bit [159:0] wide = '1; } row_t;
+    endpackage
+    module Top(output bit same, output int captured_value);
+      parameter VALUE = 2;
+      defs::row_t row;
+      initial begin
+        captured_value = row.value;
+        $display("%h", row.wide);
+        same = row.wide == 160'hffffffffffffffffffffffffffffffffffffffff;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq captured_value 11) (expect_output "ffffffffffffffffffffffffffffffffffffffff\n") (assert_eq same 1))
+
+(case member_initial_values_specialized_functions
+  (source "struct_defaults.sv" #"
+    module Child #(parameter BASE = 2)(output int value);
+      function automatic int initial_value();
+        return BASE + 1;
+      endfunction
+      typedef struct { int value = initial_value(); } row_t;
+      row_t row;
+      initial value = row.value;
+    endmodule
+    module Top(output bit same);
+      int first, second;
+      Child #(.BASE(3)) a(first);
+      Child #(.BASE(7)) b(second);
+      always_comb same = first == 4 && second == 8;
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case member_initial_values_assignment_context
+  (source "struct_defaults.sv" #"
+    module Top(output bit same);
+      typedef struct {
+        bit [63:0] shifted = 32'd1 << 40;
+        bit [159:0] fill = 1 ? '1 : '0;
+        bit [63:0] negative = -32'sd1;
+        bit [3:0] narrow = 32'h123;
+      } row_t;
+      row_t row;
+      initial same = row.shifted == 64'h10000000000
+        && row.fill == 160'hffffffffffffffffffffffffffffffffffffffff
+        && row.negative == 64'hffffffffffffffff && row.narrow == 3;
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case member_initial_values_four_state
+  (source "struct_defaults.sv" #"
+    module Top(output bit same);
+      typedef struct { logic [3:0] known = '1; logic [3:0] unknown = 4'bxz01; bit two = 'x; logic plain; } row_t;
+      row_t row;
+      row_t explicit_row = '{default:0};
+      initial same = row.known === 4'b1111 && row.unknown === 4'bxz01
+        && row.two === 1'b0 && row.plain === 1'bx
+        && explicit_row.unknown === 4'b0000 && explicit_row.plain === 1'b0;
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case member_initial_values_class_properties
+  (source "struct_defaults.sv" #"
+    module Top(output bit same);
+      typedef struct { int value = 3; } inner_t;
+      typedef struct { inner_t inner; int other = 7; } row_t;
+      class Box;
+        row_t row;
+        row_t explicit_row = '{'{9}, 8};
+      endclass
+      Box first, second;
+      initial begin
+        first = new;
+        second = new;
+        same = first.row.inner.value == 3 && first.row.other == 7
+          && first.explicit_row.inner.value == 9 && first.explicit_row.other == 8;
+        first.row.inner.value = 2;
+        same = same && second.row.inner.value == 3;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
 (case members_whole_copies_and_equality
   (source "unpacked_struct_locals.sv" #"
 module Top(output bit done);

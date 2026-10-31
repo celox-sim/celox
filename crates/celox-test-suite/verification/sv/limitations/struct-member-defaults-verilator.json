@@ -1,0 +1,49 @@
+{
+  "schema_version": 3,
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "include_ignored": false,
+  "exclude_stronger_than_sv": false,
+  "scope": "Focused unpacked-structure member-initializer failures retained before exclusions; passes and four-state unsupported cases omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::member_initial_values_assignment_context at 101:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_assignment_context",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:6:36: ../V3Task.cpp:248: Unlinked task\n    6 |       typedef struct { int value = initial_value(); } row_t;\n      |                                    ^~~~~~~~~~~~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_specialized_functions",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 1,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 1,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  },
+  "review_notes": [
+    "The generated static initialization assigns 0 to the 64-bit shifted member and 4294967295 to the 64-bit negative member. Assignment context requires 0x10000000000 and 0xffffffffffffffff respectively (IEEE 1800-2023 11.8.2).",
+    "The constant-function initializer reports an Internal Error: V3Task.cpp:248: Unlinked task."
+  ]
+}

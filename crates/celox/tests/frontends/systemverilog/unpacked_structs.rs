@@ -3,6 +3,14 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_struct_member_initial_values(sim) { @case "unpacked_structs::member_initial_values"; }
+    fn unpacked_struct_member_initial_values_local_lifetimes(sim) { @case "unpacked_structs::member_initial_values_local_lifetimes"; }
+    fn unpacked_struct_member_initial_values_declaration_scope(sim) { @case "unpacked_structs::member_initial_values_declaration_scope"; }
+    fn unpacked_struct_member_initial_values_specialized_functions(sim) { @case "unpacked_structs::member_initial_values_specialized_functions"; }
+    fn unpacked_struct_member_initial_values_assignment_context(sim) { @case "unpacked_structs::member_initial_values_assignment_context"; }
+    fn unpacked_struct_member_initial_values_four_state(sim) { @case "unpacked_structs::member_initial_values_four_state"; }
+    fn unpacked_struct_member_initial_values_class_properties(sim) { @case "unpacked_structs::member_initial_values_class_properties"; }
+
     fn unpacked_struct_module_port_recursive_defaults(sim) {
         @case "unpacked_structs::module_port_recursive_defaults";
     }
@@ -727,5 +735,47 @@ fn unpacked_struct_port_connections_check_nominal_types_and_expressions() {
                 .expect_err("an incompatible structure connection must fail")
                 .to_string();
         assert!(error.contains("unpacked structure"), "{actual}: {error}");
+    }
+}
+
+#[test]
+fn member_initial_value_boundaries_are_explicit() {
+    for (source, want) in [
+        (
+            "module Top; int runtime_value; struct { int value = runtime_value; } row; endmodule",
+            "nonconstant or unresolved unpacked structure member initial value",
+        ),
+        (
+            "module Top; struct packed { int value = 3; } row; endmodule",
+            "unsupported packed struct member",
+        ),
+        (
+            "module Top; typedef struct { int value = 3; } row_t; row_t rows[]; endmodule",
+            "dynamic container of an unpacked structure with member initial values",
+        ),
+        (
+            "module Top; typedef struct { int value = 3; } row_t; function automatic row_t make(); return '{default:0}; endfunction endmodule",
+            "unpacked structure member initial values in subroutine interfaces",
+        ),
+        (
+            "typedef struct { int value = 3; } row_t; module Top(input row_t row); endmodule",
+            "unpacked structure member initial values on a port",
+        ),
+        (
+            "module Top; typedef enum { A, B } e_t; struct { e_t value = A; } row; endmodule",
+            "unsupported unpacked structure member initial value type",
+        ),
+        (
+            "module Top; struct { string value = \"initial\"; } row; endmodule",
+            "unsupported unpacked structure member initial value type",
+        ),
+    ] {
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(source, Path::new("defaults.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("expected unsupported: {source}");
+        };
+        assert!(error.to_string().contains(want), "{source}: {error}");
     }
 }

@@ -3001,6 +3001,85 @@
     }
   },
   {
+    "id": "sv_verilator_struct_member_constant_function",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 aborts with an internal Unlinked task error when a constant function is used for an unpacked-structure member initial value in a parameterized module. IEEE 1800-2023 7.2.2 permits constant expressions as member initial values.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-member-defaults-verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::member_initial_values_specialized_functions"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_struct_member_initial_sizing",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 evaluates a 32-bit shift before converting it to the 64-bit member type, yielding 0 for 32'd1 << 40, and zero-extends -32'sd1 to 0x00000000ffffffff. IEEE 1800-2023 7.2.2 and 11.8.2 require assignment-context sizing; the expected values are 0x10000000000 and 0xffffffffffffffff.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-member-defaults-verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::member_initial_values_assignment_context"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_struct_member_initial_values",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-member-defaults-xezim.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "unpacked_structs::member_initial_values",
+        "unpacked_structs::member_initial_values_assignment_context",
+        "unpacked_structs::member_initial_values_declaration_scope",
+        "unpacked_structs::member_initial_values_four_state",
+        "unpacked_structs::member_initial_values_local_lifetimes",
+        "unpacked_structs::member_initial_values_specialized_functions"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_struct_member_initial_values",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/struct-member-defaults-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "unpacked_structs::member_initial_values",
+        "unpacked_structs::member_initial_values_assignment_context",
+        "unpacked_structs::member_initial_values_class_properties",
+        "unpacked_structs::member_initial_values_declaration_scope",
+        "unpacked_structs::member_initial_values_four_state",
+        "unpacked_structs::member_initial_values_local_lifetimes",
+        "unpacked_structs::member_initial_values_specialized_functions"
+      ]
+    }
+  },
+  {
     "id": "sv_icarus_unpacked_structs",
     "category": "simulator_compile_limitation",
     "phase": "compile",
