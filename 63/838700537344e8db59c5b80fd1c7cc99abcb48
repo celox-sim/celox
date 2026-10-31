@@ -1,0 +1,1 @@
+Rebased on master and resolved the conflict with #2672 (shared class scope tables): the method signature resolves its return type with the context's constant functions.

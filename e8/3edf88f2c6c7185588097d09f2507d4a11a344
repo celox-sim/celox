@@ -1,0 +1,1 @@
+Rebased on master: the class scope tables and specialization names that #2672 added are Session fields too, and ClassScopes::with hands the session to its callback.
