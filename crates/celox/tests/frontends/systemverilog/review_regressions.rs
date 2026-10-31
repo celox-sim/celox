@@ -8849,6 +8849,14 @@ fn timed_task_edge_processes_of_several_instances_may_write_a_package_variable()
 }
 
 mod aggregate_regressions {
+    #[test]
+    fn wide_unpacked_ff_array_masks_interpreter() {
+        crate::suite::run_case(
+            "aggregate_regressions::wide_unpacked_ff_array_masks",
+            "interpreter",
+        );
+    }
+
     sv_backends! {
         fn wide_unpacked_ff_array_masks(sim) { @case "aggregate_regressions::wide_unpacked_ff_array_masks"; }
     }

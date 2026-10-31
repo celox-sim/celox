@@ -224,6 +224,26 @@ macro_rules! strided_backend_tests {
     ($name:ident, $build:ident) => {
         mod $name {
             #[test]
+            fn timed_simulation_keeps_array_storage_strided() {
+                let source = r#"
+                    module Top(input bit clk, output logic [19:0] q);
+                        logic [19:0] mem [6];
+                        always_ff @(posedge clk)
+                            for (int i = 0; i < 6; i++) mem[i] <= 20'(i + 1);
+                        assign q = mem[5];
+                    endmodule
+                "#;
+                let mut sim = celox::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("timed_array.sv"))], "Top",
+                ).four_state(true).$build().unwrap();
+                assert!(sim.signal("mem").array_layout.is_some());
+                sim.add_clock("clk", 2, 1);
+                sim.run_until(3).unwrap();
+                assert_eq!(sim.get_four_state(sim.signal("q")), (6u8.into(), 0u8.into()));
+                assert_eq!(sim.get_four_state(sim.signal("mem")).1, 0u8.into());
+            }
+
+            #[test]
             fn ff_writes_clear_only_written_array_masks() {
                 for four_state in [false, true] {
                     for (parallel, packed) in [(false, false), (true, false), (false, true)] {
@@ -280,7 +300,7 @@ macro_rules! strided_backend_tests {
                                 assert_eq!(
                                     sim.get_four_state(sim.signal(name)),
                                     (value.into(), 0u8.into()),
-                                    "{name}, four_state={four_state}, parallel={parallel}"
+                                    "{name}, four_state={four_state}, parallel={parallel}, packed={packed}"
                                 );
                             }
                             for i in 0..6u8 {
@@ -327,8 +347,57 @@ macro_rules! strided_backend_tests {
 }
 
 #[cfg(feature = "systemverilog")]
+strided_backend_tests!(interpreter_strided, build_interpreter);
+#[cfg(all(
+    feature = "systemverilog",
+    any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    )
+))]
 strided_backend_tests!(native_strided, build_native);
 #[cfg(all(feature = "systemverilog", feature = "cranelift"))]
 strided_backend_tests!(cranelift_strided, build_cranelift);
 #[cfg(all(feature = "systemverilog", feature = "wasm-runtime"))]
 strided_backend_tests!(wasm_strided, build_wasm);
+
+#[test]
+fn public_compilation_preserves_strided_array_indices() {
+    let source = r#"
+        module Top (clk: input clock, index: input logic<3>, q: output logic<20>) {
+            var mem: logic<20> [6];
+            always_ff (clk) { mem[index] = 20'd17; }
+            assign q = mem[index];
+        }
+    "#;
+    let (program, _) = celox::compile_to_sir(
+        &[(source, std::path::Path::new("public_array.veryl"))],
+        "Top",
+        &[],
+        &[],
+        true,
+        &Default::default(),
+        None,
+        None,
+        None,
+        None,
+        &[],
+        &Default::default(),
+    )
+    .unwrap();
+    let address = program.get_addr(&[], &["mem"]).unwrap();
+    let program = program.into_laid_out(true);
+    assert_eq!(
+        program.layout().mode,
+        celox::MemoryLayoutMode::ElementStrided
+    );
+    let array = &program.layout().unpacked_arrays[&address];
+    assert_eq!(
+        (
+            array.element_width,
+            array.element_count,
+            array.element_stride
+        ),
+        (20, 6, 4)
+    );
+}

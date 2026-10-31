@@ -885,7 +885,7 @@ pub fn compile_to_sir_with_diagnostic_policy(
         None,
         false,
         &[],
-        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         true,
         false,
         true,
@@ -927,7 +927,7 @@ pub fn compile_frontend_to_sir(
         trace_out,
         optimize_options,
         &crate::RuntimeDiagnostics::default(),
-        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
     )
 }
 
@@ -1211,7 +1211,7 @@ pub fn compile_sv_to_sir(
         &crate::DiagnosticPolicy::default(),
         None,
         false,
-        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         false,
         &[],
         &[],
@@ -1405,7 +1405,7 @@ pub fn compile_mixed_to_sir_with_file_dependencies(
         None,
         false,
         &[],
-        crate::backend::memory_layout::MemoryLayoutMode::Packed,
+        crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         true,
         false,
         false,
@@ -3203,7 +3203,7 @@ mod host {
 
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
-                    crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                    crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                     false,
                 )?;
             validate_untimed_processes(laid_out.runtime())?;
@@ -3643,16 +3643,7 @@ mod host {
                 .with_inferred_latches(self.options.allow_inferred_latches);
             self.enforce_native_force_optimizer();
             let mut trace = crate::debug::CompilationTrace::default();
-            #[cfg(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            ))]
             let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::ElementStrided;
-            #[cfg(not(any(
-                all(target_arch = "x86_64", not(feature = "arm64-codegen")),
-                all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
-            )))]
-            let layout_mode = crate::backend::memory_layout::MemoryLayoutMode::Packed;
             let layout_mode = if self.vcd_path.is_some() {
                 crate::backend::memory_layout::MemoryLayoutMode::Packed
             } else {
@@ -4047,7 +4038,7 @@ mod host {
             self,
         ) -> Result<crate::Simulation<crate::backend::InterpBackend>, SimulatorError> {
             self.build_with_backend(
-                crate::backend::memory_layout::MemoryLayoutMode::Packed,
+                crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 false,
                 crate::backend::InterpBackend::new,
             )

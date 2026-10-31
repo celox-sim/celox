@@ -355,6 +355,7 @@ fn build(design: &Design, backend: &str) -> Result<Box<dyn Backend>> {
         }
     };
     Ok(match backend {
+        "interpreter" => Box::new(CeloxBackend(builder.build_interpreter().map_err(rejected)?)),
         "native" => Box::new(CeloxBackend(builder.build_native().map_err(rejected)?)),
         "native-image" => {
             let image = builder

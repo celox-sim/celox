@@ -780,11 +780,12 @@ impl fmt::Debug for RuntimeProgram {
 }
 
 impl OptimizedSir {
-    /// Finalize the physical state layout and consume the optimized program.
+    /// Finalize the physical state layout using element-strided unpacked arrays
+    /// where the program's access patterns allow them.
     pub fn into_laid_out(self, four_state: bool) -> LaidOutProgram {
         self.into_laid_out_with_mode(
             four_state,
-            crate::backend::memory_layout::MemoryLayoutMode::Packed,
+            crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
         )
     }
 
