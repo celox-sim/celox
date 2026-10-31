@@ -212,3 +212,60 @@ mod xezim {
         assert_eq!(checked, 3);
     }
 }
+
+#[cfg(feature = "verilator")]
+#[test]
+fn procedural_wire_diagnostics_need_a_reviewed_message_and_source() {
+    let sources = [PathBuf::from("design.sv")];
+    let log = "%Error-PROCASSWIRE: design.sv:4:11: Procedural assignment to wire, perhaps intended var (IEEE 1800-2023 6.5): 'w'\n : ... note: In instance 'Top'\n 4 | initial w = #10 a & b;\n   |         ^\n ... For error description see https://verilator.org/warn/PROCASSWIRE?v=5.052\n%Error: Exiting due to 1 error(s)\n";
+    let rejects = celox_test_suite::verilator::is_source_rejection;
+    assert!(rejects(Some(1), log, &sources));
+    assert!(!rejects(Some(2), log, &sources));
+    assert!(!rejects(Some(1), log, &["other.sv".into()]));
+    assert!(!rejects(
+        Some(1),
+        &log.replace(
+            "Procedural assignment to wire, perhaps intended var",
+            "Unsupported assignment to wire"
+        ),
+        &sources
+    ));
+    assert!(!rejects(
+        Some(1),
+        &(log.to_owned() + "%Error: internal compiler error\n"),
+        &sources
+    ));
+}
+
+#[cfg(feature = "icarus")]
+#[test]
+fn procedural_wire_rejections_need_the_matching_net_declaration() {
+    let sources = [PathBuf::from("design.sv")];
+    let error = "design.sv:4: error: 'w' is not a valid l-value for a procedural assignment.\n";
+    let declaration = "design.sv:3:      : 'w' is declared here as a wire.\nElaboration failed\n";
+    let log = error.to_owned() + declaration;
+    let rejects = celox_test_suite::icarus::is_source_rejection;
+    assert!(rejects(Some(1), &log, &sources));
+    let task_context =
+        "design.sv:4: Unable to elaborate statement in task Top.write_value at design.sv:4.\n";
+    assert!(rejects(Some(1), &(log.clone() + task_context), &sources));
+    assert!(!rejects(Some(1), task_context, &sources));
+    assert!(!rejects(
+        Some(1),
+        &(log.clone() + &task_context.replace("at design.sv", "at other.sv")),
+        &sources
+    ));
+    assert!(!rejects(Some(124), &log, &sources));
+    assert!(!rejects(Some(1), &log, &["other.sv".into()]));
+    assert!(!rejects(Some(1), error, &sources));
+    assert!(!rejects(
+        Some(1),
+        &log.replace("'w' is declared", "'other' is declared"),
+        &sources
+    ));
+    assert!(!rejects(
+        Some(1),
+        &(log + "design.sv:4: error: internal compiler error\n"),
+        &sources
+    ));
+}

@@ -1,0 +1,374 @@
+{
+  "standard": "IEEE 1800-2023 7.3.2, 10.3 Table 10-1, 10.4.1",
+  "review": "https://github.com/celox-sim/celox/pull/2776#discussion_r4432655197",
+  "ci_job": "https://github.com/celox-sim/celox/actions/runs/41225730214/job/124611352147",
+  "source": "sv_intra_assignment_review.sv",
+  "probes": [
+    {
+      "tool": "verilator",
+      "probe": "port_net",
+      "command": [
+        "verilator",
+        "--lint-only",
+        "--timing",
+        "-Wno-fatal",
+        "--top-module",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 0,
+      "output": "- V e r i l a t i o n   R e p o r t: Verilator 5.052 2026-09-05 rev v5.052\n- Verilator: Built from 0.037 MB sources in 2 modules, into 0.015 MB in 3 C++ files needing 0.000 MB\n- Verilator: Walltime 0.006 s (elab=0.000, cvt=0.002, bld=0.000); cpu 0.005 s on 1 threads; allocated 19.742 MB\n"
+    },
+    {
+      "tool": "icarus",
+      "probe": "port_net",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-s",
+        "Top",
+        "-o",
+        "work/pr2776-probe.vvp",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 1,
+      "output": "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:31: error: 'w['sd3:'sd0]' is not a valid l-value for a procedural assignment.\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:30:      : 'w['sd3:'sd0]' is declared here as a wire.\nElaboration failed\n"
+    },
+    {
+      "tool": "xezim",
+      "probe": "port_net",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "10s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--compile",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 1,
+      "output": "Parsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: net 'w' is the target of a procedural assignment (LRM 1800-2017 \u00a76.5 \u2014 nets need a continuous assignment)\n"
+    },
+    {
+      "tool": "verilator",
+      "probe": "task_net",
+      "command": [
+        "verilator",
+        "--lint-only",
+        "--timing",
+        "-Wno-fatal",
+        "+define+TASK_NET",
+        "--top-module",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 1,
+      "output": "%Error-PROCASSWIRE: crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:17:33: Procedural assignment to wire, perhaps intended var (IEEE 1800-2023 6.5): 'w'\n                                                                                                   : ... note: In instance 'Top'\n   17 |   task automatic write_value(); w = #1 1'b1; endtask\n      |                                 ^\n                    ... For error description see https://verilator.org/warn/PROCASSWIRE?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+    },
+    {
+      "tool": "icarus",
+      "probe": "task_net",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-DTASK_NET",
+        "-s",
+        "Top",
+        "-o",
+        "work/pr2776-probe.vvp",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 1,
+      "output": "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:17: error: 'w' is not a valid l-value for a procedural assignment.\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:16:      : 'w' is declared here as a wire.\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:17: Unable to elaborate statement in task Top.write_value at crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:17.\n1 error(s) during elaboration.\n"
+    },
+    {
+      "tool": "xezim",
+      "probe": "task_net",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "10s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--compile",
+        "-D",
+        "TASK_NET",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 0,
+      "output": "Parsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nElaboration successful\n"
+    },
+    {
+      "tool": "verilator",
+      "probe": "tagged",
+      "command": [
+        "verilator",
+        "--lint-only",
+        "--timing",
+        "-Wno-fatal",
+        "+define+TAGGED",
+        "--top-module",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 1,
+      "output": "%Error-UNSUPPORTED: crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:4:32: Unsupported: void (for tagged unions)\n    4 |   typedef union tagged packed {void Empty; logic [7:0] Full;} item_t;\n      |                                ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:7:10: Unsupported: tagged union\n    7 |     item=tagged Empty;\n      |          ^~~~~~\n%Error-UNSUPPORTED: crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:8:18: Unsupported: tagged union\n    8 |     source_value=tagged Full 8'ha5;\n      |                  ^~~~~~\n%Error-UNSUPPORTED: crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:12:25: Unsupported: tagged union\n   12 |   initial begin #2 item=tagged Full 8'd0; source_value=tagged Empty; end\n      |                         ^~~~~~\n%Error-UNSUPPORTED: crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:12:56: Unsupported: tagged union\n   12 |   initial begin #2 item=tagged Full 8'd0; source_value=tagged Empty; end\n      |                                                        ^~~~~~\n%Error: Exiting due to 5 error(s)\n"
+    },
+    {
+      "tool": "icarus",
+      "probe": "tagged",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-DTAGGED",
+        "-s",
+        "Top",
+        "-o",
+        "work/pr2776-probe.vvp",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 14,
+      "output": "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:4: syntax error\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:4: error: Syntax error in typedef clause.\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:4: syntax error\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:4: error: Invalid module item.\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:5: syntax error\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:5: error: Invalid module instantiation\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:7: syntax error\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:7: error: Malformed statement\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:8: syntax error\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:8: error: Malformed statement\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:12: syntax error\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:12: error: Malformed statement\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:12: syntax error\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:12: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "probe": "tagged",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "10s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--compile",
+        "-D",
+        "TAGGED",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 1,
+      "output": "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:8:30: error: expected Semicolon, found IntegerLiteral '8'ha5'\n    8 |     source_value=tagged Full 8'ha5;\n      |                              ^~~~~\ncrates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv:12:37: error: expected Semicolon, found IntegerLiteral '8'd0'\n    12 |   initial begin #2 item=tagged Full 8'd0; source_value=tagged Empty; end\n       |                                     ^~~~\nParsed 1 file(s): 1 descriptions, 2 errors, 0 warnings\n"
+    },
+    {
+      "tool": "verilator",
+      "probe": "net_shadow",
+      "command": [
+        "verilator",
+        "--lint-only",
+        "--timing",
+        "-Wno-fatal",
+        "+define+NET_SHADOW",
+        "--top-module",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 0,
+      "output": "- V e r i l a t i o n   R e p o r t: Verilator 5.052 2026-09-05 rev v5.052\n- Verilator: Built from 0.037 MB sources in 2 modules, into 0.015 MB in 3 C++ files needing 0.000 MB\n- Verilator: Walltime 0.005 s (elab=0.000, cvt=0.002, bld=0.000); cpu 0.005 s on 1 threads; allocated 19.742 MB\n"
+    },
+    {
+      "tool": "icarus",
+      "probe": "net_shadow",
+      "command": [
+        "iverilog",
+        "-g2012",
+        "-DNET_SHADOW",
+        "-s",
+        "Top",
+        "-o",
+        "work/pr2776-probe.vvp",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 0,
+      "output": ""
+    },
+    {
+      "tool": "xezim",
+      "probe": "net_shadow",
+      "command": [
+        "timeout",
+        "-k",
+        "2s",
+        "10s",
+        "/nix/store/x5akm1kg9vcr6hmn4zry5wfvr92yywrz-xezim-0.11.4/bin/xezim",
+        "--compile",
+        "-D",
+        "NET_SHADOW",
+        "-s",
+        "Top",
+        "crates/celox-test-suite/verification/repros/sv_intra_assignment_review.sv"
+      ],
+      "exit_code": 1,
+      "output": "Parsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: net 'w' is the target of a procedural assignment (LRM 1800-2017 \u00a76.5 \u2014 nets need a continuous assignment)\n"
+    }
+  ],
+  "tools": {
+    "verilator": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "cases": [
+        {
+          "name": "timing::blocking_intra_assignment_net_shadow_is_variable",
+          "expectation": "Simulation",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_net",
+          "expectation": "CompilationError",
+          "status": "rejected",
+          "phase": "compile",
+          "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-PROCASSWIRE: <case>/source_0.sv:4:11: Procedural assignment to wire, perhaps intended var (IEEE 1800-2023 6.5): 'w'\n                                           : ... note: In instance 'Top'\n    4 |   initial w = #10 a & b;\n      |           ^\n                    ... For error description see https://verilator.org/warn/PROCASSWIRE?v=5.052\n%Error: Exiting due to 1 error(s)\n",
+          "diagnostic": "%Error-PROCASSWIRE: <target>/sv-verilator/timing/blocking_intra_assignment_rejects_net/source_0.sv:4:11: Procedural assignment to wire, perhaps intended var (IEEE 1800-2023 6.5): 'w'\n                                                                                                                                                                                                  : ... note: In instance 'Top'\n    4 |   initial w = #10 a & b;\n      |           ^\n                    ... For error description see https://verilator.org/warn/PROCASSWIRE?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_net_port_select",
+          "expectation": "CompilationError",
+          "status": "unexpected_accept",
+          "phase": "execute",
+          "detail": "invalid design was accepted: timing::blocking_intra_assignment_rejects_net_port_select"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_task_net_write",
+          "expectation": "CompilationError",
+          "status": "rejected",
+          "phase": "compile",
+          "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-PROCASSWIRE: <case>/source_0.sv:4:33: Procedural assignment to wire, perhaps intended var (IEEE 1800-2023 6.5): 'w'\n                                           : ... note: In instance 'Top'\n    4 |   task automatic write_value(); w = #1 1'b1; endtask\n      |                                 ^\n                    ... For error description see https://verilator.org/warn/PROCASSWIRE?v=5.052\n%Error: Exiting due to 1 error(s)\n",
+          "diagnostic": "%Error-PROCASSWIRE: <target>/sv-verilator/timing/blocking_intra_assignment_rejects_task_net_write/source_0.sv:4:33: Procedural assignment to wire, perhaps intended var (IEEE 1800-2023 6.5): 'w'\n                                                                                                                                                                                                             : ... note: In instance 'Top'\n    4 |   task automatic write_value(); w = #1 1'b1; endtask\n      |                                 ^\n                    ... For error description see https://verilator.org/warn/PROCASSWIRE?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_tag_checks",
+          "expectation": "Simulation",
+          "status": "unsupported",
+          "phase": "compile",
+          "detail": "four-state expectations"
+        }
+      ]
+    },
+    "icarus": {
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "cases": [
+        {
+          "name": "timing::blocking_intra_assignment_net_shadow_is_variable",
+          "expectation": "Simulation",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_net",
+          "expectation": "CompilationError",
+          "status": "rejected",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: error: 'w' is not a valid l-value for a procedural assignment.\n<case>/source_0.sv:3:      : 'w' is declared here as a wire.\nElaboration failed\n",
+          "diagnostic": "<target>/sv-icarus/timing/blocking_intra_assignment_rejects_net/source_0.sv:4: error: 'w' is not a valid l-value for a procedural assignment.\n<target>/sv-icarus/timing/blocking_intra_assignment_rejects_net/source_0.sv:3:      : 'w' is declared here as a wire.\nElaboration failed\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_net_port_select",
+          "expectation": "CompilationError",
+          "status": "rejected",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: error: 'w['sd3:'sd0]' is not a valid l-value for a procedural assignment.\n<case>/source_0.sv:2:      : 'w['sd3:'sd0]' is declared here as a wire.\nElaboration failed\n",
+          "diagnostic": "<target>/sv-icarus/timing/blocking_intra_assignment_rejects_net_port_select/source_0.sv:3: error: 'w['sd3:'sd0]' is not a valid l-value for a procedural assignment.\n<target>/sv-icarus/timing/blocking_intra_assignment_rejects_net_port_select/source_0.sv:2:      : 'w['sd3:'sd0]' is declared here as a wire.\nElaboration failed\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_task_net_write",
+          "expectation": "CompilationError",
+          "status": "rejected",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: error: 'w' is not a valid l-value for a procedural assignment.\n<case>/source_0.sv:3:      : 'w' is declared here as a wire.\n<case>/source_0.sv:4: Unable to elaborate statement in task Top.write_value at <case>/source_0.sv:4.\n1 error(s) during elaboration.\n",
+          "diagnostic": "<target>/sv-icarus/timing/blocking_intra_assignment_rejects_task_net_write/source_0.sv:4: error: 'w' is not a valid l-value for a procedural assignment.\n<target>/sv-icarus/timing/blocking_intra_assignment_rejects_task_net_write/source_0.sv:3:      : 'w' is declared here as a wire.\n<target>/sv-icarus/timing/blocking_intra_assignment_rejects_task_net_write/source_0.sv:4: Unable to elaborate statement in task Top.write_value at <target>/sv-icarus/timing/blocking_intra_assignment_rejects_task_net_write/source_0.sv:4.\n1 error(s) during elaboration.\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_tag_checks",
+          "expectation": "Simulation",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 24; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Syntax error in typedef clause.\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Syntax error in typedef clause.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module instantiation\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module instantiation\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Malformed statement\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Malformed statement\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Malformed statement\n",
+          "diagnostic": "<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:3: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:3: error: Syntax error in typedef clause.\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:3: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:3: error: Invalid module item.\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:4: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:4: error: Syntax error in typedef clause.\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:4: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:4: error: Invalid module item.\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:5: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:5: error: Invalid module instantiation\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:6: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:6: error: Invalid module instantiation\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:8: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:8: error: Malformed statement\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:9: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:9: error: Malformed statement\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:14: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:14: error: Malformed statement\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:19: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:19: error: Malformed statement\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:20: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:20: error: Malformed statement\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:21: syntax error\n<target>/sv-icarus/timing/blocking_intra_assignment_tag_checks/source_0.sv:21: error: Malformed statement\n"
+        }
+      ]
+    },
+    "xezim": {
+      "version": "xezim version 0.11.4",
+      "cases": [
+        {
+          "name": "timing::blocking_intra_assignment_net_shadow_is_variable",
+          "expectation": "Simulation",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 3 file(s): 3 descriptions, 0 errors, 0 warnings\nerror: net 'w' is the target of a procedural assignment (LRM 1800-2017 \u00a76.5 \u2014 nets need a continuous assignment)\n",
+          "diagnostic": "Parsed 3 file(s): 3 descriptions, 0 errors, 0 warnings\nerror: net 'w' is the target of a procedural assignment (LRM 1800-2017 \u00a76.5 \u2014 nets need a continuous assignment)\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_net",
+          "expectation": "CompilationError",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: net 'w' is the target of a procedural assignment (LRM 1800-2017 \u00a76.5 \u2014 nets need a continuous assignment)\n",
+          "diagnostic": "Parsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: net 'w' is the target of a procedural assignment (LRM 1800-2017 \u00a76.5 \u2014 nets need a continuous assignment)\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_net_port_select",
+          "expectation": "CompilationError",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "xezim build exit status: 1; see <case>/build.log\nParsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: net 'w' is the target of a procedural assignment (LRM 1800-2017 \u00a76.5 \u2014 nets need a continuous assignment)\n",
+          "diagnostic": "Parsed 1 file(s): 1 descriptions, 0 errors, 0 warnings\nerror: net 'w' is the target of a procedural assignment (LRM 1800-2017 \u00a76.5 \u2014 nets need a continuous assignment)\n"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_rejects_task_net_write",
+          "expectation": "CompilationError",
+          "status": "unexpected_accept",
+          "phase": "execute",
+          "detail": "invalid design was accepted: timing::blocking_intra_assignment_rejects_task_net_write"
+        },
+        {
+          "name": "timing::blocking_intra_assignment_tag_checks",
+          "expectation": "Simulation",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:9:30: error: expected Semicolon, found IntegerLiteral '8'ha5'\n    9 |     source_value=tagged Full 8'ha5;\n      |                              ^~~~~\n<case>/source_0.sv:14:29: error: expected Semicolon, found IntegerLiteral '16'd0'\n    14 |     nested_item=tagged Word 16'd0;\n       |                             ^~~~~\n<case>/source_0.sv:19:25: error: expected Semicolon, found IntegerLiteral '8'd0'\n    19 |     #2 item=tagged Full 8'd0;\n       |                         ^~~~\n<case>/source_0.sv:21:44: error: expected RParen, found IntegerLiteral '8'd0'\n    21 |     nested_item=tagged Nested (tagged Full 8'd0);\n       |                                            ^~~~\n<case>/source_0.sv:21:44: error: expected Semicolon, found IntegerLiteral '8'd0'\n    21 |     nested_item=tagged Nested (tagged Full 8'd0);\n       |                                            ^~~~\n<case>/source_0.sv:21:48: error: expected Semicolon, found RParen ')'\n    21 |     nested_item=tagged Nested (tagged Full 8'd0);\n       |                                                ^\n<case>/source_0.sv:21:48: error: expected expression, found RParen ')'\n    21 |     nested_item=tagged Nested (tagged Full 8'd0);\n       |                                                ^\nParsed 3 file(s): 3 descriptions, 8 errors, 0 warnings\n",
+          "diagnostic": "<target>/sv-xezim/timing/blocking_intra_assignment_tag_checks/source_0.sv:9:30: error: expected Semicolon, found IntegerLiteral '8'ha5'\n    9 |     source_value=tagged Full 8'ha5;\n      |                              ^~~~~\n<target>/sv-xezim/timing/blocking_intra_assignment_tag_checks/source_0.sv:14:29: error: expected Semicolon, found IntegerLiteral '16'd0'\n    14 |     nested_item=tagged Word 16'd0;\n       |                             ^~~~~\n<target>/sv-xezim/timing/blocking_intra_assignment_tag_checks/source_0.sv:19:25: error: expected Semicolon, found IntegerLiteral '8'd0'\n    19 |     #2 item=tagged Full 8'd0;\n       |                         ^~~~\n<target>/sv-xezim/timing/blocking_intra_assignment_tag_checks/source_0.sv:21:44: error: expected RParen, found IntegerLiteral '8'd0'\n    21 |     nested_item=tagged Nested (tagged Full 8'd0);\n       |                                            ^~~~\n<target>/sv-xezim/timing/blocking_intra_assignment_tag_checks/source_0.sv:21:44: error: expected Semicolon, found IntegerLiteral '8'd0'\n    21 |     nested_item=tagged Nested (tagged Full 8'd0);\n       |                                            ^~~~\n<target>/sv-xezim/timing/blocking_intra_assignment_tag_checks/source_0.sv:21:48: error: expected Semicolon, found RParen ')'\n    21 |     nested_item=tagged Nested (tagged Full 8'd0);\n       |                                                ^\n<target>/sv-xezim/timing/blocking_intra_assignment_tag_checks/source_0.sv:21:48: error: expected expression, found RParen ')'\n    21 |     nested_item=tagged Nested (tagged Full 8'd0);\n       |                                                ^\nParsed 3 file(s): 3 descriptions, 8 errors, 0 warnings\n"
+        }
+      ]
+    }
+  },
+  "official_cases": [
+    {
+      "test": "chapter-10/10.3--proc-assignment--bad.sv",
+      "state_mode": "2state",
+      "result": "pass",
+      "log": "name: proc_assignment__bad\ndescription: continuous assignment with delay test\nshould_fail_because: Illegal to procedurally assign to wire, IEEE Table 10-1\ntags: 10.3\ntype: simulation elaboration\nfiles: <checkout>/work/sv-tests/tests/chapter-10/10.3--proc-assignment--bad.sv\nincdirs: <checkout>/work/sv-tests/tests/chapter-10\ntop_module: \ntimeout: 30\nshould_fail: 1\ndefines: \ncompatible-runners: all\nunsynthesizable: 0\nresults_group: \nsimvariants: \nmode: simulation\nrc: 1\ntool_success: 0\nrunner: celox\nrunner_url: https://github.com/celox-sim/celox\ntime_elapsed: 0.09174466133117676\nuser_time: 0.0\nsystem_time: 0.023202999999999998\nram_usage: 46556\ndate_completed: 2026-11-01 03:52:27\n\n/home/tsukasa/mbx/cache/targets/v1/bef0732cedd19d508dcf8061e9d7cc541968e9c609f69b6e5261b7d714dda19a/debug/examples/sv_tests --mode simulation --state-mode 2state --include <checkout>/work/sv-tests/tests/chapter-10 -- <checkout>/work/sv-tests/tests/chapter-10/10.3--proc-assignment--bad.sv\nillegal_context\n\n  \u00d7 Illegal in current context: systemverilog analysis (procedural assignment to net `w`)\n\n"
+    },
+    {
+      "test": "chapter-10/10.3--proc-assignment--bad.sv",
+      "state_mode": "4state",
+      "result": "pass",
+      "log": "name: proc_assignment__bad\ndescription: continuous assignment with delay test\nshould_fail_because: Illegal to procedurally assign to wire, IEEE Table 10-1\ntags: 10.3\ntype: simulation elaboration\nfiles: <checkout>/work/sv-tests/tests/chapter-10/10.3--proc-assignment--bad.sv\nincdirs: <checkout>/work/sv-tests/tests/chapter-10\ntop_module: \ntimeout: 30\nshould_fail: 1\ndefines: \ncompatible-runners: all\nunsynthesizable: 0\nresults_group: \nsimvariants: \nmode: simulation\nrc: 1\ntool_success: 0\nrunner: celox\nrunner_url: https://github.com/celox-sim/celox\ntime_elapsed: 0.09415149688720703\nuser_time: 0.0\nsystem_time: 0.022524\nram_usage: 46632\ndate_completed: 2026-11-01 03:52:27\n\n/home/tsukasa/mbx/cache/targets/v1/bef0732cedd19d508dcf8061e9d7cc541968e9c609f69b6e5261b7d714dda19a/debug/examples/sv_tests --mode simulation --state-mode 4state --include <checkout>/work/sv-tests/tests/chapter-10 -- <checkout>/work/sv-tests/tests/chapter-10/10.3--proc-assignment--bad.sv\nillegal_context\n\n  \u00d7 Illegal in current context: systemverilog analysis (procedural assignment to net `w`)\n\n"
+    },
+    {
+      "test": "chapter-14/14.3--clocking-block-signals-error.sv",
+      "state_mode": "2state",
+      "result": "pass",
+      "log": "name: clocking_block_signals_fail\ndescription: clocking block with signals test\nshould_fail_because: assigning to net from procedural context\ntype: simulation elaboration\ntags: 14.3\nunsynthesizable: 1\nfiles: <checkout>/work/sv-tests/tests/chapter-14/14.3--clocking-block-signals-error.sv\nincdirs: <checkout>/work/sv-tests/tests/chapter-14\ntop_module: \ntimeout: 30\nshould_fail: 1\ndefines: \ncompatible-runners: all\nresults_group: \nsimvariants: \nmode: simulation\nrc: 1\ntool_success: 0\nrunner: celox\nrunner_url: https://github.com/celox-sim/celox\ntime_elapsed: 0.013794898986816406\nuser_time: 0.003345\nsystem_time: 0.010036999999999999\nram_usage: 47132\ndate_completed: 2026-11-01 03:52:33\n\n/home/tsukasa/mbx/cache/targets/v1/bef0732cedd19d508dcf8061e9d7cc541968e9c609f69b6e5261b7d714dda19a/debug/examples/sv_tests --mode simulation --state-mode 2state --include <checkout>/work/sv-tests/tests/chapter-14 -- <checkout>/work/sv-tests/tests/chapter-14/14.3--clocking-block-signals-error.sv\nillegal_context\n\n  \u00d7 Illegal in current context: systemverilog analysis (procedural assignment to net `b`)\n\n"
+    },
+    {
+      "test": "chapter-14/14.3--clocking-block-signals-error.sv",
+      "state_mode": "4state",
+      "result": "pass",
+      "log": "name: clocking_block_signals_fail\ndescription: clocking block with signals test\nshould_fail_because: assigning to net from procedural context\ntype: simulation elaboration\ntags: 14.3\nunsynthesizable: 1\nfiles: <checkout>/work/sv-tests/tests/chapter-14/14.3--clocking-block-signals-error.sv\nincdirs: <checkout>/work/sv-tests/tests/chapter-14\ntop_module: \ntimeout: 30\nshould_fail: 1\ndefines: \ncompatible-runners: all\nresults_group: \nsimvariants: \nmode: simulation\nrc: 1\ntool_success: 0\nrunner: celox\nrunner_url: https://github.com/celox-sim/celox\ntime_elapsed: 0.012444496154785156\nuser_time: 0.005634\nsystem_time: 0.005634\nram_usage: 47132\ndate_completed: 2026-11-01 03:52:33\n\n/home/tsukasa/mbx/cache/targets/v1/bef0732cedd19d508dcf8061e9d7cc541968e9c609f69b6e5261b7d714dda19a/debug/examples/sv_tests --mode simulation --state-mode 4state --include <checkout>/work/sv-tests/tests/chapter-14 -- <checkout>/work/sv-tests/tests/chapter-14/14.3--clocking-block-signals-error.sv\nillegal_context\n\n  \u00d7 Illegal in current context: systemverilog analysis (procedural assignment to net `b`)\n\n"
+    }
+  ],
+  "scope": {
+    "complete": true,
+    "selection": "Source/path UVM-related cases excluded (172 files); all other pinned files checked in both modes.",
+    "files": 1478,
+    "verdicts": 2956,
+    "remaining_expectation_differences": 0,
+    "base_commit": "1e1c169844d9f2f5b86ec6ae7ac71f7fe83e6670"
+  }
+}

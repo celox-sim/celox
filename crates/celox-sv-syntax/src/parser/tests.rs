@@ -118,7 +118,8 @@ fn opaque_randsequence_owns_code_blocks_and_assignment_event_payloads() {
     };
     let StatementKind::Assignment {
         timing: Some(range),
-        event_control: Some(event),
+        timing_control: Some(event),
+        repeat_count: Some(count),
         nonblocking: true,
         ..
     } = syntax.statement(statements[0]).kind
@@ -126,6 +127,7 @@ fn opaque_randsequence_owns_code_blocks_and_assignment_event_payloads() {
         panic!()
     };
     assert!(syntax.token_text(range).starts_with("repeat(2)@"));
+    assert!(matches!(&syntax.expression(count).kind, ExprKind::Literal(value) if value == "2"));
     let TimingControlKind::Event(EventControl::Items(events)) = &syntax.timing_control(event).kind
     else {
         panic!()
@@ -3141,5 +3143,33 @@ fn virtual_method_visibility_order_preserves_class_members() {
                 DataTypeKind::VirtualInterface { .. }
             ));
         }
+    }
+}
+
+#[test]
+fn intra_assignment_delays_have_native_operands() {
+    let syntax =
+        parse("module M; bit a,b; int d; initial a = #1.25 b; initial a = #(d+1) b; endmodule");
+    for (index, parenthesized) in [false, true].into_iter().enumerate() {
+        let StatementKind::Assignment {
+            timing_control: Some(control),
+            repeat_count: None,
+            ..
+        } = syntax.statement(syntax.procedures[index].body).kind
+        else {
+            panic!()
+        };
+        let TimingControlKind::Delay {
+            value,
+            parenthesized: actual,
+        } = syntax.timing_control(control).kind
+        else {
+            panic!()
+        };
+        assert_eq!(actual, parenthesized);
+        assert_eq!(
+            syntax.token_text(syntax.expression(value).tokens),
+            if parenthesized { "(d+1)" } else { "1.25" }
+        );
     }
 }

@@ -1173,9 +1173,10 @@ pub enum StatementKind {
         right: ExprId,
         nonblocking: bool,
         timing: Option<TokenRange>,
-        /// Native event payload within an otherwise unsupported intra-assignment
-        /// control. Delay/cycle and repeat-count syntax retains its token range.
-        event_control: Option<TimingControlId>,
+        /// Native delay or event payload; cycle controls remain unsupported.
+        timing_control: Option<TimingControlId>,
+        /// A repeat count evaluated once before an intra-assignment event wait.
+        repeat_count: Option<ExprId>,
     },
     Expression(ExprId),
     Declaration(LocalDeclaration),
