@@ -850,7 +850,7 @@ fn enum_values(
                 expr => expr,
             };
             let value = eval_ast_const_expr(&tree.functions, &expr, &env)?;
-            let value_type = infer_const_expr_type(&expr, &parameter_types_from_const_env(&env))?;
+            let value_type = parameters::infer_const_expr_type_in(&expr, &env)?;
             if !parameters::enum_initializer_fits_base_type(value, value_type, shape) {
                 return None;
             }

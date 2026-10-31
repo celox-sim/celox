@@ -1452,7 +1452,7 @@ fn logical_type_inference_requires_operand_types_outside_bounded_proofs() {
         None
     );
     assert_eq!(
-        infer_const_expr_type_inner(&expression, &HashMap::default(), true),
+        infer_const_expr_type_inner(&expression, &|_| None, true),
         Some(ExprType {
             width: 1,
             signed: false
