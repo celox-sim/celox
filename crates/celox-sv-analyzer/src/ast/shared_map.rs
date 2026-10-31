@@ -24,6 +24,24 @@ impl<V> SharedMap<V> {
     }
 }
 
+/// A table given to a context that keeps it: a shared table is shared
+/// again, and a borrowed one is copied.
+pub(super) trait ToShared<V> {
+    fn to_shared(self) -> SharedMap<V>;
+}
+
+impl<V> ToShared<V> for &SharedMap<V> {
+    fn to_shared(self) -> SharedMap<V> {
+        SharedMap(Arc::clone(&self.0))
+    }
+}
+
+impl<V: Clone> ToShared<V> for &HashMap<String, V> {
+    fn to_shared(self) -> SharedMap<V> {
+        self.clone().into()
+    }
+}
+
 impl<V> Default for SharedMap<V> {
     fn default() -> Self {
         HashMap::default().into()
@@ -53,6 +71,13 @@ impl<V: Clone> DerefMut for SharedMap<V> {
 impl<V> FromIterator<(String, V)> for SharedMap<V> {
     fn from_iter<I: IntoIterator<Item = (String, V)>>(values: I) -> Self {
         HashMap::from_iter(values).into()
+    }
+}
+
+impl<V: Clone> SharedMap<V> {
+    /// The entries, copied only when another snapshot shares them.
+    pub fn into_inner(self) -> HashMap<String, V> {
+        Arc::unwrap_or_clone(self.0)
     }
 }
 

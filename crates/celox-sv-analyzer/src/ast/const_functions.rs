@@ -470,7 +470,12 @@ fn collect_module_constant_functions(
         &symbolic_aliases
     };
     let (subroutine_params, subroutine_shapes, subroutine_directions) =
-        match procedural::subroutine_argument_names(tree, session, const_env, type_aliases) {
+        match procedural::subroutine_argument_names(
+            tree,
+            session,
+            const_env,
+            &type_aliases.clone().into(),
+        ) {
             Ok(names) => names,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
