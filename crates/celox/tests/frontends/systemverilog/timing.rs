@@ -5,6 +5,8 @@
 //! adds it removes the exclusion. Supported cases run on every backend,
 //! and natively also from a serialized native image.
 
+use num_bigint::BigUint;
+
 macro_rules! timed_cases {
     () => {};
     (
@@ -57,6 +59,13 @@ macro_rules! timed_cases {
 }
 
 timed_cases! {
+    fn wildcard_blocks_with_crossing_output_dependencies = "timing::wildcard_blocks_with_crossing_output_dependencies";
+    fn wildcard_blocks_in_a_converging_feedback_loop = "timing::wildcard_blocks_in_a_converging_feedback_loop";
+    fn nonblocking_intra_assignment_delays = "timing::nonblocking_intra_assignment_delays";
+    fn nonblocking_intra_assignment_positions = "timing::nonblocking_intra_assignment_positions";
+    fn nonblocking_intra_assignment_four_state = "timing::nonblocking_intra_assignment_four_state";
+    fn nonblocking_intra_assignment_flip_flop = "timing::nonblocking_intra_assignment_flip_flop";
+    fn nonblocking_intra_assignment_outlives_caller = "timing::nonblocking_intra_assignment_outlives_caller";
     fn blocking_intra_assignment_tag_checks = "timing::blocking_intra_assignment_tag_checks";
     fn blocking_intra_assignment_rejects_net = "timing::blocking_intra_assignment_rejects_net";
     fn blocking_intra_assignment_rejects_net_port_select = "timing::blocking_intra_assignment_rejects_net_port_select";
@@ -523,8 +532,8 @@ fn unimplemented_timing_features_are_rejected() {
             88,
         ),
         (
-            "bit a, b; initial a <= #1 b;",
-            "nonblocking intra-assignment timing control",
+            "bit a, b; int d; initial a <= #(d) b;",
+            "nonconstant or overflowing nonblocking assignment delay",
             88,
         ),
         (
@@ -921,6 +930,56 @@ fn runtime_error_before_a_commit_leaves_no_held_writes() {
         } else {
             check!(builder.build_cranelift());
         }
+    }
+}
+
+#[test]
+fn delayed_nonblocking_updates_survive_checkpoint_and_state_file() {
+    let source = r#"
+        module Top(output logic [7:0] q);
+            timeunit 1ns / 1ns;
+            initial begin
+                q=0; q <= #3 8'h11; q <= #6 8'h22;
+                // IEEE 1800-2023 9.4.1: negative delays use the time width.
+                q <= #(4'shf) 8'hee;
+                q <= #(-1) 8'hff;
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let build = || {
+            celox::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("delayed_state.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .build()
+            .unwrap()
+        };
+        let mut sim = build();
+        let q = sim.signal("q");
+        sim.run_until(1).unwrap();
+        let saved = sim.checkpoint().unwrap();
+        let mut bytes = Vec::new();
+        sim.save_state().unwrap().write_to(&mut bytes).unwrap();
+        let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+        let pending = &file.schedule.as_ref().unwrap().processes.delayed_nba;
+        assert_eq!(
+            pending.iter().map(|(time, _, _)| *time).collect::<Vec<_>>(),
+            [3, 6, u64::MAX, u64::MAX]
+        );
+        let mut loaded = build();
+        loaded.load_state(&file).unwrap();
+        let loaded_q = loaded.signal("q");
+        for (time, expected) in [(4, 0x11u8), (7, 0x22)] {
+            sim.run_until(time).unwrap();
+            loaded.run_until(time).unwrap();
+            assert_eq!(sim.get(q), BigUint::from(expected));
+            assert_eq!(loaded.get(loaded_q), BigUint::from(expected));
+        }
+        sim.restore(&saved).unwrap();
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(q), BigUint::from(0x11u8));
     }
 }
 

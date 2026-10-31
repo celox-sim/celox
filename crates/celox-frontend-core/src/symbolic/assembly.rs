@@ -4442,10 +4442,12 @@ fn select_nba_paths(
     processes: &mut [RelocatedProcess],
 ) {
     let mut staged = staged.clone();
-    // Fork activations can reach one NBA site concurrently. Always queue its
+    // Future updates must be queued at issue time rather than staged for
+    // publication in the current slot. Fork activations can reach one NBA site
+    // concurrently. Always queue its
     // captured value, rather than leaving one shared pending slot per kernel.
     for site in &timing.nba_sites {
-        if processes[site.process].frame.is_some() {
+        if site.delay > 0 || processes[site.process].frame.is_some() {
             for switch in &timing.nba_switches {
                 if switch.value == site.value {
                     staged.remove(&switch.switch);

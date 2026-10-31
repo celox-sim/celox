@@ -57,6 +57,12 @@ pub struct AnalysisOptions {
     /// Compatibility mode: return zero for every empty array reduction,
     /// rather than the product/bitwise-AND identity. Disabled by default.
     pub legacy_empty_reductions: bool,
+    /// Treat a variable that only several `always @*` blocks write, each
+    /// before it reads it, and that nothing else reads, as a temporary of
+    /// each block, instead of a variable whose writes wake the other blocks
+    /// (IEEE 1800-2023 9.4.2.2). Off by default; see the
+    /// `shared_always_temporary` diagnostic.
+    pub shared_always_temporaries: bool,
     /// Default unit/precision exponents; precision also bounds global resolution.
     pub default_timescale: Option<(i32, i32)>,
     /// The virtual interfaces of the design (IEEE 1800-2023 25.9), which the

@@ -3256,6 +3256,145 @@ endmodule
   (run_to_finish)
   (expect_output "final value=31\n"))
 
+; IEEE 1800-2023 10.4.2: delayed NBA updates capture values and positions
+; immediately, preserve issue order, and do not suspend the caller.
+(case wildcard_blocks_with_crossing_output_dependencies
+  (source "crossing_outputs.sv" #"
+module Top;
+  reg [7:0] s=0, t=0, a, b, x, y;
+  always @* begin a=s; x=b+1; end
+  always @* begin b=t; y=a+1; end
+  initial begin
+    #1 s=3; t=5;
+    #1 $display("%0d %0d %0d %0d", a, b, x, y);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "3 5 6 4\n"))
+
+(case wildcard_blocks_in_a_converging_feedback_loop
+  (source "converging_wildcards.sv" #"
+module Top;
+  reg [7:0] a, b;
+  always @* b=(a<4) ? a : 8'd3;
+  always @* a=(b<4) ? b+8'd1 : b;
+  initial begin
+    #1 a=1;
+    #1 $display("%0d %0d", a, b);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "4 3\n"))
+
+(case nonblocking_intra_assignment_delays
+  (source "delayed_nba.sv" #"
+module Top;
+  reg [7:0] q=0, rhs=8'h11, zero=0;
+  initial begin
+    q <= #3 rhs;
+    rhs=8'h22;
+    q <= #5 rhs;
+    #1 q <= #2 8'h33;
+    #1 $display("before %h", q);
+    #2 $display("ordered %h", q);
+    zero <= #0 rhs;
+    rhs=8'h44;
+    #2 $display("after %h zero %h", q, zero);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "before 00\nordered 33\nafter 22 zero 22\n"))
+
+(case nonblocking_intra_assignment_positions
+  (source "delayed_position.sv" #"
+module Top;
+  reg [15:0] q=0;
+  integer index=0, bit_index=0;
+  reg [7:0] bits=0;
+  reg [3:0] rhs=1;
+  initial begin
+    bits[bit_index++] <= #2 1'b1;
+    bits[bit_index++] <= #2 1'b0;
+    $display("positions %0d", bit_index);
+    q[index +: 4] <= #2 rhs;
+    index=4; rhs=2;
+    q[index +: 4] <= #2 rhs;
+    index=8; rhs=3;
+    #3 $display("%h", q);
+    $display("%h %0d", bits, bit_index);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "positions 2\n0021\n01 2\n"))
+
+(case nonblocking_intra_assignment_four_state
+  (source "delayed_four_state.sv" #"
+module Top;
+  reg [3:0] q=0, rhs=4'bxz01;
+  initial begin
+    q <= #2 rhs;
+    rhs='1;
+    #1 $display("%b", q);
+    #2 $display("%b", q);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (four_state)
+  (run_to_finish)
+  (expect_output "0000\nxz01\n"))
+
+(case nonblocking_intra_assignment_flip_flop
+  (source "delayed_flop.sv" #"
+module Top;
+  reg clk=0, rst_n=1, d=0;
+  reg q;
+  always @(posedge clk or negedge rst_n)
+    if (!rst_n) q <= #1 0;
+    else q <= #1 d;
+  initial begin
+    #1 rst_n=0;
+    #2 $display("reset %b", q);
+    rst_n=1; d=1;
+    #1 clk=1;
+    #1 d=0;
+    #1 $display("data %b", q);
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "reset 0\ndata 1\n"))
+
+(case nonblocking_intra_assignment_outlives_caller
+  (source "delayed_done.sv" #"
+module Top;
+  reg q=0;
+  initial q <= #2 1;
+  always @(q) if (q) begin
+    $display("updated");
+    $finish;
+  end
+endmodule
+"#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "updated\n"))
+
 ; IEEE 1800-2023 9.4.5/10.4.1: snapshot and convert the RHS before waiting;
 ; evaluate the destination, including its effects, after the wait.
 (case blocking_intra_assignment_delays

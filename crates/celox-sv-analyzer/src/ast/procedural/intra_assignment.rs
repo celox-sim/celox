@@ -1,4 +1,4 @@
-//! Blocking intra-assignment controls (IEEE 1800-2023 9.4.5, 10.4.1).
+//! Intra-assignment controls (IEEE 1800-2023 9.4.5, 10.4.1, 10.4.2).
 use super::*;
 use celox_sv_syntax::{ExprId, TimingControlId};
 
@@ -12,10 +12,7 @@ impl BodyBuilder<'_, '_, '_> {
         control: Option<TimingControlId>,
         repeat_count: Option<ExprId>,
     ) -> Converted<Vec<Stmt>> {
-        if nonblocking {
-            return Err(unsupported("nonblocking intra-assignment timing control"));
-        }
-        if operator != "=" {
+        if operator != "=" && !nonblocking {
             return Err(unsupported("compound assignment with a timing control"));
         }
         self.allow_timing("intra-assignment timing control")?;
@@ -39,6 +36,19 @@ impl BodyBuilder<'_, '_, '_> {
             || shape.virtual_interface.is_some()
         {
             return Err(unsupported("nonintegral intra-assignment target"));
+        }
+        if nonblocking {
+            let delay = self.native_timing_control(control)?;
+            if repeat_count.is_some() || !matches!(delay, Stmt::Delay { .. }) {
+                return Err(unsupported("nonblocking intra-assignment event control"));
+            }
+            output.extend(target_effects);
+            let assignment = self.assignment_value("=", true, (left, right))?;
+            output.push(Stmt::DelayedNonblocking {
+                control: Box::new(delay),
+                assignment: Box::new(assignment),
+            });
+            return Ok(output);
         }
         let ty = shape
             .pattern_type(&self.tree.functions, &self.dims)
@@ -132,13 +142,8 @@ mod tests {
         for (declarations, statement, diagnostic) in [
             (
                 "bit a,b,clk;",
-                "a <= #1 b;",
-                "nonblocking intra-assignment timing control",
-            ),
-            (
-                "bit a,b,clk;",
                 "a <= repeat(2) @(posedge clk) b;",
-                "nonblocking intra-assignment timing control",
+                "nonblocking intra-assignment event control",
             ),
             (
                 "bit a,b,clk; logic [128:0] n=1;",
