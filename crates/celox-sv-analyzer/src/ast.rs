@@ -1327,8 +1327,20 @@ impl Module {
             let mut array_initial_processes = Vec::new();
             let mut packed_pattern_values = HashMap::default();
             for parameter in &array_parameters {
-                let process =
+                let mut process =
                     parameter.initial_process(syntax_tree, session, &packed_dimensions)?;
+                // The value may name constants, such as enumeration members
+                // (IEEE 1800-2023 6.19), which every other process is given as
+                // values the same way.
+                for stmt in &mut process.body {
+                    procedural::substitute_stmt_constants(
+                        syntax_tree,
+                        session,
+                        stmt,
+                        &const_env,
+                        &enum_constants.exprs,
+                    );
+                }
                 if let Stmt::Assign { rhs, .. } = &process.body[0] {
                     packed_dimensions
                         .array_parameter_values
