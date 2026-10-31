@@ -1785,7 +1785,12 @@ pub(crate) fn specialize_foreign_module(
             .collect();
         context.push_override(symbol.inner_namespace(), overrides);
         context.modport_signatures.push(modports);
-        let result = veryl_analyzer::conv::utils::get_component(context, &signature, module.token);
+        // Only an instantiated conversion carries the pushed modport signatures.
+        let result = veryl_analyzer::conv::utils::get_instantiated_component(
+            context,
+            &signature,
+            module.token,
+        );
         context.modport_signatures.pop();
         context.pop_override();
         let component =
