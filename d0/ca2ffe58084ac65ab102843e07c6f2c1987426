@@ -1,1 +1,7 @@
-Address review 5724162288 on PR #2778: scalar concatenated gate outputs and property operator parsing boundaries.
+Revision history for #2779:
+
+rev 3 (rebase) 2026-10-31 18:12 UTC — Address review 5724162288 on PR #2778: scalar concatenated gate outputs and property operator parsing boundaries.
+rev 2 (rebase) 2026-10-31 17:54 UTC — Rebase the newly published stack onto current master to resolve the base conflict reported on PR #2778.
+rev 1 (initial) 2026-10-31 17:54 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2779,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"bf1e54ae460e0181d24d59a7afb8476ca90caeb9","timestamp_iso":"2026-10-31T17:54:46Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"bf1e54ae460e0181d24d59a7afb8476ca90caeb9","new_sha":"7a30e63df0d8218d652fa69bc6ae6d9b745e02be","timestamp_iso":"2026-10-31T17:54:46Z","reason":"Rebase the newly published stack onto current master to resolve the base conflict reported on PR #2778.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/bf1e54ae460e0181d24d59a7afb8476ca90caeb9...7a30e63df0d8218d652fa69bc6ae6d9b745e02be"},{"number":3,"change_type":"rebase","old_sha":"7a30e63df0d8218d652fa69bc6ae6d9b745e02be","new_sha":"d0ca2ffe58084ac65ab102843e07c6f2c1987426","timestamp_iso":"2026-10-31T18:12:18Z","reason":"Address review 5724162288 on PR #2778: scalar concatenated gate outputs and property operator parsing boundaries.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7a30e63df0d8218d652fa69bc6ae6d9b745e02be...d0ca2ffe58084ac65ab102843e07c6f2c1987426"}]} -->
