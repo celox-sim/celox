@@ -3679,8 +3679,8 @@ fn build_fused_ff_actions(
     result
 }
 
-/// always_comb starts after every initial procedure has reached its first
-/// suspension or completion (IEEE 1800-2023 9.2.2.2). Initial status is zero
+/// always_comb starts after every initial and always procedure has reached its
+/// first suspension or completion (IEEE 1800-2023 9.2.2.2). Initial status is zero
 /// until that happens; all control slots are ordinary checkpointed state.
 fn after_initial_processes(
     unit: &ExecutionUnit<AbsoluteAddr>,
@@ -3781,17 +3781,27 @@ fn relocate_units(
     let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
     let mut parallel_ff_units = parallel_ff_units;
-    let mut initial_statuses: Vec<_> = expanded
+    let mut startup_statuses: Vec<_> = expanded
         .values()
         .flat_map(|id| {
             modules[&instance_modules[id]]
                 .processes
                 .iter()
+                // Only automatically started procedures participate in the
+                // time-zero barrier (IEEE 1800-2023 9.2.2.2). Final procedures
+                // wait for termination, and callable kernels wait for a caller;
+                // neither can release a startup dependency.
+                .filter(|process| match process.slots.kind {
+                    celox_design::ProcessKind::Initializer | celox_design::ProcessKind::Regular => {
+                        true
+                    }
+                    celox_design::ProcessKind::Final | celox_design::ProcessKind::Callable => false,
+                })
                 .map(|process| bindings.locate(*id, process.slots.status))
         })
         .collect();
-    initial_statuses.sort();
-    initial_statuses.dedup();
+    startup_statuses.sort();
+    startup_statuses.dedup();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -3996,8 +4006,8 @@ fn relocate_units(
                     &runtime_event_site_map,
                     &extern_function_map,
                 );
-                if *after_initials && !initial_statuses.is_empty() {
-                    **unit = after_initial_processes(unit, &initial_statuses);
+                if *after_initials && !startup_statuses.is_empty() {
+                    **unit = after_initial_processes(unit, &startup_statuses);
                 }
             }
         }
