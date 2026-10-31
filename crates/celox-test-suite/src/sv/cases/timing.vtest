@@ -3171,3 +3171,87 @@ program Tb;
  initial #3;
 endprogram"#)
  (top Top) (run_to_finish) (expect_output "program final at 3\n"))
+
+; Startup waits for initial/always procedures, never termination-only final
+; procedures (IEEE 1800-2023 9.2.2.2, 9.2.3). A random call forces stateful
+; comb lowering, with a deterministic result: the range contains only zero
+; (IEEE 1800-2023 18.13.2).
+
+(case comb_startup_ignores_final_two_state
+  (source "comb_final.sv" #"
+module Child(input int seed, input bit enable,
+             output int combined, classic, latched);
+    always_comb combined = seed + $urandom_range(0, 0);
+    always @(seed) classic = seed + $urandom_range(0, 0);
+    always_latch if (enable) latched = seed + $urandom_range(0, 0);
+    final $display("final value=%0d", combined);
+endmodule
+module Top(output int combined, classic, latched);
+    int seed;
+    bit enable;
+    Child child(seed, enable, combined, classic, latched);
+    initial begin
+        seed = 17; enable = 1;
+        #2 seed = 23;
+        #2 begin enable = 0; seed = 31; end
+        #1 $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq combined 17)
+  (assert_eq classic 17)
+  (assert_eq latched 17)
+  (expect_output "")
+  (run_until 3)
+  (assert_eq combined 23)
+  (assert_eq classic 23)
+  (assert_eq latched 23)
+  (run_until 4)
+  (assert_eq combined 31)
+  (assert_eq classic 31)
+  (assert_eq latched 23)
+  (expect_output "")
+  (run_to_finish)
+  (expect_output "final value=31\n"))
+
+(case comb_startup_ignores_final_four_state
+  (four_state)
+  (source "comb_final.sv" #"
+module Child(input int seed, input bit enable,
+             output int combined, classic, latched);
+    always_comb combined = seed + $urandom_range(0, 0);
+    always @(seed) classic = seed + $urandom_range(0, 0);
+    always_latch if (enable) latched = seed + $urandom_range(0, 0);
+    final $display("final value=%0d", combined);
+endmodule
+module Top(output int combined, classic, latched);
+    int seed;
+    bit enable;
+    Child child(seed, enable, combined, classic, latched);
+    initial begin
+        seed = 17; enable = 1;
+        #2 seed = 23;
+        #2 begin enable = 0; seed = 31; end
+        #1 $finish;
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 1)
+  (assert_eq combined 17)
+  (assert_eq classic 17)
+  (assert_eq latched 17)
+  (expect_output "")
+  (run_until 3)
+  (assert_eq combined 23)
+  (assert_eq classic 23)
+  (assert_eq latched 23)
+  (run_until 4)
+  (assert_eq combined 31)
+  (assert_eq classic 31)
+  (assert_eq latched 23)
+  (expect_output "")
+  (run_to_finish)
+  (expect_output "final value=31\n"))

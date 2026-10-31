@@ -56,6 +56,11 @@ macro_rules! timed_cases {
     };
 }
 
+timed_cases! {
+    fn comb_startup_ignores_final_two_state = "timing::comb_startup_ignores_final_two_state";
+    fn comb_startup_ignores_final_four_state = "timing::comb_startup_ignores_final_four_state";
+}
+
 // Static locals of tasks (IEEE 1800-2023 6.21, 13.3.1).
 timed_cases! {
     fn timed_task_static_locals_are_shared = "timing::timed_task_static_locals_are_shared";
@@ -63,6 +68,16 @@ timed_cases! {
     fn timed_task_static_locals_take_nonblocking_updates_and_waits = "timing::timed_task_static_locals_take_nonblocking_updates_and_waits";
     fn timed_task_static_locals_follow_their_scope = "timing::timed_task_static_locals_follow_their_scope";
     fn timed_task_static_locals_in_forked_children = "timing::timed_task_static_locals_in_forked_children";
+}
+
+#[test]
+fn comb_startup_ignores_final_interpreter() {
+    for case in [
+        "timing::comb_startup_ignores_final_two_state",
+        "timing::comb_startup_ignores_final_four_state",
+    ] {
+        crate::suite::run_case(case, "interpreter");
+    }
 }
 
 // Program blocks (IEEE 1800-2023 Clause 24) and the reactive region set.
