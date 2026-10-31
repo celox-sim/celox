@@ -420,6 +420,9 @@ pub type VpiHandle = *mut VpiHandleObject;
 /// per process because standard VPI entry points carry no host context.
 #[derive(Default)]
 struct VpiHost {
+    // Read-only clock shared with cocotb bridge threads; runtime state remains
+    // confined to the installing thread.
+    published_time: std::sync::Arc<std::sync::atomic::AtomicU64>,
     runtime: RefCell<Option<Runtime>>,
     /// Untimed state can only change through the host's mutation helpers.
     /// Timed slot observers keep polling because kernels can update their state
@@ -445,12 +448,23 @@ impl VpiHost {
 }
 
 struct HostRegistration {
+    time: std::sync::Arc<std::sync::atomic::AtomicU64>,
     owner: std::thread::ThreadId,
     // An owning Rc reference, accessed only after checking the owner thread.
     address: usize,
 }
 
 static ACTIVE_HOST: std::sync::Mutex<Option<HostRegistration>> = std::sync::Mutex::new(None);
+
+fn published_time() -> u64 {
+    ACTIVE_HOST
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .as_ref()
+        .map_or(0, |host| {
+            host.time.load(std::sync::atomic::Ordering::Relaxed)
+        })
+}
 
 /// Owns the active process VPI session. Keep this guard alive while calling VPI
 /// or plugin code. A session and all its callbacks stay on the installing thread.
@@ -750,6 +764,7 @@ fn install(runtime: Runtime) -> Result<VpiSession, String> {
     }
     let pointer = std::rc::Rc::into_raw(host.clone());
     *active = Some(HostRegistration {
+        time: host.published_time.clone(),
         owner: std::thread::current().id(),
         address: pointer as usize,
     });
@@ -2639,6 +2654,7 @@ mod session_tests {
     fn scheduler_unwind_releases_the_host_registration() {
         let host = std::rc::Rc::new(VpiHost::default());
         *ACTIVE_HOST.lock().unwrap() = Some(HostRegistration {
+            time: host.published_time.clone(),
             owner: std::thread::current().id(),
             address: std::rc::Rc::into_raw(host.clone()) as usize,
         });

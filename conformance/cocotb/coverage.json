@@ -1,0 +1,345 @@
+{
+  "revision": "e85fae957d5c93894740b164ea9cc6567015b954",
+  "groups": [
+    {
+      "group": "test_array",
+      "status": "pending",
+      "reason": "Frontend rejects nested unpacked aggregate members."
+    },
+    {
+      "group": "test_array_simple",
+      "status": "pending",
+      "reason": "VPI discovery does not expose the unpacked inout_if aggregate."
+    },
+    {
+      "group": "test_async_bridge",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_cocotb",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_cocotb_tops",
+      "status": "pending",
+      "reason": "Attached VPI images currently have one top-level root; this group requires multiple tops."
+    },
+    {
+      "group": "test_compare",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_configuration",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_custom_entry",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_deadlock",
+      "status": "pending",
+      "reason": "Both upstream expected-SimFailure tests pass, but the executable returns a no-scheduled-activity error; preserve and check that termination contract."
+    },
+    {
+      "group": "test_defaultless_parameter",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_discovery",
+      "status": "pending",
+      "reason": "Missing pseudo/generate regions, scoped and real parameters, integer typing, primitive handles, and one-element-vector metadata."
+    },
+    {
+      "group": "test_dumpfile_verilator",
+      "status": "outside_scope",
+      "reason": "Tests Verilator-specific flags, tracing, or version behavior."
+    },
+    {
+      "group": "test_exit_error",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_failure",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_fatal",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_first_on_coincident_triggers",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_force_release",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_forked_exception",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_gpi_extra_bad_lib",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_gpi_users_bad_lib",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_gpi_users_notset",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_indexing_warning",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_inertial_writes",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_integers",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_iteration_mixedlang",
+      "status": "outside_scope",
+      "reason": "Requires the upstream mixed Verilog/VHDL design; no substitute HDL is used."
+    },
+    {
+      "group": "test_iteration_verilog",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_iteration_vhdl",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_kill_sim",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_listing",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_log_prefix",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_logic_array_indexing",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_long_log_msg",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_max_failures",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_module_var_empty",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_module_var_messy",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_module_without_tests",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_multi_dimension_array",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_multi_level_module_path",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_null_ranges",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_one_empty_test",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_package",
+      "status": "pending",
+      "reason": "Package and compilation-unit objects and their typed constants are not exposed over VPI."
+    },
+    {
+      "group": "test_packed_array",
+      "status": "pending",
+      "reason": "Packed dimensions are flattened; nested selection, declared ranges, and indexed callbacks are not exposed."
+    },
+    {
+      "group": "test_packed_union",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_plusargs",
+      "status": "pending",
+      "reason": "Needs attached-executable plusargs forwarded both to VPI argv and the HDL runtime."
+    },
+    {
+      "group": "test_random_test_order",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_seed",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_select_testcase",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_select_testcase_error",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_similar_scope_name",
+      "status": "pending",
+      "reason": "VPI does not expose generated-scope arrays as iterable hierarchy arrays."
+    },
+    {
+      "group": "test_skip",
+      "status": "harness_pending",
+      "reason": "Upstream Makefile/pytest wrapper checks termination, test counts, logs, artifacts, environment, or multiple simulator invocations; its complete success contract must be retained."
+    },
+    {
+      "group": "test_skipped_explicitly_run",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_struct",
+      "status": "pending",
+      "reason": "VPI discovery does not expose the unpacked inout_if aggregate."
+    },
+    {
+      "group": "test_sv_interface",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_test_filter",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_toplevel_architecture_same_as_entity",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_toplevel_library",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_trigger_memory_leak",
+      "status": "pending",
+      "reason": "The NextTimeStep stress case exceeds upstream RSS growth limit; full group also needs a larger wall-clock budget."
+    },
+    {
+      "group": "test_verilator_timing_a",
+      "status": "outside_scope",
+      "reason": "Tests Verilator-specific flags, tracing, or version behavior."
+    },
+    {
+      "group": "test_verilator_timing_b",
+      "status": "outside_scope",
+      "reason": "Tests Verilator-specific flags, tracing, or version behavior."
+    },
+    {
+      "group": "test_verilator_timing_c",
+      "status": "outside_scope",
+      "reason": "Tests Verilator-specific flags, tracing, or version behavior."
+    },
+    {
+      "group": "test_verilator_timing_d",
+      "status": "outside_scope",
+      "reason": "Tests Verilator-specific flags, tracing, or version behavior."
+    },
+    {
+      "group": "test_verilog_access",
+      "status": "outside_scope",
+      "reason": "Requires the upstream mixed Verilog/VHDL design; no substitute HDL is used."
+    },
+    {
+      "group": "test_verilog_include_dirs",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    },
+    {
+      "group": "test_vhdl_access",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_vhdl_integer",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_vhdl_libraries",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_vhdl_libraries_multiple",
+      "status": "outside_scope",
+      "reason": "Requires a VHDL frontend and VHDL simulator integration."
+    },
+    {
+      "group": "test_xfail",
+      "status": "enabled",
+      "reason": "Runs the unmodified upstream modules and HDL with the declared group configuration."
+    }
+  ]
+}

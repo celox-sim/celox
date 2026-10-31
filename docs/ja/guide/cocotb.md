@@ -309,3 +309,6 @@ ValueChange、End の各コールバック領域に対応しています。
 
 [upstream 回帰テストの実行手順](https://github.com/celox-sim/celox/tree/master/conformance/cocotb)から、
 固定したバージョンの未改変 cocotb テストを生成バイナリで実行できます。
+デフォルトの23構成で534件成功、upstream のスキップ5件を確認しています。
+bridge スレッドからの時刻取得、force/release、2種類の inertial-write 設定を含みます。
+残りの upstream グループと未対応項目は実行手順の一覧で追跡しています。
