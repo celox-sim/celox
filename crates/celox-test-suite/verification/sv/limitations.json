@@ -3925,5 +3925,23 @@
         "timing::blocking_intra_assignment_tag_checks"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_gate_two_state_struct_member",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0 (stable)",
+    "reason": "Icarus rejects a primitive output connected to a bit member of a packed structure variable as a non-default-strength driver. IEEE 1800-2023 6.5 includes primitive outputs to independent structure elements and automatic assignment conversion; Verilator 5.052 accepts the standalone source in lint mode. The case retains its two-state conversion assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_gate_two_state_member.sv",
+      "verification/repros/sv_gate_two_state_member.json",
+      "LIMITATIONS.md#primitive-outputs-to-two-state-struct-members"
+    ],
+    "cases": {
+      "icarus": [
+        "logic_gates::scalar_two_state_member"
+      ]
+    }
   }
 ]
