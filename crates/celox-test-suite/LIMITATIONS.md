@@ -1651,3 +1651,38 @@ The exclusions cover only `queue_slice_runtime_bounds`,
 `queue_slice_updates_and_copies`, and (for Icarus) `queue_slice_wide_and_unknown_bounds`
 in the `containers` group. The four-state case remains unsupported by Verilator.
 The Celox cases retain their bounds, copy, side-effect and X/Z assertions.
+
+
+### Blocking intra-assignment controls
+
+The seven `timing::blocking_intra_assignment_*` cases preserve RHS values and
+assignment conversion before suspension, while evaluating the destination after
+the timing control (IEEE 1800-2023 9.4.5, 10.4.1, 11.8.2 and 6.11.2). The
+[standalone source](verification/repros/sv_blocking_intra_assignment.sv) and
+[focused observations](verification/repros/sv_blocking_intra_assignment.json)
+retain these external results:
+
+- Verilator 5.052 passes the ordinary delays, events and automatic task case.
+  It rejects repeated event controls, and evaluates the destination index
+  increment before the delay: the standalone probe prints `early index=1`
+  and `selected=0029` instead of `early index=0` and `selected=2900`.
+  The two four-state cases report unsupported.
+- Icarus 13.0 passes five cases, including late destination evaluation and
+  four-state values. It rejects the automatic task's reference port. With
+  X, Z or mixed unknown repeat counts, it waits for an event instead of
+  assigning immediately; the isolated probes retain `result=0 done=0`
+  where 9.4.5 requires `result=9 done=1`.
+- Pinned xezim 0.11.4 passes four cases. It loses the carry of the 8-bit
+  addition saved for a 16-bit delayed assignment (`0000` instead of `0100`),
+  retains X in a `bit` output (`X9` instead of `89`), and times out on the
+  shared negative repeat count. Adapter-free probes reproduce each difference:
+  the signed count -3 does not complete within a bounded wall-clock run,
+  while isolated X/Z counts complete correctly. These failures remain
+  executed focused evidence, without changing the historical xezim baseline.
+
+The four new Verilator/Icarus exclusions name only the observed cases and have
+matching retained rows. Celox's assertions and all existing retained results
+remain unchanged. Nonblocking intra-assignment controls, implicit event and
+cycle controls, nonintegral targets, concatenations, indirect writes such as
+object properties or dynamic-container elements, and repeat counts that are
+nonintegral or wider than 64 bits remain explicitly unsupported.

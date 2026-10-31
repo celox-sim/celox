@@ -3255,3 +3255,125 @@ endmodule
   (expect_output "")
   (run_to_finish)
   (expect_output "final value=31\n"))
+
+; IEEE 1800-2023 9.4.5/10.4.1: snapshot and convert the RHS before waiting;
+; evaluate the destination, including its effects, after the wait.
+(case blocking_intra_assignment_delays
+  (source "intra_delays.sv" #"
+module Top(output bit [15:0] sampled, sum, output int data, done, zero_seen);
+  bit [7:0] a=8'hff, b=1;
+  initial begin data=41; sampled=0; done=0;
+    sampled = #4 data++;
+    done=1;
+  end
+  initial begin #1 data=99; end
+  initial sum = #2 a+b;
+  initial begin zero_seen=0; zero_seen = #0 7; end
+  initial begin #1 a=0; b=0; end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq data 42)
+  (assert_eq sampled 0) (assert_eq done 0) (assert_eq zero_seen 7)
+  (run_until 2) (assert_eq sum 256) (assert_eq sampled 0) (assert_eq done 0)
+  (run_until 4) (assert_eq sampled 41) (assert_eq data 99) (assert_eq done 1))
+
+(case blocking_intra_assignment_late_target
+  (source "intra_late_target.sv" #"
+module Top(output bit [15:0] selected, output int index, data, done);
+  initial begin data=41; index=0; selected=0; done=0;
+    selected[(index++) +: 8] = #4 data++;
+    done=1;
+  end
+  initial begin #1 data=99; index=8; end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq data 42) (assert_eq index 0)
+  (assert_eq selected 0) (assert_eq done 0)
+  (run_until 2) (assert_eq index 8) (assert_eq selected 0) (assert_eq done 0)
+  (run_until 4) (assert_eq selected 0x2900) (assert_eq index 9)
+  (assert_eq data 99) (assert_eq done 1))
+
+(case blocking_intra_assignment_events
+  (source "intra_events.sv" #"
+module Top(output int once_value, named_value);
+  bit clk;
+  event ready;
+  int data=17;
+  initial begin #1 clk=1; #1 data=99; #1 ->ready; end
+  initial begin once_value=0; once_value = @(posedge clk) data; end
+  initial begin named_value=0; named_value = @ready data; end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq once_value 17) (assert_eq named_value 0)
+  (run_until 3) (assert_eq once_value 17) (assert_eq named_value 17))
+
+(case blocking_intra_assignment_repeat_events
+  (source "intra_repeat_events.sv" #"
+module Top(output int repeat_value, n, data, done);
+  bit clk;
+  initial begin repeat(4) begin #1 clk=1; #1 clk=0; end end
+  initial begin repeat_value=0; done=0; n=3; data=17;
+    repeat_value = repeat(n++) @(posedge clk) data+1;
+    done=1;
+  end
+  initial begin #2 n=1; data=99; end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq repeat_value 0) (assert_eq n 4) (assert_eq done 0)
+  (run_until 3) (assert_eq repeat_value 0) (assert_eq done 0)
+  (run_until 5) (assert_eq repeat_value 18) (assert_eq done 1))
+
+(case blocking_intra_assignment_nonpositive_unknown_repeat
+  (four_state)
+  (source "intra_repeat.sv" #"
+module Top(output int a,b,c,d,value,done);
+  bit clk;
+  int n=-3;
+  logic [7:0] count=8'hxz;
+  initial begin value=7; done=0;
+    a = repeat(0) @(posedge clk) value++;
+    b = repeat(n) @(posedge clk) value++;
+    c = repeat(count) @(posedge clk) value++;
+    count='z;
+    d = repeat(count) @(posedge clk) value++;
+    done=1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq a 7) (assert_eq b 8) (assert_eq c 9) (assert_eq d 10)
+  (assert_eq value 11) (assert_eq done 1))
+
+(case blocking_intra_assignment_four_state
+  (four_state)
+  (source "intra_four_state.sv" #"
+module Top(output logic [129:0] wide,
+           output bit [7:0] clean, output logic signed [127:0] signed_value);
+  logic [129:0] value={2'bxz,128'h1234};
+  logic [7:0] dirty=8'b1x0z1001;
+  logic signed [7:0] small_value=-1;
+  initial wide = #3 value;
+  initial clean = #3 dirty;
+  initial signed_value = #3 small_value;
+  initial begin #1 value='0; dirty='1; small_value=0; end
+endmodule
+"#)
+  (top Top) (run_until 3)
+  (assert_eq wide (fourstate (+ (<< 1 129) 0x1234) (+ (<< 1 129) (<< 1 128))))
+  (assert_eq clean 0x89) (assert_eq signed_value (- (<< 1 128) 1)))
+
+(case blocking_intra_assignment_automatic_tasks
+  (source "intra_tasks.sv" #"
+module Top(output int first,second,done);
+  task automatic sample(input int value, pause, ref int result);
+    result = #(pause) value;
+  endtask
+  initial begin first=0; second=0; done=0;
+    fork sample(11,4,first); sample(22,2,second); join
+    done=1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 2)
+  (assert_eq first 0) (assert_eq second 22) (assert_eq done 0)
+  (run_until 4) (assert_eq first 11) (assert_eq second 22) (assert_eq done 1))

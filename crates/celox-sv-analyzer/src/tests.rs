@@ -3564,12 +3564,8 @@ fn rejects_unimplemented_timing_constructs() {
             "event control mixing named events with other events",
         ),
         (
-            "logic a, b; initial a = #1 b;",
-            "intra-assignment timing control",
-        ),
-        (
             "logic a, b; initial a <= #1 b;",
-            "intra-assignment timing control",
+            "nonblocking intra-assignment timing control",
         ),
         ("initial begin : b disable b; end", "disable statement"),
         (

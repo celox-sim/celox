@@ -1806,6 +1806,54 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects the automatic task reference port: Reference ports not supported yet. IEEE 1800-2023 13.5.2 permits this ref formal, and 9.4.5 permits the blocking delay in the task. The standalone REFERENCE_PORT probe reproduces the rejection. Verilator 5.052, pinned xezim 0.11.4 and Celox pass the unchanged shared case.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_intra_assignment_ref_task",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects the automatic task reference port: Reference ports not supported yet. IEEE 1800-2023 13.5.2 permits this ref formal, and 9.4.5 permits the blocking delay in the task. The standalone REFERENCE_PORT probe reproduces the rejection. Verilator 5.052, pinned xezim 0.11.4 and Celox pass the unchanged shared case.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_blocking_intra_assignment.sv",
+          "verification/repros/sv_blocking_intra_assignment.json",
+          "LIMITATIONS.md#blocking-intra-assignment-controls"
+        ]
+      },
+      "name": "timing::blocking_intra_assignment_automatic_tasks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 waits for an event when the repeat count contains X/Z. IEEE 1800-2023 9.4.5 requires the assignment to occur as if the repeat construct were absent. The standalone UNKNOWN_REPEAT, HIGH_Z and MIXED_UNKNOWN probes leave result=0 and done=0 instead of result=9 and done=1. Celox passes the unchanged shared assertions; xezim has a separate negative-count timeout.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_intra_assignment_unknown_repeat",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 waits for an event when the repeat count contains X/Z. IEEE 1800-2023 9.4.5 requires the assignment to occur as if the repeat construct were absent. The standalone UNKNOWN_REPEAT, HIGH_Z and MIXED_UNKNOWN probes leave result=0 and done=0 instead of result=9 and done=1. Celox passes the unchanged shared assertions; xezim has a separate negative-count timeout.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_blocking_intra_assignment.sv",
+          "verification/repros/sv_blocking_intra_assignment.json",
+          "LIMITATIONS.md#blocking-intra-assignment-controls"
+        ]
+      },
+      "name": "timing::blocking_intra_assignment_nonpositive_unknown_repeat",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -1759,6 +1759,54 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 evaluates the destination index increment before the intra-assignment delay. IEEE 1800-2023 10.4.1 evaluates the blocking destination at the time specified by the timing control; 9.4.5 samples only the RHS before waiting. The standalone probe prints early index=1 and selected=0029 instead of early index=0 and selected=2900. Icarus 13.0, pinned xezim 0.11.4 and Celox give the required late destination value.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_intra_assignment_lvalue_timing",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 evaluates the destination index increment before the intra-assignment delay. IEEE 1800-2023 10.4.1 evaluates the blocking destination at the time specified by the timing control; 9.4.5 samples only the RHS before waiting. The standalone probe prints early index=1 and selected=0029 instead of early index=0 and selected=2900. Icarus 13.0, pinned xezim 0.11.4 and Celox give the required late destination value.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_blocking_intra_assignment.sv",
+          "verification/repros/sv_blocking_intra_assignment.json",
+          "LIMITATIONS.md#blocking-intra-assignment-controls"
+        ]
+      },
+      "name": "timing::blocking_intra_assignment_late_target",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 rejects the repeat event control with Unsupported: repeat event control. IEEE 1800-2023 9.4.5 permits repeated intra-assignment event waits. Icarus 13.0, pinned xezim 0.11.4 and Celox pass the unchanged case; the standalone REPEAT_EVENT probe reproduces the rejection.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_intra_assignment_repeat_event",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 rejects the repeat event control with Unsupported: repeat event control. IEEE 1800-2023 9.4.5 permits repeated intra-assignment event waits. Icarus 13.0, pinned xezim 0.11.4 and Celox pass the unchanged case; the standalone REPEAT_EVENT probe reproduces the rejection.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_blocking_intra_assignment.sv",
+          "verification/repros/sv_blocking_intra_assignment.json",
+          "LIMITATIONS.md#blocking-intra-assignment-controls"
+        ]
+      },
+      "name": "timing::blocking_intra_assignment_repeat_events",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

@@ -57,6 +57,16 @@ macro_rules! timed_cases {
 }
 
 timed_cases! {
+    fn blocking_intra_assignment_late_target = "timing::blocking_intra_assignment_late_target";
+    fn blocking_intra_assignment_repeat_events = "timing::blocking_intra_assignment_repeat_events";
+    fn blocking_intra_assignment_delays = "timing::blocking_intra_assignment_delays";
+    fn blocking_intra_assignment_events = "timing::blocking_intra_assignment_events";
+    fn blocking_intra_assignment_nonpositive_unknown_repeat = "timing::blocking_intra_assignment_nonpositive_unknown_repeat";
+    fn blocking_intra_assignment_four_state = "timing::blocking_intra_assignment_four_state";
+    fn blocking_intra_assignment_automatic_tasks = "timing::blocking_intra_assignment_automatic_tasks";
+}
+
+timed_cases! {
     fn comb_startup_ignores_final_two_state = "timing::comb_startup_ignores_final_two_state";
     fn comb_startup_ignores_final_four_state = "timing::comb_startup_ignores_final_four_state";
 }
@@ -508,18 +518,8 @@ fn unimplemented_timing_features_are_rejected() {
             88,
         ),
         (
-            "bit a, b; initial a = #1 b;",
-            "intra-assignment timing control",
-            88,
-        ),
-        (
             "bit a, b; initial a <= #1 b;",
-            "intra-assignment timing control",
-            88,
-        ),
-        (
-            "bit a, b, c; initial a = @(posedge c) b;",
-            "intra-assignment timing control",
+            "nonblocking intra-assignment timing control",
             88,
         ),
         (
