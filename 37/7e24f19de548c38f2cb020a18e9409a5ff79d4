@@ -1,0 +1,1 @@
+Synchronize after #2786 merged and retain the newly merged static-initialization and blocking-timing fixes; rerun validation on the synchronized source.
