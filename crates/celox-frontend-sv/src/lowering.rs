@@ -8067,16 +8067,16 @@ fn signal_type_from_sv(
         })
         .collect();
     let type_kind = match typ.kind() {
-        sv::ir::TypeKind::Bit | sv::ir::TypeKind::Real | sv::ir::TypeKind::Shortreal => {
-            PortTypeKind::Bit
-        }
+        sv::ir::TypeKind::Bit => PortTypeKind::Bit,
+        sv::ir::TypeKind::Real => PortTypeKind::Real,
+        sv::ir::TypeKind::Shortreal => PortTypeKind::ShortReal,
+        sv::ir::TypeKind::String => PortTypeKind::String,
         sv::ir::TypeKind::Logic | sv::ir::TypeKind::Reg | sv::ir::TypeKind::Implicit => {
             PortTypeKind::Logic
         }
-        sv::ir::TypeKind::String
-        | sv::ir::TypeKind::Object
-        | sv::ir::TypeKind::Process
-        | sv::ir::TypeKind::Event => PortTypeKind::Other,
+        sv::ir::TypeKind::Object | sv::ir::TypeKind::Process | sv::ir::TypeKind::Event => {
+            PortTypeKind::Other
+        }
     };
     let value_kind = match typ.kind() {
         sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,

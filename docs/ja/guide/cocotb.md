@@ -300,9 +300,12 @@ build/top-sim \
 
 ## 現在の互換範囲
 
-cocotb 2.0で使われるモジュール・信号の探索、immediate/deposit/force/release書き込み、
-スカラー・ベクター値、シミュレーション時刻、およびStart、ReadWrite、ReadOnly、
-NextTimeStep、Timer、ValueChange、Endの各コールバック領域に対応しています。
+cocotb 2.0 / 2.1 のモジュール・信号の探索、拡張識別子、スカラー・ベクター値、
+packed bit handle、unpacked array の要素、real 値、string のバイト列に対応しています。
+immediate deposit とゼロ遅延 inertial 更新を利用できます。packed 変数ではベクター全体の
+force/release と、force 中のビットへの deposit に対応しています。string の force/release と
+遅延 VPI 書き込みは未対応です。Start、ReadWrite、ReadOnly、NextTimeStep、Timer、
+ValueChange、End の各コールバック領域に対応しています。
 
-packed bit handle、遅延VPI書き込み、unpacked arrayのインデックス参照、
-派生・カスケードクロックのスケジューリングにはまだ対応していません。
+[upstream 回帰テストの実行手順](https://github.com/celox-sim/celox/tree/master/conformance/cocotb)から、
+固定したバージョンの未改変 cocotb テストを生成バイナリで実行できます。

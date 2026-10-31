@@ -54,8 +54,8 @@ pub fn type_kind_str(type_kind: PortTypeKind) -> &'static str {
         PortTypeKind::ResetSyncHigh => "reset_sync_high",
         PortTypeKind::ResetSyncLow => "reset_sync_low",
         PortTypeKind::Logic => "logic",
-        PortTypeKind::Bit => "bit",
-        PortTypeKind::Other => "other",
+        PortTypeKind::Bit | PortTypeKind::Real | PortTypeKind::ShortReal => "bit",
+        PortTypeKind::Other | PortTypeKind::String => "other",
     }
 }
 

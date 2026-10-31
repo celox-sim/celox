@@ -2,8 +2,8 @@
 
 This gate executes unmodified tests and HDL from cocotb 2.1.0, pinned by
 [`revision`](revision), using Celox's attached VPI executable. It currently
-covers four upstream groups: coincident triggers, packed vector indexing,
-handle comparisons, and multidimensional arrays. This is a focused subset,
+covers five upstream groups: the main `test_cocotb` regression, coincident
+triggers, packed vector indexing, handle comparisons, and multidimensional arrays. This is a focused subset,
 not the complete cocotb test suite. VHDL-only tests retain upstream's skips.
 No test filter, expected-failure override, or HDL rewrite is applied.
 
@@ -31,18 +31,10 @@ modified upstream tests, Python/cocotb setup errors, compilation failures,
 timeouts, simulator failures, and empty or skipped-only selections. Any failing
 group makes the command fail after the remaining selected groups execute.
 
-The larger `test_cocotb` group and other groups sharing `sample_module.sv`
-are outside the default selection: compiling that unmodified design currently reports
-unsupported gate primitive instantiation (`and test_and_gate(...)`). This
-must be implemented before those groups can run; their absence is not a pass.
-The same runner can reproduce this compilation failure and retain it as a
-failure in its report:
-
-```sh
-python3 conformance/cocotb/run.py work/cocotb \
-  --python "$PWD/work/cocotb-python/bin/python" --case test_cocotb \
-  --output work/cocotb-sample-module
-```
+The main `test_cocotb` selection runs every module listed in the upstream
+Makefile. Its HDL includes scalar logic gates, real and string ports, and
+escaped identifiers. Select it alone with `--case test_cocotb`. Other upstream
+make-based groups and VHDL simulation are outside this runner's current scope.
 
 Runner contract checks:
 

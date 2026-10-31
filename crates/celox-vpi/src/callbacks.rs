@@ -203,6 +203,7 @@ fn registration_ids_for_host(host: &super::VpiHost, reason: i32) -> Vec<u64> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ValueSnapshot {
     Word(u64, u64),
+    String(Vec<u8>),
     Wide(celox::BigUint, celox::BigUint),
 }
 
@@ -220,7 +221,7 @@ impl ValueSnapshot {
 
     pub(super) fn canonical(self) -> Self {
         match self {
-            Self::Word(..) => self,
+            Self::Word(..) | Self::String(..) => self,
             Self::Wide(value, mask) => Self::new(value, mask),
         }
     }
