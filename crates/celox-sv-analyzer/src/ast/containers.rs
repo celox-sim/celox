@@ -184,10 +184,10 @@ pub(super) fn native_type(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<ContainerType>>> {
-    if let ExprKind::Name(name) = &native
-        .expression(expression_binding::ungroup(id, native))
-        .kind
-        && let Some(shape) = dims.get(&instances::normalize_identifier(&name.spelling))
+    // A variable, also a package variable named `p::q` (IEEE 1800-2023
+    // 26.3).
+    if let Some(name) = expression_binding::native_name(tree, id, native)
+        && let Some(shape) = dims.get(&name)
     {
         return Ok(shape.container.clone());
     }

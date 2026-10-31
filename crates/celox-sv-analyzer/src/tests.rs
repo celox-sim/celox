@@ -8163,6 +8163,16 @@ fn wide_associative_indices_reject_index_locators() {
 }
 
 #[test]
+fn package_scoped_container_receivers_are_not_interface_handles() {
+    // `p::q.push_back(v)` calls a method of package variable `p::q`; a
+    // package holds no interface instance (IEEE 1800-2023 26.2), so the
+    // receiver is not looked up as an interface handle.
+    let source = "package p; int q[$]; class C; function void f(); p::q.push_back(1); endfunction \
+         endclass endpackage module Top; initial begin p::q.push_back(2); p::q.delete(); end endmodule";
+    analyze_source(source, Path::new("package_queues.sv")).expect("the calls bind");
+}
+
+#[test]
 fn wide_container_elements_reject_whole_container_operations() {
     // Elements wider than 64 bits are held in records, which these
     // operations would compare or combine as handles.
