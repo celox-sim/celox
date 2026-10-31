@@ -83,17 +83,9 @@ pub(crate) fn native_is_default_target() -> bool {
     }
 }
 
-/// The memory-layout mode for tiered execution.
-///
-/// Uses the selected compiled tier's required mode. On native hosts this is
-/// ElementStrided (a native-tier optimization for unpacked arrays); the
-/// interpreter implements matching strided addressing.
+/// The memory-layout mode shared by the interpreter and every compiled tier.
 pub(crate) fn default_target_layout_mode() -> crate::backend::memory_layout::MemoryLayoutMode {
-    if native_is_default_target() {
-        crate::backend::memory_layout::MemoryLayoutMode::ElementStrided
-    } else {
-        crate::backend::memory_layout::MemoryLayoutMode::Packed
-    }
+    crate::backend::memory_layout::MemoryLayoutMode::ElementStrided
 }
 
 /// The layout mode for one tiered build.
@@ -2486,10 +2478,10 @@ module Top (
     assign q = mem[raddr];
 }
 "#;
-        // Reference: Packed-mode interpreter (build_interpreter always uses Packed).
-        // NOTE: build_interpreter is pub so we can call it from integration tests,
-        // but from unit tests inside the crate we use the builder directly.
+        // VCD explicitly requests the packed compatibility layout.
+        let packed_trace = tempfile::tempdir().unwrap();
         let mut packed_sim = SimulatorBuilder::<Simulator>::new(code, "Top")
+            .vcd(packed_trace.path().join("packed.vcd"))
             .four_state(true)
             .build_interpreter()
             .unwrap();
@@ -2612,7 +2604,15 @@ module Top (
             )
             .four_state(true)
         };
-        let (_, reference) = run(builder().build_interpreter().unwrap());
+        let packed_trace = tempfile::tempdir().unwrap();
+        let (strided, reference) = run(builder()
+            .vcd(packed_trace.path().join("packed.vcd"))
+            .build_interpreter()
+            .unwrap());
+        assert!(!strided, "VCD requests packed storage");
+        let (strided, interpreted) = run(builder().build_interpreter().unwrap());
+        assert!(strided, "the standalone interpreter stores arrays strided");
+        assert_eq!(interpreted, reference);
         // Every element starts unknown.
         assert_eq!(
             reference[0].1,

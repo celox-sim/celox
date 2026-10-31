@@ -569,9 +569,20 @@ impl Machine<'_> {
             if !was_dirty {
                 for plane in 0..plane_count {
                     let delta = plane * plane_size + chunk * 8;
-                    // Safety: both chunks live inside the merged allocation.
-                    let stable_chunk = unsafe { self.read_u64(stable_base + delta) };
-                    unsafe { self.write_u64(sparse_base + delta, stable_chunk) };
+                    // A partial final chunk must not overwrite the next plane:
+                    // its first mask byte may already hold an earlier write.
+                    let len = (plane_size - chunk * 8).min(8);
+                    if len == 8 {
+                        // Safety: this complete chunk is inside its plane.
+                        let stable_chunk = unsafe { self.read_u64(stable_base + delta) };
+                        unsafe { self.write_u64(sparse_base + delta, stable_chunk) };
+                    } else {
+                        for byte in 0..len {
+                            // Safety: len bounds both accesses to their planes.
+                            let value = unsafe { self.read_u8(stable_base + delta + byte) };
+                            unsafe { self.write_u8(sparse_base + delta + byte, value) };
+                        }
+                    }
                 }
             }
             // Safety: bounded by the dirty-word region above.
