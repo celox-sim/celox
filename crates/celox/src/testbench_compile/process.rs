@@ -950,12 +950,8 @@ fn allocate_scheduler(
             }
         }
     }
-    let mut clocks: Vec<_> = program
-        .clocks()
-        .iter()
-        .map(|c| (c.event, c.period.max(2)))
-        .collect();
-    let declared = clocks.len();
+    // Only clocks some process waits on take edges.
+    let mut clocks = Vec::new();
     collect(program.statements(), &mut clocks);
     let mut slot = || {
         let a = runtime.design.allocate_testbench_slot(64, false);
@@ -1017,7 +1013,6 @@ fn allocate_scheduler(
         clocks: clock_slots,
         events: clocks.iter().map(|c| c.0).collect(),
         periods: clocks.iter().map(|c| c.1).collect(),
-        declared,
         locals,
         baselines,
         marker_site: Some(marker_site),

@@ -152,6 +152,29 @@ fn choose(g: &mut Generator<'_>, cond: RegisterId, yes: RegisterId, no: Register
     g.b.emit(SIRInstruction::Mux(r, cond, yes, no));
     r
 }
+/// Whether some process waits on clock `c`: the generator's enable.
+fn waited_on(g: &mut Generator<'_>, c: &[AbsoluteAddr; 4]) -> RegisterId {
+    let waiters = g.load(c[3], 64);
+    let idle = g.equals(waiters, 0);
+    g.equals(idle, 0)
+}
+
+/// A process starts waiting on `clock`. The generator finishes a whole
+/// period before it looks at its enable again, so the next rise is at the
+/// later of now and the previous rise plus the period.
+fn wait_on_clock(g: &mut Generator<'_>, m: &Meta, clock: usize) {
+    let c = m.clocks[clock];
+    let now = g.load(m.control[TB_NOW], 64);
+    let next = g.load(c[0], 64);
+    let late = g.binary(1, next, BinaryOp::LtU, now);
+    let next = choose(g, late, now, next);
+    g.store(c[0], 64, next);
+    let waiters = g.load(c[3], 64);
+    let one = g.constant(1, 64);
+    let waiters = g.binary(64, waiters, BinaryOp::Add, one);
+    g.store(c[3], 64, waiters);
+}
+
 fn equals_slot(g: &mut Generator<'_>, a: AbsoluteAddr, value: u64) -> RegisterId {
     let r = g.load(a, 64);
     g.equals(r, value)
@@ -424,7 +447,7 @@ fn account_edges(g: &mut Generator<'_>, m: &Meta, overflow: BlockId) {
     let active = g.binary(1, active, BinaryOp::And, running);
     let mut rising = g.constant(0, 1);
     for (clock, c) in m.clocks.iter().enumerate() {
-        let enabled = equals_slot(g, c[3], 1);
+        let enabled = waited_on(g, c);
         let next = g.load(c[0], 64);
         let due = g.binary(1, next, BinaryOp::Eq, now);
         let due = g.binary(1, due, BinaryOp::And, enabled);
@@ -470,6 +493,9 @@ fn account_edges(g: &mut Generator<'_>, m: &Meta, overflow: BlockId) {
             g.b.switch_to_block(release);
             put(g, p[0], 3);
             g.store(p[3], 64, next);
+            let waiters = g.load(c[3], 64);
+            let waiters = g.binary(64, waiters, BinaryOp::Sub, one);
+            g.store(c[3], 64, waiters);
             jump(g, after);
             g.b.switch_to_block(after);
         }
@@ -818,13 +844,7 @@ fn generate(
                     g.store(p[1], 64, count);
                     put(&mut g, p[0], 1);
                     put(&mut g, p[2], clock as u64);
-                    let enabled = equals_slot(&mut g, m.clocks[clock][3], 0);
-                    let activate = g.b.new_block();
-                    branch(&mut g, enabled, activate, save[i]);
-                    g.b.switch_to_block(activate);
-                    put(&mut g, m.clocks[clock][3], 1);
-                    let now = g.load(m.control[TB_NOW], 64);
-                    g.store(m.clocks[clock][0], 64, now);
+                    wait_on_clock(&mut g, m, clock);
                     jump(&mut g, save[i]);
                 }
                 KernelRequest::Statement(site) => match statements[*site] {
@@ -980,13 +1000,7 @@ fn generate(
                         put(&mut g, p[0], 1);
                         put(&mut g, p[2], clock as u64);
                         put(&mut g, p[4], request_index as u64 + 1);
-                        let enabled = equals_slot(&mut g, m.clocks[clock][3], 0);
-                        let activate = g.b.new_block();
-                        branch(&mut g, enabled, activate, save[i]);
-                        g.b.switch_to_block(activate);
-                        put(&mut g, m.clocks[clock][3], 1);
-                        let now = g.load(m.control[TB_NOW], 64);
-                        g.store(m.clocks[clock][0], 64, now);
+                        wait_on_clock(&mut g, m, clock);
                         jump(&mut g, save[i]);
                     }
                     _ => host_statement(&mut g, m, i),
@@ -1126,7 +1140,7 @@ fn generate(
         let mut armed = g.constant(0, 64);
         let mut values = g.constant(0, 64);
         for (c, &bit) in m.clocks.iter().zip(&positions) {
-            let enabled = equals_slot(&mut g, c[3], 1);
+            let enabled = waited_on(&mut g, c);
             let next = g.load(c[0], 64);
             let rise = g.binary(1, next, BinaryOp::Eq, now);
             let rise = g.binary(1, rise, BinaryOp::And, enabled);
@@ -1233,7 +1247,7 @@ fn generate(
     let mut next = g.constant(u64::MAX, 64);
     let mut pending = g.constant(0, 1);
     for c in &m.clocks {
-        let enabled = equals_slot(&mut g, c[3], 1);
+        let enabled = waited_on(&mut g, c);
         let enabled = g.binary(1, enabled, BinaryOp::And, active);
         let rise = g.load(c[0], 64);
         let earlier = g.binary(1, rise, BinaryOp::LtU, next);

@@ -914,7 +914,6 @@ impl NativeProgramImage {
                 || scheduler.locals.len() != tb.kernels().len()
                 || scheduler.clocks.len() != scheduler.events.len()
                 || scheduler.clocks.len() != scheduler.periods.len()
-                || scheduler.declared > scheduler.clocks.len()
                 || scheduler.periods.iter().any(|&period| period < 2)
                 || !scheduler
                     .control

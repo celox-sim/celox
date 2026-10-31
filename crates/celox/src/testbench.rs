@@ -1102,14 +1102,28 @@ struct ProcessClock<Event> {
     falling_edge: Option<u64>,
 }
 
+/// Whether some process waits on `clock`: the generator's enable.
+fn waited_on<Event: celox_runtime::backend::EventHandle>(
+    waits: &[Option<ProcessWait<Event>>],
+    clock: &ProcessClock<Event>,
+) -> bool {
+    waits.iter().any(|wait| {
+        wait.as_ref()
+            .is_some_and(|wait| wait.remaining != 0 && wait.clock.id() == clock.event.id())
+    })
+}
+
 // Clock generators start low even when the design uses four-state storage.
 // Otherwise X's nonzero payload can make the first scheduled 1 look like a
 // steady high to the edge detector, losing the first clock/reset cycle.
-// Returns the clock events, declared generators first.
+// Returns how many distinct clocks the testbench has, declared or waited
+// on. A declared generator nobody waits on stays low and drives nothing,
+// but it still keeps the timed scheduler, which reports each process's
+// time in units of the clock periods rather than in cycles.
 fn initialize_process_clocks<B: SimBackend>(
     sim: &mut Simulator<B>,
     testbench: &CompiledTestbench<B>,
-) -> Vec<B::Event> {
+) -> usize {
     fn referenced<B: SimBackend>(statements: &[TestbenchStatement<B>], clocks: &mut Vec<B::Event>) {
         for statement in statements {
             match statement {
@@ -1130,17 +1144,24 @@ fn initialize_process_clocks<B: SimBackend>(
             }
         }
     }
-    let mut clocks: Vec<_> = testbench.clocks().iter().map(|clock| clock.event).collect();
-    referenced::<B>(testbench.statements(), &mut clocks);
-    let mut unique: Vec<B::Event> = Vec::with_capacity(clocks.len());
-    for event in clocks {
+    let mut waited: Vec<B::Event> = Vec::new();
+    referenced::<B>(testbench.statements(), &mut waited);
+    let mut unique: Vec<B::Event> = Vec::with_capacity(waited.len());
+    for event in waited {
         if unique.iter().all(|known| known.id() != event.id()) {
-            let signal = sim.backend.resolve_signal(&event.addr());
-            sim_set_u64(sim, signal, 0);
             unique.push(event);
         }
     }
-    unique
+    for clock in testbench.clocks() {
+        if unique.iter().all(|known| known.id() != clock.event.id()) {
+            unique.push(clock.event);
+        }
+    }
+    for &event in &unique {
+        let signal = sim.backend.resolve_signal(&event.addr());
+        sim_set_u64(sim, signal, 0);
+    }
+    unique.len()
 }
 
 fn exec_testbench<B: SimBackend>(
@@ -1152,7 +1173,7 @@ fn exec_testbench<B: SimBackend>(
     let clocks = initialize_process_clocks(sim, testbench);
     // A finished kernel returns without passing a collection point, so
     // collect its temporaries here; no process is suspended anymore.
-    if let Some(result) = compiled::run(sim, testbench, ctx) {
+    if let Some(result) = compiled::run(sim, testbench, ctx, clocks) {
         sim.heap_safepoint();
         return result;
     }
@@ -1161,7 +1182,7 @@ fn exec_testbench<B: SimBackend>(
     if blocks.is_empty() {
         return ExecResult::Continue;
     }
-    if blocks.len() == 1 && clocks.len() <= 1 {
+    if blocks.len() == 1 && clocks <= 1 {
         let mut process = match native::Process::<B>::compile(blocks[0], &testbench.kernels()[0]) {
             Ok(process) => process,
             Err(error) => return ExecResult::Fail(format!("testbench compilation: {error}")),
@@ -1207,18 +1228,9 @@ fn exec_processes<B: SimBackend>(
         Ok(processes) => processes,
         Err(error) => return ExecResult::Fail(format!("testbench compilation: {error}")),
     };
-    // Every clock generator runs from time 0, whether or not a process
-    // waits on it.
-    let mut clocks: Vec<ProcessClock<B::Event>> = testbench
-        .clocks()
-        .iter()
-        .map(|clock| ProcessClock {
-            event: clock.event,
-            period: clock.period.max(2),
-            next_edge: 0,
-            falling_edge: None,
-        })
-        .collect();
+    // A clock generator joins when a process first waits on it, and rises
+    // only while some process does.
+    let mut clocks: Vec<ProcessClock<B::Event>> = Vec::new();
     // Capture the baseline before runnable processes drive reset. Reset
     // assertions are signal writes AND events at this timestamp, even if
     // their clock's next edge is still in the future. Rebasing after the
@@ -1338,7 +1350,9 @@ fn exec_processes<B: SimBackend>(
         fired.extend(
             clocks
                 .iter()
-                .filter(|clock| !draining && !stopped && clock.next_edge == now)
+                .filter(|clock| {
+                    !draining && !stopped && clock.next_edge == now && waited_on(&waits, clock)
+                })
                 .map(|clock| clock.event),
         );
         {
@@ -1400,7 +1414,7 @@ fn exec_processes<B: SimBackend>(
         }
         let next_edge = clocks
             .iter()
-            .filter(|_| !ctx.at_tick_limit())
+            .filter(|clock| !ctx.at_tick_limit() && waited_on(&waits, clock))
             .map(|clock| clock.next_edge)
             .min();
         let next_falling = clocks.iter().filter_map(|clock| clock.falling_edge).min();
