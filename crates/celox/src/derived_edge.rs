@@ -19,6 +19,7 @@ use celox_design::{
     schedule::ScheduleModel,
 };
 use celox_sir::{BinaryOp, BlockId, SIRBuilder, SIRTerminator, SIRValue, UnaryOp};
+use num_bigint::BigUint;
 
 use crate::ir::{
     AbsoluteAddr, ExecutionUnit, LaidOutProgram, RegionedAbsoluteAddr, RegisterId, SIRInstruction,
@@ -34,8 +35,10 @@ const GATE_WIDTH: usize = 64;
 /// The deepest stack a gate program may use, as the Rust walk allows.
 const GATE_STACK: usize = 16;
 
-/// The most domains one edge can fire: one bit each in a fire mask.
-const MAX_ENTRIES: usize = 64;
+/// The narrowest fire mask, one bit per domain an edge can fire: one 64-bit
+/// word, which every edge reaching at most 64 domains uses. An edge reaching
+/// more uses as many words as its domains need.
+const MIN_ENTRY_BITS: usize = 64;
 
 /// The units of one event domain.
 #[derive(Clone, Debug)]
@@ -139,9 +142,6 @@ impl EdgePlan {
         if comb_fatal {
             return Err("combinational logic has fatal assertions");
         }
-        if domains.len() + gated.len() + 1 > MAX_ENTRIES {
-            return Err("an edge reaches too many derived domains");
-        }
         // A derived clock without a domain of its own is left out, as the
         // Rust walk leaves out a clock without an event.
         let derived = |address: AbsoluteAddr| -> Result<Option<Derived>, &'static str> {
@@ -204,6 +204,14 @@ impl EdgePlan {
             .chain(self.gated.iter().map(|gated| &gated.derived.units))
     }
 
+    /// The width of a fire mask: one bit per entry, at least
+    /// [`MIN_ENTRY_BITS`] and a whole number of words.
+    fn entry_bits(&self) -> usize {
+        (1 + self.domains.len() + self.gated.len())
+            .next_multiple_of(64)
+            .max(MIN_ENTRY_BITS)
+    }
+
     fn gated_bit(&self, index: usize) -> usize {
         1 + self.domains.len() + index
     }
@@ -240,9 +248,11 @@ impl EdgePlan {
         settled: BlockId,
         unsettled: BlockId,
     ) {
+        let bits = self.entry_bits();
         let mut e = Emitter {
             b,
             after: Vec::new(),
+            entry_bits: bits,
         };
         // The state-derived clocks' levels before the edge, the baseline of
         // their edges for the whole phase.
@@ -254,14 +264,14 @@ impl EdgePlan {
         // The fire section's parameters: the domains to fire, those fired so
         // far, whether to settle first, and whether the gated domains run
         // first one at a time (`fire_with_gated`).
-        let mask = e.b.alloc_bit(MAX_ENTRIES, false);
-        let fired = e.b.alloc_bit(MAX_ENTRIES, false);
+        let mask = e.b.alloc_bit(bits, false);
+        let fired = e.b.alloc_bit(bits, false);
         let settle_first = e.b.alloc_bit(1, false);
         let alone = e.b.alloc_bit(1, false);
         let fire = e.b.new_block_with(vec![mask, fired, settle_first, alone]);
         let source = e.bit(fires, 0);
         if self.gated.is_empty() {
-            let zero = e.constant(0, MAX_ENTRIES);
+            let zero = e.constant(0, bits);
             let none = e.binary(1, source, BinaryOp::Eq, zero);
             let no = e.constant(0, 1);
             let start = e.b.new_block();
@@ -276,15 +286,15 @@ impl EdgePlan {
             // The edge: each gated clock judged from its gate program with
             // the signal at its old and new level.
             let mut ready = source;
-            let mut gated_fired = e.constant(0, MAX_ENTRIES);
+            let mut gated_fired = e.constant(0, bits);
             let mut after = Vec::with_capacity(self.gated.len());
             for (index, gated) in self.gated.iter().enumerate() {
                 let before = e.gate(&gated.gate, from);
                 let level = e.gate(&gated.gate, to);
                 let edge = e.edge(gated.derived.kind, before, level);
                 let bit = e.bit(edge, self.gated_bit(index));
-                ready = e.binary(MAX_ENTRIES, ready, BinaryOp::Or, bit);
-                gated_fired = e.binary(MAX_ENTRIES, gated_fired, BinaryOp::Or, bit);
+                ready = e.binary(bits, ready, BinaryOp::Or, bit);
+                gated_fired = e.binary(bits, gated_fired, BinaryOp::Or, bit);
                 after.push(level);
             }
             let alone = e.constant(u64::from(self.independent), 1);
@@ -299,24 +309,26 @@ impl EdgePlan {
         e.b.switch_to_block(fire);
         let fire_end = e.b.new_block();
         e.settle_if(settle_first, comb);
-        let zero = e.constant(0, MAX_ENTRIES);
+        let zero = e.constant(0, bits);
         let gated_mask = self
             .gated
             .iter()
             .enumerate()
-            .fold(0u64, |mask, (index, _)| mask | 1 << self.gated_bit(index));
-        let gated_bits = e.constant(gated_mask, MAX_ENTRIES);
-        let gated_ready = e.binary(MAX_ENTRIES, mask, BinaryOp::And, gated_bits);
+            .fold(BigUint::ZERO, |mask, (index, _)| {
+                mask | BigUint::from(1u8) << self.gated_bit(index)
+            });
+        let gated_bits = e.wide_constant(gated_mask, bits);
+        let gated_ready = e.binary(bits, mask, BinaryOp::And, gated_bits);
         let any_gated = e.binary(1, gated_ready, BinaryOp::Ne, zero);
         let in_turn = e.binary(1, alone, BinaryOp::And, any_gated);
         // Each domain's units appear once in the unit: the one-domain path
         // also serves the independent gated domains one at a time, and only
         // domains that can fire with another get the several-domain path.
-        let one_mask = e.b.alloc_bit(MAX_ENTRIES, false);
-        let remaining = e.b.alloc_bit(MAX_ENTRIES, false);
+        let one_mask = e.b.alloc_bit(bits, false);
+        let remaining = e.b.alloc_bit(bits, false);
         let turn = e.b.alloc_bit(1, false);
         let one_domain = e.b.new_block_with(vec![one_mask, remaining, turn]);
-        let rest = e.b.alloc_bit(MAX_ENTRIES, false);
+        let rest = e.b.alloc_bit(bits, false);
         let next_turn = e.b.new_block_with(vec![rest]);
         let together = e.b.new_block();
         e.b.seal_block(SIRTerminator::Branch {
@@ -333,8 +345,8 @@ impl EdgePlan {
             .chain(std::iter::once(0))
             .collect();
         for entry in order {
-            let bit = e.constant(1 << entry, MAX_ENTRIES);
-            let selected = e.binary(MAX_ENTRIES, rest, BinaryOp::And, bit);
+            let bit = e.single(entry, bits);
+            let selected = e.binary(bits, rest, BinaryOp::And, bit);
             let set = e.binary(1, selected, BinaryOp::Ne, zero);
             let take = e.b.new_block();
             let skip = e.b.new_block();
@@ -344,9 +356,9 @@ impl EdgePlan {
                 false_block: (skip, Vec::new()),
             });
             e.b.switch_to_block(take);
-            let all = e.constant(u64::MAX, MAX_ENTRIES);
-            let others = e.binary(MAX_ENTRIES, bit, BinaryOp::Xor, all);
-            let left = e.binary(MAX_ENTRIES, rest, BinaryOp::And, others);
+            let all = e.ones(bits);
+            let others = e.binary(bits, bit, BinaryOp::Xor, all);
+            let left = e.binary(bits, rest, BinaryOp::And, others);
             let yes = e.constant(1, 1);
             e.b.seal_block(SIRTerminator::Jump(one_domain, vec![bit, left, yes]));
             e.b.switch_to_block(skip);
@@ -356,13 +368,13 @@ impl EdgePlan {
         // The domains together: one evaluates and commits at once, several
         // evaluate, then commit, in entry order.
         e.b.switch_to_block(together);
-        let one = e.constant(1, MAX_ENTRIES);
-        let lower = e.binary(MAX_ENTRIES, mask, BinaryOp::Sub, one);
-        let others = e.binary(MAX_ENTRIES, mask, BinaryOp::And, lower);
+        let one = e.constant(1, bits);
+        let lower = e.binary(bits, mask, BinaryOp::Sub, one);
+        let others = e.binary(bits, mask, BinaryOp::And, lower);
         let single = e.binary(1, others, BinaryOp::Eq, zero);
         let several = e.b.new_block();
         let no = e.constant(0, 1);
-        let none_left = e.constant(0, MAX_ENTRIES);
+        let none_left = e.constant(0, bits);
         e.b.seal_block(SIRTerminator::Branch {
             cond: single,
             true_block: (one_domain, vec![mask, none_left, no]),
@@ -400,23 +412,23 @@ impl EdgePlan {
         // domains not fired yet whose clocks moved to their active edge.
         e.b.switch_to_block(fire_end);
         e.inline_all(comb);
-        let mut ready = e.constant(0, MAX_ENTRIES);
+        let mut ready = e.constant(0, bits);
         for (index, domain) in self.domains.iter().enumerate() {
             let is = e.level(domain.signal, domain.width);
             let edge = e.edge(domain.kind, was[index], is);
             let bit = e.bit(edge, 1 + index);
-            ready = e.binary(MAX_ENTRIES, ready, BinaryOp::Or, bit);
+            ready = e.binary(bits, ready, BinaryOp::Or, bit);
         }
         let after = std::mem::take(&mut e.after);
         for (index, gated) in self.gated.iter().enumerate() {
             let is = e.gate(&gated.gate, to);
             let edge = e.edge(gated.derived.kind, after[index], is);
             let bit = e.bit(edge, self.gated_bit(index));
-            ready = e.binary(MAX_ENTRIES, ready, BinaryOp::Or, bit);
+            ready = e.binary(bits, ready, BinaryOp::Or, bit);
         }
-        let all = e.constant(u64::MAX, MAX_ENTRIES);
-        let unfired = e.binary(MAX_ENTRIES, fired, BinaryOp::Xor, all);
-        let ready = e.binary(MAX_ENTRIES, ready, BinaryOp::And, unfired);
+        let all = e.ones(bits);
+        let unfired = e.binary(bits, fired, BinaryOp::Xor, all);
+        let ready = e.binary(bits, ready, BinaryOp::And, unfired);
         let quiet = e.binary(1, ready, BinaryOp::Eq, zero);
         let round = e.b.new_block();
         e.b.seal_block(SIRTerminator::Branch {
@@ -425,7 +437,7 @@ impl EdgePlan {
             false_block: (round, Vec::new()),
         });
         e.b.switch_to_block(round);
-        let now_fired = e.binary(MAX_ENTRIES, fired, BinaryOp::Or, ready);
+        let now_fired = e.binary(bits, fired, BinaryOp::Or, ready);
         let no = e.constant(0, 1);
         e.b.seal_block(SIRTerminator::Jump(fire, vec![ready, now_fired, no, no]));
     }
@@ -491,14 +503,30 @@ struct Emitter<'b> {
     /// The gated clocks' levels just after the edge, the baseline of their
     /// further edges in the rounds.
     after: Vec<RegisterId>,
+    /// See [`EdgePlan::entry_bits`].
+    entry_bits: usize,
 }
 
 impl Emitter<'_> {
     fn constant(&mut self, value: u64, width: usize) -> RegisterId {
+        self.wide_constant(BigUint::from(value), width)
+    }
+
+    fn wide_constant(&mut self, value: BigUint, width: usize) -> RegisterId {
         let register = self.b.alloc_bit(width, false);
         self.b
             .emit(SIRInstruction::Imm(register, SIRValue::new(value)));
         register
+    }
+
+    /// The `width`-bit value with only bit `bit` set.
+    fn single(&mut self, bit: usize, width: usize) -> RegisterId {
+        self.wide_constant(BigUint::from(1u8) << bit, width)
+    }
+
+    /// The `width`-bit value with every bit set.
+    fn ones(&mut self, width: usize) -> RegisterId {
+        self.wide_constant((BigUint::from(1u8) << width) - 1u8, width)
     }
 
     fn binary(
@@ -561,9 +589,9 @@ impl Emitter<'_> {
 
     /// Bit `index` of a fire mask, set when `condition` holds.
     fn bit(&mut self, condition: RegisterId, index: usize) -> RegisterId {
-        let set = self.constant(1 << index, MAX_ENTRIES);
-        let unset = self.constant(0, MAX_ENTRIES);
-        let bit = self.b.alloc_bit(MAX_ENTRIES, false);
+        let set = self.single(index, self.entry_bits);
+        let unset = self.constant(0, self.entry_bits);
+        let bit = self.b.alloc_bit(self.entry_bits, false);
         self.b.emit(SIRInstruction::Mux(bit, condition, set, unset));
         bit
     }
@@ -695,9 +723,9 @@ impl Emitter<'_> {
 
     /// Run `body` when bit `index` of `mask` is set.
     fn if_bit(&mut self, mask: RegisterId, index: usize, body: impl FnOnce(&mut Self)) {
-        let selector = self.constant(1 << index, MAX_ENTRIES);
-        let selected = self.binary(MAX_ENTRIES, mask, BinaryOp::And, selector);
-        let zero = self.constant(0, MAX_ENTRIES);
+        let selector = self.single(index, self.entry_bits);
+        let selected = self.binary(self.entry_bits, mask, BinaryOp::And, selector);
+        let zero = self.constant(0, self.entry_bits);
         let set = self.binary(1, selected, BinaryOp::Ne, zero);
         let run = self.b.new_block();
         let next = self.b.new_block();
@@ -1227,11 +1255,17 @@ mod tests {
     /// repeated edges, and host writes of `en` when the design has it.
     fn ticks_agree(source: &str) {
         let build = || Simulator::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top");
-        let mut generated = build().build().unwrap();
-        let mut walked = build()
-            .disable_pass(crate::SirPass::DerivedEdgeUnits)
-            .build()
-            .unwrap();
+        ticks_agree_on(
+            build().build().unwrap(),
+            build()
+                .disable_pass(crate::SirPass::DerivedEdgeUnits)
+                .build()
+                .unwrap(),
+        );
+    }
+
+    /// [`ticks_agree`] for two simulators of one backend.
+    fn ticks_agree_on<B: SimBackend>(mut generated: Simulator<B>, mut walked: Simulator<B>) {
         assert!(
             !generated.program.runtime_schema.derived_edges.is_empty(),
             "no edge unit was generated"
@@ -1273,17 +1307,15 @@ mod tests {
         }
     }
 
-    /// An edge reaching 60 gated domains.
-    #[test]
-    fn an_edge_reaching_60_gated_domains_runs_as_the_plan_walk() {
-        const GATED_CLOCKS: usize = 60;
+    /// One `clk` gating `gated_clocks` clocks, each clocking a counter.
+    fn gated_domains_source(gated_clocks: usize) -> String {
         let mut source = String::from(
             "module Top(input logic clk, input logic en, output logic [7:0] q);\n  \
              logic [6:0] count = 0;\n  logic [7:0] sum;\n  \
              always_ff @(posedge clk) count <= count + 7'd1;\n",
         );
         let mut terms = Vec::new();
-        for index in 0..GATED_CLOCKS {
+        for index in 0..gated_clocks {
             source += &format!(
                 "  logic g{index};\n  logic [7:0] n{index} = 0;\n  \
                  assign g{index} = clk & (en ^ (count[2:0] == 3'd{bits}) ^ (count[6:3] == 4'd{high}));\n  \
@@ -1294,7 +1326,34 @@ mod tests {
             terms.push(format!("n{index}"));
         }
         source += &format!("  assign q = {};\nendmodule\n", terms.join(" ^ "));
-        ticks_agree(&source);
+        source
+    }
+
+    /// An edge reaching 60 gated domains.
+    #[test]
+    fn an_edge_reaching_60_gated_domains_runs_as_the_plan_walk() {
+        ticks_agree(&gated_domains_source(60));
+    }
+
+    /// An edge reaching more domains than one word of a fire mask holds.
+    #[test]
+    fn an_edge_reaching_more_than_64_domains_runs_as_the_plan_walk() {
+        ticks_agree(&gated_domains_source(70));
+    }
+
+    /// The same on Cranelift, whose wide comparisons once ran every domain.
+    #[test]
+    fn an_edge_reaching_more_than_64_domains_runs_on_cranelift_as_the_plan_walk() {
+        let source = gated_domains_source(70);
+        let build =
+            || Simulator::from_sv_sources(vec![(source.as_str(), Path::new("top.sv"))], "Top");
+        ticks_agree_on(
+            build().build_cranelift().unwrap(),
+            build()
+                .disable_pass(crate::SirPass::DerivedEdgeUnits)
+                .build_cranelift()
+                .unwrap(),
+        );
     }
 
     #[test]

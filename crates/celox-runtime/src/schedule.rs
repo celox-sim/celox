@@ -63,6 +63,52 @@ pub struct ResolvedSchedule<B: SimBackend> {
 
 /// A design's compiled scheduler resolved against a backend: its process
 /// unit and the slots it exchanges a run with.
+/// A set of the compiled scheduler's events, by their bit in `levels`: one
+/// 64-bit word per 64 events.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct EventMask(Vec<u64>);
+
+impl EventMask {
+    /// The set of the events at `bits`.
+    pub(crate) fn of(bits: impl IntoIterator<Item = usize>) -> Self {
+        let mut mask = Self::default();
+        for bit in bits {
+            let word = bit / 64;
+            if mask.0.len() <= word {
+                mask.0.resize(word + 1, 0);
+            }
+            mask.0[word] |= 1 << (bit % 64);
+        }
+        mask
+    }
+
+    pub(crate) fn union(&self, other: &Self) -> Self {
+        let (long, short) = if self.0.len() >= other.0.len() {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let mut union = long.clone();
+        for (word, other) in union.0.iter_mut().zip(&short.0) {
+            *word |= other;
+        }
+        union
+    }
+
+    /// The events of `self` not in `other`.
+    pub(crate) fn difference(&self, other: &Self) -> Self {
+        let mut difference = self.clone();
+        for (word, other) in difference.0.iter_mut().zip(&other.0) {
+            *word &= !other;
+        }
+        difference
+    }
+
+    pub(crate) fn intersects(&self, other: &Self) -> bool {
+        self.0.iter().zip(&other.0).any(|(a, b)| a & b != 0)
+    }
+}
+
 pub(crate) struct SchedulerRefs {
     pub(crate) unit: usize,
     pub(crate) limit: SignalRef,
@@ -93,12 +139,12 @@ pub(crate) struct SchedulerRefs {
     /// in the order of its clock slots.
     pub(crate) clocks: Vec<(usize, SignalRef)>,
     /// Per process kernel, the bits of `levels` of the events it writes.
-    pub(crate) kernel_events: Vec<u64>,
+    pub(crate) kernel_events: Vec<EventMask>,
     /// Per clock slot, the bit of `levels` of its event.
-    pub(crate) clock_events: Vec<u64>,
+    pub(crate) clock_events: Vec<EventMask>,
     /// The bits of `levels` of clocks derived from the others, which any
     /// slot may change.
-    pub(crate) derived_events: u64,
+    pub(crate) derived_events: EventMask,
     pub(crate) clock_next: SignalRef,
     pub(crate) clock_period: SignalRef,
     pub(crate) clock_value: SignalRef,
@@ -106,6 +152,16 @@ pub(crate) struct SchedulerRefs {
 }
 
 impl SchedulerRefs {
+    /// The low word of `exit_arg`, where an exit that names a clock stores
+    /// its index. The slot is wider when it holds the edges of more than 64
+    /// events.
+    pub(crate) fn exit_index(&self) -> SignalRef {
+        SignalRef {
+            width: self.exit_arg.width.min(celox_design::SCHEDULER_TIME_WIDTH),
+            ..self.exit_arg
+        }
+    }
+
     /// Element `bit` of the per-clock slot `slots`.
     pub(crate) fn clock_element(slots: SignalRef, bit: usize) -> SignalRef {
         let width = celox_design::SCHEDULER_TIME_WIDTH;
@@ -479,12 +535,14 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                         .collect::<Option<_>>()?,
                     kernel_events: (0..scheduler.fallback.len())
                         .map(|index| {
-                            scheduler
-                                .kernel_events
-                                .get(index)
-                                .into_iter()
-                                .flatten()
-                                .fold(0, |mask, &bit| mask | 1 << bit)
+                            EventMask::of(
+                                scheduler
+                                    .kernel_events
+                                    .get(index)
+                                    .into_iter()
+                                    .flatten()
+                                    .copied(),
+                            )
                         })
                         .collect(),
                     clock_events: scheduler
@@ -492,7 +550,7 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                         .iter()
                         .map(|clock| {
                             let bit = scheduler.events.iter().position(|event| event == clock)?;
-                            Some(1 << bit)
+                            Some(EventMask::of([bit]))
                         })
                         .collect::<Option<_>>()?,
                     clocks: scheduler
@@ -507,18 +565,16 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                     clock_period: resolve(&slots.clock_period),
                     clock_value: resolve(&slots.clock_value),
                     clock_armed: resolve(&slots.clock_armed),
-                    derived_events: 0,
+                    derived_events: EventMask::default(),
                 };
                 // What no kernel and no clock writes itself derives from them.
-                let all = 1u64
-                    .checked_shl(refs.events.len() as u32)
-                    .map_or(u64::MAX, |bit| bit - 1);
+                let all = EventMask::of(0..refs.events.len());
                 let driven = refs
                     .kernel_events
                     .iter()
                     .chain(&refs.clock_events)
-                    .fold(0, |mask, &bits| mask | bits);
-                refs.derived_events = all & !driven;
+                    .fold(EventMask::default(), |mask, bits| mask.union(bits));
+                refs.derived_events = all.difference(&driven);
                 Some(refs)
             }),
             kernel_fallback: model
