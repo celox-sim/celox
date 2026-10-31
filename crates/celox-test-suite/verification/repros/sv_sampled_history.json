@@ -1,0 +1,145 @@
+{
+  "standard": "IEEE 1800-2023 16.9.3, 16.5.1 and 16.14.1",
+  "source": "sv_sampled_history.sv",
+  "tools": {
+    "verilator": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "cases": [
+        {
+          "name": "concurrent_assertions::sampled_history_explicit_nesting",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_gates_and_indices",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:10:37: Unsupported: $past expr2 and/or clock arguments\n   10 |  g: assert property (@(posedge clk) $past(data,1,enable) === (cycle>=2)) gate_count++; else;\n      |                                     ^~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <case>/source_0.sv:11:37: Unsupported: $past expr2 and/or clock arguments\n   11 |  s: assert property (@(posedge clk) $past(data,1,$sampled(enable)) === (cycle>=2)) sampled_gate_count++; else;\n      |                                     ^~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:12:37: Unsupported: $past expr2 and/or clock arguments\n   12 |  r: assert property (@(posedge clk) $past(data,1,reactive_gate) === (cycle>=2))\n      |                                     ^~~~~\n%Error-UNSUPPORTED: <case>/source_0.sv:15:37: Unsupported: $past expr2 and/or clock arguments\n   15 |  d: assert property (@(posedge clk) $past(data,2,enable) === (cycle>=4)) depth_count++; else;\n      |                                     ^~~~~\n%Error: Exiting due to 4 error(s)\n",
+          "diagnostic": "%Error-UNSUPPORTED: <target>/sv-verilator/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:10:37: Unsupported: $past expr2 and/or clock arguments\n   10 |  g: assert property (@(posedge clk) $past(data,1,enable) === (cycle>=2)) gate_count++; else;\n      |                                     ^~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error-UNSUPPORTED: <target>/sv-verilator/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:11:37: Unsupported: $past expr2 and/or clock arguments\n   11 |  s: assert property (@(posedge clk) $past(data,1,$sampled(enable)) === (cycle>=2)) sampled_gate_count++; else;\n      |                                     ^~~~~\n%Error-UNSUPPORTED: <target>/sv-verilator/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:12:37: Unsupported: $past expr2 and/or clock arguments\n   12 |  r: assert property (@(posedge clk) $past(data,1,reactive_gate) === (cycle>=2))\n      |                                     ^~~~~\n%Error-UNSUPPORTED: <target>/sv-verilator/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:15:37: Unsupported: $past expr2 and/or clock arguments\n   15 |  d: assert property (@(posedge clk) $past(data,2,enable) === (cycle>=4)) depth_count++; else;\n      |                                     ^~~~~\n%Error: Exiting due to 4 error(s)\n"
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_predicates",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_unknown_transitions",
+          "status": "unsupported",
+          "phase": "compile",
+          "detail": "four-state expectations"
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_while_disabled",
+          "status": "mismatch",
+          "phase": "execute",
+          "detail": "concurrent_assertions::sampled_history_while_disabled at 201:27: assert_eq passed: expected 0x2, got 0x1",
+          "diagnostic": ""
+        }
+      ]
+    },
+    "icarus": {
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "cases": [
+        {
+          "name": "concurrent_assertions::sampled_history_explicit_nesting",
+          "status": "runtime_error",
+          "phase": "execute",
+          "detail": "native testbench failed: exit status: 10; see runtime.log and protocol.log\n<case>/source_0.sv:7: Error: System task/function $past() is not defined by any module.\n<case>/source_0.sv:7: Error: System task/function $sampled() is not defined by any module.\n<case>/source_0.sv:8: Error: System task/function $past() is not defined by any module.\n<case>/source_0.sv:8: Error: System task/function $sampled() is not defined by any module.\n<case>/source_0.sv:9: Error: System task/function $sampled() is not defined by any module.\n<case>/source_0.sv:9: Error: System task/function $past() is not defined by any module.\n<case>/source_0.sv:9: Error: System task/function $sampled() is not defined by any module.\n<case>/source_0.sv:10: Error: System task/function $sampled() is not defined by any module.\n<case>/source_0.sv:11: Error: System task/function $past() is not defined by any module.\n<case>/source_0.sv:11: Error: System task/function $sampled() is not defined by any module.\n",
+          "diagnostic": "<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:7: Error: System task/function $past() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:7: Error: System task/function $sampled() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:8: Error: System task/function $past() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:8: Error: System task/function $sampled() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:9: Error: System task/function $sampled() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:9: Error: System task/function $past() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:9: Error: System task/function $sampled() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:10: Error: System task/function $sampled() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:11: Error: System task/function $past() is not defined by any module.\n<target>/sv-icarus/concurrent_assertions/sampled_history_explicit_nesting/source_0.sv:11: Error: System task/function $sampled() is not defined by any module.\n"
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_gates_and_indices",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:10: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:11: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:12: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:15: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:16: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+          "diagnostic": "<target>/sv-icarus/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:10: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:11: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:12: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:15: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_gates_and_indices/source_0.sv:16: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_predicates",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:8: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:10: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:11: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:12: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:13: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:14: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:15: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:16: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+          "diagnostic": "<target>/sv-icarus/concurrent_assertions/sampled_history_predicates/source_0.sv:8: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_predicates/source_0.sv:10: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_predicates/source_0.sv:11: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_predicates/source_0.sv:12: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_predicates/source_0.sv:13: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_predicates/source_0.sv:14: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_predicates/source_0.sv:15: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_predicates/source_0.sv:16: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_unknown_transitions",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:15: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:16: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:17: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:18: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<case>/source_0.sv:19: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+          "diagnostic": "<target>/sv-icarus/concurrent_assertions/sampled_history_unknown_transitions/source_0.sv:15: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_unknown_transitions/source_0.sv:16: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_unknown_transitions/source_0.sv:17: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_unknown_transitions/source_0.sv:18: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<target>/sv-icarus/concurrent_assertions/sampled_history_unknown_transitions/source_0.sv:19: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_while_disabled",
+          "status": "compile_error",
+          "phase": "compile",
+          "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n",
+          "diagnostic": "<target>/sv-icarus/concurrent_assertions/sampled_history_while_disabled/source_0.sv:6: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+        }
+      ]
+    },
+    "xezim": {
+      "version": "xezim version 0.11.4",
+      "cases": [
+        {
+          "name": "concurrent_assertions::sampled_history_explicit_nesting",
+          "status": "mismatch",
+          "phase": "execute",
+          "detail": "concurrent_assertions::sampled_history_explicit_nesting at 184:4: assert_eq selected: expected 0x0, got 0x1",
+          "diagnostic": ""
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_gates_and_indices",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_predicates",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_unknown_transitions",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        },
+        {
+          "name": "concurrent_assertions::sampled_history_while_disabled",
+          "status": "passed",
+          "phase": "execute",
+          "detail": ""
+        }
+      ]
+    }
+  },
+  "standalone": {
+    "verilator_selected": {
+      "flags": "--binary --assert --timing -Wno-fatal --top-module Top",
+      "output": "selected=0 (expected 0)\n- crates/celox-test-suite/verification/repros/sv_sampled_history.sv:26: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 2ps; walltime 0.000 s; speed 80.887 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+    },
+    "xezim_selected": {
+      "flags": "--error-exit -s Top",
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\nselected=1 (expected 0)\nSimulation finished at time 2 ($finish called)\n"
+    },
+    "xezim_disabled": {
+      "flags": "--error-exit -D DISABLED -s Top",
+      "output": "=== xezim 0.11.4 ===\ngit unknown (unknown)\npassed=2 failed=1 (expected 2 1)\nSimulation finished at time 10 ($finish called)\n"
+    },
+    "icarus_selected": {
+      "flags": "iverilog -g2012 -s Top -o probe.vvp; vvp probe.vvp",
+      "output": "crates/celox-test-suite/verification/repros/sv_sampled_history.sv:20: Error: System task/function $past() is not defined by any module.\ncrates/celox-test-suite/verification/repros/sv_sampled_history.sv:20: Error: System task/function $sampled() is not defined by any module.\nwork/sampled-repro.vvp: Program not runnable, 2 errors.\n"
+    },
+    "verilator_gated": {
+      "flags": "--lint-only --assert --timing -Wno-fatal +define+GATED --top-module Top",
+      "output": "%Error-UNSUPPORTED: crates/celox-test-suite/verification/repros/sv_sampled_history.sv:17:37: Unsupported: $past expr2 and/or clock arguments\n   17 |   always @(posedge clk) selected <= $past(data, 1, enable);\n      |                                     ^~~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+    },
+    "verilator_disabled": {
+      "flags": "--binary --assert --timing -Wno-fatal +define+DISABLED --top-module Top",
+      "output": "passed=1 failed=1 (expected 2 1)\n- crates/celox-test-suite/verification/repros/sv_sampled_history.sv:14: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 10ps; walltime 0.000 s; speed 254.433 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+    }
+  }
+}

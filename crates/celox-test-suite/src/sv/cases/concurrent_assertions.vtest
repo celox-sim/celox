@@ -62,3 +62,140 @@ endmodule"#)
 endmodule"#)
  (top Top) (four_state) (run_until 2)
  (assert_eq failed 1) (assert_eq disabled_failed 1))
+
+
+; Each function owns its history; current operands use Preponed values even
+; though the producer updates data in NBA before the Observed predicate.
+(case sampled_history_predicates
+ (source "sampled_history_predicates.sv" #"
+module Top(output int past_passed, past_failed, rose_count, fell_count,
+           stable_count, changed_count, mixed_count, pure_count, nested_count,
+           action_past);
+ bit clk, data;
+ int cycle=0;
+ always @(posedge clk) begin data <= ~data; cycle<=cycle+1; end
+ p: assert property (@(posedge clk) $past(data))
+    begin past_passed++; action_past+=$past(data); end else past_failed++;
+ r: assert property (@(posedge clk) $rose(data)) rose_count++; else;
+ f: assert property (@(posedge clk) $fell(data)) fell_count++; else;
+ s: assert property (@(posedge clk) $stable(data)) stable_count++; else;
+ c: assert property (@(posedge clk) $changed(data)) changed_count++; else;
+ m: assert property (@(posedge clk) $past(data) == !data) mixed_count++; else;
+ q: assert property (@(posedge clk) $countones({data,$past(data)}) == $changed(data)) pure_count++; else;
+ n: assert property (@(posedge clk) $sampled($past(data)) === $past(data)) nested_count++; else;
+ initial begin
+   past_passed=0; past_failed=0; rose_count=0; fell_count=0; stable_count=0;
+   changed_count=0; mixed_count=0; pure_count=0; nested_count=0;
+   action_past=0;
+   repeat(5) begin #1 clk=1; #1 clk=0; end
+ end
+endmodule
+"#)
+ (top Top) (run_until 10)
+ (assert_eq past_passed 2) (assert_eq past_failed 3)
+ (assert_eq rose_count 2) (assert_eq fell_count 2)
+ (assert_eq stable_count 1) (assert_eq changed_count 4)
+ (assert_eq mixed_count 4) (assert_eq pure_count 5) (assert_eq nested_count 5)
+ (assert_eq action_past 2))
+
+(case sampled_history_gates_and_indices
+ (source "sampled_history_gates.sv" #"
+module Top(output int gate_count, depth_count, selected_count, sampled_gate_count, reactive_gate_count);
+ bit clk, data, enable, index, reactive_gate;
+ bit [1:0] bits_value=2'b10;
+ int cycle=0;
+ always @(posedge clk) begin
+   data <= ~data; enable <= ~enable; index <= ~index;
+   bits_value <= ~bits_value; cycle <= cycle+1;
+ end
+ g: assert property (@(posedge clk) $past(data,1,enable) === (cycle>=2)) gate_count++; else;
+ s: assert property (@(posedge clk) $past(data,1,$sampled(enable)) === (cycle>=2)) sampled_gate_count++; else;
+ r: assert property (@(posedge clk) $past(data,1,reactive_gate) === (cycle>=2))
+    begin reactive_gate_count++; reactive_gate=~reactive_gate; end
+    else reactive_gate=~reactive_gate;
+ d: assert property (@(posedge clk) $past(data,2,enable) === (cycle>=4)) depth_count++; else;
+ i: assert property (@(posedge clk) bits_value[$past(index)]) selected_count++; else;
+ initial begin
+   gate_count=0; depth_count=0; selected_count=0; sampled_gate_count=0; reactive_gate_count=0;
+   repeat(5) begin #1 clk=1; #1 clk=0; end
+ end
+endmodule
+"#)
+ (top Top) (run_until 10)
+ (assert_eq gate_count 5) (assert_eq depth_count 5) (assert_eq selected_count 4)
+ (assert_eq sampled_gate_count 5) (assert_eq reactive_gate_count 5))
+
+(case sampled_history_unknown_transitions
+ (four_state)
+ (source "sampled_history_unknown.sv" #"
+module Top(output int rose_count, fell_count, stable_count, changed_count, nested_count);
+ bit clk;
+ logic value=1'bx;
+ int cycle=0;
+ always @(posedge clk) begin
+   case(cycle)
+     0: value<=1'bz;
+     1: value<=1'b0;
+     2: value<=1'b1;
+     default: value<=1'b0;
+   endcase
+   cycle<=cycle+1;
+ end
+ r: assert property (@(posedge clk) $rose(value)) rose_count++; else;
+ f: assert property (@(posedge clk) $fell(value)) fell_count++; else;
+ s: assert property (@(posedge clk) $stable(value)) stable_count++; else;
+ c: assert property (@(posedge clk) $changed(value)) changed_count++; else;
+ n: assert property (@(posedge clk) $sampled($past(value)) === $past(value)) nested_count++; else;
+ initial begin
+   rose_count=0; fell_count=0; stable_count=0; changed_count=0; nested_count=0;
+   repeat(5) begin #1 clk=1; #1 clk=0; end
+ end
+endmodule
+"#)
+ (top Top) (run_until 10)
+ (assert_eq rose_count 1) (assert_eq fell_count 2)
+ (assert_eq stable_count 1) (assert_eq changed_count 4) (assert_eq nested_count 5))
+
+; Explicit nesting in a normal clocked procedure uses the same sampled and
+; history bindings, including temporal functions inside select positions.
+(case sampled_history_explicit_nesting
+ (source "sampled_history_explicit.sv" #"
+module Top(input bit clk, input bit [7:0] a, input bit index,
+           output bit [7:0] past_value, mixed, depth, current_value,
+           output bit selected);
+ bit [3:0] data=4'b1010;
+ always_ff @(posedge clk) begin
+   past_value <= $sampled($past(a));
+   mixed <= $sampled($past(a)+a);
+   depth <= $sampled($sampled(a)+$past(a,2));
+   current_value <= $sampled(a);
+   selected <= $sampled(data[$past(index)]);
+ end
+endmodule
+"#)
+ (top Top)
+ (for value (list 1 2 3 4)
+   (modify (set a value) (set index (% value 2)))
+   (tick clk)
+   (assert_eq past_value (- value 1))
+   (assert_eq mixed (- (* 2 value) 1))
+   (assert_eq depth (+ value (max 0 (- value 2))))
+   (assert_eq current_value value)
+   (assert_eq selected (- 1 (% value 2)))))
+
+
+; History advances on every clock even when disable iff suppresses evaluation.
+(case sampled_history_while_disabled
+ (source "sampled_history_disabled.sv" #"
+module Top(output int passed, failed);
+ bit clk, data;
+ int cycle=0;
+ always @(posedge clk) begin data<=~data; cycle<=cycle+1; end
+ p: assert property (@(posedge clk) disable iff(cycle<=2) $past(data)) passed++; else failed++;
+ initial begin
+   passed=0; failed=0;
+   repeat(5) begin #1 clk=1; #1 clk=0; end
+ end
+endmodule
+"#)
+ (top Top) (run_until 10) (assert_eq passed 2) (assert_eq failed 1))

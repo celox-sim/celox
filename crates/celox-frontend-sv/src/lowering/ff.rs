@@ -240,26 +240,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         let [Some(operand)] = args else {
             return Err(unsupported("operand of `$sampled`"));
         };
-        // A sampled value function in the operand would read the sampled
-        // copies instead of its history.
-        let mut nested = Vec::new();
-        collect_calls(operand, &mut nested);
-        if nested.iter().any(|(callee, _)| {
-            matches!(
-                callee,
-                sv::ir::Callee::System(
-                    sv::ir::SystemFunction::Past
-                        | sv::ir::SystemFunction::Rose
-                        | sv::ir::SystemFunction::Fell
-                        | sv::ir::SystemFunction::Stable
-                        | sv::ir::SystemFunction::Changed
-                )
-            )
-        }) {
-            return Err(unsupported(
-                "`$sampled` of an operand that calls a sampled value function",
-            ));
-        }
+        // Sampled-value calls resolve their own current/history operands.
+        // Sampling their arguments again would bypass that history mapping.
         let operand = self.propagate(operand);
         let mut names = HashSet::default();
         expr_idents(&operand, &mut names);
@@ -276,7 +258,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             renames.insert(name, self.m.sampled_copy(id));
         }
-        Ok(rename_idents(&operand, &renames))
+        Ok(rename_idents_with_sampling(&operand, &renames, true))
     }
 
     /// Declare the `$past` histories that the sampled value functions of
@@ -515,6 +497,11 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// process's clock: each history moves one tick back and takes the
     /// sampled value, where its gate holds at the tick.
     fn update_history(&mut self) -> Result<bool, sv::AnalyzerError> {
+        let stmts = self.history_updates();
+        self.exec_block(&stmts)
+    }
+
+    fn history_updates(&self) -> Vec<sv::ir::Stmt> {
         use sv::ir::{Expr, LValue, Stmt};
         let sampled = |expr: Expr| Expr::Call {
             callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
@@ -523,7 +510,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let mut stmts = Vec::new();
         if self.history.is_empty() {
-            return Ok(true);
+            return stmts;
         }
         for history in &self.history {
             let mut updates: Vec<Stmt> = history
@@ -592,7 +579,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 else_body: Vec::new(),
             }];
         }
-        self.exec_block(&stmts)
+        stmts
     }
 
     /// Evaluate the gate of each `$past` history before the body runs. The
@@ -6323,6 +6310,53 @@ impl Ff<'_, '_> {
         final_process: bool,
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
+        let monitored;
+        let body = if let Some(clock) = concurrent_monitor_clock(body) {
+            self.inferred_clock = Some(clock);
+            self.declare_history(body)?;
+            if self.history.is_empty() {
+                body
+            } else {
+                use sv::ir::{BinaryOp, Expr, LValue, Stmt};
+                let mut gates = Vec::new();
+                for index in 0..self.history.len() {
+                    let Some(gate) = self.history[index].gate.clone() else {
+                        continue;
+                    };
+                    let (_, name) = self.m.temp("assertion_history_gate", 1, false, true);
+                    gates.push(Stmt::Assign {
+                        lhs: LValue::Ident(name.clone()),
+                        rhs: Expr::Binary {
+                            left: Box::new(gate),
+                            op: BinaryOp::Ne,
+                            right: Box::new(Expr::Literal("1'b0".into())),
+                        },
+                        nonblocking: false,
+                    });
+                    self.history[index].gate_value = Some(name);
+                }
+                let mut owned = body.to_vec();
+                let [
+                    Stmt::Loop {
+                        body: repeated,
+                        step,
+                        ..
+                    },
+                ] = owned.as_mut_slice()
+                else {
+                    unreachable!("a canonical monitor loop")
+                };
+                // Capture gates immediately after the clock wait, in Active,
+                // before the predicate yields to Observed and the actions to
+                // Reactive. Advance history after either action or disable.
+                repeated.splice(1..1, gates);
+                step.extend(self.history_updates());
+                monitored = owned;
+                &monitored[..]
+            }
+        } else {
+            body
+        };
         let starts_with_event_wait = slots.requires_timed_simulation;
         let first_created = self.m.created.len();
         fn has_fork(
@@ -8056,11 +8090,81 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     None
 }
 
+/// The single edge clock of a module-level Boolean concurrent monitor.
+/// General timed procedures and multi-event/derived clocks keep their existing
+/// restrictions; a monitor's history advances once per completed iteration.
+fn concurrent_monitor_clock(body: &[sv::ir::Stmt]) -> Option<Clock> {
+    use sv::ir::{EventEdge, Expr, LoopKind, Stmt};
+    let [
+        Stmt::Loop {
+            kind: LoopKind::Forever,
+            init,
+            condition: None,
+            step,
+            body,
+        },
+    ] = body
+    else {
+        return None;
+    };
+    if !init.is_empty() || !step.is_empty() {
+        return None;
+    }
+    let [
+        Stmt::WaitEvent(items),
+        Stmt::AssertionRegion { reactive: false },
+        ..,
+    ] = body.as_slice()
+    else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    // An iff expression is itself a clock expression: temporal calls there
+    // require a separate explicit clock, which this subset does not support.
+    if item.iff.is_some() {
+        return None;
+    }
+    let Expr::Ident(signal) = &item.expr else {
+        return None;
+    };
+    let rising = match item.edge {
+        EventEdge::Pos => true,
+        EventEdge::Neg => false,
+        _ => return None,
+    };
+    Some(Clock {
+        signal: signal.clone(),
+        rising,
+        alone: true,
+    })
+}
+
 /// `expr` with the identifiers in `renames` replaced.
 fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::ir::Expr {
-    fn constant(expr: &sv::ir::ConstExpr, renames: &HashMap<String, String>) -> sv::ir::ConstExpr {
+    rename_idents_with_sampling(expr, renames, false)
+}
+
+/// When sampling, leave sampled-value calls to resolve their own operands.
+/// Ordinary renames (notably history reads) still descend through those calls.
+fn rename_idents_with_sampling(
+    expr: &sv::ir::Expr,
+    renames: &HashMap<String, String>,
+    sampling: bool,
+) -> sv::ir::Expr {
+    fn constant(
+        expr: &sv::ir::ConstExpr,
+        renames: &HashMap<String, String>,
+        sampling: bool,
+    ) -> sv::ir::ConstExpr {
+        if sampling
+            && matches!(expr, sv::ir::ConstExpr::Function { callee: sv::ir::Callee::System(function), .. } if function.reads_sampled_values())
+        {
+            return expr.clone();
+        }
         use sv::ir::ConstExpr;
-        let go = |expr: &ConstExpr| Box::new(constant(expr, renames));
+        let go = |expr: &ConstExpr| Box::new(constant(expr, renames, sampling));
         match expr {
             ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
             ConstExpr::Literal(_) => expr.clone(),
@@ -8082,7 +8186,10 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             ConstExpr::Function { callee, args, site } => ConstExpr::Function {
                 callee: callee.clone(),
                 site: *site,
-                args: args.iter().map(|arg| constant(arg, renames)).collect(),
+                args: args
+                    .iter()
+                    .map(|arg| constant(arg, renames, sampling))
+                    .collect(),
             },
             ConstExpr::Resize {
                 expr,
@@ -8113,8 +8220,13 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             },
         }
     }
+    if sampling
+        && matches!(expr, sv::ir::Expr::Call { callee: sv::ir::Callee::System(function), .. } if function.reads_sampled_values())
+    {
+        return expr.clone();
+    }
     use sv::ir::Expr;
-    let go = |expr: &Expr| Box::new(rename_idents(expr, renames));
+    let go = |expr: &Expr| Box::new(rename_idents_with_sampling(expr, renames, sampling));
     match expr {
         Expr::Ident(name) => Expr::Ident(renames.get(name).unwrap_or(name).clone()),
         Expr::Literal(_) => expr.clone(),
@@ -8125,21 +8237,21 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             signed,
         } => Expr::Select {
             expr: go(expr),
-            msb: constant(msb, renames),
-            lsb: constant(lsb, renames),
+            msb: constant(msb, renames, sampling),
+            lsb: constant(lsb, renames, sampling),
             signed: *signed,
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .iter()
-                .map(|part| rename_idents(part, renames))
+                .map(|part| rename_idents_with_sampling(part, renames, sampling))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
-            count: constant(count, renames),
+            count: constant(count, renames, sampling),
             parts: parts
                 .iter()
-                .map(|part| rename_idents(part, renames))
+                .map(|part| rename_idents_with_sampling(part, renames, sampling))
                 .collect(),
         },
         Expr::Resize {
@@ -8177,7 +8289,10 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             callee: callee.clone(),
             args: args
                 .iter()
-                .map(|arg| arg.as_ref().map(|arg| rename_idents(arg, renames)))
+                .map(|arg| {
+                    arg.as_ref()
+                        .map(|arg| rename_idents_with_sampling(arg, renames, sampling))
+                })
                 .collect(),
             arg_order: arg_order.clone(),
         },
@@ -8185,7 +8300,9 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             expr: go(expr),
             items: items
                 .iter()
-                .map(|item| item.map(&mut |operand| rename_idents(operand, renames)))
+                .map(|item| {
+                    item.map(&mut |operand| rename_idents_with_sampling(operand, renames, sampling))
+                })
                 .collect(),
         },
     }
