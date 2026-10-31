@@ -9,16 +9,27 @@ use crate::system_functions::ObjectOp;
 pub(super) fn lower(
     class: &classes::Class,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     state: &mut BodyState<'_>,
     item: &generate::Item,
 ) -> Converted<Vec<Subroutine>> {
-    lower_methods(class, tree, dimensions, state, Some(item), None, false)
+    lower_methods(
+        class,
+        tree,
+        session,
+        dimensions,
+        state,
+        Some(item),
+        None,
+        false,
+    )
 }
 
 fn lower_methods(
     class: &classes::Class,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     state: &mut BodyState<'_>,
     item: Option<&generate::Item>,
@@ -41,7 +52,7 @@ fn lower_methods(
             item.map(|item| item.name(&name)).unwrap_or(name)
         }
     };
-    let handle = classes::handle_type(tree, &class.name)
+    let handle = classes::handle_type(tree, session, &class.name)
         .ok_or_else(|| unsupported("class randomization receiver"))?;
     let convert_type = |ty| {
         crate::ir::Type::from_ast(
@@ -60,8 +71,13 @@ fn lower_methods(
         if method == "randomize" && class.check_randomize().is_err() {
             continue;
         }
-        let mut builder =
-            BodyBuilder::new(tree, dimensions, state, system_functions::Body::Subroutine);
+        let mut builder = BodyBuilder::new(
+            tree,
+            session,
+            dimensions,
+            state,
+            system_functions::Body::Subroutine,
+        );
         builder.automatic = true;
         let first_local = builder.state.locals.len();
         let this = builder.declare(classes::THIS, handle.clone());
@@ -280,11 +296,12 @@ fn lower_methods(
             // randomize is virtual, while its pre/post hooks are not (18.6.2).
             // Object-wide rand_mode also covers the dynamic object's members.
             let mut items = Vec::new();
-            for name in classes::visible_classes(tree) {
+            for name in classes::visible_classes(tree, builder.session) {
                 if name == class.name {
                     continue;
                 }
-                let Ok(derived) = classes::class(tree, &name, env, &aliases) else {
+                let Ok(derived) = classes::class(tree, builder.session, &name, env, &aliases)
+                else {
                     continue;
                 };
                 if derived.is_abstract || derived.is_interface {
@@ -292,7 +309,7 @@ fn lower_methods(
                 }
                 if (inline.is_some() && derived.constraint_program().is_err())
                     || (method == "randomize" && derived.check_randomize().is_err())
-                    || !derived.derives_from(tree, &class.name, env, &aliases)
+                    || !derived.derives_from(tree, builder.session, &class.name, env, &aliases)
                 {
                     continue;
                 }
@@ -466,10 +483,11 @@ fn random_property(
 
 pub(in crate::ast) fn inline_subroutines(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     state: &mut BodyState<'_>,
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<Subroutine>, Vec<classes::constraints::InlineRequest>)> {
-    let mut requests = std::mem::take(&mut *tree.state.inline_randomizations.borrow_mut());
+    let mut requests = std::mem::take(&mut session.inline_randomizations);
     for request in &scope::imported(tree).inline_randomizations {
         if !requests.iter().any(|known| known.key == request.key) {
             requests.push(classes::constraints::Inline {
@@ -489,11 +507,12 @@ pub(in crate::ast) fn inline_subroutines(
     for inline in requests {
         let dims = &inline.dimensions;
         let mut classes = vec![inline.class.clone()];
-        for name in classes::visible_classes(tree) {
+        for name in classes::visible_classes(tree, session) {
             if name == inline.class.name {
                 continue;
             }
-            let Ok(class) = classes::shared_class(tree, &name, &dims.const_env, &dims.type_aliases)
+            let Ok(class) =
+                classes::shared_class(tree, &name, &dims.const_env, &dims.type_aliases, session)
             else {
                 continue;
             };
@@ -503,6 +522,7 @@ pub(in crate::ast) fn inline_subroutines(
                 && class.constraint_program().is_ok()
                 && class.derives_from(
                     tree,
+                    session,
                     &inline.class.name,
                     &dims.const_env,
                     &dims.type_aliases,
@@ -515,6 +535,7 @@ pub(in crate::ast) fn inline_subroutines(
             result.extend(lower_methods(
                 &class,
                 tree,
+                session,
                 dims,
                 state,
                 None,
@@ -525,6 +546,7 @@ pub(in crate::ast) fn inline_subroutines(
                 result.extend(lower_methods(
                     &class,
                     tree,
+                    session,
                     dims,
                     state,
                     None,

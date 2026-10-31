@@ -79,6 +79,7 @@ mod tests {
 
     #[test]
     fn trimmed_structural_header_view_uses_selected_native_subroutine_membership() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_scope_fixture("module M(output logic[$bits(g())-1:0]y);function int f();return 1;endfunction function int g();return 2;endfunction assign y=0;endmodule", Path::new("trimmed-subroutine-view.sv")).unwrap();
         let tree = tree
             .with_body_membership(tree.root_unit().unwrap().items[1..].to_vec())
@@ -90,6 +91,7 @@ mod tests {
         };
         let module = Module::from_scope_with_symbols(
             &AnalysisContext::unspecialized(&tree),
+            session,
             "M",
             &HashMap::default(),
             &lookup,

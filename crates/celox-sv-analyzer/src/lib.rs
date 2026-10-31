@@ -36,7 +36,7 @@ pub use ast::interfaces::{
     InterfacePrototype, interface_prototypes, interface_prototypes_for,
     interface_prototypes_with_options,
 };
-pub use ast::packages::Packages;
+pub use ast::packages::{Design, Packages};
 pub use ast::virtual_interfaces::{
     VirtualInterface, VirtualInterfaceDeclaration, VirtualInterfaceMember, VirtualInterfaceSignal,
     VirtualInterfaces,
@@ -404,7 +404,7 @@ fn analyze_interface_source(
 ) -> Result<Ir, AnalyzerError> {
     let source = ParsedSource::parse(code, path)?;
     let packages = ParsedSource::analyze_packages(&[&source])?;
-    let plan = &packages.interface_plan;
+    let plan = packages.interface_plan.clone();
     let mut names = source
         .module_names()
         .iter()
@@ -460,6 +460,7 @@ fn analyze_interface_source(
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )?;
         modules.extend(ir.modules().iter().cloned());
         warnings.extend(ir.warnings().iter().cloned());
@@ -573,6 +574,7 @@ pub fn analyze_source_module_with_packages(
     module_name: &str,
     parameter_overrides: &HashMap<String, i128>,
     packages: &Packages,
+    design: &mut Design,
 ) -> Result<Ir, AnalyzerError> {
     let overrides = parameter_overrides
         .iter()
@@ -596,5 +598,6 @@ pub fn analyze_source_module_with_packages(
         &[],
         &ModuleInterfaces::default(),
         packages,
+        design,
     )
 }

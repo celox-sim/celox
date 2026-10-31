@@ -18,6 +18,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     for module in source.modules() {
         let syntax = crate::source_tree::SourceTree::empty();
         let tree = &module.constant_context(&syntax);
+        let session = &mut ast::Session::default();
         let id = module_table.insert(module)?;
         let mut constants = HashMap::default();
         let mut parameter_types = HashMap::default();
@@ -44,6 +45,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
             let (resolved_value, literal) = parameter.resolved_value_and_literal(
                 tree,
+                session,
                 &constants,
                 &parameter_types,
                 &parameter_literals,
@@ -80,7 +82,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             .with_declaration(
                 parameter.value().map(|value| {
                     module
-                        .declaration_expr(tree, value, &parameter_signedness)
+                        .declaration_expr(tree, session, value, &parameter_signedness)
                         .into()
                 }),
                 parameter
@@ -89,10 +91,20 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     .map(|range| {
                         ir::PackedRange::new(
                             module
-                                .declaration_expr(tree, range.left(), &parameter_signedness)
+                                .declaration_expr(
+                                    tree,
+                                    session,
+                                    range.left(),
+                                    &parameter_signedness,
+                                )
                                 .into(),
                             module
-                                .declaration_expr(tree, range.right(), &parameter_signedness)
+                                .declaration_expr(
+                                    tree,
+                                    session,
+                                    range.right(),
+                                    &parameter_signedness,
+                                )
                                 .into(),
                         )
                     })

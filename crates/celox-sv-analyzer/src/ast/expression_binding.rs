@@ -48,15 +48,17 @@ fn disagreement() -> AnalyzerError {
 pub(super) fn bind(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    bind_value(root, tree.declarations(), tree, dimensions, None)
+    bind_value(root, tree.declarations(), tree, session, dimensions, None)
 }
 pub(super) fn expression(
     root: ExprId,
     native: &Declarations,
     lhs: &LValue,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let shape = match lhs {
@@ -79,10 +81,10 @@ pub(super) fn expression(
                 dimensions,
             ),
         };
-        return streams::pack(root, Some(receiver), native, tree, dimensions);
+        return streams::pack(root, Some(receiver), native, tree, session, dimensions);
     }
     if let Some(target) = shape.and_then(|shape| shape.container.as_deref()) {
-        return containers::assignment(root, tree, dimensions, target);
+        return containers::assignment(root, tree, session, dimensions, target);
     }
     // `new` creates an object of the class of the variable or of the
     // element of an array of handles (IEEE 1800-2023 8.7).
@@ -99,14 +101,14 @@ pub(super) fn expression(
         LValue::Select { .. } => None,
     };
     if let Some(class) = class {
-        if let Some(call) = objects::constructor(tree, root, native, dimensions, class)? {
+        if let Some(call) = objects::constructor(tree, session, root, native, dimensions, class)? {
             return Ok(call);
         }
-        objects::check_assignment(tree, root, native, dimensions, class, || {
+        objects::check_assignment(tree, session, root, native, dimensions, class, || {
             "assignment".to_owned()
         })?;
     }
-    let value = bind_value(root, native, tree, dimensions, shape)?;
+    let value = bind_value(root, native, tree, session, dimensions, shape)?;
     // A string literal or integral value assigned to a string becomes its
     // bytes (IEEE 1800-2023 6.16).
     Ok(if shape.is_some_and(|shape| shape.string) {
@@ -119,15 +121,17 @@ pub(super) fn value(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    bind_value(root, native, tree, dimensions, None)
+    bind_value(root, native, tree, session, dimensions, None)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn deep_native_runtime_groups_and_native_literal_values() {
+        let session = &mut Session::default();
         let path = Path::new("native-runtime-groups.sv");
         let tree =
             crate::source_tree::parse_source("module M(output int y); assign y=7; endmodule", path)
@@ -142,7 +146,15 @@ mod tests {
         let native = celox_sv_syntax::Declarations::parse(&source, path).unwrap();
         let root = native.assign_statements[0].assignments[0].right;
         assert_eq!(
-            expression(root, &native, &lhs, &tree, &PackedDimensions::default()).unwrap(),
+            expression(
+                root,
+                &native,
+                &lhs,
+                &tree,
+                session,
+                &PackedDimensions::default()
+            )
+            .unwrap(),
             Expr::Literal("7".into())
         );
         for (text, expected) in [("8", 8), ("7+8", 15)] {
@@ -152,10 +164,17 @@ mod tests {
             )
             .unwrap();
             let root = native.assign_statements[0].assignments[0].right;
-            let value =
-                expression(root, &native, &lhs, &tree, &PackedDimensions::default()).unwrap();
+            let value = expression(
+                root,
+                &native,
+                &lhs,
+                &tree,
+                session,
+                &PackedDimensions::default(),
+            )
+            .unwrap();
             assert_eq!(
-                expr_to_const(&tree.state, value).and_then(|value| eval_ast_const_expr(
+                expr_to_const(session, value).and_then(|value| eval_ast_const_expr(
                     &tree.functions,
                     &value,
                     &HashMap::default()
@@ -171,6 +190,7 @@ mod query_depth_tests {
     use super::*;
     #[test]
     fn deeply_nested_bits_uses_native_jobs_on_default_stack() {
+        let session = &mut Session::default();
         let tree = std::thread::Builder::new()
             .stack_size(128 * 1024 * 1024)
             .spawn(|| {
@@ -196,7 +216,7 @@ mod query_depth_tests {
             scope_types_complete: true,
             ..PackedDimensions::default()
         };
-        let value = bind(root, &tree, &context);
+        let value = bind(root, &tree, session, &context);
         drop(tree);
         assert_eq!(value.unwrap(), Expr::Literal("32".into()));
     }

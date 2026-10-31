@@ -1078,19 +1078,19 @@ pub(super) fn indexed_select_bounds_values(
 /// Bound expressions keep both mux arms until typed folding establishes width.
 pub(super) fn indexed_expression_value(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expression: Expr,
     dimensions: &PackedDimensions,
 ) -> Option<ConstExpr> {
-    let state = &*tree.state;
-    let expression = substitute_indexed_parameter_values(tree, expression, dimensions);
-    expr_to_const(
-        state,
-        fold_const_integral_expr_preserving_mask(tree, expression, &dimensions.const_env),
-    )
+    let expression = substitute_indexed_parameter_values(tree, session, expression, dimensions);
+    let folded =
+        fold_const_integral_expr_preserving_mask(tree, session, expression, &dimensions.const_env);
+    expr_to_const(session, folded)
 }
 
 fn substitute_indexed_parameter_values(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expression: Expr,
     dimensions: &PackedDimensions,
 ) -> Expr {
@@ -1108,6 +1108,7 @@ fn substitute_indexed_parameter_values(
         .collect();
     substitute_expr_constants_with_parameter_literals(
         tree,
+        session,
         expression,
         &dimensions.const_env,
         &values,
@@ -1119,6 +1120,7 @@ fn substitute_indexed_parameter_values(
 pub(super) fn selected_parameter_initializer(
     native: celox_sv_syntax::ExprId,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     assignment_width: Option<usize>,
 ) -> Converted<ConstExpr> {
@@ -1128,18 +1130,26 @@ pub(super) fn selected_parameter_initializer(
         native,
         syntax_tree.declarations(),
         syntax_tree,
+        session,
         &dimensions,
     )?;
-    fold_parameter_selection(syntax_tree, expression, &dimensions, assignment_width)
+    fold_parameter_selection(
+        syntax_tree,
+        session,
+        expression,
+        &dimensions,
+        assignment_width,
+    )
 }
 
 fn fold_parameter_selection(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expression: Expr,
     dimensions: &PackedDimensions,
     assignment_width: Option<usize>,
 ) -> Converted<ConstExpr> {
-    let expression = substitute_indexed_parameter_values(tree, expression, dimensions);
+    let expression = substitute_indexed_parameter_values(tree, session, expression, dimensions);
     if let Expr::Literal(text) = &expression
         && text.contains(['.', 'e', 'E'])
         && text.parse::<f64>().is_ok()
@@ -1155,6 +1165,7 @@ fn fold_parameter_selection(
     let not_constant = || unsupported("parameter initializer that is not constant");
     let constant = constant_folding::constant_with_folded_selections(
         tree,
+        session,
         &expression,
         &dimensions.const_env,
         &integral_types,

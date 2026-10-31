@@ -1409,6 +1409,7 @@ fn resolves_imported_constant_parameter_part_selects() {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap();
     assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(11));
@@ -3834,6 +3835,7 @@ fn native_interface_module(source: &str, name: &str) -> ir::Module {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap()
         .modules()[0]
@@ -3881,6 +3883,7 @@ fn native_interface_sources(sources: &[(&str, &Path)]) -> Result<Vec<ir::Module>
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )?;
             modules.extend(ir.modules().iter().cloned());
         }
@@ -5338,6 +5341,7 @@ fn native_interface_array_ports_reject_incompatible_shapes() {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap_err();
     assert_eq!(
@@ -5374,6 +5378,7 @@ fn rejects_mismatched_interface_array_connection_widths_and_shapes() {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap_err();
         assert!(
@@ -7010,6 +7015,7 @@ fn imported_class_member_types_keep_declaration_dimensions() {
         "Top",
         &HashMap::default(),
         &packages,
+        &mut packages.design(),
     )
     .expect("imported class typedefs must retain their declaration's dimensions");
     let top = ir

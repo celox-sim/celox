@@ -9,6 +9,7 @@ pub(super) fn with_dimensions(
     base: Type,
     dims: &[Dimension],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Type> {
     let Some(first) = dims.first() else {
@@ -21,7 +22,7 @@ pub(super) fn with_dimensions(
             let capacity = match bound {
                 None => 0,
                 Some(id) => {
-                    let bound = constant_binding::bind(id, tree, context)?
+                    let bound = constant_binding::bind(id, tree, session, context)?
                         .and_then(|v| eval_ast_const_expr(&tree.functions, &v, &context.const_env))
                         .and_then(|v| u32::try_from(v).ok())
                         .filter(|v| *v > 0 && *v < u32::MAX)
@@ -35,15 +36,17 @@ pub(super) fn with_dimensions(
         }
         DimensionKind::Index(id) => {
             let key_type = match &tree.declarations().expression(id).kind {
-                ExprKind::Type(id) => type_binding::bind(*id, tree, context)?,
+                ExprKind::Type(id) => type_binding::bind(*id, tree, session, context)?,
                 ExprKind::Name(name) => {
                     let name = instances::normalize_identifier(&name.spelling);
                     match context.type_aliases.get(&name) {
                         Some(ty) => Some(ty.clone()),
                         // A class: the index is an object handle (IEEE
                         // 1800-2023 7.8.5).
-                        None if context.get(&name).is_none() => classes::resolve(tree, &name)
-                            .and_then(|class| classes::handle_type(tree, &class)),
+                        None if context.get(&name).is_none() => {
+                            classes::resolve(tree, session, &name)
+                                .and_then(|class| classes::handle_type(tree, session, &class))
+                        }
                         None => None,
                     }
                 }
@@ -89,13 +92,13 @@ pub(super) fn with_dimensions(
     let Some(kind) = kind else {
         return Ok(types::type_with_unpacked_ranges(
             base,
-            constant_binding::bind_unpacked_ranges(dims, tree, context)?,
+            constant_binding::bind_unpacked_ranges(dims, tree, session, context)?,
         ));
     };
     // `T a[x][y]`: each element of `a` is a container `T [y]` (IEEE
     // 1800-2023 7.4.5, 7.8), held by its handle like any container value.
     let base = if dims.len() > 1 {
-        with_dimensions(base, &dims[1..], tree, context)?
+        with_dimensions(base, &dims[1..], tree, session, context)?
     } else {
         base
     };
@@ -179,6 +182,7 @@ pub(super) fn native_type(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<ContainerType>>> {
     if let ExprKind::Name(name) = &native
@@ -188,10 +192,12 @@ pub(super) fn native_type(
     {
         return Ok(shape.container.clone());
     }
-    if let Some((property, _)) = expression_binding::object_property(tree, id, native, dims)? {
+    if let Some((property, _)) =
+        expression_binding::object_property(tree, session, id, native, dims)?
+    {
         return Ok(property.r#type.container);
     }
-    if let Some(name) = expression_binding::object_static_property(tree, id, native, dims)?
+    if let Some(name) = expression_binding::object_static_property(tree, session, id, native, dims)?
         && let Some(shape) = dims.get(&name)
     {
         return Ok(shape.container.clone());
@@ -210,7 +216,7 @@ pub(super) fn native_type(
             expression, name, ..
         } = &native.expression(callee).kind
         && matches!(name.spelling.as_str(), "pop_front" | "pop_back")
-        && let Some(outer) = native_type(*expression, native, tree, dims)?
+        && let Some(outer) = native_type(*expression, native, tree, session, dims)?
         && let Some(inner) = outer.element.container.clone()
     {
         return Ok(Some(inner));
@@ -226,11 +232,17 @@ pub(super) fn native_type(
             dimension.kind,
             DimensionKind::Index(_) | DimensionKind::Queue(None)
         )
-        && let Some(outer) = native_type(*expression, native, tree, dims)?
+        && let Some(outer) = native_type(*expression, native, tree, session, dims)?
     {
         return Ok(outer.element.container.clone());
     }
-    locators::result_type(expression_binding::ungroup(id, native), native, tree, dims)
+    locators::result_type(
+        expression_binding::ungroup(id, native),
+        native,
+        tree,
+        session,
+        dims,
+    )
 }
 
 pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {
@@ -268,6 +280,7 @@ pub(super) fn dynamic_array_new(
 pub(super) fn assignment(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<Expr> {
@@ -280,11 +293,11 @@ pub(super) fn assignment(
         let DimensionKind::Index(size) = dimension.kind else {
             return Err(unsupported("dynamic array size"));
         };
-        let size = expression_binding::value(size, native, tree, dims)?;
+        let size = expression_binding::value(size, native, tree, session, dims)?;
         let init = match initializer {
             Some(id) => {
-                check_compatible(id, native, tree, dims, target)?;
-                expression_binding::value(id, native, tree, dims)?
+                check_compatible(id, native, tree, session, dims, target)?;
+                expression_binding::value(id, native, tree, session, dims)?
             }
             None => Expr::Literal("0".into()),
         };
@@ -311,20 +324,20 @@ pub(super) fn assignment(
         let mut parts = Vec::with_capacity(items.len());
         let mut values = Vec::with_capacity(items.len());
         for id in items {
-            match native_type(id, native, tree, dims)? {
+            match native_type(id, native, tree, session, dims)? {
                 Some(item) if concatenation && target.element.container.is_none() => {
                     if matches!(item.layout.kind, ContainerKind::Associative { .. }) {
                         return Err(unsupported(
                             "associative array in an unpacked array concatenation",
                         ));
                     }
-                    check_compatible(id, native, tree, dims, target)?;
+                    check_compatible(id, native, tree, session, dims, target)?;
                     parts.push(Some(item.layout));
-                    values.push(expression_binding::value(id, native, tree, dims)?);
+                    values.push(expression_binding::value(id, native, tree, session, dims)?);
                 }
                 _ => {
                     parts.push(None);
-                    values.push(element_value(id, tree, dims, target)?);
+                    values.push(element_value(id, tree, session, dims, target)?);
                 }
             }
         }
@@ -339,11 +352,13 @@ pub(super) fn assignment(
         }
         return Ok(call(ContainerOp::Literal, target.layout, values));
     }
-    check_compatible(root, native, tree, dims, target)?;
+    check_compatible(root, native, tree, session, dims, target)?;
     Ok(call(
         ContainerOp::Convert,
         target.layout,
-        vec![expression_binding::value(root, native, tree, dims)?],
+        vec![expression_binding::value(
+            root, native, tree, session, dims,
+        )?],
     ))
 }
 /// An output or inout container formal is copied back to its actual, and an
@@ -353,13 +368,15 @@ pub(super) fn assignment(
 pub(super) fn check_written_actual(
     id: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     formal: &ContainerType,
     inout: bool,
 ) -> Converted<()> {
     let native = tree.declarations();
-    check_compatible(id, native, tree, dims, formal)?;
-    let actual = native_type(id, native, tree, dims)?.expect("checked by `check_compatible`");
+    check_compatible(id, native, tree, session, dims, formal)?;
+    let actual =
+        native_type(id, native, tree, session, dims)?.expect("checked by `check_compatible`");
     let bound = |kind| match kind {
         ContainerKind::Queue { capacity } => capacity,
         _ => 0,
@@ -377,10 +394,11 @@ fn check_compatible(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<()> {
-    let Some(source) = native_type(id, native, tree, dims)? else {
+    let Some(source) = native_type(id, native, tree, session, dims)? else {
         return Err(unsupported(
             "container assignment requires a compatible container",
         ));
@@ -414,6 +432,7 @@ fn check_compatible(
 fn element_value(
     id: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<Expr> {
@@ -421,24 +440,32 @@ fn element_value(
     // An element that is itself a container takes a container value, as an
     // assignment to a container variable does.
     if let Some(inner) = target.element.container.as_deref() {
-        return assignment(id, tree, dims, inner);
+        return assignment(id, tree, session, dims, inner);
     }
-    if native_type(id, native, tree, dims)?.is_some() {
+    if native_type(id, native, tree, session, dims)?.is_some() {
         return Err(unsupported("container used as an element"));
     }
     if let Some(class) = target.element.class.as_deref() {
-        if let Some(call) = expression_binding::object_constructor(tree, id, native, dims, class)? {
+        if let Some(call) =
+            expression_binding::object_constructor(tree, session, id, native, dims, class)?
+        {
             return Ok(call);
         }
-        expression_binding::check_handle_assignment(tree, id, native, dims, class, || {
-            "container element assignment".into()
-        })?;
+        expression_binding::check_handle_assignment(
+            tree,
+            session,
+            id,
+            native,
+            dims,
+            class,
+            || "container element assignment".into(),
+        )?;
     }
     if let Some(aggregate) = target.element.unpacked_struct() {
-        unpacked_structs::check_value(aggregate, id, native, tree, dims)?;
+        unpacked_structs::check_value(aggregate, id, native, tree, session, dims)?;
     }
     let shape = procedural::dimensions_from_type(&target.element);
-    let value = expression_binding::bind_value(id, native, tree, dims, Some(&shape))?;
+    let value = expression_binding::bind_value(id, native, tree, session, dims, Some(&shape))?;
     if let Some(record) = &target.record {
         return Ok(classes::object_call(
             ObjectOp::Box(record.clone()),
@@ -472,6 +499,7 @@ fn index_value(
     id: ExprId,
     base: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<Expr> {
@@ -483,14 +511,20 @@ fn index_value(
             ContainerKind::Associative { object: true, .. }
         )
     }) {
-        expression_binding::check_handle_assignment(tree, id, native, dims, class, || {
-            "associative array index".into()
-        })?;
+        expression_binding::check_handle_assignment(
+            tree,
+            session,
+            id,
+            native,
+            dims,
+            class,
+            || "associative array index".into(),
+        )?;
     }
     if matches!(
         target.layout.kind,
         ContainerKind::Associative { string: true, .. }
-    ) && !expression_binding::native_string(tree, id, native, dims)
+    ) && !expression_binding::native_string(tree, session, id, native, dims)
         && !matches!(&native.expression(expression_binding::ungroup(id, native)).kind, ExprKind::Literal(text) if text.starts_with('"'))
     {
         return Err(unsupported(
@@ -505,22 +539,25 @@ fn index_value(
             if name.spelling == "$"
                 && matches!(target.layout.kind, ContainerKind::Queue { .. }) =>
         {
-            last_index(target, expression_binding::value(base, native, tree, dims)?)?
+            last_index(
+                target,
+                expression_binding::value(base, native, tree, session, dims)?,
+            )?
         }
         ExprKind::Binary {
             left,
             operator,
             right,
         } if operator == "+" || operator == "-" => Expr::Binary {
-            left: Box::new(index_value(*left, base, tree, dims, target)?),
+            left: Box::new(index_value(*left, base, tree, session, dims, target)?),
             op: if operator == "+" {
                 BinaryOp::Add
             } else {
                 BinaryOp::Sub
             },
-            right: Box::new(index_value(*right, base, tree, dims, target)?),
+            right: Box::new(index_value(*right, base, tree, session, dims, target)?),
         },
-        _ => expression_binding::value(id, native, tree, dims)?,
+        _ => expression_binding::value(id, native, tree, session, dims)?,
     };
     Ok(
         if matches!(
@@ -538,10 +575,11 @@ pub(super) fn value(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     statement: bool,
 ) -> Converted<Option<Expr>> {
-    if let Some(query) = query(id, native, tree, dims)? {
+    if let Some(query) = query(id, native, tree, session, dims)? {
         return Ok(Some(query));
     }
     match &native.expression(id).kind {
@@ -549,14 +587,15 @@ pub(super) fn value(
             left,
             operator,
             right,
-        } if native_type(*left, native, tree, dims)?.is_some()
-            || native_type(*right, native, tree, dims)?.is_some() =>
+        } if native_type(*left, native, tree, session, dims)?.is_some()
+            || native_type(*right, native, tree, session, dims)?.is_some() =>
         {
-            let Some(target) = native_type(*left, native, tree, dims)? else {
+            let Some(target) = native_type(*left, native, tree, session, dims)? else {
                 return Err(unsupported("container comparison requires two containers"));
             };
-            check_compatible(*right, native, tree, dims, &target)?;
-            let source = native_type(*right, native, tree, dims)?.expect("checked compatibility");
+            check_compatible(*right, native, tree, session, dims, &target)?;
+            let source =
+                native_type(*right, native, tree, session, dims)?.expect("checked compatibility");
             if std::mem::discriminant(&source.layout.kind)
                 != std::mem::discriminant(&target.layout.kind)
             {
@@ -583,8 +622,8 @@ pub(super) fn value(
                 op,
                 target.layout,
                 vec![
-                    expression_binding::value(*left, native, tree, dims)?,
-                    expression_binding::value(*right, native, tree, dims)?,
+                    expression_binding::value(*left, native, tree, session, dims)?,
+                    expression_binding::value(*right, native, tree, session, dims)?,
                 ],
             );
             Ok(Some(if matches!(operator.as_str(), "!=" | "!==") {
@@ -600,7 +639,7 @@ pub(super) fn value(
             expression,
             dimension,
         } => {
-            let Some(target) = native_type(*expression, native, tree, dims)? else {
+            let Some(target) = native_type(*expression, native, tree, session, dims)? else {
                 return Ok(None);
             };
             let index = match dimension.kind {
@@ -618,12 +657,20 @@ pub(super) fn value(
                     ContainerOp::Get,
                     target.layout,
                     vec![
-                        expression_binding::value(*expression, native, tree, dims)?,
+                        expression_binding::value(*expression, native, tree, session, dims)?,
                         match index {
-                            Some(index) => index_value(index, *expression, tree, dims, &target)?,
+                            Some(index) => {
+                                index_value(index, *expression, tree, session, dims, &target)?
+                            }
                             None => last_index(
                                 &target,
-                                expression_binding::value(*expression, native, tree, dims)?,
+                                expression_binding::value(
+                                    *expression,
+                                    native,
+                                    tree,
+                                    session,
+                                    dims,
+                                )?,
                             )?,
                         },
                     ],
@@ -648,7 +695,7 @@ pub(super) fn value(
             else {
                 return Ok(None);
             };
-            let Some(target) = native_type(*base, native, tree, dims)? else {
+            let Some(target) = native_type(*base, native, tree, session, dims)? else {
                 return Ok(None);
             };
             if separator != "." {
@@ -744,7 +791,9 @@ pub(super) fn value(
             {
                 return Err(unsupported("type queries on nonintegral queue pop results"));
             }
-            let mut args = vec![expression_binding::value(*base, native, tree, dims)?];
+            let mut args = vec![expression_binding::value(
+                *base, native, tree, session, dims,
+            )?];
             for (index, arg) in arguments.iter().enumerate() {
                 let id = arg.value.unwrap();
                 if matches!(
@@ -773,13 +822,13 @@ pub(super) fn value(
                             "incompatible associative traversal index variable",
                         ));
                     }
-                    args.push(expression_binding::value(id, native, tree, dims)?);
+                    args.push(expression_binding::value(id, native, tree, session, dims)?);
                 } else if matches!(op, ContainerOp::PushFront | ContainerOp::PushBack)
                     || op == ContainerOp::Insert && index == 1
                 {
-                    args.push(element_value(id, tree, dims, &target)?);
+                    args.push(element_value(id, tree, session, dims, &target)?);
                 } else {
-                    args.push(index_value(id, *base, tree, dims, &target)?);
+                    args.push(index_value(id, *base, tree, session, dims, &target)?);
                 }
             }
             let value = call(op, target.layout, args);
@@ -799,6 +848,7 @@ fn query(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
     let ExprKind::Call {
@@ -828,7 +878,7 @@ fn query(
     let Some(base) = arguments.first().and_then(|a| a.value) else {
         return Ok(None);
     };
-    let Some(target) = native_type(base, native, tree, dims)? else {
+    let Some(target) = native_type(base, native, tree, session, dims)? else {
         return Ok(None);
     };
     if arguments
@@ -884,7 +934,7 @@ fn query(
     }
     let dimension = match arguments.get(1).and_then(|a| a.value) {
         None => 1,
-        Some(id) => constant_binding::bind(id, tree, dims)?
+        Some(id) => constant_binding::bind(id, tree, session, dims)?
             .and_then(|v| eval_ast_const_expr(&tree.functions, &v, &dims.const_env))
             .ok_or_else(|| unsupported("nonconstant dynamic array query dimension"))?,
     };
@@ -896,11 +946,13 @@ fn query(
     if matches!(target.layout.kind, ContainerKind::Associative { .. }) && name.spelling != "$size" {
         return Err(unsupported("associative bound query"));
     }
-    let size = || -> Converted<Expr> {
+    let mut size = || -> Converted<Expr> {
         Ok(call(
             ContainerOp::Size,
             target.layout,
-            vec![expression_binding::value(base, native, tree, dims)?],
+            vec![expression_binding::value(
+                base, native, tree, session, dims,
+            )?],
         ))
     };
     Ok(Some(match name.spelling.as_str() {
@@ -921,6 +973,7 @@ pub(super) fn set(
     op: &str,
     nonblocking: bool,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Stmt>> {
     let native = tree.declarations();
@@ -931,21 +984,29 @@ pub(super) fn set(
     else {
         return Ok(None);
     };
-    let Some(target) = native_type(*expression, native, tree, dims)? else {
+    let Some(target) = native_type(*expression, native, tree, session, dims)? else {
         return Ok(None);
     };
     if nonblocking {
         return Err(unsupported("nonblocking dynamic element assignment"));
     }
-    let container = expression_binding::value(*expression, native, tree, dims)?;
+    let container = expression_binding::value(*expression, native, tree, session, dims)?;
     let index = match dimension.kind {
-        DimensionKind::Index(index) => index_value(index, *expression, tree, dims, &target)?,
+        DimensionKind::Index(index) => {
+            index_value(index, *expression, tree, session, dims, &target)?
+        }
         DimensionKind::Queue(None) if matches!(target.layout.kind, ContainerKind::Queue { .. }) => {
             Expr::Binary {
                 left: Box::new(call(
                     ContainerOp::Size,
                     target.layout,
-                    vec![expression_binding::value(*expression, native, tree, dims)?],
+                    vec![expression_binding::value(
+                        *expression,
+                        native,
+                        tree,
+                        session,
+                        dims,
+                    )?],
                 )),
                 op: BinaryOp::Sub,
                 right: Box::new(Expr::Literal("1".into())),
@@ -954,9 +1015,9 @@ pub(super) fn set(
         _ => return Err(unsupported("dynamic element slice assignment")),
     };
     let value = if op == "=" {
-        element_value(right, tree, dims, &target)?
+        element_value(right, tree, session, dims, &target)?
     } else {
-        compound_value(op, right, &container, &index, tree, dims, &target)?
+        compound_value(op, right, &container, &index, tree, session, dims, &target)?
     };
     Ok(Some(Stmt::Eval(call(
         ContainerOp::Set,
@@ -975,6 +1036,7 @@ fn compound_value(
     container: &Expr,
     index: &Expr,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     target: &ContainerType,
 ) -> Converted<Expr> {
@@ -1023,6 +1085,7 @@ fn compound_value(
             right,
             tree.declarations(),
             tree,
+            session,
             dims,
         )?),
     })
@@ -1251,6 +1314,7 @@ fn struct_element(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<(Arc<ContainerType>, Expr)>> {
     let id = expression_binding::ungroup(id, native);
@@ -1273,13 +1337,13 @@ fn struct_element(
         }
         _ => return Ok(None),
     };
-    let Some(target) = native_type(base, native, tree, dims)? else {
+    let Some(target) = native_type(base, native, tree, session, dims)? else {
         return Ok(None);
     };
     if target.element.unpacked_struct().is_none() {
         return Ok(None);
     }
-    let Some(value) = value(id, native, tree, dims, false)? else {
+    let Some(value) = value(id, native, tree, session, dims, false)? else {
         return Ok(None);
     };
     let raw = match value {
@@ -1302,6 +1366,7 @@ pub(super) fn native_struct_element(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<unpacked_structs::UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
@@ -1321,7 +1386,7 @@ pub(super) fn native_struct_element(
         } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") => *expression,
         _ => return Ok(None),
     };
-    Ok(native_type(base, native, tree, dims)?
+    Ok(native_type(base, native, tree, session, dims)?
         .and_then(|target| target.element.unpacked_struct().cloned()))
 }
 
@@ -1331,6 +1396,7 @@ pub(super) fn element_member(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<(Type, Expr)>> {
     let mut names = Vec::new();
@@ -1349,12 +1415,12 @@ pub(super) fn element_member(
         }
         names.push(instances::normalize_identifier(&name.spelling));
         current = expression_binding::ungroup(*expression, native);
-        if native_struct_element(current, native, tree, dims)?.is_some() {
+        if native_struct_element(current, native, tree, session, dims)?.is_some() {
             break current;
         }
     };
     names.reverse();
-    let Some((target, raw)) = struct_element(element, native, tree, dims)? else {
+    let Some((target, raw)) = struct_element(element, native, tree, session, dims)? else {
         return Ok(None);
     };
     let aggregate = target

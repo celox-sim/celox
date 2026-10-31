@@ -18,7 +18,8 @@ impl BodyBuilder<'_, '_, '_> {
         header: &ForeachHeader,
     ) -> Result<Vec<ForeachLoop>, AnalyzerError> {
         let native = self.tree.declarations();
-        let container = containers::native_type(header.array, native, self.tree, &self.dims)?;
+        let container =
+            containers::native_type(header.array, native, self.tree, self.session, &self.dims)?;
         let mut array = header.array;
         let mut unit_member = None;
         let array = loop {

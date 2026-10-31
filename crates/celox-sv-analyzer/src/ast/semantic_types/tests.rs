@@ -3,22 +3,24 @@ use super::{
     conversion::of_type,
     relations::{Assignable, Mismatch},
 };
+use crate::ast::Session;
 use crate::ast::{AnalysisContext, types};
 use std::path::Path;
 
 /// The semantic types of the typedefs of module `M` in `items`.
 fn typedefs(items: &str) -> (TyTable, HashMap<String, TyId>) {
+    let session = &mut Session::default();
     let source = format!("module M; {items} endmodule");
     let tree =
         crate::source_tree::parse_scope_fixture(&source, Path::new("semantic_types.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
     let env = HashMap::default();
-    let aliases = types::type_aliases_from_scope_with_env(&tree, &env).unwrap();
-    let table = TyTable::default();
+    let aliases = types::type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
+    let mut table = TyTable::default();
     let ids = aliases
         .iter()
         .map(|(name, ty)| {
-            let id = of_type(&table, &tree.functions, ty, &env)
+            let id = of_type(&mut table, &tree.functions, ty, &env)
                 .unwrap_or_else(|| panic!("`{name}` has no semantic type"));
             (name.clone(), id)
         })
@@ -111,7 +113,7 @@ fn named_aggregates_and_enumerations_match_only_their_own_declaration() {
 
 #[test]
 fn interning_a_type_again_returns_its_id() {
-    let table = TyTable::default();
+    let mut table = TyTable::default();
     let packed = |keyword| {
         TyData::Packed(Packed {
             element: PackedElement::Bits,
@@ -126,7 +128,7 @@ fn interning_a_type_again_returns_its_id() {
     let vector = table.intern(packed(None));
     assert_eq!(table.len(), 2);
     assert_eq!(table.intern(packed(Some("int"))), int);
-    assert_eq!(table.data(int), packed(Some("int")));
+    assert_eq!(*table.data(int), packed(Some("int")));
     assert_eq!(table.canonical(int), vector);
     let queue = |element| TyData::Array {
         kind: ArrayKind::Queue { bound: None },
@@ -139,6 +141,7 @@ fn interning_a_type_again_returns_its_id() {
 
 #[test]
 fn aggregates_of_each_generate_scope_are_types_of_their_own() {
+    let session = &mut Session::default();
     // IEEE 1800-2023 27.4: a typedef in a generate scope declares a type of
     // its own in each iteration.
     let source = "module M; typedef struct packed {int A;} p_t; typedef struct {int A;} u_t;
@@ -148,12 +151,19 @@ fn aggregates_of_each_generate_scope_are_types_of_their_own() {
     let tree = AnalysisContext::unspecialized(&tree);
     let items = tree.body_membership().unwrap();
     let env = HashMap::default();
-    let table = TyTable::default();
-    let scope = |path| {
-        let aliases =
-            types::type_aliases_of_generate_scope(&tree, &items, &env, &HashMap::default(), path)
-                .unwrap();
-        ["p_t", "u_t"].map(|name| of_type(&table, &tree.functions, &aliases[name], &env).unwrap())
+    let mut table = TyTable::default();
+    let mut scope = |path| {
+        let aliases = types::type_aliases_of_generate_scope(
+            &tree,
+            session,
+            &items,
+            &env,
+            &HashMap::default(),
+            path,
+        )
+        .unwrap();
+        ["p_t", "u_t"]
+            .map(|name| of_type(&mut table, &tree.functions, &aliases[name], &env).unwrap())
     };
     let (first, second, again) = (scope("g[0]"), scope("g[1]"), scope("g[0]"));
     for index in 0..2 {

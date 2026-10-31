@@ -128,12 +128,13 @@ impl Message {
 pub(super) fn named_type(
     path: &[TypeSegment],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<Box<Type>>> {
     let segment = match path {
         [segment]
             if segment.name.spelling == "mailbox"
-                && classes::resolve(tree, "mailbox").is_none() =>
+                && classes::resolve(tree, session, "mailbox").is_none() =>
         {
             segment
         }
@@ -150,7 +151,8 @@ pub(super) fn named_type(
     };
     let argument = argument.ok_or_else(|| unsupported("mailbox message type"))?;
     // The type may name a constant that `context` does not know yet.
-    let Some(message) = classes::specializations::type_argument(tree, argument, context)? else {
+    let Some(message) = classes::specializations::type_argument(tree, session, argument, context)?
+    else {
         return Ok(None);
     };
     let name = Message::of(&tree.functions, &message, &context.const_env)?.class_name(&message);
@@ -160,6 +162,7 @@ pub(super) fn named_type(
 /// `new(bound)` of mailbox class `class` (15.4.1).
 pub(super) fn new(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     arguments: &[Argument],
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -180,7 +183,7 @@ pub(super) fn new(
                 .is_none_or(|name| name.spelling == "bound") =>
         {
             match argument.value {
-                Some(value) => expression_binding::value(value, native, tree, dimensions)?,
+                Some(value) => expression_binding::value(value, native, tree, session, dimensions)?,
                 None => Expr::Literal("32'sd0".into()),
             }
         }
@@ -196,6 +199,7 @@ pub(super) fn new(
 /// the methods that are functions, as a value.
 pub(super) fn value(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -220,8 +224,9 @@ pub(super) fn value(
     if separator != "." {
         return Ok(None);
     }
-    let Some(class) = expression_binding::object_native_class(tree, *receiver, native, dimensions)
-        .filter(|class| is_class(class))
+    let Some(class) =
+        expression_binding::object_native_class(tree, session, *receiver, native, dimensions)
+            .filter(|class| is_class(class))
     else {
         return Ok(None);
     };
@@ -252,7 +257,7 @@ pub(super) fn value(
         [argument] if argument.name.is_none() && argument.value.is_none() => &[],
         arguments => arguments,
     };
-    let mailbox = expression_binding::value(*receiver, native, tree, dimensions)?;
+    let mailbox = expression_binding::value(*receiver, native, tree, session, dimensions)?;
     if op == ProcessOp::MailboxNum {
         if !arguments.is_empty() {
             return Err(unsupported("arguments of mailbox num"));
@@ -271,37 +276,41 @@ pub(super) fn value(
         return Err(unsupported(format!("arguments of mailbox {method}")));
     };
     // A message has the type of the mailbox (15.4.9).
-    let class_matches =
-        |id| expression_binding::object_native_class(tree, id, native, dimensions) == message.class;
-    let string = expression_binding::native_string(tree, argument, native, dimensions);
+    let class_matches = |session: &mut Session, id| {
+        expression_binding::object_native_class(tree, session, id, native, dimensions)
+            == message.class
+    };
+    let string = expression_binding::native_string(tree, session, argument, native, dimensions);
     let message_value = if matches!(op, ProcessOp::MailboxPut | ProcessOp::MailboxTryPut) {
         match message.handle {
             Some(HandleProperty::Object) => {
                 let class = message.class.as_deref().unwrap_or_default();
                 if let Some(call) = expression_binding::object_constructor(
-                    tree, argument, native, dimensions, class,
+                    tree, session, argument, native, dimensions, class,
                 )? {
                     call
                 } else {
                     expression_binding::check_handle_assignment(
                         tree,
+                        session,
                         argument,
                         native,
                         dimensions,
                         class,
                         || "mailbox message".to_owned(),
                     )?;
-                    expression_binding::value(argument, native, tree, dimensions)?
+                    expression_binding::value(argument, native, tree, session, dimensions)?
                 }
             }
             Some(HandleProperty::String) => {
-                let value = expression_binding::value(argument, native, tree, dimensions)?;
+                let value = expression_binding::value(argument, native, tree, session, dimensions)?;
                 expression_binding::string_operand(value, dimensions)
             }
             None => {
                 if let Some(class) = &message.class {
                     expression_binding::check_handle_assignment(
                         tree,
+                        session,
                         argument,
                         native,
                         dimensions,
@@ -310,7 +319,7 @@ pub(super) fn value(
                     )?;
                 }
                 // The lowering converts it to the message type.
-                expression_binding::value(argument, native, tree, dimensions)?
+                expression_binding::value(argument, native, tree, session, dimensions)?
             }
         }
     } else {
@@ -318,12 +327,14 @@ pub(super) fn value(
             Some(HandleProperty::String) => string,
             // A process or event message has its built-in class.
             Some(HandleProperty::Object) | None if message.class.is_some() => {
-                class_matches(argument)
+                class_matches(session, argument)
             }
             _ => {
                 !string
-                    && expression_binding::object_native_class(tree, argument, native, dimensions)
-                        .is_none()
+                    && expression_binding::object_native_class(
+                        tree, session, argument, native, dimensions,
+                    )
+                    .is_none()
             }
         };
         if !compatible {
@@ -331,7 +342,7 @@ pub(super) fn value(
                 "mailbox {method} into a variable of another type than its messages"
             )));
         }
-        expression_binding::value(argument, native, tree, dimensions)?
+        expression_binding::value(argument, native, tree, session, dimensions)?
     };
     // The lowering takes the message shape from the layout, which it does
     // not pass on to the scheduler, and copies a message out as a value of

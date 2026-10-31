@@ -193,20 +193,22 @@ fn unsupported_operand(what: impl std::fmt::Display) -> AnalyzerError {
 pub(super) fn query_string(
     argument: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<String> {
-    let context = dimensions::query_context_for_operand(argument, tree, context)?;
-    let r#type = operand_type(argument, tree, &context)?;
-    type_name(&r#type, tree, &context.const_env)
+    let context = dimensions::query_context_for_operand(argument, tree, session, context)?;
+    let r#type = operand_type(argument, tree, session, &context)?;
+    type_name(&r#type, tree, session, &context.const_env)
 }
 
 /// The value of a `$typename(argument)` call: the string as a literal.
 pub(super) fn query_value(
     argument: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Expr> {
-    let name = query_string(argument, tree, context)?;
+    let name = query_string(argument, tree, session, context)?;
     // A string, as the result of the enumeration method `name` is (6.19.5.6).
     Ok(expression_binding::string_call(
         system_functions::StringOp::FromBits,
@@ -226,6 +228,7 @@ fn string_literal(text: &str) -> String {
 fn operand_type(
     argument: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Type> {
     let native = tree.declarations();
@@ -249,17 +252,18 @@ fn operand_type(
                 // A type of a package or class, `C::T [3:0]`.
                 None => classes::specializations::scoped_type(
                     tree,
+                    session,
                     selected_base(argument, native),
                     context,
                 )?,
             }
         {
-            let ranges = type_binding::binding::packed_ranges(&dimensions, tree, context)?;
+            let ranges = type_binding::binding::packed_ranges(&dimensions, tree, session, context)?;
             return Ok(types::enclose_aliased_packed_type(base, ranges));
         }
     }
     match &native.expression(argument).kind {
-        celox_sv_syntax::ExprKind::Type(id) => type_binding::bind(*id, tree, context)?
+        celox_sv_syntax::ExprKind::Type(id) => type_binding::bind(*id, tree, session, context)?
             .ok_or_else(|| unsupported_operand("this data type")),
         celox_sv_syntax::ExprKind::Name(name) => {
             let name = instances::normalize_identifier(&name.spelling);
@@ -273,32 +277,34 @@ fn operand_type(
                 return Err(unsupported_operand(format!("parameter `{name}`")));
             }
             if let Some((property, _)) =
-                expression_binding::object_property(tree, argument, native, context)?
+                expression_binding::object_property(tree, session, argument, native, context)?
             {
                 return Ok(property.r#type.clone());
             }
             if let Some(r#type) = context.type_aliases.get(&name) {
                 return Ok(r#type.clone());
             }
-            if let Some(r#type) = class_operand(tree, &name, context)? {
+            if let Some(r#type) = class_operand(tree, session, &name, context)? {
                 return Ok(r#type);
             }
             Err(unsupported_operand(format!("`{name}`")))
         }
         celox_sv_syntax::ExprKind::Member { .. } => {
             if let Some((property, _)) =
-                expression_binding::object_property(tree, argument, native, context)?
+                expression_binding::object_property(tree, session, argument, native, context)?
             {
                 return Ok(property.r#type.clone());
             }
             // A static property, `C::v` or `h.v` (8.9).
             if let Some(property) = expression_binding::object_static_property_declaration(
-                tree, argument, native, context,
+                tree, session, argument, native, context,
             )? {
                 return Ok(property.r#type);
             }
             // A type of a package or class, `p::t` or `C::T`.
-            if let Some(r#type) = classes::specializations::scoped_type(tree, argument, context)? {
+            if let Some(r#type) =
+                classes::specializations::scoped_type(tree, session, argument, context)?
+            {
                 return Ok(r#type);
             }
             // A class of a package, `p::C`.
@@ -310,22 +316,19 @@ fn operand_type(
                 && separator == "::"
                 && let celox_sv_syntax::ExprKind::Name(package) =
                     &native.expression(*expression).kind
-                && let Some(r#type) = class_operand(
+                && let qualified = scope::qualified_name(
                     tree,
-                    &scope::qualified_name(
-                        tree,
-                        &instances::normalize_identifier(&package.spelling),
-                        &instances::normalize_identifier(&name.spelling),
-                    ),
-                    context,
-                )?
+                    &instances::normalize_identifier(&package.spelling),
+                    &instances::normalize_identifier(&name.spelling),
+                )
+                && let Some(r#type) = class_operand(tree, session, &qualified, context)?
             {
                 return Ok(r#type);
             }
             Err(unsupported_operand("this member or hierarchical name"))
         }
         celox_sv_syntax::ExprKind::Parameterized { .. } => {
-            expression_binding::named_class(tree, argument, native, context)?
+            expression_binding::named_class(tree, session, argument, native, context)?
                 .map(|class| classes::handle(&class))
                 .ok_or_else(|| unsupported_operand("this class"))
         }
@@ -338,19 +341,20 @@ fn operand_type(
 /// The handle type of the class `name` names, if it names one.
 fn class_operand(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
     context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    let Some(class) = classes::resolve(tree, name) else {
+    let Some(class) = classes::resolve(tree, session, name) else {
         return Ok(None);
     };
     // A parameterized class named alone is its default specialization
     // (8.25).
-    if classes::is_parameterized(tree, &class) {
-        let class = classes::specializations::specialize(tree, &class, &[], context)?;
+    if classes::is_parameterized(tree, session, &class) {
+        let class = classes::specializations::specialize(tree, session, &class, &[], context)?;
         return Ok(Some(classes::handle(&class)));
     }
-    Ok(classes::handle_type(tree, &class))
+    Ok(classes::handle_type(tree, session, &class))
 }
 
 /// The expression that the selects of native expression `id` apply to.
@@ -368,6 +372,7 @@ fn selected_base(
 pub(super) fn type_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
 ) -> Converted<String> {
     let range = |left: &ConstExpr, right: &ConstExpr| -> Converted<String> {
@@ -388,7 +393,7 @@ pub(super) fn type_name(
                 ContainerKind::Queue { capacity: 0 } => "[$]".to_owned(),
                 ContainerKind::Queue { capacity } => format!("[$:{}]", capacity - 1),
                 ContainerKind::Associative { .. } => match &container.key {
-                    Some(key) => format!("[{}]", type_name(key, tree, env)?),
+                    Some(key) => format!("[{}]", type_name(key, tree, session, env)?),
                     None => "[*]".to_owned(),
                 },
             });
@@ -401,7 +406,7 @@ pub(super) fn type_name(
     {
         return Err(unsupported_operand("an array of containers"));
     }
-    let mut name = element_name(element, tree, env, &range)?;
+    let mut name = element_name(element, tree, session, env, &range)?;
     if !dimensions.is_empty() {
         // `$` stands for the name of the unpacked array (rule d).
         name.push('$');
@@ -414,12 +419,13 @@ pub(super) fn type_name(
 fn element_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
     // An event is a handle of a built-in class that has no class name.
     if let Some(class) = r#type.class().filter(|_| r#type.kind != TypeKind::Event) {
-        return class_name(class, tree, env);
+        return class_name(class, tree, session, env);
     }
     match r#type.kind {
         TypeKind::Event => return Ok("event".to_owned()),
@@ -432,13 +438,13 @@ fn element_name(
         TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {}
     }
     if let Some(aggregate) = r#type.unpacked_struct() {
-        return unpacked_struct_name(r#type, aggregate, tree, env);
+        return unpacked_struct_name(r#type, aggregate, tree, session, env);
     }
     if r#type.is_enum {
-        return enum_name(r#type, tree, env, range);
+        return enum_name(r#type, tree, session, env, range);
     }
     if !r#type.members.is_empty() {
-        return aggregate_name(r#type, tree, env, range);
+        return aggregate_name(r#type, tree, session, env, range);
     }
     if r#type.signed_element_depth.is_some() {
         // No declaration without a typedef has this type (7.4.1).
@@ -496,6 +502,7 @@ fn vector_name(
 fn enum_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
@@ -536,6 +543,7 @@ fn enum_name(
         r#type,
         "an anonymous enumerated type",
         tree,
+        session,
         env,
     )?);
     Ok(name)
@@ -545,6 +553,7 @@ fn enum_name(
 fn aggregate_name(
     r#type: &Type,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     range: &dyn Fn(&ConstExpr, &ConstExpr) -> Converted<String>,
 ) -> Converted<String> {
@@ -567,7 +576,7 @@ fn aggregate_name(
     }
     name.push('{');
     for member in &r#type.members {
-        name.push_str(&type_name(member.r#type(), tree, env)?);
+        name.push_str(&type_name(member.r#type(), tree, session, env)?);
         name.push(' ');
         name.push_str(member.name());
         name.push(';');
@@ -577,6 +586,7 @@ fn aggregate_name(
         r#type,
         "an anonymous struct or union type",
         tree,
+        session,
         env,
     )?);
     for packed in outer {
@@ -591,6 +601,7 @@ fn unpacked_struct_name(
     r#type: &Type,
     aggregate: &unpacked_structs::UnpackedStruct,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
 ) -> Converted<String> {
     let mut name = "struct{".to_owned();
@@ -601,7 +612,7 @@ fn unpacked_struct_name(
                 "an unpacked structure with an unpacked array member",
             ));
         }
-        name.push_str(&type_name(&member.r#type, tree, env)?);
+        name.push_str(&type_name(&member.r#type, tree, session, env)?);
         name.push(' ');
         name.push_str(&member.name);
         name.push(';');
@@ -611,6 +622,7 @@ fn unpacked_struct_name(
         r#type,
         "an anonymous struct or union type",
         tree,
+        session,
         env,
     )?);
     Ok(name)
@@ -622,13 +634,15 @@ fn typedef_name(
     r#type: &Type,
     anonymous: &str,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
 ) -> Converted<String> {
     match r#type.spelling.name_of() {
         Some(TypedefName::Scope(name)) => Ok(name.to_string()),
-        Some(TypedefName::Class { class, name }) => {
-            Ok(format!("{}::{name}", class_name(class, tree, env)?))
-        }
+        Some(TypedefName::Class { class, name }) => Ok(format!(
+            "{}::{name}",
+            class_name(class, tree, session, env)?
+        )),
         None => Err(unsupported_operand(anonymous)),
     }
 }
@@ -638,18 +652,19 @@ fn typedef_name(
 fn class_name(
     class: &str,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
 ) -> Converted<String> {
     if class == processes::CLASS {
         return Ok("std::process".to_owned());
     }
-    let specialization = classes::specializations::lookup(tree, class)
-        .or_else(|| tree.state.foreign.specialization(class));
+    let specialization = classes::specializations::lookup(session, class)
+        .or_else(|| session.foreign.specialization(class));
     let generic = specialization.as_ref().map_or_else(
         || class.to_owned(),
         |specialization| specialization.generic.clone(),
     );
-    let declaration = classes::declaration(tree, &generic);
+    let declaration = classes::declaration(tree, session, &generic);
     let mut name = match declaration {
         Some(declaration) => scoped_name(
             classes::enclosing_unit(tree.declarations(), declaration.tokens),
@@ -672,7 +687,7 @@ fn class_name(
             .arguments
             .iter()
             .map(|argument| match argument {
-                ClassArgument::Type(r#type) => type_name(r#type, tree, env),
+                ClassArgument::Type(r#type) => type_name(r#type, tree, session, env),
                 ClassArgument::Value(Some(value)) => Ok(value.to_string()),
                 ClassArgument::Value(None) => Err(unsupported_operand(format!(
                     "class `{name}` with a parameter value that is not integral"

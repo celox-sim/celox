@@ -9,7 +9,6 @@
 //! type it renames.
 
 use fxhash::FxHashMap as HashMap;
-use std::cell::RefCell;
 use std::sync::Arc;
 
 mod conversion;
@@ -125,11 +124,8 @@ pub(super) enum TyData {
 }
 
 /// The interned types of an analysis.
-#[derive(Debug, Default)]
-pub(super) struct TyTable(RefCell<Interned>);
-
-#[derive(Debug, Default)]
-struct Interned {
+#[derive(Clone, Debug, Default)]
+pub(super) struct TyTable {
     /// Each type with the id of the type it matches in canonical form.
     types: Vec<(TyData, TyId)>,
     ids: HashMap<TyData, TyId>,
@@ -137,24 +133,23 @@ struct Interned {
 
 impl TyTable {
     /// The id of type `data`.
-    pub fn intern(&self, data: TyData) -> TyId {
-        if let Some(&id) = self.0.borrow().ids.get(&data) {
+    pub fn intern(&mut self, data: TyData) -> TyId {
+        if let Some(&id) = self.ids.get(&data) {
             return id;
         }
         let canonical = match self.canonical_data(&data) {
             Some(canonical) => self.intern(canonical),
-            None => TyId(self.0.borrow().types.len() as u32),
+            None => TyId(self.types.len() as u32),
         };
-        let mut interned = self.0.borrow_mut();
-        let id = TyId(interned.types.len() as u32);
-        interned.types.push((data.clone(), canonical));
-        interned.ids.insert(data, id);
+        let id = TyId(self.types.len() as u32);
+        self.types.push((data.clone(), canonical));
+        self.ids.insert(data, id);
         id
     }
 
     /// The type `id` names.
-    pub fn data(&self, id: TyId) -> TyData {
-        self.0.borrow().types[id.0 as usize].0.clone()
+    pub fn data(&self, id: TyId) -> &TyData {
+        &self.types[id.0 as usize].0
     }
 
     /// Whether `a` and `b` are matching types (IEEE 1800-2023 6.22.1).
@@ -164,13 +159,13 @@ impl TyTable {
 
     /// The type that every type matching `id` shares.
     pub fn canonical(&self, id: TyId) -> TyId {
-        self.0.borrow().types[id.0 as usize].1
+        self.types[id.0 as usize].1
     }
 
     /// How many types the table holds.
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.0.borrow().types.len()
+        self.types.len()
     }
 
     /// The canonical form of `data` if it is not `data` itself: the type

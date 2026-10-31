@@ -45,9 +45,10 @@ pub(super) enum Value {
 pub(super) fn from_param(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<BoundPattern> {
-    match binding::value(root, tree, dims)? {
+    match binding::value(root, tree, session, dims)? {
         Value::Pattern(pattern) => Ok(pattern),
         Value::Expression { expr, .. } => Ok(BoundPattern {
             items: Items::Value(expr),
@@ -58,25 +59,30 @@ pub(super) fn from_param(
 pub(super) fn from_array_parameter(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     shape: &VariableDimensions,
 ) -> Converted<BoundPattern> {
     let ty = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
         .ok_or_else(|| unsupported("array parameter argument type"))?;
     let value = substitute_expr_idents(
-        expression_binding::bind(root, tree, dims)?,
+        expression_binding::bind(root, tree, session, dims)?,
         &dims.array_parameter_values,
     );
-    let value = frozen(tree, value, dims)?;
+    let value = frozen(tree, session, value, dims)?;
     Ok(BoundPattern {
         items: Items::ArrayValue { value, ty },
     })
 }
 
-fn frozen(tree: &AnalysisContext<'_>, expr: Expr, dims: &PackedDimensions) -> Converted<Expr> {
-    let state = &*tree.state;
+fn frozen(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expr: Expr,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
     let functions = &tree.functions;
-    let freeze = |expr| frozen(tree, expr, dims).map(Box::new);
+    let mut freeze = |expr| frozen(tree, session, expr, dims).map(Box::new);
     Ok(match expr {
         Expr::Literal(_) => expr,
         Expr::Unary { op, expr } => Expr::Unary {
@@ -107,12 +113,13 @@ fn frozen(tree: &AnalysisContext<'_>, expr: Expr, dims: &PackedDimensions) -> Co
                 .map(|arg| {
                     let expr = frozen(
                         tree,
+                        session,
                         arg.ok_or_else(|| {
                             unsupported("default constant function argument in pattern")
                         })?,
                         dims,
                     )?;
-                    expr_to_const(state, expr)
+                    expr_to_const(session, expr)
                         .map(Into::into)
                         .ok_or_else(|| unsupported("constant pattern function argument"))
                 })
@@ -131,11 +138,13 @@ fn frozen(tree: &AnalysisContext<'_>, expr: Expr, dims: &PackedDimensions) -> Co
                 .collect();
             let value = substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 value,
                 &dims.const_env,
                 &values,
             );
-            let folded = fold_const_integral_expr_preserving_mask(tree, value, &dims.const_env);
+            let folded =
+                fold_const_integral_expr_preserving_mask(tree, session, value, &dims.const_env);
             if !matches!(folded, Expr::Literal(_)) {
                 return Err(unsupported("nonconstant parameter pattern element"));
             }
@@ -153,12 +162,13 @@ impl Value {
     fn lower(
         &self,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         shape: &VariableDimensions,
         dims: &PackedDimensions,
         default: bool,
     ) -> Converted<Expr> {
         if let Self::Pattern(pattern) = self {
-            return pattern.lower(tree, shape, dims);
+            return pattern.lower(tree, session, shape, dims);
         }
         let (value, signed, value_type) = match self {
             Self::Expression {
@@ -172,7 +182,9 @@ impl Value {
             ),
             Self::Pattern(_) => unreachable!(),
         };
-        patterns::assignment_value(tree, value, signed, value_type, shape, dims, default)
+        patterns::assignment_value(
+            tree, session, value, signed, value_type, shape, dims, default,
+        )
     }
 }
 
@@ -180,6 +192,7 @@ impl BoundPattern {
     pub(super) fn lower(
         &self,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         shape: &VariableDimensions,
         dims: &PackedDimensions,
     ) -> Converted<Expr> {
@@ -387,7 +400,7 @@ impl BoundPattern {
         let mut parts = selected
             .into_iter()
             .zip(shapes)
-            .map(|((v, default), shape)| v.lower(tree, &shape, dims, default))
+            .map(|((v, default), shape)| v.lower(tree, session, &shape, dims, default))
             .collect::<Converted<Vec<_>>>()?;
         if unpacked {
             parts.reverse();

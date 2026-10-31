@@ -245,6 +245,7 @@ pub(in crate::ast) fn native_struct(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<UnpackedStruct>>> {
     let id = expression_binding::ungroup(id, native);
@@ -261,25 +262,27 @@ pub(in crate::ast) fn native_struct(
             .and_then(|parts| dims.get(&parts[0])?.unpacked_struct.clone())
         {
             Some(aggregate) => Some(aggregate),
-            None if let Some((ty, _)) = containers::element_member(id, native, tree, dims)? => {
+            None if let Some((ty, _)) =
+                containers::element_member(id, native, tree, session, dims)? =>
+            {
                 ty.unpacked_struct().cloned()
             }
             // A class property of unpacked structure type.
             None if let Some((aggregate, _, _)) =
-                expression_binding::object_aggregate_property(tree, id, native, dims)? =>
+                expression_binding::object_aggregate_property(tree, session, id, native, dims)? =>
             {
                 aggregate.r#type.unpacked_struct().cloned()
             }
             // An element popped by `q.pop_front` without parentheses.
-            None => containers::native_struct_element(id, native, tree, dims)?,
+            None => containers::native_struct_element(id, native, tree, session, dims)?,
         },
         ExprKind::Conditional {
             then_expression,
             else_expression,
             ..
         } => {
-            let then_type = native_struct(*then_expression, native, tree, dims)?;
-            let else_type = native_struct(*else_expression, native, tree, dims)?;
+            let then_type = native_struct(*then_expression, native, tree, session, dims)?;
+            let else_type = native_struct(*else_expression, native, tree, session, dims)?;
             then_type.filter(|then_type| {
                 else_type
                     .as_ref()
@@ -292,13 +295,19 @@ pub(in crate::ast) fn native_struct(
         } if std::ptr::eq(native, tree.declarations()) => {
             patterns::typed_shape(id, tree, dims)?.and_then(|shape| shape.unpacked_struct)
         }
-        _ if containers::native_struct_element(id, native, tree, dims)?.is_some() => {
-            containers::native_struct_element(id, native, tree, dims)?
+        _ if containers::native_struct_element(id, native, tree, session, dims)?.is_some() => {
+            containers::native_struct_element(id, native, tree, session, dims)?
         }
         // A method of the scope class hides a module function of its name,
         // as call binding resolves it.
         ExprKind::Call { expression, .. } => {
-            match expression_binding::object_method_result(tree, *expression, native, dims)? {
+            match expression_binding::object_method_result(
+                tree,
+                session,
+                *expression,
+                native,
+                dims,
+            )? {
                 Some(ty) => ty.unpacked_struct().cloned(),
                 None => expression_binding::callable_name(tree, *expression, native)
                     .and_then(|name| dims.functions.get(&name))
@@ -357,13 +366,14 @@ pub(in crate::ast) fn check_assignment(
     name: &str,
     right: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let target = dims
         .get(name)
         .and_then(|shape| shape.unpacked_struct.clone())
         .ok_or_else(|| unsupported("unpacked structure target"))?;
-    check_value(&target, right, tree.declarations(), tree, dims)
+    check_value(&target, right, tree.declarations(), tree, session, dims)
 }
 
 /// Check that `value` is an assignment pattern or a value of type `target`.
@@ -372,6 +382,7 @@ pub(in crate::ast) fn check_value(
     value: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let value = expression_binding::ungroup(value, native);
@@ -389,10 +400,10 @@ pub(in crate::ast) fn check_value(
         ..
     } = &native.expression(value).kind
     {
-        check_value(target, *then_expression, native, tree, dims)?;
-        return check_value(target, *else_expression, native, tree, dims);
+        check_value(target, *then_expression, native, tree, session, dims)?;
+        return check_value(target, *else_expression, native, tree, session, dims);
     }
-    match native_struct(value, native, tree, dims)? {
+    match native_struct(value, native, tree, session, dims)? {
         Some(actual) if actual.same_type(target) => Ok(()),
         _ => Err(unsupported(
             "assignment to an unpacked structure of a value that is not of its type",
@@ -407,6 +418,7 @@ pub(in crate::ast) fn check_operands(
     id: ExprId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let operands: Vec<ExprId> = match &native.expression(id).kind {
@@ -417,8 +429,8 @@ pub(in crate::ast) fn check_operands(
             right,
         } => {
             if matches!(operator.as_str(), "==" | "!=" | "===" | "!==") {
-                let left_type = native_struct(*left, native, tree, dims)?;
-                let right_type = native_struct(*right, native, tree, dims)?;
+                let left_type = native_struct(*left, native, tree, session, dims)?;
+                let right_type = native_struct(*right, native, tree, session, dims)?;
                 return match (left_type, right_type) {
                     (None, None) => Ok(()),
                     (Some(left), Some(right)) if left.same_type(&right) => Ok(()),
@@ -436,7 +448,7 @@ pub(in crate::ast) fn check_operands(
         _ => return Ok(()),
     };
     for operand in operands {
-        if native_struct(operand, native, tree, dims)?.is_some() {
+        if native_struct(operand, native, tree, session, dims)?.is_some() {
             return Err(unsupported(
                 "operator, select or cast applied to an unpacked structure",
             ));

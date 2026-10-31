@@ -1,8 +1,11 @@
 //! Native generate control and scope worklist.
 use super::*;
 use celox_sv_syntax::{BodyItemId, BodyItemKind, ExprKind, ForStep};
-use std::{cell::Cell, rc::Rc};
-type Ordinal = Rc<Cell<usize>>;
+use std::rc::Rc;
+/// The index of a scope's count of the generate constructs it has seen so
+/// far, which numbers its unnamed blocks (IEEE 1800-2023 27.6), in the
+/// counts of an elaboration.
+type Ordinal = usize;
 enum Job {
     ExitScope,
     Item {
@@ -171,7 +174,8 @@ impl<'a, 'b> Elaborator<'a, 'b> {
             pending.extend(nested);
         }
         let scope = Rc::new(scope);
-        let ordinal = Rc::new(Cell::new(0));
+        let mut ordinals = vec![0];
+        let ordinal = 0;
         let mut jobs = ids
             .into_iter()
             .rev()
@@ -182,12 +186,12 @@ impl<'a, 'b> Elaborator<'a, 'b> {
             .map(|id| Job::Item {
                 id,
                 scope: scope.clone(),
-                ordinal: ordinal.clone(),
+                ordinal,
             })
             .collect::<Vec<_>>();
         let mut contexts = Contexts(Vec::new());
         while let Some(job) = jobs.pop() {
-            if let Err(error) = self.execute_job(job, &mut jobs, &mut contexts) {
+            if let Err(error) = self.execute_job(job, &mut jobs, &mut contexts, &mut ordinals) {
                 while let Some(context) = contexts.0.pop() {
                     self.leave(context);
                 }
@@ -204,6 +208,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         job: Job,
         jobs: &mut Vec<Job>,
         contexts: &mut Contexts<'b>,
+        ordinals: &mut Vec<usize>,
     ) -> Result<(), AnalyzerError> {
         match job {
             Job::ExitScope => {
@@ -211,13 +216,13 @@ impl<'a, 'b> Elaborator<'a, 'b> {
                 self.leave(context);
                 Ok(())
             }
-            Job::Item { id, scope, ordinal } => self.item_job(id, scope, ordinal, jobs),
+            Job::Item { id, scope, ordinal } => self.item_job(id, scope, ordinal, jobs, ordinals),
             Job::Block {
                 id,
                 parent,
                 ordinal,
                 index,
-            } => self.block_job(id, parent, ordinal, index, jobs, contexts),
+            } => self.block_job(id, parent, ordinal, index, jobs, contexts, ordinals),
             Job::Loop {
                 id,
                 parent,
@@ -248,14 +253,15 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         scope: Rc<Scope>,
         ordinal: Ordinal,
         jobs: &mut Vec<Job>,
+        ordinals: &mut [usize],
     ) -> Result<(), AnalyzerError> {
-        let kind = &self.tree.declarations().body_item(id).kind;
+        let kind = &self.tree.syntax_tree.declarations().body_item(id).kind;
         if let BodyItemKind::Region(items) = kind {
             for id in items.iter().rev() {
                 jobs.push(Job::Item {
                     id: *id,
                     scope: scope.clone(),
-                    ordinal: ordinal.clone(),
+                    ordinal,
                 });
             }
             return Ok(());
@@ -269,8 +275,8 @@ impl<'a, 'b> Elaborator<'a, 'b> {
                 | BodyItemKind::Case { .. }
                 | BodyItemKind::Loop { .. }
         ) {
-            let number = ordinal.get() + 1;
-            ordinal.set(number);
+            ordinals[ordinal] += 1;
+            let number = ordinals[ordinal];
             match kind {
                 BodyItemKind::Conditional {
                     condition,
@@ -344,18 +350,20 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         index: Option<(String, i128)>,
         jobs: &mut Vec<Job>,
         contexts: &mut Contexts<'b>,
+        ordinals: &mut Vec<usize>,
     ) -> Result<(), AnalyzerError> {
-        let kind = &self.tree.declarations().body_item(id).kind;
+        let kind = &self.tree.syntax_tree.declarations().body_item(id).kind;
         if index.is_none()
             && matches!(
                 kind,
                 BodyItemKind::Conditional { .. } | BodyItemKind::Case { .. }
             )
         {
+            ordinals.push(ordinal - 1);
             jobs.push(Job::Item {
                 id,
                 scope: parent,
-                ordinal: Rc::new(Cell::new(ordinal - 1)),
+                ordinal: ordinals.len() - 1,
             });
             return Ok(());
         }
@@ -388,7 +396,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         let imported = scope::imported(&self.tree);
         if let Some(bindings) = imported.generate_imports.get(&id) {
             for (name, target) in bindings {
-                bind_import(&mut scope, name, target);
+                bind_import(&mut scope, name, target, self.session);
             }
         }
         let index_ref = index.as_ref().map(|(name, value)| (name.as_str(), *value));
@@ -404,12 +412,13 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         });
         let scope = Rc::new(self.prepare_block_contents(&children, scope, index_ref)?);
         jobs.push(Job::ExitScope);
-        let counter = Rc::new(Cell::new(0));
+        ordinals.push(0);
+        let counter = ordinals.len() - 1;
         for id in children.into_iter().rev() {
             jobs.push(Job::Item {
                 id,
                 scope: scope.clone(),
-                ordinal: counter.clone(),
+                ordinal: counter,
             });
         }
         Ok(())
@@ -427,7 +436,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
             condition,
             body,
             ..
-        } = &self.tree.declarations().body_item(id).kind
+        } = &self.tree.syntax_tree.declarations().body_item(id).kind
         else {
             return Err(mismatch());
         };
@@ -479,18 +488,20 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         Ok(())
     }
     fn next_value(
-        &self,
+        &mut self,
         id: BodyItemId,
         value: i128,
         scope: &Scope,
     ) -> Result<i128, AnalyzerError> {
-        let BodyItemKind::Loop { step, .. } = &self.tree.declarations().body_item(id).kind else {
+        let BodyItemKind::Loop { step, .. } =
+            &self.tree.syntax_tree.declarations().body_item(id).kind
+        else {
             return Err(mismatch());
         };
         let result = match step {
             ForStep::Expression(id) => {
                 let ExprKind::Unary { operator, .. } =
-                    &self.tree.declarations().expression(*id).kind
+                    &self.tree.syntax_tree.declarations().expression(*id).kind
                 else {
                     return Err(mismatch());
                 };
@@ -512,7 +523,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         result.ok_or_else(|| unsupported("genvar update operator"))
     }
     fn case_block(
-        &self,
+        &mut self,
         selector: ExprId,
         arms: &[celox_sv_syntax::GenerateCaseArm],
         scope: &Scope,
@@ -632,13 +643,16 @@ mod tests {
     use super::*;
     #[test]
     fn root_function_seeding_defers_explicit_region_declarations() {
+        let session = &mut Session::default();
         let tree=crate::source_tree::parse_scope_fixture("module M;function automatic int rootf();return 1;endfunction generate function automatic int regionf();return 2;endfunction endgenerate endmodule",Path::new("native-root-seeding.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let env = HashMap::default();
         let aliases = HashMap::default();
         let seeded =
-            items_with_literal_use(&tree, &env, &aliases, LiteralUse::RootSubroutines).unwrap();
-        let all = items_with_literal_use(&tree, &env, &aliases, LiteralUse::Subroutines).unwrap();
+            items_with_literal_use(&tree, session, &env, &aliases, LiteralUse::RootSubroutines)
+                .unwrap();
+        let all = items_with_literal_use(&tree, session, &env, &aliases, LiteralUse::Subroutines)
+            .unwrap();
         assert_eq!(seeded.len(), 1);
         assert_eq!(all.len(), 2);
         assert!(

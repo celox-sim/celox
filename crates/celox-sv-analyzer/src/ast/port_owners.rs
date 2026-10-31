@@ -118,10 +118,12 @@ mod tests {
     }
     #[test]
     fn explicit_port_without_a_new_header_keeps_native_inherited_type() {
+        let session = &mut Session::default();
         let tree = parse("module M(input wire[7:0] a,.b(a));endmodule");
         let tree = AnalysisContext::unspecialized(&tree);
         let ports = ports_from_scope(
             &AnalysisContext::unspecialized(&tree),
+            session,
             &HashMap::default(),
             &HashMap::default(),
             None,
@@ -140,6 +142,7 @@ mod tests {
     }
     #[test]
     fn a_structural_header_projection_carries_explicit_native_membership() {
+        let session = &mut Session::default();
         let tree = parse(
             "module M(input wire[3:0]a,input wire[7:0]b);endmodule module N(input wire z);endmodule",
         );
@@ -149,6 +152,7 @@ mod tests {
         assert_eq!(scope(None, &tree).unwrap().len(), 2);
         let ports = ports_from_scope(
             &AnalysisContext::unspecialized(&tree),
+            session,
             &HashMap::default(),
             &HashMap::default(),
             Some(&selection),

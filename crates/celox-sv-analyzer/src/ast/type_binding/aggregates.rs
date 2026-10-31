@@ -5,6 +5,7 @@ pub(super) fn bind(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
@@ -12,6 +13,7 @@ pub(super) fn bind(
         root,
         native,
         tree,
+        session,
         &PackedDimensions::new(HashMap::default(), env, aliases),
     )
 }
@@ -21,6 +23,7 @@ mod tests {
     use super::*;
     #[test]
     fn native_field_order_owns_offsets_in_the_shared_layout() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_source(
             "module M;typedef struct packed {logic[3:0]high;bit[1:0]low;} T;T value;endmodule",
             Path::new("native-aggregate-order.sv"),
@@ -44,6 +47,7 @@ mod tests {
             root,
             &native,
             &tree,
+            session,
             &HashMap::default(),
             &HashMap::default(),
         )
@@ -94,6 +98,7 @@ mod tests {
             root,
             native,
             &tree,
+            &mut Session::default(),
             &HashMap::default(),
             &HashMap::default(),
         );
