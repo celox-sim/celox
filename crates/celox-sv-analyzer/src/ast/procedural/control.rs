@@ -472,6 +472,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     .transpose()?;
                                 if let Some(disable) = &disable {
                                     assertions::concurrent_operand(disable)?;
+                                    assertions::concurrent_disable(disable)?;
                                 }
                                 (condition, &None, Some(disable))
                             }

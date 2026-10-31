@@ -1353,6 +1353,27 @@ evidence, not an exclusion. [Top/Wrapped reproductions](verification/repros/sv_c
 identify the actual installed xezim binary; the current flake pin's stale dependency
 lock prevented building that pin. No current-pin conformance is claimed.
 
+### Sampled history in assertions
+
+The five `concurrent_assertions::sampled_history_*` cases check IEEE 1800-2023
+16.9.3, including nested sampling, gated history, selected history operands,
+X/Z transitions and histories advancing while assertions are disabled.
+[Focused observations and standalone probes](verification/repros/sv_sampled_history.json)
+retain the external results without weakening assertions:
+
+- Verilator 5.052 passes the basic predicates and explicit nesting. It rejects
+  the gate argument of `$past`, reports the four-state case as unsupported, and
+  evaluates `disable iff` before NBA: the disabled-history case passes once
+  instead of twice. The latter extends the existing scheduling exclusion.
+- Icarus 13.0 rejects all four concurrent-property cases. Its standalone clocked
+  procedure compiles, but vvp reports undefined `$past` and `$sampled` functions.
+- Pinned xezim 0.11.4 passes all four concurrent-property cases, including gates
+  and disabled histories. It returns 1 instead of 0 for the first
+  `$sampled(bits_value[$past(index)])` with `index=1` and `bits_value=4'b1010`:
+  the default previous `bit` index is 0. Verilator and Celox return 0. The
+  adapter-free probe reproduces this difference, which remains an executed
+  mismatch rather than an exclusion.
+
 ### Class method ranges of module declarations
 
 `class::method_ranges_of_scope_declarations` declares a module variable whose

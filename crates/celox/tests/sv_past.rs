@@ -386,8 +386,8 @@ fn nested_past_calls_are_rejected() {
     );
 }
 
-/// Operands whose value a history of their variables cannot hold, and
-/// sampled value functions inside `$sampled`, are rejected; so is a call in
+/// Operands whose value a history of their variables cannot hold are
+/// rejected; so is a call in
 /// a subroutine that needs more history than its caller declared.
 #[test]
 fn operands_histories_cannot_hold_are_rejected() {
@@ -399,10 +399,6 @@ fn operands_histories_cannot_hold_are_rejected() {
         (
             "function bit f(); return a; endfunction\n  always_ff @(posedge clk) r <= $past(f());",
             "calls a function",
-        ),
-        (
-            "always_ff @(posedge clk) r <= $sampled($past(a));",
-            "`$sampled` of an operand that calls a sampled value function",
         ),
         (
             "function automatic bit gated(bit enable); return $past(a, 1, enable); endfunction\n  \
