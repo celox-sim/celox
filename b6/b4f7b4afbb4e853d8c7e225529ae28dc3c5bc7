@@ -1,0 +1,1 @@
+CI retained_reports requires aggregate exclusion rows for the eight newly reviewed fixed-string-array tool failures. Add only those rows; simulation behavior is unchanged.
