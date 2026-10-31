@@ -1,0 +1,1 @@
+Review fix: a static whose constant initializer a run-time static initializer reads is classified with all statics of the subroutine, and kept and initialized at time zero too. The package initializer test builds a Simulation. Rebased onto #2775.
