@@ -159,7 +159,7 @@ fn validate_procedure(
             }
             StatementKind::Timing { control, .. }
             | StatementKind::Assignment {
-                event_control: Some(control),
+                timing_control: Some(control),
                 ..
             } if kind == AlwaysKind::Ff => {
                 if let TimingControlKind::Event(EventControl::Items(items)) =
@@ -191,7 +191,7 @@ fn validate_final(
                 timing: Some(_), ..
             }
             | StatementKind::Assignment {
-                event_control: Some(_),
+                timing_control: Some(_),
                 ..
             }
             | StatementKind::Timing { .. } => Some("timing control"),

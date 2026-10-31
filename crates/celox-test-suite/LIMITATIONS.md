@@ -1680,3 +1680,55 @@ Verilator; its four-state case is unsupported.
 Icarus 13.0 rejects both simple and compound assignment expressions in the default
 standalone source. Its exclusions cover all seven `operators::assignment_expression_*`
 cases. Celox retains the value, type, index-evaluation and short-circuit assertions.
+
+### Blocking intra-assignment controls
+
+The seven `timing::blocking_intra_assignment_*` cases preserve RHS values and
+assignment conversion before suspension, while evaluating the destination after
+the timing control (IEEE 1800-2023 9.4.5, 10.4.1, 11.8.2 and 6.11.2). The
+[standalone source](verification/repros/sv_blocking_intra_assignment.sv) and
+[focused observations](verification/repros/sv_blocking_intra_assignment.json)
+retain these external results:
+
+- Verilator 5.052 passes the ordinary delays, events and automatic task case.
+  It rejects repeated event controls, and evaluates the destination index
+  increment before the delay: the standalone probe prints `early index=1`
+  and `selected=0029` instead of `early index=0` and `selected=2900`.
+  The two four-state cases report unsupported.
+- Icarus 13.0 passes five cases, including late destination evaluation and
+  four-state values. It rejects the automatic task's reference port. With
+  X, Z or mixed unknown repeat counts, it waits for an event instead of
+  assigning immediately; the isolated probes retain `result=0 done=0`
+  where 9.4.5 requires `result=9 done=1`.
+- Pinned xezim 0.11.4 passes four cases. It loses the carry of the 8-bit
+  addition saved for a 16-bit delayed assignment (`0000` instead of `0100`),
+  retains X in a `bit` output (`X9` instead of `89`), and times out on the
+  shared negative repeat count. Adapter-free probes reproduce each difference:
+  the signed count -3 does not complete within a bounded wall-clock run,
+  while isolated X/Z counts complete correctly. These failures remain
+  executed focused evidence, without changing the historical xezim baseline.
+
+The four new Verilator/Icarus exclusions name only the observed cases and have
+matching retained rows. Celox's assertions and all existing retained results
+remain unchanged. Nonblocking intra-assignment controls, implicit event and
+cycle controls, nonintegral targets, concatenations, indirect writes such as
+object properties or dynamic-container elements, and repeat counts that are
+nonintegral or wider than 64 bits remain explicitly unsupported.
+
+
+The [intra-assignment review regressions](verification/repros/sv_intra_assignment_review.json)
+check late destination tag validation, early source tag validation, procedural
+net-write rejection and local variables shadowing nets. Verilator 5.052 accepts
+the invalid selected output-net write; only that negative case is excluded.
+Icarus 13.0 rejects the tagged-union syntax; only the new tagged timing case
+extends its exclusions. The remaining negative net cases retain actual
+source rejections: the adapters recognize only the observed attributed
+PROCASSWIRE diagnostic or a matching Icarus net-declaration note, including
+task elaboration context. Unattributed or mixed tool errors still fail closed.
+
+Pinned xezim 0.11.4 rejects the new tagged constructors, rejects the legal local
+shadow of a net, and accepts the illegal task net write. Its direct net-write
+rejections have no source location, so they remain compile errors in focused
+evidence rather than being promoted to attributed language rejections. These
+observations remain executed evidence; no xezim exclusions or historical
+baseline rows are changed.

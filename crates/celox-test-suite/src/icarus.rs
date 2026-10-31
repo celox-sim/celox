@@ -128,6 +128,8 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
         return false;
     }
     let mut rejected = false;
+    let mut net_targets = Vec::new();
+    let mut declared_nets = Vec::new();
     for line in log.lines().filter(|line| !line.trim().is_empty()) {
         if line == "Elaboration failed"
             || line
@@ -145,7 +147,13 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
             return false;
         };
         if let Some(error) = diagnostic.strip_prefix("error: ") {
-            let invalid_source = matches!(
+            let net_target = error
+                .strip_suffix(" is not a valid l-value for a procedural assignment.")
+                .filter(|target| target.starts_with('\'') && target.ends_with('\''));
+            if let Some(target) = net_target {
+                net_targets.push(target);
+            }
+            let invalid_source = net_target.is_some() || matches!(
                 error,
                 "Bit select expressions must be a constant integral value."
                     | "Indexed part select base expression must be a constant integral value in this context."
@@ -179,6 +187,31 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
             }
             // The function-port diagnostic is an Icarus limitation, and alone
             // does not establish rejection of an invalid output destination.
+        } else if let Some(net) = diagnostic
+            .strip_prefix(": ")
+            .and_then(|text| text.strip_suffix(" is declared here as a wire."))
+        {
+            declared_nets.push(net);
+        } else if let Some(task) = diagnostic.strip_prefix("Unable to elaborate statement in task ")
+        {
+            // Icarus follows a rejected net write in a task with this source
+            // context. It is not sufficient evidence of rejection on its own.
+            let location = task.split_once(" at ").map(|(_, location)| location);
+            if net_targets.is_empty()
+                || !location.is_some_and(|location| {
+                    sources.iter().any(|source| {
+                        source
+                            .to_str()
+                            .and_then(|source| location.strip_prefix(source))
+                            .and_then(|tail| tail.strip_prefix(':'))
+                            .and_then(|tail| tail.strip_suffix('.'))
+                            .and_then(|line| line.parse::<usize>().ok())
+                            .is_some_and(|line| line > 0)
+                    })
+                })
+            {
+                return false;
+            }
         } else if !(diagnostic.starts_with(": This expression violates that rule: ")
             || diagnostic.starts_with(": Port ")
             || diagnostic == ": Function arguments must be input ports."
@@ -189,6 +222,9 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
         }
     }
     rejected
+        && net_targets
+            .iter()
+            .all(|target| declared_nets.contains(target))
 }
 
 impl Backend for Icarus {

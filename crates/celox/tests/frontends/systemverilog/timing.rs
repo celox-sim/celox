@@ -57,6 +57,21 @@ macro_rules! timed_cases {
 }
 
 timed_cases! {
+    fn blocking_intra_assignment_tag_checks = "timing::blocking_intra_assignment_tag_checks";
+    fn blocking_intra_assignment_rejects_net = "timing::blocking_intra_assignment_rejects_net";
+    fn blocking_intra_assignment_rejects_net_port_select = "timing::blocking_intra_assignment_rejects_net_port_select";
+    fn blocking_intra_assignment_rejects_task_net_write = "timing::blocking_intra_assignment_rejects_task_net_write";
+    fn blocking_intra_assignment_net_shadow_is_variable = "timing::blocking_intra_assignment_net_shadow_is_variable";
+    fn blocking_intra_assignment_late_target = "timing::blocking_intra_assignment_late_target";
+    fn blocking_intra_assignment_repeat_events = "timing::blocking_intra_assignment_repeat_events";
+    fn blocking_intra_assignment_delays = "timing::blocking_intra_assignment_delays";
+    fn blocking_intra_assignment_events = "timing::blocking_intra_assignment_events";
+    fn blocking_intra_assignment_nonpositive_unknown_repeat = "timing::blocking_intra_assignment_nonpositive_unknown_repeat";
+    fn blocking_intra_assignment_four_state = "timing::blocking_intra_assignment_four_state";
+    fn blocking_intra_assignment_automatic_tasks = "timing::blocking_intra_assignment_automatic_tasks";
+}
+
+timed_cases! {
     fn comb_startup_ignores_final_two_state = "timing::comb_startup_ignores_final_two_state";
     fn comb_startup_ignores_final_four_state = "timing::comb_startup_ignores_final_four_state";
 }
@@ -508,18 +523,8 @@ fn unimplemented_timing_features_are_rejected() {
             88,
         ),
         (
-            "bit a, b; initial a = #1 b;",
-            "intra-assignment timing control",
-            88,
-        ),
-        (
             "bit a, b; initial a <= #1 b;",
-            "intra-assignment timing control",
-            88,
-        ),
-        (
-            "bit a, b, c; initial a = @(posedge c) b;",
-            "intra-assignment timing control",
+            "nonblocking intra-assignment timing control",
             88,
         ),
         (
@@ -2037,4 +2042,84 @@ timed_cases! {
  fn process_nested_calls_preserve_level_wait_resume = "fork_control::process_nested_calls_preserve_level_wait_resume";
  fn process_resume_resamples_automatic_event_expression = "fork_control::process_resume_resamples_automatic_event_expression";
  fn process_resume_after_program_exit_is_noop = "fork_control::process_resume_after_program_exit_is_noop";
+}
+
+#[test]
+fn blocking_intra_assignment_tag_errors_observe_the_right_time() {
+    for backend in [
+        "native",
+        "cranelift",
+        "wasm",
+        "native-parallel",
+        "cranelift-parallel",
+    ] {
+        for (declarations, setup, write, invalidate, delayed) in [
+            (
+                "union tagged packed {void Empty; logic [7:0] Full;} item;",
+                "item=tagged Full 8'd0;",
+                "item.Full = #4 8'hff;",
+                "item=tagged Empty;",
+                true,
+            ),
+            (
+                "union tagged packed {void Empty; logic [7:0] Full;} item, src;",
+                "item=tagged Full 8'd0; src=tagged Empty;",
+                "item.Full = #4 src.Full;",
+                "src=tagged Full 8'd1;",
+                false,
+            ),
+            (
+                "typedef union tagged packed {void Empty; logic [7:0] Full;} I; union tagged packed {I Nested; logic [15:0] Word;} item;",
+                "item=tagged Nested (tagged Full 8'd0);",
+                "item.Nested.Full = #4 8'hff;",
+                "item=tagged Word 16'd0;",
+                true,
+            ),
+            (
+                "typedef union tagged packed {void Empty; logic [7:0] Full;} I; union tagged packed {I Nested; logic [15:0] Word;} item;",
+                "item=tagged Nested (tagged Full 8'd0);",
+                "item.Nested.Full = #4 8'hff;",
+                "item=tagged Nested (tagged Empty);",
+                true,
+            ),
+        ] {
+            let source = format!(
+                "module Top; timeunit 1ps / 1ps; {declarations} initial begin {setup} {write} end initial begin #2 {invalidate} end endmodule"
+            );
+            let builder = celox::Simulation::from_sv_sources(
+                vec![(&source, std::path::Path::new("intra_tag_error.sv"))],
+                "Top",
+            )
+            .four_state(true);
+            let builder = if backend.ends_with("-parallel") {
+                builder
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+            } else {
+                builder
+            };
+            macro_rules! check {
+                ($sim:expr) => {{
+                    let mut sim = $sim.unwrap();
+                    if delayed {
+                        sim.run_until(3).unwrap();
+                    }
+                    let error = sim
+                        .run_until(if delayed { 4 } else { 0 })
+                        .expect_err(&format!("{backend}: delayed={delayed}: {source}"));
+                    assert!(
+                        error.to_string().contains("tagged union member"),
+                        "{backend}: {error}"
+                    );
+                }};
+            }
+            if backend.starts_with("native") {
+                check!(builder.build_native());
+            } else if backend == "wasm" {
+                check!(builder.build_wasm());
+            } else {
+                check!(builder.build_cranelift());
+            }
+        }
+    }
 }
