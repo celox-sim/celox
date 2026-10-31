@@ -10,6 +10,7 @@ pub(super) const CLASS: &str = "$builtin::semaphore";
 /// The key count of a call, `default` when it is omitted.
 fn key_count(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     arguments: &[Argument],
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -30,7 +31,7 @@ fn key_count(
                 .is_none_or(|name| name.spelling == "keyCount") =>
         {
             match argument.value {
-                Some(value) => expression_binding::value(value, native, tree, dimensions),
+                Some(value) => expression_binding::value(value, native, tree, session, dimensions),
                 None => Ok(Expr::Literal(format!("32'sd{default}"))),
             }
         }
@@ -41,11 +42,12 @@ fn key_count(
 /// `new(keyCount)` of a semaphore (15.3.1).
 pub(super) fn new(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     arguments: &[Argument],
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    let keys = key_count(tree, arguments, native, dimensions, "new", 0)?;
+    let keys = key_count(tree, session, arguments, native, dimensions, "new", 0)?;
     Ok(events::call(ProcessOp::SemaphoreNew, vec![keys]))
 }
 
@@ -53,6 +55,7 @@ pub(super) fn new(
 /// statement or, for `try_get`, as a value.
 pub(super) fn value(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -75,7 +78,8 @@ pub(super) fn value(
         return Ok(None);
     };
     if separator != "."
-        || expression_binding::object_native_class(tree, *receiver, native, dimensions).as_deref()
+        || expression_binding::object_native_class(tree, session, *receiver, native, dimensions)
+            .as_deref()
             != Some(CLASS)
     {
         return Ok(None);
@@ -92,7 +96,7 @@ pub(super) fn value(
             "semaphore {method}, which returns nothing, used as a value"
         )));
     }
-    let semaphore = expression_binding::value(*receiver, native, tree, dimensions)?;
-    let keys = key_count(tree, arguments, native, dimensions, &method, 1)?;
+    let semaphore = expression_binding::value(*receiver, native, tree, session, dimensions)?;
+    let keys = key_count(tree, session, arguments, native, dimensions, &method, 1)?;
     Ok(Some(events::call(op, vec![semaphore, keys])))
 }

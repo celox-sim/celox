@@ -343,6 +343,7 @@ fn check_formal(
 
 #[cfg(test)]
 mod tests {
+
     use crate::{AnalyzerError, analyze_source};
     use std::path::Path;
 

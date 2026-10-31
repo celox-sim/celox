@@ -5,6 +5,7 @@ mod tests {
     use super::*;
     #[test]
     fn native_index_operators_and_selected_names_are_authoritative() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_source(
             "module M;assign y=a[i+1];endmodule",
             Path::new("native-index.sv"),
@@ -19,7 +20,7 @@ mod tests {
         }
         let root = native.assign_statements[0].assignments[0].right;
         let Expr::Select { msb, lsb, .. } =
-            value(root, &native, &tree, &PackedDimensions::default()).unwrap()
+            value(root, &native, &tree, session, &PackedDimensions::default()).unwrap()
         else {
             panic!()
         };
@@ -40,7 +41,7 @@ mod tests {
             }
         }
         let Expr::Select { expr, .. } =
-            value(root, &native, &tree, &PackedDimensions::default()).unwrap()
+            value(root, &native, &tree, session, &PackedDimensions::default()).unwrap()
         else {
             panic!()
         };
@@ -48,6 +49,7 @@ mod tests {
     }
     #[test]
     fn nested_native_indices_keep_typed_selection_values() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_source(
             "module M;assign y=a[b[i+1]];endmodule",
             Path::new("nested-index.sv"),
@@ -57,7 +59,7 @@ mod tests {
         let native = tree.declarations();
         let root = native.assign_statements[0].assignments[0].right;
         let Expr::Select { lsb, .. } =
-            value(root, native, &tree, &PackedDimensions::default()).unwrap()
+            value(root, native, &tree, session, &PackedDimensions::default()).unwrap()
         else {
             panic!()
         };
@@ -94,6 +96,7 @@ mod tests {
     }
     #[test]
     fn deep_native_index_groups_use_the_explicit_worklists() {
+        let session = &mut Session::default();
         let path = Path::new("native-index-groups.sv");
         let tree =
             crate::source_tree::parse_source("module M;assign y=a[7];endmodule", path).unwrap();
@@ -106,7 +109,7 @@ mod tests {
         let native = celox_sv_syntax::Declarations::parse(&source, path).unwrap();
         let root = native.assign_statements[0].assignments[0].right;
         let Expr::Select { lsb, .. } =
-            value(root, &native, &tree, &PackedDimensions::default()).unwrap()
+            value(root, &native, &tree, session, &PackedDimensions::default()).unwrap()
         else {
             panic!()
         };
@@ -119,6 +122,7 @@ mod range_tests {
     use super::*;
     #[test]
     fn deep_native_constant_and_indexed_range_groups_use_worklists() {
+        let session = &mut Session::default();
         for (shallow, deep, high, low) in [
             (
                 "a[7:0]".to_string(),
@@ -159,7 +163,7 @@ mod range_tests {
             .unwrap();
             let root = native.assign_statements[0].assignments[0].right;
             let Expr::Select { msb, lsb, .. } =
-                value(root, &native, &tree, &PackedDimensions::default()).unwrap()
+                value(root, &native, &tree, session, &PackedDimensions::default()).unwrap()
             else {
                 panic!()
             };

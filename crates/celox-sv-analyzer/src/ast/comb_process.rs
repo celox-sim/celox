@@ -4,13 +4,19 @@ use super::*;
 
 pub(super) fn comb_processes_from_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
 ) -> Result<Vec<CombProcess>, AnalyzerError> {
     let mut processes = Vec::new();
-    let active = generate::items(syntax_tree, const_env, &packed_dimensions.type_aliases)?;
+    let active = generate::items(
+        syntax_tree,
+        session,
+        const_env,
+        &packed_dimensions.type_aliases,
+    )?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
         let syntax_tree = &item.scoped(syntax_tree);
@@ -30,6 +36,7 @@ pub(super) fn comb_processes_from_scope(
             item,
             None,
             syntax_tree,
+            session,
             &item.env,
             dimensions,
             literals,
@@ -56,6 +63,7 @@ fn comb_processes_from_item(
     item: &generate::Item,
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &SharedMap<i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &SharedMap<Expr>,
@@ -67,11 +75,13 @@ fn comb_processes_from_item(
             for mut process in continuous_assignments(
                 syntax_tree.declarations().assign_statement(*id),
                 syntax_tree,
+                session,
                 packed_dimensions,
             )? {
                 process.condition = condition.clone();
                 processes.push(substitute_process_constants_with_parameter_literals(
                     syntax_tree,
+                    session,
                     process,
                     const_env,
                     parameter_literals,
@@ -86,12 +96,14 @@ fn comb_processes_from_item(
                 procedure,
                 condition,
                 syntax_tree,
+                session,
                 &local_packed_dimensions,
                 parameter_literals,
                 state,
             )? {
                 processes.push(substitute_process_constants(
                     syntax_tree,
+                    session,
                     process,
                     const_env,
                 ));
@@ -102,10 +114,12 @@ fn comb_processes_from_item(
             for assignment in net_declaration_assignments(
                 syntax_tree.declarations().net_declaration(*id),
                 syntax_tree,
+                session,
                 packed_dimensions,
             )? {
                 let assignment = substitute_assignment_constants_with_parameter_literals(
                     syntax_tree,
+                    session,
                     assignment,
                     const_env,
                     parameter_literals,
@@ -145,6 +159,7 @@ fn always_dimensions(
 fn net_declaration_assignments(
     native: &celox_sv_syntax::NetDeclaration,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     packed_dimensions: &PackedDimensions,
 ) -> Result<Vec<Assignment>, AnalyzerError> {
     let mut assignments = Vec::new();
@@ -156,6 +171,7 @@ fn net_declaration_assignments(
         if let Some(target) = packed_dimensions.get(&name) {
             array_compatibility::check_native_unpacked_assignment(
                 syntax_tree,
+                session,
                 value,
                 target,
                 || "net declaration assignment".to_string(),
@@ -168,6 +184,7 @@ fn net_declaration_assignments(
             syntax_tree.declarations(),
             &lhs,
             syntax_tree,
+            session,
             packed_dimensions,
         )?;
         assignments.push(Assignment::new(lhs, rhs));
@@ -179,6 +196,7 @@ fn net_declaration_assignments(
 fn continuous_assignments(
     native: &celox_sv_syntax::AssignSyntax,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Vec<CombProcess>> {
     if native.assignments.is_empty() {
@@ -223,12 +241,18 @@ fn continuous_assignments(
                             id,
                             native_tree,
                             tree,
+                            session,
                             dimensions,
                         )?);
                     }
                 }
-                let rhs =
-                    expression_binding::value(assignment.right, native_tree, tree, dimensions)?;
+                let rhs = expression_binding::value(
+                    assignment.right,
+                    native_tree,
+                    tree,
+                    session,
+                    dimensions,
+                )?;
                 return Ok(CombProcess::procedural(
                     CombProcessKind::ContinuousAssign,
                     None,
@@ -239,11 +263,15 @@ fn continuous_assignments(
                     }],
                 ));
             }
-            if let Some(shape) =
-                array_compatibility::native_unpacked_shape(assignment.left, tree, dimensions)
-            {
+            if let Some(shape) = array_compatibility::native_unpacked_shape(
+                assignment.left,
+                tree,
+                session,
+                dimensions,
+            ) {
                 array_compatibility::check_native_unpacked_assignment(
                     tree,
+                    session,
                     assignment.right,
                     &shape,
                     || "continuous assignment".into(),
@@ -254,6 +282,7 @@ fn continuous_assignments(
                 assignment.left,
                 tree.declarations(),
                 tree,
+                session,
                 dimensions,
             )?;
             let rhs = expression_binding::expression(
@@ -261,13 +290,20 @@ fn continuous_assignments(
                 tree.declarations(),
                 &lhs,
                 tree,
+                session,
                 dimensions,
             )?;
             // A variable of unpacked structure type: drive its leaves.
             if let LValue::Ident(name) = &lhs
                 && let Some(parts) = unpacked_structs::targets(name, dimensions)
             {
-                unpacked_structs::check_assignment(name, assignment.right, tree, dimensions)?;
+                unpacked_structs::check_assignment(
+                    name,
+                    assignment.right,
+                    tree,
+                    session,
+                    dimensions,
+                )?;
                 return Ok(CombProcess::procedural(
                     CombProcessKind::ContinuousAssign,
                     None,
@@ -302,6 +338,7 @@ fn comb_process_from_procedure(
     procedure: &celox_sv_syntax::Procedure,
     condition: Option<ConstExpr>,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
     state: &mut procedural::BodyState<'_>,
@@ -317,6 +354,7 @@ fn comb_process_from_procedure(
     };
     let mut builder = procedural::BodyBuilder::new(
         syntax_tree,
+        session,
         packed_dimensions,
         state,
         system_functions::Body::Always,
@@ -325,6 +363,7 @@ fn comb_process_from_procedure(
     for stmt in &mut body {
         procedural::substitute_stmt_constants(
             syntax_tree,
+            builder.session,
             stmt,
             &HashMap::default(),
             parameter_literals,

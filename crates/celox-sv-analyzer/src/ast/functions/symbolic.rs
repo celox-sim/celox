@@ -376,10 +376,12 @@ mod tests {
         Source::from_syntax(&tree).unwrap()
     }
     fn evaluate(expr: Expr, bindings: &HashMap<String, Expr>) -> i128 {
+        let session = &mut Session::default();
         let expr = substitute_expr_idents(expr, bindings);
         let syntax = crate::source_tree::SourceTree::empty();
         let expr = expr_to_index_const(
             &AnalysisContext::unspecialized(&syntax),
+            session,
             expr,
             &PackedDimensions::default(),
         )
@@ -404,17 +406,22 @@ mod tests {
     }
     #[test]
     fn native_task_outputs_keep_formal_fit_and_two_state_coercion() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_scope_fixture(
             "module M;task automatic t(input logic[3:0]x,output bit[2:0]y);y=x+1;endtask endmodule",
             Path::new("native-task-symbolic.sv"),
         )
         .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let function =
-            functions_from_scope(&tree, &HashMap::default(), &PackedDimensions::default())
-                .unwrap()
-                .remove("t")
-                .unwrap();
+        let function = functions_from_scope(
+            &tree,
+            session,
+            &HashMap::default(),
+            &PackedDimensions::default(),
+        )
+        .unwrap()
+        .remove("t")
+        .unwrap();
         assert!(function.body.is_some());
         assert_eq!(function.outputs[0].0, "y");
         for input in ["4'd7", "4'bxxxx"] {

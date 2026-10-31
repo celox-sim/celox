@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) fn bind_generate_parameter(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
@@ -11,6 +12,7 @@ pub(super) fn bind_generate_parameter(
     let mut parameter_types = parameter_types_from_const_env(const_env);
     bind_generate_parameter_with_types(
         tree,
+        session,
         parameter,
         const_env,
         parameter_literals,
@@ -20,6 +22,7 @@ pub(super) fn bind_generate_parameter(
 
 pub(super) fn bind_generate_parameter_with_types(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
@@ -38,8 +41,13 @@ pub(super) fn bind_generate_parameter_with_types(
         i128::from(unbounded),
     );
     let resolved_type = parameter.resolved_type(parameter_types);
-    let (resolved, resolved_literal) =
-        parameter.resolved_value_and_literal(tree, const_env, parameter_types, parameter_literals);
+    let (resolved, resolved_literal) = parameter.resolved_value_and_literal(
+        tree,
+        session,
+        const_env,
+        parameter_types,
+        parameter_literals,
+    );
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -49,7 +57,7 @@ pub(super) fn bind_generate_parameter_with_types(
         }))
     } else {
         resolved_literal.or_else(|| {
-            parameter_value_env(tree, std::slice::from_ref(&parameter), const_env)
+            parameter_value_env(tree, session, std::slice::from_ref(&parameter), const_env)
                 .remove(parameter.name())
                 .map(|value| substitute_expr_idents(value, parameter_literals))
         })
@@ -86,11 +94,13 @@ pub(super) fn eval_ast_const_expr(
 
 pub(super) fn substitute_process_constants(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     process: CombProcess,
     const_env: &HashMap<String, i128>,
 ) -> CombProcess {
     substitute_process_constants_with_parameter_literals(
         tree,
+        session,
         process,
         const_env,
         &HashMap::default(),
@@ -99,13 +109,14 @@ pub(super) fn substitute_process_constants(
 
 pub(super) fn substitute_process_constants_with_parameter_literals(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     process: CombProcess,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> CombProcess {
     let mut sensitivity_body = process.sensitivity_body;
     for stmt in &mut sensitivity_body {
-        procedural::substitute_stmt_constants(tree, stmt, const_env, parameter_literals);
+        procedural::substitute_stmt_constants(tree, session, stmt, const_env, parameter_literals);
     }
     let condition = process
         .condition
@@ -113,7 +124,13 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     if process.assignments.is_empty() {
         let mut body = process.body;
         for stmt in &mut body {
-            procedural::substitute_stmt_constants(tree, stmt, const_env, parameter_literals);
+            procedural::substitute_stmt_constants(
+                tree,
+                session,
+                stmt,
+                const_env,
+                parameter_literals,
+            );
         }
         return CombProcess {
             creation_order: process.creation_order,
@@ -132,6 +149,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
             .map(|assignment| {
                 substitute_assignment_constants_with_parameter_literals(
                     tree,
+                    session,
                     assignment,
                     const_env,
                     parameter_literals,
@@ -148,6 +166,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
 
 pub(super) fn substitute_assignment_constants_with_parameter_literals(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     assignment: Assignment,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
@@ -156,6 +175,7 @@ pub(super) fn substitute_assignment_constants_with_parameter_literals(
         substitute_lvalue_constants(assignment.lhs, const_env),
         substitute_expr_constants_with_parameter_literals(
             tree,
+            session,
             assignment.rhs,
             const_env,
             parameter_literals,
@@ -192,11 +212,11 @@ pub(super) fn substitute_lvalue_constants(
 
 pub(super) fn substitute_expr_constants_with_parameter_literals(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: Expr,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> Expr {
-    let state = &*tree.state;
     match expr {
         Expr::Ident(name) => parameter_literals
             .get(&name)
@@ -235,6 +255,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         } => Expr::Select {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -249,6 +270,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .map(|part| {
                     substitute_expr_constants_with_parameter_literals(
                         tree,
+                        session,
                         part,
                         const_env,
                         parameter_literals,
@@ -263,6 +285,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .map(|part| {
                     substitute_expr_constants_with_parameter_literals(
                         tree,
+                        session,
                         part,
                         const_env,
                         parameter_literals,
@@ -277,6 +300,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         } => Expr::Resize {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -288,6 +312,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             op,
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -296,6 +321,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         Expr::Binary { left, op, right } => Expr::Binary {
             left: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *left,
                 const_env,
                 parameter_literals,
@@ -303,6 +329,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             op,
             right: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *right,
                 const_env,
                 parameter_literals,
@@ -315,18 +342,21 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         } => Expr::Mux {
             condition: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *condition,
                 const_env,
                 parameter_literals,
             )),
             then_expr: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *then_expr,
                 const_env,
                 parameter_literals,
             )),
             else_expr: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *else_expr,
                 const_env,
                 parameter_literals,
@@ -335,6 +365,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
                 tree,
+                session,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -345,6 +376,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                     item.map(&mut |operand| {
                         substitute_expr_constants_with_parameter_literals(
                             tree,
+                            session,
                             operand,
                             const_env,
                             parameter_literals,
@@ -364,6 +396,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                     arg.map(|arg| {
                         substitute_expr_constants_with_parameter_literals(
                             tree,
+                            session,
                             arg,
                             const_env,
                             parameter_literals,
@@ -374,7 +407,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             let function = callee.system();
             if let Some(function @ (SystemFunction::Signed | SystemFunction::Unsigned)) = function
                 && let [Some(arg)] = args.as_slice()
-                && let Some(constant) = expr_to_const(state, arg.clone())
+                && let Some(constant) = expr_to_const(session, arg.clone())
                 && let Some(ty) =
                     infer_const_expr_type(&constant, &parameter_types_from_const_env(const_env))
             {
@@ -387,6 +420,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 // Resolve constant calls before SLT lowering while retaining X/Z masks.
                 fold_const_integral_expr_preserving_mask(
                     tree,
+                    session,
                     Expr::Call {
                         callee,
                         args,
@@ -578,7 +612,7 @@ fn substitute_const_expr_constants_impl(
 }
 
 /// Convert an expression to its symbolic constant form when representable.
-pub(super) fn expr_to_const(state: &AnalysisState, expr: Expr) -> Option<ConstExpr> {
+pub(super) fn expr_to_const(state: &mut Session, expr: Expr) -> Option<ConstExpr> {
     match expr {
         Expr::Ident(name) => Some(ConstExpr::Ident(name)),
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
@@ -613,11 +647,11 @@ pub(super) fn expr_to_const(state: &AnalysisState, expr: Expr) -> Option<ConstEx
                 return None;
             }
             Some(ConstExpr::call(
-                state,
                 callee,
                 args.into_iter()
                     .map(|arg| expr_to_const(state, arg?))
                     .collect::<Option<_>>()?,
+                state,
             ))
         }
         Expr::Select { .. }
@@ -630,10 +664,10 @@ pub(super) fn expr_to_const(state: &AnalysisState, expr: Expr) -> Option<ConstEx
 
 pub(super) fn expr_to_index_const(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: Expr,
     dimensions: &PackedDimensions,
 ) -> Option<ConstExpr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
     match expr {
         Expr::Resize {
@@ -645,7 +679,7 @@ pub(super) fn expr_to_index_const(
                 return Some(ConstExpr::Literal("0".into()));
             }
             Some(ConstExpr::Resize {
-                expr: Box::new(expr_to_index_const(tree, *expr, dimensions)?),
+                expr: Box::new(expr_to_index_const(tree, session, *expr, dimensions)?),
                 width,
                 signed,
             })
@@ -654,12 +688,12 @@ pub(super) fn expr_to_index_const(
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op,
-            expr: Box::new(expr_to_index_const(tree, *expr, dimensions)?),
+            expr: Box::new(expr_to_index_const(tree, session, *expr, dimensions)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(expr_to_index_const(tree, *left, dimensions)?),
+            left: Box::new(expr_to_index_const(tree, session, *left, dimensions)?),
             op,
-            right: Box::new(expr_to_index_const(tree, *right, dimensions)?),
+            right: Box::new(expr_to_index_const(tree, session, *right, dimensions)?),
         }),
         Expr::Select {
             expr,
@@ -668,7 +702,7 @@ pub(super) fn expr_to_index_const(
             signed,
         } if !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
             Some(ConstExpr::SelectRange {
-                expr: Box::new(expr_to_index_const(tree, *expr, dimensions)?),
+                expr: Box::new(expr_to_index_const(tree, session, *expr, dimensions)?),
                 msb: Box::new(msb),
                 lsb: Box::new(lsb),
                 signed,
@@ -679,9 +713,9 @@ pub(super) fn expr_to_index_const(
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(expr_to_index_const(tree, *condition, dimensions)?),
-            then_expr: Box::new(expr_to_index_const(tree, *then_expr, dimensions)?),
-            else_expr: Box::new(expr_to_index_const(tree, *else_expr, dimensions)?),
+            condition: Box::new(expr_to_index_const(tree, session, *condition, dimensions)?),
+            then_expr: Box::new(expr_to_index_const(tree, session, *then_expr, dimensions)?),
+            else_expr: Box::new(expr_to_index_const(tree, session, *else_expr, dimensions)?),
         }),
         Expr::Call {
             callee,
@@ -694,11 +728,11 @@ pub(super) fn expr_to_index_const(
                 return None;
             }
             Some(ConstExpr::call(
-                state,
                 callee,
                 args.into_iter()
-                    .map(|arg| expr_to_index_const(tree, arg?, dimensions))
+                    .map(|arg| expr_to_index_const(tree, session, arg?, dimensions))
                     .collect::<Option<_>>()?,
+                session,
             ))
         }
         Expr::Select {
@@ -729,13 +763,13 @@ pub(super) fn expr_to_index_const(
                     if inlining::calls_subroutine(&expr) {
                         return None;
                     }
-                    let source = IndexBitSource::from_expr(tree, expr, dimensions)?;
+                    let source = IndexBitSource::from_expr(tree, session, expr, dimensions)?;
                     positions
                         .map(|bit| source.bit(bit))
                         .collect::<Option<_>>()?
                 }
                 expr => {
-                    let expr = expr_to_index_const(tree, expr, dimensions)?;
+                    let expr = expr_to_index_const(tree, session, expr, dimensions)?;
                     positions
                         .map(|bit| ConstExpr::Select {
                             expr: Box::new(expr.clone()),
@@ -752,7 +786,7 @@ pub(super) fn expr_to_index_const(
             if inlining::calls_subroutine(&expr) {
                 return None;
             }
-            let source = IndexBitSource::from_expr(tree, expr, dimensions)?;
+            let source = IndexBitSource::from_expr(tree, session, expr, dimensions)?;
             let width = source.width();
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
@@ -835,6 +869,7 @@ enum IndexBitSource {
 impl IndexBitSource {
     fn from_expr(
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         expr: Expr,
         dimensions: &PackedDimensions,
     ) -> Option<Self> {
@@ -844,12 +879,17 @@ impl IndexBitSource {
             Expr::Concat(parts) => Self::Concat {
                 parts: parts
                     .into_iter()
-                    .map(|part| Self::from_expr(tree, part, dimensions))
+                    .map(|part| Self::from_expr(tree, session, part, dimensions))
                     .collect::<Option<_>>()?,
                 width,
             },
             Expr::RepeatConcat { parts, .. } => Self::Repeat {
-                part: Box::new(Self::from_expr(tree, Expr::Concat(parts), dimensions)?),
+                part: Box::new(Self::from_expr(
+                    tree,
+                    session,
+                    Expr::Concat(parts),
+                    dimensions,
+                )?),
                 width,
             },
             Expr::Resize { expr, .. } => {
@@ -860,7 +900,7 @@ impl IndexBitSource {
                     &dimensions.function_return_types,
                 )?;
                 Self::Resize {
-                    part: Box::new(Self::from_expr(tree, *expr, dimensions)?),
+                    part: Box::new(Self::from_expr(tree, session, *expr, dimensions)?),
                     width,
                     extend_signed,
                 }
@@ -876,7 +916,7 @@ impl IndexBitSource {
                         let left = eval_ast_const_expr(functions, &msb, &dimensions.const_env)?;
                         let right = eval_ast_const_expr(functions, &lsb, &dimensions.const_env)?;
                         Self::Slice {
-                            part: Box::new(Self::from_expr(tree, expr, dimensions)?),
+                            part: Box::new(Self::from_expr(tree, session, expr, dimensions)?),
                             width,
                             right,
                             step: if left >= right { 1 } else { -1 },
@@ -887,6 +927,7 @@ impl IndexBitSource {
                         // when its position in an unpacked array is dynamic.
                         expr: expr_to_index_const(
                             tree,
+                            session,
                             Expr::Select {
                                 expr: Box::new(expr),
                                 msb,
@@ -916,7 +957,7 @@ impl IndexBitSource {
                     (0, 1)
                 };
                 Self::Scalar {
-                    expr: expr_to_index_const(tree, expr, dimensions)?,
+                    expr: expr_to_index_const(tree, session, expr, dimensions)?,
                     width,
                     right,
                     step,
@@ -985,10 +1026,10 @@ mod tests;
 /// of the syntax adapter that supplied the call and its actual values.
 pub(super) fn user_call_value(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expression: Expr,
     constants: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
     if let Expr::Call {
         args, arg_order, ..
@@ -1008,20 +1049,22 @@ pub(super) fn user_call_value(
         let args = const_functions::resolved_arguments(functions, callee, args)?
             .into_iter()
             .map(|arg| {
-                expr_to_const(state, arg.clone()).or_else(|| {
-                    constant_folding::constant_with_folded_selections(tree, &arg, constants, &types)
+                expr_to_const(session, arg.clone()).or_else(|| {
+                    constant_folding::constant_with_folded_selections(
+                        tree, session, &arg, constants, &types,
+                    )
                 })
             })
             .collect::<Option<Vec<_>>>()?;
         // Keep references to parameters for consumers that re-specialize the
         // declaration contract; retain the native function's result type too.
         return Some(ConstExpr::Resize {
-            expr: Box::new(ConstExpr::call(state, callee.clone(), args)),
+            expr: Box::new(ConstExpr::call(callee.clone(), args, session)),
             width: literal.width,
             signed: literal.signed,
         });
     }
-    expr_to_const(state, expression.clone()).or_else(|| {
+    expr_to_const(session, expression.clone()).or_else(|| {
         let Expr::Call {
             callee,
             args,
@@ -1041,12 +1084,14 @@ pub(super) fn user_call_value(
             .into_iter()
             .map(|arg| {
                 let arg = arg?;
-                expr_to_const(state, arg.clone()).or_else(|| {
-                    constant_folding::constant_with_folded_selections(tree, &arg, constants, &types)
+                expr_to_const(session, arg.clone()).or_else(|| {
+                    constant_folding::constant_with_folded_selections(
+                        tree, session, &arg, constants, &types,
+                    )
                 })
             })
             .collect::<Option<Vec<_>>>()?;
-        Some(ConstExpr::call(state, callee, args))
+        Some(ConstExpr::call(callee, args, session))
     })
 }
 
@@ -1055,10 +1100,10 @@ pub(super) fn user_call_value(
 // and preserves the selected width, including when zero bits are counted.
 pub(super) fn countbits_constant_call(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expression: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    let state = &*tree.state;
     let Expr::Call { args, .. } = expression else {
         return None;
     };
@@ -1068,28 +1113,28 @@ pub(super) fn countbits_constant_call(
         .into_iter()
         .map(|control| match control {
             Expr::Select { expr, lsb, .. } => Some(ConstExpr::Select {
-                expr: Box::new(expr_to_const(state, *expr)?),
+                expr: Box::new(expr_to_const(session, *expr)?),
                 bit: Box::new(lsb),
             }),
-            control => expr_to_const(state, control),
+            control => expr_to_const(session, control),
         })
         .collect::<Option<Vec<_>>>()?;
-    countbits_constant_operand(tree, operand, &controls, const_env)
+    countbits_constant_operand(tree, session, operand, &controls, const_env)
 }
 
 fn countbits_constant_operand(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     operand: Expr,
     controls: &[ConstExpr],
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
-    let call = |operand| {
+    let call = |session: &mut Session, operand| {
         let mut args = Vec::with_capacity(controls.len() + 1);
         args.push(operand);
         args.extend_from_slice(controls);
-        ConstExpr::call(state, Callee::System(SystemFunction::Countbits), args)
+        ConstExpr::call(Callee::System(SystemFunction::Countbits), args, session)
     };
     let sum = |mut terms: Vec<ConstExpr>| {
         // Keep large selected vectors from creating a deeply nested sum.
@@ -1118,34 +1163,45 @@ fn countbits_constant_operand(
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
             }
-            let operand = expr_to_const(state, *expr)?;
+            let operand = expr_to_const(session, *expr)?;
             sum((lsb..=msb)
                 .map(|bit| {
-                    call(ConstExpr::Select {
-                        expr: Box::new(operand.clone()),
-                        bit: Box::new(ConstExpr::Literal(bit.to_string())),
-                    })
+                    call(
+                        session,
+                        ConstExpr::Select {
+                            expr: Box::new(operand.clone()),
+                            bit: Box::new(ConstExpr::Literal(bit.to_string())),
+                        },
+                    )
                 })
                 .collect())
         }
         Expr::Concat(parts) => sum(parts
             .into_iter()
-            .map(|part| countbits_constant_operand(tree, part, controls, const_env))
+            .map(|part| countbits_constant_operand(tree, session, part, controls, const_env))
             .collect::<Option<Vec<_>>>()?),
         Expr::RepeatConcat { count, parts } => {
             let count = eval_ast_const_expr(functions, &count, const_env)?;
             if count < 0 {
                 return None;
             }
-            let counted =
-                countbits_constant_operand(tree, Expr::Concat(parts), controls, const_env)?;
+            let counted = countbits_constant_operand(
+                tree,
+                session,
+                Expr::Concat(parts),
+                controls,
+                const_env,
+            )?;
             Some(ConstExpr::Binary {
                 left: Box::new(counted),
                 op: BinaryOp::Mul,
                 right: Box::new(ConstExpr::Literal(format!("32'sd{count}"))),
             })
         }
-        operand => Some(call(expr_to_const(state, operand)?)),
+        operand => {
+            let operand = expr_to_const(session, operand)?;
+            Some(call(session, operand))
+        }
     }
 }
 

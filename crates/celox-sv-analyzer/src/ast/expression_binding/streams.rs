@@ -38,10 +38,11 @@ pub(in crate::ast) fn is_stream(id: ExprId, native: &Declarations) -> bool {
 fn constant(
     id: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     what: &str,
 ) -> Converted<i128> {
-    constant_binding::bind(id, tree, dims)?
+    constant_binding::bind(id, tree, session, dims)?
         .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
         .ok_or_else(|| {
             unsupported(format!(
@@ -56,10 +57,11 @@ fn slice_size(
     slice: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<usize> {
     let ty = match native.expression(slice).kind {
-        ExprKind::Type(ty) => type_binding::bind(ty, tree, dims)?,
+        ExprKind::Type(ty) => type_binding::bind(ty, tree, session, dims)?,
         _ => type_binding::argument_alias(slice, native)
             .and_then(|(name, dimensions)| dimensions.is_empty().then_some(name))
             .and_then(|name| dims.type_aliases.get(&name).cloned()),
@@ -70,7 +72,7 @@ fn slice_size(
             .filter(|width| *width > 0)
             .ok_or_else(|| unsupported("streaming concatenation slice type of unknown width"));
     }
-    let size = constant(slice, tree, dims, "slice size")?;
+    let size = constant(slice, tree, session, dims, "slice size")?;
     usize::try_from(size)
         .ok()
         .filter(|size| *size > 0)
@@ -228,9 +230,10 @@ fn dynamic_range(
     range: &Dimension,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<(Expr, Expr, StreamRange)> {
-    let value = |id| bind_value(id, native, tree, dims, None);
+    let mut value = |id| bind_value(id, native, tree, session, dims, None);
     Ok(match range.kind {
         DimensionKind::Index(id) => (value(id)?, Expr::Literal("32'sd1".into()), StreamRange::Up),
         DimensionKind::Range { left, right } => (value(left)?, value(right)?, StreamRange::Bounds),
@@ -259,9 +262,10 @@ fn with_positions(
     range: &Dimension,
     (left, right): (i128, i128),
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<(i128, i128)> {
-    let index = |id| constant(id, tree, dims, "with range");
+    let mut index = |id| constant(id, tree, session, dims, "with range");
     let (low, high) = match range.kind {
         DimensionKind::Index(id) => {
             let index = index(id)?;
@@ -311,6 +315,7 @@ fn operand(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Vec<Item>> {
     let (id, range) = match &native.expression(ungroup(id, native)).kind {
@@ -324,15 +329,15 @@ fn operand(
         if range.is_some() {
             return Err(invalid("with applies to a one-dimensional unpacked array"));
         }
-        return Ok(vec![match packed(id, native, tree, dims)? {
+        return Ok(vec![match packed(id, native, tree, session, dims)? {
             Packed::Fixed(value, width) => Item::Fixed(value, StreamArg::packed(width)),
             Packed::Dynamic(stream) => Item::Dynamic(StreamItem::Stream, vec![stream]),
         }]);
     }
-    let shape = dimensions::operand_shape(id, tree, dims)?;
+    let shape = dimensions::operand_shape(id, tree, session, dims)?;
     // A container variable, or any expression of container type, such as a
     // bit-stream cast to a queue type.
-    let container = match containers::native_type(id, native, tree, dims)? {
+    let container = match containers::native_type(id, native, tree, session, dims)? {
         Some(container) => Some(container),
         None => shape.as_ref().and_then(|shape| shape.container.clone()),
     };
@@ -343,7 +348,7 @@ fn operand(
                 "streaming concatenation of class handles or structures in a container",
             ));
         }
-        let value = bind_value(id, native, tree, dims, None)?;
+        let value = bind_value(id, native, tree, session, dims, None)?;
         let Some(range) = range else {
             return Ok(vec![Item::Dynamic(
                 StreamItem::Container {
@@ -358,7 +363,7 @@ fn operand(
                 "streaming concatenation with range on an associative array",
             ));
         }
-        let (first, second, form) = dynamic_range(range, native, tree, dims)?;
+        let (first, second, form) = dynamic_range(range, native, tree, session, dims)?;
         return Ok(vec![Item::Dynamic(
             StreamItem::Container {
                 layout,
@@ -372,7 +377,7 @@ fn operand(
     {
         check_fixed(shape)?;
     }
-    let value = bind_value(id, native, tree, dims, None)?;
+    let value = bind_value(id, native, tree, session, dims, None)?;
     if real_value(&value, dims) {
         return Err(invalid("a real value is not of bit-stream type"));
     }
@@ -438,7 +443,7 @@ fn operand(
             .ok_or_else(|| unsupported("streaming concatenation with an array of unknown bounds"))
     };
     let bounds = (bound(&dimension.left)?, bound(&dimension.right)?);
-    let (first, last) = with_positions(range, bounds, tree, dims)?;
+    let (first, last) = with_positions(range, bounds, tree, session, dims)?;
     // A pack streams the selected elements, and the value of a nonexistent
     // entry (Table 7-1) for each position past the array (11.4.14.4).
     let missing = Expr::Literal(if shape.is_2state {
@@ -474,6 +479,7 @@ fn parts(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<(Option<usize>, Vec<ExprId>)> {
     let ExprKind::Streaming {
@@ -485,7 +491,7 @@ fn parts(
         unreachable!("checked by the caller");
     };
     let size = slice
-        .map(|slice| slice_size(slice, native, tree, dims))
+        .map(|slice| slice_size(slice, native, tree, session, dims))
         .transpose()?;
     // `>>` streams the blocks left to right, ignoring the slice size.
     Ok((
@@ -544,12 +550,13 @@ fn packed(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Packed> {
-    let (slice, expressions) = parts(id, native, tree, dims)?;
+    let (slice, expressions) = parts(id, native, tree, session, dims)?;
     let mut items = Vec::new();
     for expression in expressions {
-        items.extend(operand(expression, native, tree, dims)?);
+        items.extend(operand(expression, native, tree, session, dims)?);
     }
     if items.iter().any(|item| matches!(item, Item::Dynamic(..))) {
         return Ok(Packed::Dynamic(heap_stream(items, slice, false, None)));
@@ -583,9 +590,10 @@ pub(in crate::ast) fn pack(
     receiver: Option<Receiver>,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
-    Ok(match (packed(id, native, tree, dims)?, receiver) {
+    Ok(match (packed(id, native, tree, session, dims)?, receiver) {
         (Packed::Fixed(value, _), None | Some(Receiver::Cast(_))) => value,
         (Packed::Fixed(_, width), Some(Receiver::Fixed(target))) if target.width < width => {
             return Err(invalid(format!(
@@ -755,12 +763,13 @@ pub(in crate::ast) fn unpack(
     right: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Unpack>> {
     if !is_stream(left, native) {
         return Ok(None);
     }
-    let (slice, expressions) = parts(left, native, tree, dims)?;
+    let (slice, expressions) = parts(left, native, tree, session, dims)?;
     let mut lvalues = Vec::new();
     let mut takes = Vec::new();
     let mut greedy = false;
@@ -778,7 +787,7 @@ pub(in crate::ast) fn unpack(
                 return Err(invalid("with applies to a one-dimensional unpacked array"));
             }
             // A stream that keeps its order unpacks as its operands do.
-            let (slice, inner) = parts(id, native, tree, dims)?;
+            let (slice, inner) = parts(id, native, tree, session, dims)?;
             if slice.is_some() {
                 return Err(unsupported(
                     "re-ordering streaming concatenation in an unpack target",
@@ -787,7 +796,7 @@ pub(in crate::ast) fn unpack(
             pending.extend(inner.into_iter().rev());
             continue;
         }
-        let shape = dimensions::operand_shape(id, tree, dims)?
+        let shape = dimensions::operand_shape(id, tree, session, dims)?
             .ok_or_else(|| unsupported("streaming concatenation unpack target"))?;
         let dynamic = shape.container.is_some() || shape.string;
         if let Some(range) = range {
@@ -799,13 +808,17 @@ pub(in crate::ast) fn unpack(
                 });
             };
             let layout = stream_container(container)?;
-            let (first, second, form) = dynamic_range(range, native, tree, dims)?;
+            let (first, second, form) = dynamic_range(range, native, tree, session, dims)?;
             takes.push(Take::Range {
                 layout,
                 form,
-                operands: Box::new([bind_value(id, native, tree, dims, None)?, first, second]),
+                operands: Box::new([
+                    bind_value(id, native, tree, session, dims, None)?,
+                    first,
+                    second,
+                ]),
             });
-            lvalues.push(variable_lvalue(id, native, tree, dims)?);
+            lvalues.push(variable_lvalue(id, native, tree, session, dims)?);
             continue;
         }
         if dynamic {
@@ -820,7 +833,7 @@ pub(in crate::ast) fn unpack(
                 },
                 None => Take::String { reserve },
             });
-            lvalues.push(variable_lvalue(id, native, tree, dims)?);
+            lvalues.push(variable_lvalue(id, native, tree, session, dims)?);
             continue;
         }
         check_fixed(&shape)?;
@@ -856,15 +869,15 @@ pub(in crate::ast) fn unpack(
             unreachable!("a fixed-size variable receives fixed-size data");
         };
         takes.push(Take::Fixed(target));
-        lvalues.push(variable_lvalue(id, native, tree, dims)?);
+        lvalues.push(variable_lvalue(id, native, tree, session, dims)?);
     }
     let source = if is_stream(right, native) {
-        vec![match packed(right, native, tree, dims)? {
+        vec![match packed(right, native, tree, session, dims)? {
             Packed::Fixed(value, width) => Item::Fixed(value, StreamArg::packed(width)),
             Packed::Dynamic(stream) => Item::Dynamic(StreamItem::Stream, vec![stream]),
         }]
     } else {
-        operand(right, native, tree, dims)?
+        operand(right, native, tree, session, dims)?
     };
     let fixed = takes.iter().all(|take| matches!(take, Take::Fixed(_)));
     if !fixed || source.iter().any(|item| matches!(item, Item::Dynamic(..))) {

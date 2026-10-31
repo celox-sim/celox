@@ -376,12 +376,14 @@ fn scope_flags(tree: &AnalysisContext<'_>) -> (bool, bool) {
 
 pub(super) fn module_constant_functions(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> ConstantFunctions {
     symbolic_module_constant_functions(
         tree,
+        session,
         const_env,
         type_aliases,
         parameter_literals,
@@ -391,6 +393,7 @@ pub(super) fn module_constant_functions(
 
 pub(super) fn symbolic_module_constant_functions(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
@@ -404,6 +407,7 @@ pub(super) fn symbolic_module_constant_functions(
     if !needs_bootstrap {
         return collect_module_constant_functions(
             tree,
+            session,
             const_env,
             type_aliases,
             parameter_literals,
@@ -418,6 +422,7 @@ pub(super) fn symbolic_module_constant_functions(
             root_subroutines: true,
             ..tree.clone()
         },
+        session,
         const_env,
         type_aliases,
         parameter_literals,
@@ -427,6 +432,7 @@ pub(super) fn symbolic_module_constant_functions(
     let tree = &tree.with_functions(roots);
     collect_module_constant_functions(
         tree,
+        session,
         const_env,
         type_aliases,
         parameter_literals,
@@ -436,6 +442,7 @@ pub(super) fn symbolic_module_constant_functions(
 
 fn collect_module_constant_functions(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_literals: &HashMap<String, Expr>,
@@ -456,14 +463,14 @@ fn collect_module_constant_functions(
             .filter(|(name, _)| !symbolic_parameters.contains(*name))
             .map(|(name, value)| (name.clone(), *value))
             .collect();
-        symbolic_aliases = match type_aliases_from_scope_with_env(tree, &constants) {
+        symbolic_aliases = match type_aliases_from_scope_with_env(tree, session, &constants) {
             Ok(aliases) => aliases,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
         &symbolic_aliases
     };
     let (subroutine_params, subroutine_shapes, subroutine_directions) =
-        match procedural::subroutine_argument_names(tree, const_env, type_aliases) {
+        match procedural::subroutine_argument_names(tree, session, const_env, type_aliases) {
             Ok(names) => names,
             Err(error) => return ConstantFunctions::unconverted(error),
         };
@@ -487,6 +494,7 @@ fn collect_module_constant_functions(
     let mut rejected = HashMap::default();
     let subroutines = match procedural::subroutines_with_symbolic_parameters(
         tree,
+        session,
         const_env,
         &dimensions,
         parameter_literals,

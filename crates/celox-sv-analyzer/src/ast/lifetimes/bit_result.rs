@@ -1,5 +1,6 @@
 //! Bounded bit coverage for static results and scratch locals filled by constant loops.
 use super::*;
+use crate::ast::Session;
 use num_bigint::BigUint;
 
 const MAX_BITS: usize = 65536;
@@ -7,6 +8,7 @@ const MAX_STEPS: usize = 65536;
 
 pub(super) fn proves(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     subroutine: &Subroutine,
     constants: &HashMap<String, i128>,
     locals: &[LocalVariable],
@@ -22,11 +24,20 @@ pub(super) fn proves(
     else {
         return false;
     };
-    proves_variable(tree, name, width, &subroutine.body, constants, locals)
+    proves_variable(
+        tree,
+        session,
+        name,
+        width,
+        &subroutine.body,
+        constants,
+        locals,
+    )
 }
 
 pub(super) fn proves_local(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
     body: &[Stmt],
     constants: &HashMap<String, i128>,
@@ -39,11 +50,12 @@ pub(super) fn proves_local(
     let Some(width) = local.r#type.resolved_width() else {
         return false;
     };
-    proves_variable(tree, name, width, body, constants, locals)
+    proves_variable(tree, session, name, width, body, constants, locals)
 }
 
 pub(super) fn proves_variable(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
     width: usize,
     body: &[Stmt],
@@ -85,7 +97,7 @@ pub(super) fn proves_variable(
         types,
         remaining: MAX_STEPS,
     };
-    proof.block(body) == Some(true)
+    proof.block(session, body) == Some(true)
 }
 
 struct Proof<'a> {
@@ -104,12 +116,12 @@ impl Proof<'_> {
         pure(expression) && (self.written == self.full || !expr_reads(expression, self.name))
     }
 
-    fn value(&self, expression: &Expr) -> Option<i128> {
+    fn value(&self, session: &mut Session, expression: &Expr) -> Option<i128> {
         if !self.readable(expression) {
             return None;
         }
         let dims = PackedDimensions::new(HashMap::default(), &self.env, &HashMap::default());
-        let value = expr_to_index_const(self.tree, expression.clone(), &dims)?;
+        let value = expr_to_index_const(self.tree, session, expression.clone(), &dims)?;
         eval_ast_const_expr(&self.tree.functions, &value, &self.env)
     }
 
@@ -135,12 +147,12 @@ impl Proof<'_> {
 
     /// `true` means no entry bit can subsequently be observed. Unknown control
     /// flow or calls give no proof; the ordinary lifetime check requires persistent storage.
-    fn block(&mut self, statements: &[Stmt]) -> Option<bool> {
+    fn block(&mut self, session: &mut Session, statements: &[Stmt]) -> Option<bool> {
         for statement in statements {
             self.remaining = self.remaining.checked_sub(1)?;
             match statement {
                 Stmt::Local { name, init } if name != self.name => {
-                    let value = init.as_ref().and_then(|value| self.value(value));
+                    let value = init.as_ref().and_then(|value| self.value(session, value));
                     if let Some(init) = init {
                         if !self.readable(init) {
                             return None;
@@ -178,7 +190,7 @@ impl Proof<'_> {
                             }
                         }
                     } else if let LValue::Ident(name) = lhs {
-                        let value = self.value(rhs);
+                        let value = self.value(session, rhs);
                         self.store(name, value)?;
                     } else if let LValue::Select { name, msb, lsb, .. } = lhs {
                         // A partial store loses our numeric value for this
@@ -200,12 +212,12 @@ impl Proof<'_> {
                     step,
                     body,
                 } => {
-                    if self.block(init)? {
+                    if self.block(session, init)? {
                         return Some(true);
                     }
-                    while self.value(condition)? != 0 {
+                    while self.value(session, condition)? != 0 {
                         self.remaining = self.remaining.checked_sub(1)?;
-                        if self.block(body)? || self.block(step)? {
+                        if self.block(session, body)? || self.block(session, step)? {
                             return Some(true);
                         }
                     }
@@ -215,12 +227,12 @@ impl Proof<'_> {
                     then_body,
                     else_body,
                 } => {
-                    let branch = if self.value(condition)? != 0 {
+                    let branch = if self.value(session, condition)? != 0 {
                         then_body
                     } else {
                         else_body
                     };
-                    if self.block(branch)? {
+                    if self.block(session, branch)? {
                         return Some(true);
                     }
                 }
@@ -277,6 +289,7 @@ fn pure(expression: &Expr) -> bool {
 
 #[cfg(test)]
 mod tests {
+
     #[test]
     fn incomplete_or_entry_dependent_scratch_arrays_retain_storage() {
         for body in [

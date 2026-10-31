@@ -146,28 +146,29 @@ pub(in crate::ast) fn operands(
 /// bound: a string variable, or a method of a string value that returns one.
 pub(in crate::ast) fn native_string(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
     match &native.expression(ungroup(id, native)).kind {
-        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, separator } if separator == "." && name.spelling == "get_randstate" && objects::native_class(tree, *base, native, dimensions).as_deref() == Some(super::super::processes::CLASS)) => {
+        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, separator } if separator == "." && name.spelling == "get_randstate" && objects::native_class(tree, session, *base, native, dimensions).as_deref() == Some(super::super::processes::CLASS)) => {
             true
         }
         ExprKind::Select { expression, .. }
-            if containers::native_type(*expression, native, tree, dimensions)
+            if containers::native_type(*expression, native, tree, session, dimensions)
                 .ok()
                 .flatten()
                 .is_some() =>
         {
-            containers::native_type(*expression, native, tree, dimensions)
+            containers::native_type(*expression, native, tree, session, dimensions)
                 .ok()
                 .flatten()
                 .is_some_and(|ty| {
                     ty.layout.handle == Some(crate::system_functions::HandleProperty::String)
                 })
         }
-        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, .. } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") && containers::native_type(*base, native, tree, dimensions).ok().flatten().is_some_and(|ty| ty.layout.handle == Some(crate::system_functions::HandleProperty::String))) => {
+        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, .. } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") && containers::native_type(*base, native, tree, session, dimensions).ok().flatten().is_some_and(|ty| ty.layout.handle == Some(crate::system_functions::HandleProperty::String))) => {
             true
         }
         ExprKind::Name(name)
@@ -182,21 +183,27 @@ pub(in crate::ast) fn native_string(
         ExprKind::Call { expression, .. } => {
             matches!(&native.expression(ungroup(*expression, native)).kind,
                 ExprKind::Name(name) if matches!(name.spelling.as_str(), "$sformatf" | "$typename"))
-                || method(tree, *expression, native, dimensions)
+                || method(tree, session, *expression, native, dimensions)
                     .is_some_and(|(op, _)| op.returns_string())
-                || enum_name(tree, *expression, native, dimensions)
-                || returns_string(tree, *expression, native, dimensions)
+                || enum_name(tree, session, *expression, native, dimensions)
+                || returns_string(tree, session, *expression, native, dimensions)
         }
         // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
-        ExprKind::Member { .. } if enum_name(tree, id, native, dimensions) => true,
+        ExprKind::Member { .. } if enum_name(tree, session, id, native, dimensions) => true,
         // A string member of a container element of unpacked structure type.
         ExprKind::Member { .. }
-            if containers::element_member(ungroup(id, native), native, tree, dimensions)
-                .ok()
-                .flatten()
-                .is_some() =>
+            if containers::element_member(
+                ungroup(id, native),
+                native,
+                tree,
+                session,
+                dimensions,
+            )
+            .ok()
+            .flatten()
+            .is_some() =>
         {
-            containers::element_member(ungroup(id, native), native, tree, dimensions)
+            containers::element_member(ungroup(id, native), native, tree, session, dimensions)
                 .ok()
                 .flatten()
                 .is_some_and(|(ty, _)| ty.kind() == TypeKind::String)
@@ -211,7 +218,7 @@ pub(in crate::ast) fn native_string(
                 .is_some_and(|ty| ty.string)
         }
         // A string property of a class object.
-        _ => objects::property(tree, id, native, dimensions)
+        _ => objects::property(tree, session, id, native, dimensions)
             .ok()
             .flatten()
             .is_some_and(|(property, _)| {
@@ -224,11 +231,12 @@ pub(in crate::ast) fn native_string(
 /// returns a `string`.
 fn returns_string(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
-    let name = match objects::method(tree, id, native, dimensions) {
+    let name = match objects::method(tree, session, id, native, dimensions) {
         Ok(Some((name, ..))) => name,
         Ok(None) => match super::direct::callable_name(tree, id, native) {
             Some(name) => name,
@@ -250,11 +258,12 @@ fn returns_string(
 /// enumerated type (6.19.5.6).
 fn enum_name(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
-    enums::method(tree, id, native, dimensions)
+    enums::method(tree, session, id, native, dimensions)
         .ok()
         .flatten()
         .is_some_and(|(method, _, _)| method.returns_string())
@@ -264,6 +273,7 @@ fn enum_name(
 /// expression it is called on.
 pub(in crate::ast) fn method(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -276,7 +286,7 @@ pub(in crate::ast) fn method(
     else {
         return None;
     };
-    if separator != "." || !native_string(tree, *expression, native, dimensions) {
+    if separator != "." || !native_string(tree, session, *expression, native, dimensions) {
         return None;
     }
     let (op, _) = StringOp::method(&name.spelling)?;

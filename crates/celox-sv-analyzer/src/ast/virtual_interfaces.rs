@@ -253,13 +253,13 @@ pub(super) fn value_type(interface: VirtualInterface) -> Type {
 }
 
 /// The declarations of the design's virtual interfaces, if it has any.
-pub(super) fn declarations(state: &AnalysisState) -> Option<&VirtualInterfaces> {
+pub(super) fn declarations(state: &Session) -> Option<&VirtualInterfaces> {
     state.virtual_interfaces.as_deref()
 }
 
 /// The type `virtual name[.modport]`, checked against the interface.
 pub(super) fn bind_type(
-    state: &AnalysisState,
+    state: &Session,
     name: &celox_sv_syntax::Name,
     arguments: Option<&[celox_sv_syntax::Argument]>,
     modport: Option<&celox_sv_syntax::Name>,
@@ -293,7 +293,7 @@ pub(super) fn bind_type(
 /// The member `member` that a virtual interface of type `ty` reaches, with
 /// the signals that denote it in each instance the value may denote.
 pub(super) fn member<'a>(
-    state: &'a AnalysisState,
+    state: &'a Session,
     ty: &VirtualInterface,
     member: &str,
 ) -> Converted<(&'a VirtualInterfaceMember, Vec<(u32, String)>)> {
@@ -337,7 +337,7 @@ pub(super) fn member<'a>(
 /// input of its modport, which may not be assigned (IEEE 1800-2023 25.5,
 /// 23.3.3.4).
 pub(super) fn check_write(
-    state: &AnalysisState,
+    state: &Session,
     ty: &VirtualInterface,
     member: &str,
 ) -> Result<(), AnalyzerError> {
@@ -420,6 +420,7 @@ pub(super) fn template(interface: &str, member: &str) -> String {
 /// `h.m[i]` or `h.m[i][j:k]`, with the access's handle, type and member.
 pub(super) fn native_selected_member(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
@@ -431,7 +432,7 @@ pub(super) fn native_selected_member(
         base = expression_binding::ungroup(*expression, native);
     }
     selected
-        .then(|| native_member(tree, base, native, dimensions))
+        .then(|| native_member(tree, session, base, native, dimensions))
         .flatten()
 }
 
@@ -440,14 +441,14 @@ pub(super) fn native_selected_member(
 /// denotes; an error for `null`.
 pub(super) fn selected_read(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     handle: Expr,
     ty: &VirtualInterface,
     member: &str,
     selected: Expr,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    let state = &*tree.state;
-    let (_, signals) = self::member(state, ty, member)?;
+    let (_, signals) = self::member(session, ty, member)?;
     check_pure(&handle)?;
     let width = expr_static_width(tree, &selected, dimensions)
         .ok_or_else(|| unsupported(format!("width of a select of `{member}`")))?;
@@ -490,18 +491,20 @@ pub(super) fn rename(expr: Expr, from: &str, to: &str) -> Expr {
 /// container of virtual interfaces.
 pub(super) fn native_type(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<Arc<VirtualInterface>> {
-    declarations(&tree.state)?;
+    declarations(session)?;
     let id = expression_binding::ungroup(id, native);
     if let celox_sv_syntax::ExprKind::Select {
         expression,
         dimension,
     } = &native.expression(id).kind
         && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
-        && let Ok(Some(container)) = containers::native_type(*expression, native, tree, dimensions)
+        && let Ok(Some(container)) =
+            containers::native_type(*expression, native, tree, session, dimensions)
     {
         return container.element.virtual_interface.clone();
     }
@@ -548,7 +551,7 @@ pub(super) fn native_type(
     if indices > 0 {
         return None;
     }
-    let (property, _) = expression_binding::object_property(tree, id, native, dimensions)
+    let (property, _) = expression_binding::object_property(tree, session, id, native, dimensions)
         .ok()
         .flatten()?;
     property
@@ -562,6 +565,7 @@ pub(super) fn native_type(
 /// virtual interface `h`: the native handle, its type and the member.
 pub(super) fn native_member(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
@@ -579,7 +583,7 @@ pub(super) fn native_member(
     if separator != "." {
         return None;
     }
-    let ty = native_type(tree, *expression, native, dimensions)?;
+    let ty = native_type(tree, session, *expression, native, dimensions)?;
     Some((
         *expression,
         ty,
@@ -623,15 +627,15 @@ pub(super) fn null_access(handle: &Expr, width: usize, signed: bool) -> Expr {
 /// member of each instance.
 pub(super) fn read(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     handle: Expr,
     ty: &VirtualInterface,
     member: &str,
     dimensions: &PackedDimensions,
     select: impl Fn(Expr) -> Converted<Expr>,
 ) -> Converted<Expr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
-    let (found, signals) = self::member(state, ty, member)?;
+    let (found, signals) = self::member(session, ty, member)?;
     check_pure(&handle)?;
     let mut arms = Vec::new();
     for (id, signal) in signals {
@@ -744,13 +748,13 @@ fn visit_const_calls(expr: &ConstExpr, visit: &mut dyn FnMut(&Callee)) {
 /// `handle` of type `ty` denotes, `signal` naming its member `member`; an
 /// error for `null`.
 pub(super) fn dispatch(
-    state: &AnalysisState,
+    session: &mut Session,
     handle: Expr,
     ty: &VirtualInterface,
     member: &str,
-    mut arm: impl FnMut(String) -> Converted<Vec<Stmt>>,
+    mut arm: impl FnMut(&mut Session, String) -> Converted<Vec<Stmt>>,
 ) -> Converted<Stmt> {
-    let (_, signals) = self::member(state, ty, member)?;
+    let (_, signals) = self::member(session, ty, member)?;
     check_pure(&handle)?;
     let items = signals
         .into_iter()
@@ -759,7 +763,7 @@ pub(super) fn dispatch(
                 labels: vec![crate::procedural::CaseLabel::Value(Expr::Literal(format!(
                     "{WIDTH}'d{id}"
                 )))],
-                body: arm(signal)?,
+                body: arm(session, signal)?,
             })
         })
         .collect::<Converted<Vec<_>>>()?;
@@ -774,11 +778,7 @@ pub(super) fn dispatch(
 /// The signal that holds the id of the interface instance that interface
 /// instance or port `handle` of interface `interface` denotes, if a virtual
 /// interface may denote it.
-pub(super) fn identity_signal(
-    state: &AnalysisState,
-    handle: &str,
-    interface: &str,
-) -> Option<Signal> {
+pub(super) fn identity_signal(state: &Session, handle: &str, interface: &str) -> Option<Signal> {
     declarations(state)?.interfaces.get(interface)?;
     Some(Signal {
         name: VirtualInterfaceSignal::Identity {
@@ -801,7 +801,7 @@ pub(super) fn identity_signal(
 /// interface declares no members: the frontend finds the instance a port
 /// denotes by the connections of its members.
 pub(super) fn port_identity_signal(
-    state: &AnalysisState,
+    state: &Session,
     handle: &str,
     interface: &str,
 ) -> Option<Signal> {
@@ -820,10 +820,11 @@ pub(super) fn port_identity_signal(
 /// interface value: the id of the instance it denotes.
 pub(super) fn identity(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
-    if declarations(&tree.state).is_none() || dimensions.get(name).is_some() {
+    if declarations(session).is_none() || dimensions.get(name).is_some() {
         return Ok(None);
     }
     let signal = VirtualInterfaceSignal::Identity {
@@ -846,7 +847,7 @@ pub(super) fn identity(
 /// The interface instances and ports of a scope with symbols `symbols` and
 /// ports `ports` that a virtual interface may denote.
 pub(super) fn handles(
-    state: &AnalysisState,
+    state: &Session,
     symbols: &scope::ScopeSymbols,
     ports: &[Port],
 ) -> Vec<crate::ir::InterfaceHandle> {
@@ -888,18 +889,20 @@ pub(super) fn handles(
 /// interface value.
 pub(super) fn native_identity(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     dimensions: &PackedDimensions,
 ) -> Option<Expr> {
-    declarations(&tree.state)?;
+    declarations(session)?;
     let handle = interface_binding::actual_handle_key(
         id,
         tree,
+        session,
         &dimensions.const_env,
         &dimensions.type_aliases,
     )
     .ok()?;
-    identity(tree, &handle, dimensions).ok().flatten()
+    identity(tree, session, &handle, dimensions).ok().flatten()
 }
 
 /// What native expression `id` is as a virtual interface value: `None` for
@@ -908,6 +911,7 @@ pub(super) fn native_identity(
 /// else it is.
 fn native_value_type(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
@@ -931,17 +935,22 @@ fn native_value_type(
                     "pop_front" | "pop_back"
                 )
                 && let Ok(Some(container)) =
-                    containers::native_type(*receiver, native, tree, dimensions)
+                    containers::native_type(*receiver, native, tree, session, dimensions)
                 && let Some(element) = &container.element.virtual_interface
             {
                 return Ok(Some(element.as_ref().clone()));
             }
-            let name =
-                match expression_binding::object_method(tree, *expression, native, dimensions) {
-                    Ok(Some((name, _, _))) => name,
-                    _ => expression_binding::callable_name(tree, *expression, native)
-                        .ok_or_else(|| "the call".to_owned())?,
-                };
+            let name = match expression_binding::object_method(
+                tree,
+                session,
+                *expression,
+                native,
+                dimensions,
+            ) {
+                Ok(Some((name, _, _))) => name,
+                _ => expression_binding::callable_name(tree, *expression, native)
+                    .ok_or_else(|| "the call".to_owned())?,
+            };
             return match dimensions.function_return_types.get(&name) {
                 Some(result) => match &result.virtual_interface {
                     Some(ty) => Ok(Some(ty.as_ref().clone())),
@@ -952,12 +961,13 @@ fn native_value_type(
         }
         _ => {}
     }
-    if let Some(ty) = native_type(tree, id, native, dimensions) {
+    if let Some(ty) = native_type(tree, session, id, native, dimensions) {
         return Ok(Some(ty.as_ref().clone()));
     }
     let handle = interface_binding::actual_handle_key(
         id,
         tree,
+        session,
         &dimensions.const_env,
         &dimensions.type_aliases,
     )
@@ -983,6 +993,7 @@ fn native_value_type(
 /// of type `target` (IEEE 1800-2023 25.9).
 pub(super) fn check_assignment(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
@@ -997,10 +1008,10 @@ pub(super) fn check_assignment(
         .expression(expression_binding::ungroup(id, native))
         .kind
     {
-        check_assignment(tree, *then_expression, native, dimensions, target)?;
-        return check_assignment(tree, *else_expression, native, dimensions, target);
+        check_assignment(tree, session, *then_expression, native, dimensions, target)?;
+        return check_assignment(tree, session, *else_expression, native, dimensions, target);
     }
-    let actual = match native_value_type(tree, id, native, dimensions) {
+    let actual = match native_value_type(tree, session, id, native, dimensions) {
         Ok(None) => return Ok(()),
         Ok(Some(source)) if target.accepts(&source) => return Ok(()),
         Ok(Some(source)) => format!("a `{}`", source.spelling()),
@@ -1028,12 +1039,13 @@ pub(super) fn arithmetic(op: &str, ty: &VirtualInterface) -> AnalyzerError {
 /// 25.9).
 pub(super) fn check_copy_out(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
     formal: &VirtualInterface,
 ) -> Converted<()> {
-    let actual = match native_type(tree, id, native, dimensions) {
+    let actual = match native_type(tree, session, id, native, dimensions) {
         Some(actual) if actual.accepts(formal) => return Ok(()),
         Some(actual) => actual.spelling(),
         None => "the argument".to_owned(),
@@ -1092,6 +1104,7 @@ pub(super) fn check_array_assignment(
 /// conditional counts.
 fn equality_operand(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
@@ -1105,10 +1118,24 @@ fn equality_operand(
         .expression(expression_binding::ungroup(id, native))
         .kind
     {
-        equality_operand(tree, *then_expression, native, dimensions, interface)?;
-        return equality_operand(tree, *else_expression, native, dimensions, interface);
+        equality_operand(
+            tree,
+            session,
+            *then_expression,
+            native,
+            dimensions,
+            interface,
+        )?;
+        return equality_operand(
+            tree,
+            session,
+            *else_expression,
+            native,
+            dimensions,
+            interface,
+        );
     }
-    match native_value_type(tree, id, native, dimensions)? {
+    match native_value_type(tree, session, id, native, dimensions)? {
         None => Ok(()),
         Some(source) if source.interface == interface => Ok(()),
         Some(source) => Err(format!("a `{}`", source.spelling())),
@@ -1120,19 +1147,21 @@ fn equality_operand(
 /// same interface (IEEE 1800-2023 25.9).
 pub(super) fn check_equality(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     left: celox_sv_syntax::ExprId,
     right: celox_sv_syntax::ExprId,
     native: &celox_sv_syntax::Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
-    if declarations(&tree.state).is_none() {
+    if declarations(session).is_none() {
         return Ok(());
     }
     for (one, other) in [(left, right), (right, left)] {
-        let Some(ty) = native_type(tree, one, native, dimensions) else {
+        let Some(ty) = native_type(tree, session, one, native, dimensions) else {
             continue;
         };
-        let Err(actual) = equality_operand(tree, other, native, dimensions, &ty.interface) else {
+        let Err(actual) = equality_operand(tree, session, other, native, dimensions, &ty.interface)
+        else {
             return Ok(());
         };
         return Err(AnalyzerError::IncompatibleVirtualInterface {
@@ -1155,13 +1184,13 @@ pub(super) fn null_check(handle: &Expr) -> Expr {
 /// zero for `null`.
 pub(super) fn watched(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     handle: Expr,
     ty: &VirtualInterface,
     member: &str,
 ) -> Converted<Expr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
-    let (found, signals) = self::member(state, ty, member)?;
+    let (found, signals) = self::member(session, ty, member)?;
     let width = casts::expr_type_from_type(functions, &found.r#type, &HashMap::default())
         .map(|shape| shape.width)
         .ok_or_else(|| unsupported(format!("width of virtual interface member `{member}`")))?;
@@ -1181,7 +1210,7 @@ pub(super) fn watched(
 /// one counts each write of the member, which the settled selection
 /// ([`watched`]) misses when a process pulses it.
 pub(super) fn watched_writes(
-    state: &AnalysisState,
+    state: &Session,
     handle: &Expr,
     ty: &VirtualInterface,
     member: &str,

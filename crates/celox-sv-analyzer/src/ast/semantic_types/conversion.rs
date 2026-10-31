@@ -10,7 +10,7 @@ use crate::ast::{
 /// The semantic type of `ty`, whose ranges name constants of `env`; `None`
 /// if a range is not constant or the type has no semantic type yet.
 pub(in crate::ast) fn of_type(
-    table: &TyTable,
+    table: &mut TyTable,
     functions: &const_functions::ConstantFunctions,
     ty: &Type,
     env: &HashMap<String, i128>,
@@ -46,7 +46,7 @@ pub(in crate::ast) fn of_type(
 /// constants of `env`, without the integer type keyword that declared it
 /// (which only `$typename` tells apart).
 pub(in crate::ast) fn of_shape(
-    table: &TyTable,
+    table: &mut TyTable,
     functions: &const_functions::ConstantFunctions,
     shape: &VariableDimensions,
     env: &HashMap<String, i128>,
@@ -115,7 +115,7 @@ impl Parts<'_> {
     /// varying first (7.4.2), of this element type.
     fn intern<'b>(
         &self,
-        table: &TyTable,
+        table: &mut TyTable,
         functions: &const_functions::ConstantFunctions,
         env: &HashMap<String, i128>,
         unpacked: impl DoubleEndedIterator<Item = (&'b ConstExpr, &'b ConstExpr)>,
@@ -126,7 +126,8 @@ impl Parts<'_> {
                 right: eval_ast_const_expr(functions, right, env)?,
             })
         };
-        let mut id = table.intern(self.element(table, functions, env, &range)?);
+        let element = self.element(table, functions, env, &range)?;
+        let mut id = table.intern(element);
         for (left, right) in unpacked.rev() {
             id = table.intern(TyData::Array {
                 kind: ArrayKind::Fixed(range(left, right)?),
@@ -139,7 +140,7 @@ impl Parts<'_> {
     /// The type of an element of the fixed-size unpacked dimensions.
     fn element(
         &self,
-        table: &TyTable,
+        table: &mut TyTable,
         functions: &const_functions::ConstantFunctions,
         env: &HashMap<String, i128>,
         range: &dyn Fn(&ConstExpr, &ConstExpr) -> Option<Range>,
