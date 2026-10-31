@@ -96,17 +96,6 @@ struct SvVariable {
     history_of: Option<SourceVarId>,
 }
 
-/// Whether `expr` reads a string variable: after its calls are hoisted, a
-/// string-valued argument is the identifier of a variable or temporary.
-fn reads_string_variable(
-    expr: &sv::ir::Expr,
-    variables: &HashMap<SourceVarId, SvVariable>,
-    names: &HashMap<String, SourceVarId>,
-) -> bool {
-    matches!(expr, sv::ir::Expr::Ident(name)
-        if names.get(name).and_then(|id| variables.get(id)).is_some_and(|v| v.value_kind == celox_design::ValueKind::StrRef))
-}
-
 impl SvVariable {
     fn to_symbolic_variable(&self) -> SymbolicVariable {
         SymbolicVariable {
@@ -936,7 +925,8 @@ fn lower_package_states(
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
-    let mut states = packages.state_modules().collect::<Vec<_>>();
+    let states = packages.specialized_state_modules();
+    let mut states = states.iter().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
     states
         .into_iter()
@@ -1467,7 +1457,8 @@ fn kernel_written_names(
             }
             sv::ir::Callee::String(_)
             | sv::ir::Callee::Object(_)
-            | sv::ir::Callee::Checked { .. } => continue,
+            | sv::ir::Callee::Checked { .. }
+            | sv::ir::Callee::Lookup { .. } => continue,
             sv::ir::Callee::Subroutine(name) => name,
         };
         let Some(subroutine) = subroutines
@@ -1671,7 +1662,8 @@ impl DriverScan<'_> {
                 }
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
-                | sv::ir::Callee::Checked { .. } => continue,
+                | sv::ir::Callee::Checked { .. }
+                | sv::ir::Callee::Lookup { .. } => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self
@@ -3552,6 +3544,7 @@ fn needs_host_request(
     while let Some((callee, args)) = calls.pop() {
         match callee {
             sv::ir::Callee::System(function) if function.is_host_request() => return true,
+            sv::ir::Callee::String(sv::ir::StringOp::Format { .. }) => return true,
             sv::ir::Callee::Subroutine(name) => {
                 let Some(subroutine) = module.subroutines().iter().find(|sub| sub.name == name)
                 else {
@@ -4944,6 +4937,56 @@ pub(crate) fn attach_instance_glue(
     Ok(())
 }
 
+/// A [`sv::ir::Callee::Lookup`] call as nested multiplexers of case
+/// equalities. The selector is lowered once and its node shared by every
+/// comparison, so nested lookups lower in linear time. `lower` lowers an
+/// operand with a context width and signedness.
+fn lower_lookup<A: std::hash::Hash + Eq + Clone>(
+    args: &[Option<sv::ir::Expr>],
+    width: usize,
+    signed: bool,
+    arena: &mut SLTNodeArena<A>,
+    lower: &mut dyn FnMut(
+        &sv::ir::Expr,
+        &mut SLTNodeArena<A>,
+        Option<usize>,
+        Option<bool>,
+    ) -> Option<NodeId>,
+) -> Option<NodeId> {
+    let (selector, rest) = args.split_first()?;
+    let (default, pairs) = rest.split_last()?;
+    let (pairs, []) = pairs.as_chunks::<2>() else {
+        return None;
+    };
+    let selector = lower(selector.as_ref()?, arena, None, None)?;
+    let resized = |expr: &Option<sv::ir::Expr>| {
+        Some(sv::ir::Expr::Resize {
+            expr: Box::new(expr.clone()?),
+            width,
+            signed,
+        })
+    };
+    let mut result = lower(&resized(default)?, arena, Some(width), Some(signed))?;
+    for [key, value] in pairs.iter().rev() {
+        let key = lower(key.as_ref()?, arena, None, None)?;
+        let compared = celox_slt::get_width(selector, arena).max(celox_slt::get_width(key, arena));
+        let left = coerce_node_width(arena, selector, Some(compared), false).ok()?;
+        let right = coerce_node_width(arena, key, Some(compared), false).ok()?;
+        let cond = arena
+            .alloc(SLTNode::Binary(left, BinaryOp::EqCase, right))
+            .ok()?;
+        let then_expr = lower(&resized(value)?, arena, Some(width), Some(signed))?;
+        result = arena
+            .alloc(SLTNode::Mux {
+                cond,
+                then_expr,
+                else_expr: result,
+            })
+            .ok()?;
+    }
+    Some(result)
+}
+
 /// `expr inside { items }` as the comparisons the language defines: a value
 /// matches by wildcard equality, a range by an inclusive bounds check.
 fn inside_as_comparisons(expr: &sv::ir::Expr, items: &[sv::ir::InsideItem]) -> sv::ir::Expr {
@@ -5394,8 +5437,12 @@ fn lower_initial_processes(
                 }
                 None => process.body(),
             };
-            let kernel =
-                ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(body, slots, index)?;
+            let kernel = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
+                body,
+                slots,
+                index,
+                process.is_final(),
+            )?;
             wait_sites.extend(kernel.wait_sites);
             nba_sites.extend(kernel.nba_sites);
             nba_switches.extend(kernel.nba_switches);
@@ -7227,6 +7274,38 @@ fn lower_glue_parent_expr(
                 source_ids,
             ))
         }
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Lookup { width, signed },
+            args,
+            ..
+        } => {
+            let mut sources = HashSet::default();
+            let mut source_ids = Vec::new();
+            let node = lower_lookup(
+                args,
+                *width,
+                *signed,
+                arena,
+                &mut |expr, arena, context_width, context_signed| {
+                    let (node, expr_sources, expr_source_ids) = lower_glue_parent_expr(
+                        expr,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        context_width,
+                        context_signed,
+                    )?;
+                    sources.extend(expr_sources);
+                    source_ids.extend(expr_source_ids);
+                    Some(node)
+                },
+            )?;
+            source_ids.sort();
+            source_ids.dedup();
+            Some((node, sources, source_ids))
+        }
         sv::ir::Expr::Inside { expr, items } => lower_glue_parent_expr(
             &inside_as_comparisons(expr, items),
             variables,
@@ -7433,7 +7512,10 @@ fn signal_type_from_sv(
     let is_4state = float.is_none()
         && !matches!(
             typ.kind(),
-            sv::ir::TypeKind::Bit | sv::ir::TypeKind::String | sv::ir::TypeKind::Object
+            sv::ir::TypeKind::Bit
+                | sv::ir::TypeKind::String
+                | sv::ir::TypeKind::Object
+                | sv::ir::TypeKind::Process
         );
     let packed_ranges = typ
         .packed_ranges()
@@ -7459,7 +7541,9 @@ fn signal_type_from_sv(
         sv::ir::TypeKind::Logic | sv::ir::TypeKind::Reg | sv::ir::TypeKind::Implicit => {
             PortTypeKind::Logic
         }
-        sv::ir::TypeKind::String | sv::ir::TypeKind::Object => PortTypeKind::Other,
+        sv::ir::TypeKind::String | sv::ir::TypeKind::Object | sv::ir::TypeKind::Process => {
+            PortTypeKind::Other
+        }
     };
     let value_kind = match typ.kind() {
         sv::ir::TypeKind::String => celox_design::ValueKind::StrRef,
@@ -7760,6 +7844,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
     use sv::ir::SystemFunction;
     let (width, signed) = function.result_type()?;
     let result = match function {
+        SystemFunction::Process(_) => return None,
         SystemFunction::Countbits => {
             let controls = operands[1..]
                 .iter()
@@ -8623,6 +8708,34 @@ fn lower_expr_with_context(
                     .ok()?,
                 sources,
             ))
+        }
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Lookup { width, signed },
+            args,
+            ..
+        } => {
+            let mut sources = HashSet::default();
+            let node = lower_lookup(
+                args,
+                *width,
+                *signed,
+                arena,
+                &mut |expr, arena, context_width, context_signed| {
+                    let (node, expr_sources) = lower_expr_with_context(
+                        expr,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        context_width,
+                        context_signed,
+                    )?;
+                    sources.extend(expr_sources);
+                    Some(node)
+                },
+            )?;
+            Some((node, sources))
         }
         sv::ir::Expr::Inside { expr, items } => lower_expr_with_context(
             &inside_as_comparisons(expr, items),
@@ -10846,7 +10959,8 @@ mod tests {
                         }
                         sv::ir::Callee::String(_)
                         | sv::ir::Callee::Object(_)
-                        | sv::ir::Callee::Checked { .. } => continue,
+                        | sv::ir::Callee::Checked { .. }
+                        | sv::ir::Callee::Lookup { .. } => continue,
                         sv::ir::Callee::Subroutine(name) => name,
                     };
                     let Some(subroutine) = self

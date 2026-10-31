@@ -16,13 +16,40 @@ impl Ff<'_, '_> {
         op: &ObjectOp,
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        let args = args
+        let mut args = args
             .iter()
             .map(|arg| {
                 arg.clone()
                     .ok_or_else(|| unsupported(format!("omitted argument of {op}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        if args.iter().any(|arg| self.m.calls(arg)) {
+            for (index, arg) in args.iter_mut().enumerate() {
+                // A record is built from a flat structure value, not a handle.
+                if let ObjectOp::Box(record) = op {
+                    *arg = self.heap_operand(arg, Some((record.width(), false)), None)?;
+                    continue;
+                }
+                let (width, signed) = if index == 0 {
+                    (32, false)
+                } else {
+                    match op {
+                        ObjectOp::Store(field) => (field.width as usize, field.signed),
+                        ObjectOp::Randomize(_) if index == 1 => (1, false),
+                        ObjectOp::ConstraintModeSet(_)
+                        | ObjectOp::ModeSet(_)
+                        | ObjectOp::ModeSelect(..) => (1, false),
+                        ObjectOp::Seed => (32, false),
+                        _ => (64, false),
+                    }
+                };
+                *arg = self.heap_operand(
+                    arg,
+                    Some((width, signed)),
+                    (index == 0).then_some(celox_design::ValueKind::ObjRef),
+                )?;
+            }
+        }
         let result = match op {
             ObjectOp::Randomize(program) => {
                 let object = self.handle(&args[0])?;
@@ -94,11 +121,90 @@ impl Ff<'_, '_> {
                 }
                 object
             }
+            ObjectOp::Load(field) if field.four_state && self.m.four_state => {
+                let object = self.handle(&args[0])?;
+                let result = self.load_field(object, *field);
+                let width = field.width as usize;
+                let (temp, name) = self.m.temp("object", width, field.signed, true);
+                self.store(temp, SIROffset::Static(0), width, result);
+                return Ok(sv::ir::Expr::Ident(name));
+            }
             ObjectOp::Load(field) => {
                 let object = self.handle(&args[0])?;
-                let offset = self.constant64(u64::from(field.offset));
-                let count = self.constant64(u64::from(field.bytes()));
-                self.heap_call(ops::OBJECT_LOAD, &[object, offset, count])
+                self.load_field(object, *field)
+            }
+            ObjectOp::Unbox(record) => {
+                let object = self.handle(&args[0])?;
+                let parts = record
+                    .fields
+                    .iter()
+                    .map(|field| self.load_field(object, *field))
+                    .collect::<Vec<_>>();
+                let width = record.width();
+                let four_state = self.m.four_state && record.fields.iter().any(|f| f.four_state);
+                let value = if four_state {
+                    self.b.alloc_logic(width)
+                } else {
+                    self.b.alloc_bit(width, false)
+                };
+                self.b.emit(SIRInstruction::Concat(value, parts));
+                let (temp, name) = self.m.temp("record", width, false, four_state);
+                self.store(temp, SIROffset::Static(0), width, value);
+                return Ok(sv::ir::Expr::Ident(name));
+            }
+            ObjectOp::Box(record) => {
+                // Evaluate the value first: its calls may end the block, so
+                // the record's handle is only used after them.
+                let expr = self.hoist(&args[0])?;
+                let width = record.width();
+                let mut arena = SLTNodeArena::new();
+                let node = self.expr_slt(&expr, Some((width, false)), &mut arena)?;
+                let node =
+                    coerce_node_width(&mut arena, node, Some(width), false).map_err(slt_error)?;
+                let value = self.lower_slt(&arena, node)?;
+                // A record is not seeded: it has no random state, and seeding
+                // would draw from the creating process's RNG.
+                let size = self.constant64(u64::from(record.size));
+                let object = self.heap_call(
+                    ops::encode(ops::OBJECT_NEW, u64::from(sv::ir::Record::CLASS)),
+                    &[size],
+                );
+                for field in &record.fields {
+                    if let Some(kind) = field.handle {
+                        let offset = self.constant64(u64::from(field.offset));
+                        let kind = self.constant64(match kind {
+                            HandleProperty::String => 0,
+                            HandleProperty::Object => 1,
+                        });
+                        self.heap_call(ops::OBJECT_HANDLE, &[object, offset, kind]);
+                    }
+                }
+                let mut lsb = width;
+                for field in &record.fields {
+                    lsb -= field.width as usize;
+                    let part = if matches!(self.b.register(&value), RegisterType::Logic { .. }) {
+                        self.b.alloc_logic(field.width as usize)
+                    } else {
+                        self.b.alloc_bit(field.width as usize, false)
+                    };
+                    self.b.emit(SIRInstruction::Slice(
+                        part,
+                        value,
+                        lsb,
+                        field.width as usize,
+                    ));
+                    self.store_field(object, *field, part);
+                }
+                // An equal value keeps the handle it already has, so that
+                // storing it again leaves a container unchanged.
+                self.heap_call(ops::OBJECT_FINISH_RECORD, &[object])
+            }
+            ObjectOp::Store(field) if field.four_state && self.m.four_state => {
+                let object = self.handle(&args[0])?;
+                let expr = self.hoist(&args[1])?;
+                let value = self.eval(&expr, Some((field.width as usize, field.signed)))?;
+                self.store_field(object, *field, value);
+                self.constant64(0)
             }
             ObjectOp::Store(field) => {
                 let object = self.handle(&args[0])?;
@@ -173,7 +279,10 @@ impl Ff<'_, '_> {
         let (temp, name) = self.m.temp("object", width, signed, false);
         let kind = match op {
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
-            ObjectOp::New { .. } | ObjectOp::Copy => Some(celox_design::ValueKind::ObjRef),
+            ObjectOp::New { .. } | ObjectOp::Copy | ObjectOp::Box(_) => {
+                Some(celox_design::ValueKind::ObjRef)
+            }
+            ObjectOp::Unbox(_) => unreachable!("lowered to its own temporary"),
             ObjectOp::Load(field) => field.handle.map(|handle| match handle {
                 HandleProperty::String => celox_design::ValueKind::StrRef,
                 HandleProperty::Object => celox_design::ValueKind::ObjRef,
@@ -199,5 +308,65 @@ impl Ff<'_, '_> {
         }
         self.store(temp, SIROffset::Static(0), width, value);
         Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// The value of `field` of the object in 64-bit `object`: a register of
+    /// the field's width, 4-state for a 4-state field in 4-state simulation.
+    fn load_field(&mut self, object: RegisterId, field: sv::ir::ObjectField) -> RegisterId {
+        let opcode = if field.nullable {
+            ops::OBJECT_LOAD_NULLABLE
+        } else {
+            ops::OBJECT_LOAD
+        };
+        let width = field.width as usize;
+        if field.four_state && self.m.four_state {
+            let [value, mask] = [0, field.bytes()].map(|plane| {
+                let offset = self.constant64(u64::from(field.offset + plane));
+                let count = self.constant64(u64::from(field.bytes()));
+                let stored = self.heap_call(opcode, &[object, offset, count]);
+                self.complement(stored)
+            });
+            return self.container_join(value, mask, width, true);
+        }
+        let offset = self.constant64(u64::from(field.offset));
+        let count = self.constant64(u64::from(field.bytes()));
+        let loaded = self.heap_call(opcode, &[object, offset, count]);
+        let value = self.b.alloc_bit(width, field.signed);
+        self.b.emit(SIRInstruction::Slice(value, loaded, 0, width));
+        value
+    }
+
+    /// Store register `value` of `field`'s width into `field` of the object in
+    /// 64-bit `object`.
+    fn store_field(&mut self, object: RegisterId, field: sv::ir::ObjectField, value: RegisterId) {
+        let planes = if field.four_state && self.m.four_state {
+            let (value, mask) = self.container_split(value);
+            vec![
+                (0, self.complement(value)),
+                (field.bytes(), self.complement(mask)),
+            ]
+        } else {
+            let known = self.b.alloc_bit(field.width as usize, false);
+            self.b
+                .emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, value));
+            let wide = self.b.alloc_bit(64, false);
+            self.b
+                .emit(SIRInstruction::Unary(wide, UnaryOp::Ident, known));
+            vec![(0, wide)]
+        };
+        for (plane, bits) in planes {
+            let place =
+                self.constant64(u64::from(field.offset + plane) | u64::from(field.bytes()) << 32);
+            self.heap_call(ops::OBJECT_STORE, &[object, place, bits]);
+        }
+    }
+
+    /// A 4-state property holds the complement of its value and mask planes,
+    /// so the zeroed bytes of a new object read as X (IEEE 1800-2023 6.8).
+    fn complement(&mut self, plane: RegisterId) -> RegisterId {
+        let complement = self.b.alloc_bit(64, false);
+        self.b
+            .emit(SIRInstruction::Unary(complement, UnaryOp::BitNot, plane));
+        complement
     }
 }

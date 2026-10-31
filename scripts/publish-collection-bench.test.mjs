@@ -19,13 +19,14 @@ function report() {
 test("publish medians only and separate every measurement contract", () => {
   const input = report();
   const benches = metrics(input);
-  assert.deepEqual(benches.map(b => b.value), [20, 40, 80, 20, 40, 80]);
+  assert.deepEqual(benches.map(b => b.value), [80, 80]);
   assert.equal(benches[0].unit, "ns");
+  assert.ok(benches.every(b => b.name.endsWith("_total")));
   assert.equal(JSON.parse(benches[0].extra).frontend, "veryl");
   input.results.forEach(r => r.testbenchSha256 = "c".repeat(64));
   assert.notEqual(metrics(input)[0].name, benches[0].name);
   input.host.arch = "arm64";
-  assert.match(metrics(input)[0].name, /_arm64_compilation$/);
+  assert.match(metrics(input)[0].name, /_arm64_total$/);
 });
 
 test("qualification, failures, partial samples and altered runner contracts cannot publish", () => {

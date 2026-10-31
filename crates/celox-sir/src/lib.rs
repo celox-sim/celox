@@ -45,6 +45,11 @@ pub struct SirProgram<EventAddr, StateAddr> {
     /// FF program, so the combinational program exists once however many
     /// events there are. See [`SirProgram::comb_apply`].
     pub merge_comb_apply: bool,
+    /// The storage of the `eval_comb` paths that keep state from one settle
+    /// to the next, as its scheduler found them: latches and other
+    /// previous-value reads, loops, guarded processes. Every other path is a
+    /// function of its inputs. `None` when unknown.
+    pub eval_comb_stateful: Option<Vec<StateAddr>>,
     pub eval_only_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
     pub apply_ffs: HashMap<EventAddr, Vec<ExecutionUnit<StateAddr>>>,
     /// Lane-partitioned alternatives of the hot phases, present only when
@@ -252,6 +257,9 @@ impl<EventAddr, StateAddr> SirProgram<EventAddr, StateAddr> {
                 &mut map_state,
             ),
             merge_comb_apply: self.merge_comb_apply,
+            eval_comb_stateful: self
+                .eval_comb_stateful
+                .map(|stateful| stateful.into_iter().map(&mut map_state).collect()),
             eval_only_ffs: map_groups(self.eval_only_ffs, &mut map_event, &mut map_state),
             apply_ffs: map_groups(self.apply_ffs, &mut map_event, &mut map_state),
             processes: self
@@ -1164,6 +1172,7 @@ mod program_mapping_tests {
             eval_apply_ffs: [(1u32, vec![unit])].into_iter().collect(),
             eval_comb_apply_ffs: HashMap::default(),
             merge_comb_apply: true,
+            eval_comb_stateful: None,
             eval_only_ffs: HashMap::default(),
             apply_ffs: HashMap::default(),
             parallel: None,

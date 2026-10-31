@@ -2041,7 +2041,9 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<Store, sv::AnalyzerError> {
         match stmt {
             sv::ir::Stmt::DisableFork => Ok(store),
-            sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => {
+            sv::ir::Stmt::Fork { .. }
+            | sv::ir::Stmt::WaitFork
+            | sv::ir::Stmt::AssertionRegion { .. } => {
                 Err(unsupported("fork control outside a timed process"))
             }
             sv::ir::Stmt::Assign {
@@ -3423,6 +3425,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         // Copy the inputs in, left to right, in the caller's scope.
         let mut outputs = Vec::new();
         let mut copied = Vec::new();
+        let mut references = Vec::new();
         let positions: Vec<_> = if arg_order.is_empty() {
             (0..subroutine.params.len()).collect()
         } else {
@@ -3443,6 +3446,44 @@ impl<'p, 'a> Comb<'p, 'a> {
                 .cloned()
                 .flatten()
                 .or_else(|| param.default.clone());
+            if param.direction.is_reference() && !param.leaves.is_empty() {
+                // Each member of a formal of unpacked structure type names
+                // the matching member variable of the actual.
+                let targets = match &actual {
+                    Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts
+                        .iter()
+                        .map(|part| match part {
+                            sv::ir::Expr::Ident(actual) => self.m.id(actual),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>(),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    unsupported(format!("ref argument `{}` of `{name}`", param.source_name))
+                })?;
+                for (leaf, target) in param.leaves.iter().zip(targets) {
+                    let id = self
+                        .m
+                        .id(leaf)
+                        .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+                    references.push((leaf.clone(), id, target));
+                }
+                continue;
+            }
+            if param.direction.is_reference() {
+                // A reference formal names the actual variable itself
+                // (IEEE 1800-2023 13.5.2); other actuals fall back to Ff.
+                let target = match &actual {
+                    Some(sv::ir::Expr::Ident(actual)) => self.m.id(actual),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    unsupported(format!("ref argument `{}` of `{name}`", param.source_name))
+                })?;
+                references.push((param.name.clone(), id, target));
+                continue;
+            }
             if param.direction.is_written() {
                 let actual = actual.as_ref().and_then(lvalue_from_expr).ok_or_else(|| {
                     unsupported(format!(
@@ -3508,6 +3549,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             let width = self.m.var(id).width;
             self.write(store, id, full(width), value)?;
         }
+        for (formal, _, target) in &references {
+            self.m.name_to_id.insert(formal.clone(), *target);
+        }
         let return_var = match &subroutine.return_var {
             Some(name) => {
                 let id = self
@@ -3531,6 +3575,9 @@ impl<'p, 'a> Comb<'p, 'a> {
         self.active_calls.push(name.to_string());
         let result = self.exec_block(store.fork(), &call_frames, &subroutine.body);
         self.active_calls.pop();
+        for (formal, original, _) in references {
+            self.m.name_to_id.insert(formal, original);
+        }
         *store = result?;
         // Copy the outputs back.
         for (id, lvalues) in outputs {
@@ -3701,11 +3748,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                         expr.clone()
                     };
                     let signed = self.expr_signed(&expr);
-                    arg_is_handle.push(reads_string_variable(
-                        &expr,
-                        self.m.variables,
-                        self.m.name_to_id,
-                    ));
+                    arg_is_handle.push(self.m.expr_is_string(&expr));
                     arg_float_precision.push(floating::precision(
                         &expr,
                         self.m.variables,

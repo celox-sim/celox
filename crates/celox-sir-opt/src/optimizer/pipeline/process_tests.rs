@@ -154,6 +154,7 @@ fn optimize_process(
         eval_apply_ffs: crate::HashMap::default(),
         eval_comb_apply_ffs: crate::HashMap::default(),
         merge_comb_apply: true,
+        eval_comb_stateful: None,
         eval_only_ffs: crate::HashMap::default(),
         apply_ffs: crate::HashMap::default(),
         parallel: None,

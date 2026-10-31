@@ -1,0 +1,202 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::const_ref_in_a_continuous_assignment",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::const_ref_reads_the_current_value",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:6:20: Ref argument requires matching types; port 'x' requires 'int' but connection is 'bit[31:0]'.\n                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |  initial begin set(word); q = word == -5 && word < 0; end\n      |                    ^~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Warning-WIDTHEXPAND: <case>/source_0.sv:6:29: Operator ASSIGN expects 32 bits on the Assign RHS, but Assign RHS's LOGAND generates 1 bits.\n                                             : ... note: In instance 'celox_suite_tb.dut'\n    6 |  initial begin set(word); q = word == -5 && word < 0; end\n      |                             ^\n                      ... For warning description see https://verilator.org/warn/WIDTHEXPAND?v=5.052\n                      ... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "references::ref_actual_of_an_equivalent_type",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-IMPURE: <case>/source_0.sv:5:26: Unsupported: External variable referenced by non-inlined function/task: 'celox_suite_tb.dut.bump'\n    5 |  function automatic void bump(ref int x);\n      |                          ^~~~\n               <case>/source_0.sv:7:3: ... Location of the external reference: 'celox_suite_tb.dut.i'\n    7 |   i = 3;\n      |   ^\n               ... For error description see https://verilator.org/warn/IMPURE?v=5.052\n%Warning-ZERODLY: <case>/testbench.sv:103:25: Value of # delay control statically unknown. Assuming it can be #0.\n                                            : ... If all # delays are non-zero at runtime,\n                                            : ... use '--no-sched-zero-delay' for improved performance.\n                                            : ... If a real #0 is expected at runtime,\n                                            : ... use '--sched-zero-delay' to suppress this warning.\n  103 |         if (t1 > $time) #(t1 - $time);\n      |                         ^\n                  ... For warning description see https://verilator.org/warn/ZERODLY?v=5.052\n                  ... Use \"/* verilator lint_off ZERODLY */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "references::ref_array_element_index_is_fixed_at_the_call",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-IMPURE: <case>/source_0.sv:7:26: Unsupported: External variable referenced by non-inlined function/task: 'retarget'\n                                      : ... note: In instance 'celox_suite_tb.dut'\n    7 |  function automatic void retarget(ref int x, ref Node node);\n      |                          ^~~~~~~~\n               <case>/source_0.sv:5:24: ... Location of the external reference: 'count'\n    5 |   function new(int c); count = c; endfunction\n      |                        ^~~~~\n               ... For error description see https://verilator.org/warn/IMPURE?v=5.052\n%Warning-ZERODLY: <case>/testbench.sv:103:25: Value of # delay control statically unknown. Assuming it can be #0.\n                                            : ... If all # delays are non-zero at runtime,\n                                            : ... use '--no-sched-zero-delay' for improved performance.\n                                            : ... If a real #0 is expected at runtime,\n                                            : ... use '--sched-zero-delay' to suppress this warning.\n  103 |         if (t1 > $time) #(t1 - $time);\n      |                         ^\n                  ... For warning description see https://verilator.org/warn/ZERODLY?v=5.052\n                  ... Use \"/* verilator lint_off ZERODLY */\" and lint_on around source to disable this message.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "Simulation",
+      "name": "references::ref_class_property_names_the_object_of_the_call",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_default_and_named_arguments",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_element_after_an_input_in_forked_activations",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_element_select_past_the_element",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_elements_of_concurrent_task_activations",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_fills_caller_queues",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_formals_of_one_actual_alias_each_other",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_property_forwarded_to_output_and_inout",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_property_of_this",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_replaces_a_class_handle",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_static_class_properties",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_task_keeps_a_property_while_suspended",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_task_keeps_the_reference_while_suspended",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "references::ref_writes_are_seen_before_the_return",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

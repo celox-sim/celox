@@ -3,26 +3,38 @@ use super::*;
 use celox_sv_syntax::{Declarations, DimensionKind, ExprId, ExprKind};
 mod calls;
 mod direct;
+mod enums;
+mod format_patterns;
 mod lvalues;
 mod objects;
+mod references;
 #[cfg(test)]
 mod selected;
 mod strings;
 pub(super) use calls::{statement as call_statement, statement_root as call_statement_root};
 pub(super) use direct::{
     arguments, bind_value, call_name as native_name, callable_name, cast_target_native,
-    member_context, real_value, remove_real_division_guards, ungroup,
+    formal_arguments, format_arguments, member_context, real_value, remove_real_division_guards,
+    string_literal_bytes, ungroup,
+};
+pub(super) use format_patterns::{
+    bytes_literal, format as format_call, has_pattern, pattern as format_pattern,
+    pattern_argument as format_pattern_argument, rewrite_format, rewrite_template,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
-    Cast as ObjectCast, Receiver as ObjectReceiver, cast as object_cast,
+    Cast as ObjectCast, Receiver as ObjectReceiver,
+    aggregate_property as object_aggregate_property, cast as object_cast,
     check_access as check_member_access, check_assignment as check_handle_assignment,
     constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
-    method as object_method, property as object_property, rand_mode_call as object_rand_mode_call,
-    receiver as object_receiver, static_property as object_static_property, this as object_this,
+    method as object_method, method_result as object_method_result, named_class,
+    native_class as object_native_class, property as object_property,
+    rand_mode_call as object_rand_mode_call, receiver as object_receiver,
+    static_property as object_static_property, this as object_this,
 };
 pub(super) use strings::{
-    call as string_call, method as string_method, native_string, to_string as string_operand,
+    call as string_call, method as string_method, native_string, string_value,
+    to_string as string_operand,
 };
 fn disagreement() -> AnalyzerError {
     AnalyzerError::Parse("invalid native expression ownership".into())

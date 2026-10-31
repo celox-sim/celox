@@ -1,0 +1,36 @@
+{
+  "standard": "IEEE 1800-2023 9.7",
+  "source": "sv_process_self_suspend_and_await.sv",
+  "xezim_version": "xezim version 0.11.3",
+  "source_revision": "5eab5f276c9062cfd17db4987a1e91de74fdbe5d",
+  "core_revision": "1947ac68859f823610c63833f61d52d6d7695342",
+  "build": "Pinned sources, existing Nix recipe with a regenerated lock in an isolated validation package; no simulator source changes.",
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "observations": [
+    {
+      "source": "sv_process_self_suspend_and_await.sv",
+      "top": "Top",
+      "xezim": {
+        "exit_code": 0,
+        "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nchecks=2 phase=2 finished_at=3 terminal_state=4\nSimulation finished at time 7 ($finish called)\n"
+      },
+      "verilator": {
+        "exit_code": 1,
+        "output": "[0] %Error: verilated_std.sv:183: Assertion failed in std.process.suspend: std::process::suspend() not supported"
+      }
+    },
+    {
+      "source": "sv_process_self_suspend_and_await.sv",
+      "top": "Wrapped",
+      "xezim": {
+        "exit_code": 0,
+        "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nchecks=2 phase=2 finished_at=3 terminal_state=4\nSimulation finished at time 7 ($finish called)\n"
+      },
+      "verilator": {
+        "exit_code": 1,
+        "output": "[0] %Error: verilated_std.sv:183: Assertion failed in std.process.suspend: std::process::suspend() not supported"
+      }
+    }
+  ],
+  "expected_output": "checks=7 phase=2 finished_at=5 terminal_state=0"
+}

@@ -138,15 +138,62 @@ impl Parser<'_> {
         Ok(id)
     }
 
-    /// A deferred immediate assertion as a module item: an `always_comb`
-    /// procedure whose body is the assertion (IEEE 1800-2023 16.4.3).
-    pub(super) fn static_deferred_assertion(&mut self) -> Result<ProcedureId> {
+    /// Keep temporal property syntax opaque until its automaton is supported.
+    /// A Boolean expression must not accidentally consume a sequence operator.
+    fn boolean_property_header(&self) -> bool {
+        let mut depth = 0usize;
+        for offset in 0..self.indices.len().saturating_sub(self.at) {
+            match self.nth(offset) {
+                "(" => depth += 1,
+                ")" => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                "##" | "|->" | "|=>" | "throughout" | "within" | "intersect" | "until"
+                | "s_until" | "until_with" | "s_until_with" | "implies" | "iff"
+                    if self.nth(offset.saturating_sub(1)) != "disable" =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// A module assertion: deferred immediate checks use `always_comb`, while
+    /// clocked concurrent checks wait for their event (IEEE 1800-2023 16.4, 16.14).
+    pub(super) fn module_assertion(&mut self) -> Result<ProcedureId> {
         let start = self.at;
-        let body = self.statement_machine()?;
+        let mut body = self.statement_machine()?;
+        let mut kind = ProcedureKind::AlwaysComb;
+        if let StatementKind::Assertion {
+            header:
+                AssertionHeader::Concurrent {
+                    clock, module_item, ..
+                },
+            ..
+        } = &mut self.statements[body.0].kind
+        {
+            *module_item = true;
+            let control = *clock;
+            let assertion = body;
+            let mut wrapper = self.statements[body.0].clone();
+            wrapper.kind = StatementKind::Timing {
+                control,
+                body: assertion,
+            };
+            wrapper.label = None;
+            body = StatementId(self.statements.len());
+            self.statements.push(wrapper);
+            kind = ProcedureKind::Always;
+        }
         let id = ProcedureId(self.procedures.len());
         let authored_statements = self.body_membership(&[body]);
         self.procedures.push(Procedure {
-            kind: ProcedureKind::AlwaysComb,
+            kind,
             body,
             authored_statements,
             tokens: self.range(start),
@@ -1123,15 +1170,43 @@ impl Parser<'_> {
                                 None
                             };
                             let concurrent = matches!(self.peek(), "property" | "sequence");
+                            let property = self.peek() == "property";
                             if concurrent {
                                 self.at += 1;
                             }
+                            let typed_property = property
+                                && self.peek() == "("
+                                && self.nth(1) == "@"
+                                && self.boolean_property_header();
+                            let property_header = if typed_property {
+                                self.expect("(")?;
+                                let clock = self.typed_timing_control()?;
+                                let disable = if self.eat("disable") {
+                                    self.expect("iff")?;
+                                    Some(self.parenthesized_expression()?)
+                                } else {
+                                    None
+                                };
+                                let condition = self.expression(0)?;
+                                self.expect(")")?;
+                                Some(AssertionHeader::Concurrent {
+                                    clock,
+                                    disable,
+                                    condition,
+                                    module_item: false,
+                                    tokens: self.range(start),
+                                })
+                            } else {
+                                None
+                            };
                             let condition = if !concurrent
                                 && matches!(word.as_str(), "assert" | "assume" | "cover")
                             {
                                 Some(self.parenthesized_expression()?)
                             } else {
-                                self.parentheses()?;
+                                if !typed_property {
+                                    self.parentheses()?;
+                                }
                                 None
                             };
                             let tokens = self.range(start);
@@ -1144,7 +1219,8 @@ impl Parser<'_> {
                                         deferred,
                                         tokens,
                                     },
-                                    None => AssertionHeader::Unconverted(tokens),
+                                    None => property_header
+                                        .unwrap_or(AssertionHeader::Unconverted(tokens)),
                                 })
                             };
                             if word == "restrict" {

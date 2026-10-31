@@ -11,10 +11,15 @@ rust-version.workspace = true
 
 [dependencies]
 celox-design = { workspace = true }
+celox-sir = { workspace = true }
 celox-heap = { workspace = true }
 num-bigint = { workspace = true }
 num-traits = { workspace = true }
 serde = { workspace = true }
+
+[target.'cfg(target_arch = "x86_64")'.dev-dependencies]
+celox-backend-x86 = { workspace = true }
+celox-state-layout = { workspace = true }
 
 [lints]
 workspace = true

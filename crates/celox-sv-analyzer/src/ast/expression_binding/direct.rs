@@ -68,6 +68,11 @@ pub(super) fn bound_callable_name(
     if let Some(name) = callable_name(&tree.state, id, native) {
         return Ok(Some(name));
     }
+    if let Some((name, _, objects::Receiver::Static)) =
+        objects::method(tree, id, native, dimensions)?
+    {
+        return Ok(Some(name));
+    }
     let ExprKind::Member {
         expression,
         separator,
@@ -109,6 +114,42 @@ pub(in crate::ast) fn arguments(
     } else {
         args
     };
+    let (positional, named) = split_arguments(name, args)?;
+    let signatures = expressions::call_signatures(name, dimensions);
+    let (values, order) =
+        expressions::bind_normalized_call_arguments(name, positional, named, &signatures)?;
+    expressions::check_query_omissions(name, &values, dimensions)?;
+    Ok((values, order))
+}
+
+/// The actuals `args` of a call of `name` pass to each of `formals`, by
+/// position or by name, and the order they are evaluated in, see
+/// [`expressions::bind_to_formals`].
+pub(in crate::ast) fn formal_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+    formals: &[Option<String>],
+) -> Converted<(Vec<Option<ExprId>>, Vec<usize>)> {
+    // `f()` lists one empty actual, which a subroutine without formals
+    // does not take.
+    let args = match args {
+        [arg] if formals.is_empty() && arg.name.is_none() && arg.value.is_none() => &[],
+        args => args,
+    };
+    let (positional, named) = split_arguments(name, args)?;
+    let formals = formals
+        .iter()
+        .map(|formal| formal.as_deref().unwrap_or_default())
+        .collect::<Vec<_>>();
+    expressions::bind_to_formals(name, positional, named, &formals)
+}
+
+/// The positional actuals, which come first, and the named ones with their
+/// normalized names (IEEE 1800-2023 13.5.4).
+fn split_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+) -> Converted<(Vec<Option<ExprId>>, Vec<(String, Option<ExprId>)>)> {
     let mut positional = Vec::new();
     let mut named = Vec::new();
     for arg in args {
@@ -117,14 +158,13 @@ pub(in crate::ast) fn arguments(
         } else if named.is_empty() {
             positional.push(arg.value);
         } else {
-            return Err(unsupported("positional argument after named argument"));
+            return Err(AnalyzerError::InvalidCallArguments {
+                subroutine: name.to_string(),
+                detail: "a positional actual after a named one (IEEE 1800-2023 13.5.4)".into(),
+            });
         }
     }
-    let signatures = expressions::call_signatures(name, dimensions);
-    let (values, order) =
-        expressions::bind_normalized_call_arguments(name, positional, named, &signatures)?;
-    expressions::check_query_omissions(name, &values, dimensions)?;
-    Ok((values, order))
+    Ok((positional, named))
 }
 
 pub(in crate::ast) fn cast_target_native(
@@ -234,16 +274,35 @@ enum Finish {
     Inside(Vec<bool>),
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
+    /// An enumerated type method; the children are the receiver, then the
+    /// count when one is given.
+    EnumMethod {
+        method: enums::Method,
+        domain: std::sync::Arc<crate::ast::enums::EnumDomain>,
+        count: bool,
+    },
+    /// `$sformatf` of the bound children, whose native expressions are `ids`.
+    Format {
+        ticks_per_unit: u64,
+        ids: Vec<ExprId>,
+    },
     /// A read of property `property` of the object handle child.
     ObjectLoad(Box<crate::ast::classes::Property>),
-    /// A call of method subroutine `name` with `formals` formals; the first
-    /// child is the object handle when `receiver` is one.
-    MethodCall {
-        name: String,
-        formals: usize,
-        receiver: objects::Receiver,
-        selection: Option<Expr>,
-    },
+    MethodCall(Box<MethodCall>),
+}
+
+/// A call of method subroutine `name` with `formals` formals; the first
+/// child is the object handle when `receiver` is one, then come the given
+/// actuals in the order of the formals.
+struct MethodCall {
+    name: String,
+    /// Whether each formal has an actual.
+    given: Vec<bool>,
+    /// The formals in the order their actuals are evaluated.
+    order: Vec<usize>,
+    formals: usize,
+    receiver: objects::Receiver,
+    selection: Option<Expr>,
 }
 
 enum Job {
@@ -268,6 +327,24 @@ pub(in crate::ast) fn bind_value(
         match job {
             Job::Enter(id, target, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
+                unpacked_structs::check_operands(id, native, tree, dimensions)?;
+                // An argument, result or other value received as an unpacked
+                // structure is a pattern or a value of its type (6.22.3).
+                if let Some(aggregate) = target
+                    .as_deref()
+                    .filter(|shape| shape.unpacked.is_empty())
+                    .and_then(|shape| shape.unpacked_struct.as_deref())
+                {
+                    unpacked_structs::check_value(aggregate, id, native, tree, dimensions)?;
+                } else if target
+                    .as_deref()
+                    .is_some_and(|shape| shape.unpacked.is_empty() && shape.container.is_none())
+                    && unpacked_structs::native_struct(id, native, tree, dimensions)?.is_some()
+                {
+                    return Err(unsupported(
+                        "unpacked structure value received by a destination that is not of its type",
+                    ));
+                }
                 if let Some(shape) = target.as_deref()
                     && shape
                         .members
@@ -295,6 +372,59 @@ pub(in crate::ast) fn bind_value(
                             "assignment to a tagged union requires the same union type or a tagged expression",
                         ));
                     }
+                }
+                let enum_method = match &native.expression(id).kind {
+                    ExprKind::Call {
+                        expression,
+                        arguments,
+                    } => enums::method(tree, *expression, native, dimensions)?
+                        .map(|method| (method, arguments.as_slice())),
+                    ExprKind::Member { .. } => {
+                        enums::method(tree, id, native, dimensions)?.map(|method| (method, &[][..]))
+                    }
+                    _ => None,
+                };
+                if let Some(((method, receiver, domain), arguments)) = enum_method {
+                    // `v.next()` lists one empty argument.
+                    let arguments = match arguments {
+                        [argument] if argument.name.is_none() && argument.value.is_none() => &[],
+                        arguments => arguments,
+                    };
+                    let counts = arguments
+                        .iter()
+                        .map(|argument| argument.value.filter(|_| argument.name.is_none()))
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|counts| counts.len() <= method.formals())
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "arguments of enumerated type method `{}`",
+                                native.token_text(native.expression(id).tokens).trim()
+                            ))
+                        })?;
+                    let mut children = vec![receiver];
+                    children.extend(&counts);
+                    jobs.push(Job::Finish(
+                        Finish::EnumMethod {
+                            method,
+                            domain,
+                            count: !counts.is_empty(),
+                        },
+                        children.len(),
+                        scope.clone(),
+                    ));
+                    jobs.extend(
+                        children
+                            .into_iter()
+                            .rev()
+                            .map(|id| Job::Enter(id, None, scope.clone())),
+                    );
+                    continue;
+                }
+                if let Some(call) =
+                    super::super::processes::value(tree, id, native, dimensions, false)?
+                {
+                    values.push(call);
+                    continue;
                 }
                 if let Some((value, _)) = array_reductions::bind(id, native, tree, dimensions)? {
                     values.push(value);
@@ -398,6 +528,20 @@ pub(in crate::ast) fn bind_value(
                         {
                             return Err(unsupported(format!("`{name}`")));
                         }
+                        if let Some(value) = unpacked_structs::whole(&name, dimensions) {
+                            values.push(value);
+                            continue;
+                        }
+                        if let Some((aggregate, class, _)) =
+                            objects::aggregate_property(tree, id, native, dimensions)?
+                        {
+                            values.push(objects::aggregate_load(
+                                &aggregate,
+                                &class,
+                                &objects::this(),
+                            )?);
+                            continue;
+                        }
                         if let Some(value) = objects::unqualified_property(tree, dimensions, &name)?
                         {
                             values.push(value);
@@ -471,32 +615,53 @@ pub(in crate::ast) fn bind_value(
                                 objects::random_selection(tree, dimensions, &name, args, native)
                             })
                             .transpose()?;
-                        if selection.is_none()
-                            && (args.len() > formals
-                                || (name.ends_with("::srandom") && args.len() != 1)
-                                || args.iter().any(|arg| arg.name.is_some()))
+                        if name.ends_with("::srandom")
+                            && (args.len() != 1 || args[0].name.is_some())
                         {
                             return Err(unsupported(format!("arguments of method `{name}`")));
                         }
+                        let (actuals, order) = match selection {
+                            Some(_) => (Vec::new(), Vec::new()),
+                            None => formal_arguments(
+                                name.strip_suffix("$virtual").unwrap_or(&name),
+                                args,
+                                &formals,
+                            )?,
+                        };
                         let mut children = Vec::new();
                         if let objects::Receiver::Handle(handle) = receiver {
                             children.push((handle, None));
                         }
-                        for arg in args.iter().filter(|_| selection.is_none()) {
-                            let Some(value) = arg.value else {
-                                return Err(unsupported(format!(
-                                    "omitted argument of method `{name}`"
-                                )));
-                            };
-                            children.push((value, None));
+                        // The shapes of the formals, after `this` of a method
+                        // that is not static, receive assignment patterns.
+                        let first = usize::from(receiver != objects::Receiver::Static);
+                        let shapes = dimensions.subroutine_param_shapes.get(&name);
+                        for (position, value) in actuals.iter().enumerate() {
+                            let Some(value) = *value else { continue };
+                            references::check_actual(
+                                &name,
+                                first + position,
+                                value,
+                                native,
+                                tree,
+                                dimensions,
+                            )?;
+                            let shape = shapes
+                                .and_then(|shapes| shapes.get(first + position))
+                                .filter(|shape| shape.unpacked_struct.is_some())
+                                .cloned()
+                                .map(Rc::new);
+                            children.push((value, shape));
                         }
                         (
-                            Finish::MethodCall {
+                            Finish::MethodCall(Box::new(MethodCall {
                                 name,
-                                formals,
+                                given: actuals.iter().map(Option::is_some).collect(),
+                                order,
+                                formals: formals.len(),
                                 receiver,
                                 selection,
-                            },
+                            })),
                             children,
                         )
                     }
@@ -567,7 +732,8 @@ pub(in crate::ast) fn bind_value(
                                         "scope randomize requires a packed variable with a supported enum domain",
                                     ));
                                 }
-                                domains.push(shape.enum_values.clone());
+                                domains
+                                    .push(shape.enum_domain.as_ref().map(|domain| domain.values()));
                                 if !expressions::query_actual_is_writable(
                                     &Expr::Ident(name),
                                     dimensions,
@@ -614,6 +780,15 @@ pub(in crate::ast) fn bind_value(
                                     system: None,
                                 },
                                 vec![(destination, None), (source, None)],
+                            )
+                        } else if name == "$sformatf" {
+                            let actuals = format_arguments(&name, args)?;
+                            (
+                                Finish::Format {
+                                    ticks_per_unit: timescales::time_divisor(id, tree)?,
+                                    ids: actuals.clone(),
+                                },
+                                actuals.into_iter().map(|id| (id, None)).collect(),
                             )
                         } else if name.starts_with('$') && !name.contains("::") {
                             let presence = args
@@ -737,6 +912,11 @@ pub(in crate::ast) fn bind_value(
                         } else {
                             let (actuals, order) = arguments(&name, args, dimensions)?;
                             for (position, id) in actuals.iter().enumerate() {
+                                if let Some(id) = id {
+                                    references::check_actual(
+                                        &name, position, *id, native, tree, dimensions,
+                                    )?;
+                                }
                                 if let Some(id) = id
                                     && let Some(shape) = dimensions
                                         .subroutine_param_shapes
@@ -821,6 +1001,24 @@ pub(in crate::ast) fn bind_value(
                             objects::class_parameter(tree, id, native, dimensions)?
                                 .expect("checked by the guard"),
                         );
+                        continue;
+                    }
+                    ExprKind::Member { .. }
+                        if containers::element_member(id, native, tree, dimensions)?.is_some() =>
+                    {
+                        let (_, value) = containers::element_member(id, native, tree, dimensions)?
+                            .expect("checked by the guard");
+                        values.push(value);
+                        continue;
+                    }
+                    ExprKind::Member { .. }
+                        if objects::aggregate_property(tree, id, native, dimensions)?.is_some() =>
+                    {
+                        let (aggregate, class, receiver) =
+                            objects::aggregate_property(tree, id, native, dimensions)?
+                                .expect("checked by the guard");
+                        let handle = objects::receiver(tree, receiver, native, dimensions)?;
+                        values.push(objects::aggregate_load(&aggregate, &class, &handle)?);
                         continue;
                     }
                     ExprKind::Member { .. }
@@ -1062,9 +1260,35 @@ pub(in crate::ast) fn bind_value(
                         strings::call(StringOp::Concat, operands)
                     }
                     Finish::Concat => Expr::Concat(operands),
+                    Finish::EnumMethod {
+                        method,
+                        domain,
+                        count,
+                    } => {
+                        let count = count.then(|| operands.pop()).flatten();
+                        enums::call(
+                            &tree.state,
+                            method,
+                            &domain,
+                            operands.pop(),
+                            count,
+                            dimensions,
+                        )?
+                    }
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
                     }
+                    Finish::Format {
+                        ticks_per_unit,
+                        ids,
+                    } => format_patterns::format(
+                        ticks_per_unit,
+                        &ids,
+                        operands,
+                        tree,
+                        native,
+                        dimensions,
+                    )?,
                     Finish::ScopeRandomize(domains) => {
                         // Preserve the original call when no enum is present.
                         // Every scalar operation succeeds and returns signed int 1;
@@ -1109,25 +1333,47 @@ pub(in crate::ast) fn bind_value(
                         let handle = operands.pop().ok_or_else(disagreement)?;
                         objects::load(&property, handle)
                     }
-                    Finish::MethodCall {
-                        name,
-                        formals,
-                        receiver,
-                        selection,
-                    } => {
+                    Finish::MethodCall(call) => {
+                        let MethodCall {
+                            name,
+                            given,
+                            order,
+                            formals,
+                            receiver,
+                            selection,
+                        } = *call;
                         let mut args: Vec<Option<Expr>> = Vec::with_capacity(formals + 1);
-                        if receiver == objects::Receiver::This {
-                            args.push(Some(objects::this()));
+                        let mut operands = operands.into_iter();
+                        if receiver != objects::Receiver::Static {
+                            args.push(Some(match receiver {
+                                objects::Receiver::This => objects::this(),
+                                _ => operands.next().ok_or_else(disagreement)?,
+                            }));
                         }
-                        let handles = usize::from(receiver != objects::Receiver::Static);
-                        args.extend(operands.into_iter().map(Some));
+                        let handles = args.len();
+                        for given in given {
+                            args.push(if given {
+                                Some(operands.next().ok_or_else(disagreement)?)
+                            } else {
+                                None
+                            });
+                        }
                         args.extend(selection.map(Some));
-                        // Omitted trailing arguments take their defaults.
+                        // Omitted arguments take their defaults (13.5.3).
                         args.resize(formals + handles, None);
+                        // The receiver is evaluated before the actuals.
+                        let arg_order = if order.iter().enumerate().all(|(at, index)| at == *index)
+                        {
+                            Vec::new()
+                        } else {
+                            (0..handles)
+                                .chain(order.into_iter().map(|index| index + handles))
+                                .collect()
+                        };
                         Expr::Call {
                             callee: Callee::Subroutine(name),
                             args,
-                            arg_order: Vec::new(),
+                            arg_order,
                         }
                     }
                     Finish::Cast(target) => {
@@ -1431,7 +1677,7 @@ fn read_index_value(
     Ok(value)
 }
 
-fn path(
+pub(super) fn path(
     mut root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
@@ -1487,6 +1733,9 @@ fn path(
         }
     }
     parts.reverse();
+    if qualified.is_none() {
+        unpacked_structs::collapse(&mut parts, dimensions);
+    }
     if qualified.is_none()
         && let Some(name) =
             interface_binding::unindexed_parameter(&parts, tree, dimensions, authored)
@@ -1530,9 +1779,40 @@ fn selected_value(
     {
         return Err(unsupported("bit-select or part-select of a real variable"));
     }
-    if let ExprKind::Concatenation(_) | ExprKind::Replication { .. } = native.expression(base).kind
+    // A select of a member of a container element reads the member first.
+    let element_member = if suffix.is_empty() {
+        None
+    } else {
+        containers::element_member(base, native, tree, dimensions)?
+    };
+    if element_member.is_some()
+        || matches!(
+            native.expression(base).kind,
+            ExprKind::Concatenation(_) | ExprKind::Replication { .. }
+        )
     {
-        let expr = bind_value(base, native, tree, dimensions, None)?;
+        let expr = match element_member {
+            Some((ty, value)) => {
+                // The select indices are offsets from bit 0, which only a
+                // `[N-1:0]` range declares.
+                let zero_based = match ty.packed_ranges() {
+                    [range] => {
+                        eval_ast_const_expr(&tree.state, range.right(), &dimensions.const_env)
+                            == Some(0)
+                            && eval_ast_const_expr(&tree.state, range.left(), &dimensions.const_env)
+                                .is_some_and(|left| left >= 0)
+                    }
+                    _ => false,
+                };
+                if !zero_based || ty.unpacked_struct().is_some() || !ty.members.is_empty() {
+                    return Err(unsupported(
+                        "select of a container element member that is not declared [N-1:0]",
+                    ));
+                }
+                value
+            }
+            None => bind_value(base, native, tree, dimensions, None)?,
+        };
         if suffix.len() != 1 {
             return Err(unsupported("concatenation select"));
         }
@@ -1615,6 +1895,11 @@ fn selected_value(
         &selected_lvalue(root, native, tree, dimensions, false)?,
         dimensions,
     );
+    if let Expr::Ident(name) = &value
+        && let Some(value) = unpacked_structs::whole(name, dimensions)
+    {
+        return Ok(value);
+    }
     let guards = member_context(root, native, tree, dimensions)?
         .map(|(guards, _)| guards)
         .unwrap_or_default();
@@ -1743,9 +2028,46 @@ pub(in crate::ast) fn selected_lvalue(
     Ok(lvalue)
 }
 
+/// The actuals of `$sformatf` (IEEE 1800-2023 21.3.3): a format followed by
+/// any values, all given and positional.
+pub(in crate::ast) fn format_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+) -> Converted<Vec<ExprId>> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(unsupported(format!("named arguments of `{name}`")));
+    }
+    let actuals = args
+        .iter()
+        .enumerate()
+        .map(|(position, arg)| {
+            arg.value.ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
+                name: name.to_string(),
+                detail: format!("argument {} is omitted", position + 1),
+            })
+        })
+        .collect::<Converted<Vec<_>>>()?;
+    if actuals.is_empty() {
+        return Err(AnalyzerError::InvalidSystemTfCall {
+            name: name.to_string(),
+            detail: "expected a format argument".into(),
+        });
+    }
+    Ok(actuals)
+}
+
 /// String literals in integral contexts are unsigned packed arrays of bytes
 /// (IEEE 1800-2023 5.9). Keep the semantic IR integral, including escapes.
 fn packed_string_literal(text: &str) -> Option<String> {
+    match format_patterns::bytes_literal(&string_literal_bytes(text)?) {
+        Expr::Literal(literal) => Some(literal),
+        _ => unreachable!("a packed literal"),
+    }
+}
+
+/// The bytes of string literal `text`, written with its quotes, after its
+/// escapes (IEEE 1800-2023 5.9.1).
+pub(in crate::ast) fn string_literal_bytes(text: &str) -> Option<Vec<u8>> {
     let text = if let Some(text) = text.strip_prefix("\"\"\"") {
         text.strip_suffix("\"\"\"")?
     } else {
@@ -1806,12 +2128,7 @@ fn packed_string_literal(text: &str) -> Option<String> {
         };
         bytes.push(value);
     }
-    let width = (bytes.len() * 8).max(8);
-    Some(format!(
-        "{}'h{}",
-        width,
-        num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(16)
-    ))
+    Some(bytes)
 }
 
 pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {

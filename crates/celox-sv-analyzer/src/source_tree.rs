@@ -36,9 +36,13 @@ impl<T: Clone> std::ops::DerefMut for Shared<T> {
 pub(crate) struct SourceTree {
     declarations: Shared<celox_sv_syntax::Declarations>,
     scope: scopes::View,
+    compilation_path: std::sync::Arc<std::path::PathBuf>,
 }
 
 impl SourceTree {
+    pub(crate) fn compilation_path(&self) -> &Path {
+        &self.compilation_path
+    }
     pub(crate) fn scope_handle(&self) -> ScopeHandle {
         self.scope.handle
     }
@@ -167,6 +171,7 @@ pub(crate) fn parse_source(code: &str, path: &Path) -> Result<SourceTree, Analyz
     let tree = SourceTree {
         declarations: declarations.into(),
         scope: scopes::View::default(),
+        compilation_path: std::sync::Arc::new(path.to_owned()),
     };
     scopes::validate_source(&tree)?;
     Ok(tree)

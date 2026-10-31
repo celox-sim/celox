@@ -135,6 +135,10 @@ pub enum StmtBase<E, L> {
     WaitImplicit(Vec<StmtBase<E, L>>),
     WaitFork,
     DisableFork,
+    /// Internal region boundary of a concurrent assertion monitor.
+    AssertionRegion {
+        reactive: bool,
+    },
     /// `wait (condition)`: suspend the process until the condition is true
     /// (9.4.3).
     Wait(E),
@@ -217,17 +221,40 @@ pub enum ParamDirection {
     Input,
     Output,
     Inout,
+    /// `ref`: the formal names the actual itself (IEEE 1800-2023 13.5.2).
+    Ref,
+    /// `const ref`: a reference the subroutine only reads.
+    ConstRef,
 }
 
 impl ParamDirection {
-    /// Whether the call copies the argument's value in.
+    /// The direction a formal declares with `direction`, `const` (only
+    /// meaningful with `ref`) and `static` (`ref static`).
+    pub fn declared(direction: celox_sv_syntax::Direction, constant: bool) -> Self {
+        match direction {
+            celox_sv_syntax::Direction::Input => ParamDirection::Input,
+            celox_sv_syntax::Direction::Output => ParamDirection::Output,
+            celox_sv_syntax::Direction::Inout => ParamDirection::Inout,
+            celox_sv_syntax::Direction::Ref if constant => ParamDirection::ConstRef,
+            celox_sv_syntax::Direction::Ref => ParamDirection::Ref,
+        }
+    }
+
+    /// Whether the callee may read the actual: the call copies it in, or
+    /// the formal refers to it.
     pub fn is_read(self) -> bool {
         !matches!(self, ParamDirection::Output)
     }
 
-    /// Whether the call writes the actual argument back.
+    /// Whether the callee may change the actual: the call copies the formal
+    /// back, or the formal refers to it.
     pub fn is_written(self) -> bool {
-        !matches!(self, ParamDirection::Input)
+        !matches!(self, ParamDirection::Input | ParamDirection::ConstRef)
+    }
+
+    /// Whether the formal refers to the actual instead of holding a copy.
+    pub fn is_reference(self) -> bool {
+        matches!(self, ParamDirection::Ref | ParamDirection::ConstRef)
     }
 }
 
@@ -377,6 +404,7 @@ impl<E, L> StmtBase<E, L> {
                     })
                     .collect(),
             ),
+            StmtBase::AssertionRegion { reactive } => StmtBase::AssertionRegion { reactive },
             StmtBase::WaitFork => StmtBase::WaitFork,
             StmtBase::DisableFork => StmtBase::DisableFork,
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
@@ -500,7 +528,7 @@ impl<E, L> StmtBase<E, L> {
                     }
                 }
             }
-            StmtBase::WaitFork | StmtBase::DisableFork => {}
+            StmtBase::WaitFork | StmtBase::DisableFork | StmtBase::AssertionRegion { .. } => {}
             StmtBase::Wait(condition) => fe(condition),
             StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
         }
@@ -642,6 +670,12 @@ pub struct SubroutineParamBase<E, T> {
     pub direction: ParamDirection,
     pub r#type: T,
     pub default: Option<E>,
+    /// The local names of the members of a formal of unpacked structure
+    /// type, in the order of its flat value; empty for other formals and, in
+    /// the body that dispatches a virtual method, for formals passed by
+    /// value. A reference formal binds each to the matching member of its
+    /// actual.
+    pub leaves: Vec<String>,
 }
 
 impl<E, L, T> SubroutineBase<E, L, T> {
@@ -666,6 +700,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
                     direction: param.direction,
                     r#type: ft(param.r#type),
                     default: param.default.map(&mut *fe),
+                    leaves: param.leaves,
                 })
                 .collect(),
             return_var: self.return_var,

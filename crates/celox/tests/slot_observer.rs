@@ -273,3 +273,43 @@ fn an_observer_can_finish_before_domains_commit() {
 fn an_observer_can_finish_at_the_end_of_a_slot() {
     check_observer_finish_backends(false);
 }
+
+#[test]
+fn compiled_clocks_accept_reset_gates_driven_only_between_runs() {
+    let source = r#"`timescale 1ns/1ns
+module Top(input logic clk, rst_n, enable, output logic [7:0] q, memory);
+    wire cpu_rst_n = rst_n && enable;
+    always_ff @(posedge clk or negedge rst_n)
+        if (!rst_n) memory <= 0;
+        else memory <= memory + 1;
+    always_ff @(posedge clk or negedge cpu_rst_n)
+        if (!cpu_rst_n) q <= 0;
+        else q <= q + 1;
+endmodule
+"#;
+    let mut sim = Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+        .four_state(false)
+        .scheduler_mode(celox::SchedulerMode::DifferentialRuns)
+        .build()
+        .unwrap();
+    let rst = sim.signal("rst_n");
+    let enable = sim.signal("enable");
+    let q = sim.signal("q");
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    sim.modify(|io| io.set(enable, 1u8)).unwrap();
+    sim.add_clock("clk", 2, 1);
+    sim.run_until(20).unwrap();
+    assert_eq!(sim.get(q), 10u8.into());
+    assert!(
+        sim.scheduler_stats().compiled_slots > 0,
+        "{:?}",
+        sim.scheduler_stats()
+    );
+    sim.modify(|io| io.set(rst, 0u8)).unwrap();
+    sim.run_until(22).unwrap();
+    assert_eq!(sim.get(q), 0u8.into());
+    sim.modify(|io| io.set(rst, 1u8)).unwrap();
+    sim.run_until(30).unwrap();
+    assert_eq!(sim.get(q), 4u8.into());
+    assert!(sim.scheduler_stats().checked_steps > 0);
+}

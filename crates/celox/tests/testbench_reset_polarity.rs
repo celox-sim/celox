@@ -139,3 +139,36 @@ fn generator_follows_declared_indices_of_sv_instance_arrays() {
         }
     }
 }
+
+/// A DUT clock port is a second address of the TB clock's event. Its copy can
+/// be unsettled when the compiled scheduler saves edge baselines, so the
+/// four-state interpreter (host edge path) must take the level from the
+/// event's own signal or it misses every later rising edge.
+#[test]
+fn clock_port_copy_does_not_mask_rising_edges_after_reset() {
+    let source = r#"
+        module Counter(clk: input clock, rst: input reset_sync_high, count: output logic<8>) {
+            always_ff { if_reset { count = 0; } else { count += 1; } }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen(clk);
+            var count: logic<8>;
+            inst dut: Counter(clk, rst, count);
+            initial {
+                rst.assert(4);
+                clk.next(1);
+                $assert(count == 1, "count=%d", count);
+                clk.next(6);
+                $assert(count == 7, "count=%d", count);
+                $finish();
+            }
+        }
+    "#;
+    for four_state in [false, true] {
+        run(Simulator::builder(source, "Top")
+            .four_state(four_state)
+            .build_interpreter()
+            .unwrap());
+    }
+}

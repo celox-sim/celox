@@ -38,6 +38,12 @@ impl<V: Clone> DerefMut for SharedMap<V> {
     }
 }
 
+impl<V> FromIterator<(String, V)> for SharedMap<V> {
+    fn from_iter<I: IntoIterator<Item = (String, V)>>(values: I) -> Self {
+        HashMap::from_iter(values).into()
+    }
+}
+
 impl<V: Clone> IntoIterator for SharedMap<V> {
     type Item = (String, V);
     type IntoIter = <HashMap<String, V> as IntoIterator>::IntoIter;

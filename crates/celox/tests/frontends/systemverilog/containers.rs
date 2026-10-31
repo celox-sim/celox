@@ -2,6 +2,10 @@ use super::*;
 
 sv_backends! {
     fn class_container_inheritance_static(sim) { @case "containers::class_container_inheritance_static"; }
+    fn nested_containers_and_class_keys(sim) { @case "containers::nested_containers_and_class_keys"; }
+    fn methods_of_nested_container_elements(sim) { @case "containers::methods_of_nested_container_elements"; }
+    fn nested_updates_evaluate_indices_once(sim) { @case "containers::nested_updates_evaluate_indices_once"; }
+    fn class_keys_survive_heap_collections(sim) { @case "containers::class_keys_survive_heap_collections"; }
     fn class_container_receiver_evaluation(sim) { @case "containers::class_container_receiver_evaluation"; }
     fn class_container_properties(sim) { @case "containers::class_container_properties"; }
     fn class_container_queue_pool(sim) { @case "containers::class_container_queue_pool"; }
@@ -39,6 +43,29 @@ sv_backends! {
     fn associative_string_keys(sim) { @case "containers::associative_string_keys"; }
     fn four_state_elements_and_indices(sim) { @case "containers::four_state_elements_and_indices"; }
     fn declaration_initializers_and_locals(sim) { @case "containers::declaration_initializers_and_locals"; }
+}
+
+sv_backends! {
+    fn popped_nested_queue_elements_are_containers(sim) {
+        @setup {
+            let source = r#"module Top(output int value);
+                initial begin
+                    int q[$][$];
+                    int row[$];
+                    row.push_back(4);
+                    row.push_back(2);
+                    q.push_back(row);
+                    row = '{};
+                    row = q.pop_front();
+                    value = row.size() * 100 + row[0] * 10 + q.size();
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("nested.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(240u8));
+    }
 }
 
 sv_backends! {

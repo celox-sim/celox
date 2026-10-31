@@ -311,7 +311,14 @@ pub(super) fn body(
     subroutine: &Subroutine,
     locals: &[LocalVariable],
 ) -> Option<(Expr, Vec<(String, Expr)>)> {
-    if !subroutine.persistent_locals.is_empty() {
+    // An expression of the arguments copies them; a reference formal must
+    // name the actual for the whole call (IEEE 1800-2023 13.5.2).
+    if !subroutine.persistent_locals.is_empty()
+        || subroutine
+            .params
+            .iter()
+            .any(|param| param.direction.is_reference())
+    {
         return None;
     }
     let mut types = HashMap::default();

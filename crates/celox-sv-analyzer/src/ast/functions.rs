@@ -41,18 +41,8 @@ pub(super) fn native_functions(
                 .chain(native.port_declarations.iter().flat_map(|decl| &decl.ports))
             {
                 if let Some(direction) = port.direction {
-                    previous = match direction {
-                        celox_sv_syntax::Direction::Input => {
-                            crate::procedural::ParamDirection::Input
-                        }
-                        celox_sv_syntax::Direction::Output => {
-                            crate::procedural::ParamDirection::Output
-                        }
-                        celox_sv_syntax::Direction::Inout => {
-                            crate::procedural::ParamDirection::Inout
-                        }
-                        _ => continue,
-                    };
+                    previous =
+                        crate::procedural::ParamDirection::declared(direction, port.constant);
                 }
                 if let Some(name) = &port.name {
                     arguments.push(instances::normalize_identifier(&name.spelling));
@@ -73,7 +63,7 @@ pub(super) fn native_functions(
         let _constants = item.enter();
         let mut signature_context = item.dimensions(dimensions);
         signature_context.const_env = item.env.clone();
-        signature_context.type_aliases = aliases.as_ref().clone();
+        signature_context.type_aliases = aliases.as_ref().clone().into();
         let mut function =
             native_signature(tree.declarations().subroutine(id), tree, &signature_context)?;
         let mut locals = Vec::new();
@@ -85,6 +75,7 @@ pub(super) fn native_functions(
             subroutine_directions: &directions,
             automatic,
             statics: Vec::new(),
+            explicit_statics: HashSet::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
         };
@@ -195,12 +186,7 @@ fn native_signature(
             .flat_map(|group| &group.ports),
     ) {
         if let Some(value) = port.direction {
-            direction = match value {
-                celox_sv_syntax::Direction::Input => ParamDirection::Input,
-                celox_sv_syntax::Direction::Output => ParamDirection::Output,
-                celox_sv_syntax::Direction::Inout => ParamDirection::Inout,
-                _ => direction,
-            };
+            direction = ParamDirection::declared(value, port.constant);
         }
         let Some(name) = &port.name else { continue };
         let data = tree.declarations().data_type(port.data_type);
@@ -252,6 +238,7 @@ fn native_signature(
             .as_ref()
             .is_some_and(|ty| matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)),
         return_string: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::String),
+        return_handle: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Object),
         name: instances::normalize_identifier(&native.name.spelling),
         params,
         body: None,
@@ -268,11 +255,16 @@ fn native_signature(
         }),
         return_signed: result.is_some_and(|ty| ty.signed),
         return_is_2state: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Bit),
+        return_enum_domain: ty
+            .as_ref()
+            .filter(|ty| ty.unpacked_ranges.is_empty())
+            .and_then(|ty| ty.enum_domain.clone()),
         return_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()
                     || !ty.unpacked_ranges.is_empty()
                     || ty.packed_ranges.len() > 1
+                    || ty.unpacked_struct.is_some()
             })
             .and_then(|ty| {
                 ty.pattern_target(&const_functions::Environment {

@@ -311,6 +311,111 @@ fn static_initializers_run_before_initial_blocks() {
     );
 }
 
+/// A static initializer may be any run-time expression; it runs once,
+/// before any procedure starts (IEEE 1800-2023 6.8, 6.21).
+#[test]
+fn run_time_static_initializers_run_once_before_any_procedure() {
+    // The initializers read the module variable before the other `initial`
+    // procedure writes it, and in declaration order. Without the `static`
+    // keyword that 6.21 requires, an `initial` procedure's locals still
+    // follow this rule.
+    assert_eq!(
+        settled(
+            "module Top(output logic [31:0] y);
+               typedef enum {a, b, c} e;
+               int m = 1;
+               initial m = 5;
+               initial begin
+                 e v = b;
+                 string s = v.name();
+                 int k = m + 1;
+                 static int j = k * 10 + v;
+                 v = c;
+                 y = {s.len() == 1 && s == \"b\", 7'(k), 8'(j), 8'(m)};
+               end
+             endmodule"
+        ),
+        0x82_1505
+    );
+    // Also when an edge process that makes a host request reorders the
+    // processes by creation.
+    assert_eq!(
+        settled(
+            "module Top(input logic clk, output logic [7:0] y);
+               int dummy;
+               int m = dummy + 4;
+               always @(posedge clk) $fflush;
+               initial begin static int k = m + 1; y = k; end
+             endmodule"
+        ),
+        5
+    );
+    // A static in a loop is initialized once, not on each iteration.
+    assert_eq!(
+        settled(
+            "module Top(output logic [7:0] y);
+               int m = 1;
+               initial for (int i = 0; i < 3; i++) begin
+                 static int once = m;
+                 once++;
+                 y = once;
+               end
+             endmodule"
+        ),
+        4
+    );
+    // An explicitly static local of an `always` procedure as well.
+    assert_eq!(
+        ticks(
+            "module Top(input logic clk, output logic [7:0] y);
+               int m = 4;
+               always_ff @(posedge clk) begin static int c = m + 1; c++; y <= c; end
+             endmodule",
+            2
+        ),
+        [6, 7]
+    );
+    // The statics of a function it calls are initialized before it.
+    assert_eq!(
+        settled(
+            "module Top(output logic [7:0] y);
+               int m = 1;
+               function int f(input int a);
+                 static int c = 7;
+                 c++;
+                 return c + a;
+               endfunction
+               initial begin static int k = f(m); y = k + f(0); end
+             endmodule"
+        ),
+        18
+    );
+}
+
+/// An initializer that reads an automatic variable, or a keyword-less one
+/// of a procedure that repeats, could only run on each entry.
+#[test]
+fn run_time_static_initializers_that_could_repeat_remain_unsupported() {
+    for source in [
+        "module Top(output logic [7:0] y);
+           initial begin automatic int x = 3; int t = x + 1; y = t; end
+         endmodule",
+        "module Top(output logic [7:0] y);
+           initial begin automatic int x = 3; static int t = x + 1; y = t; end
+         endmodule",
+        "module Top(input logic clk, output logic [7:0] y);
+           int m = 4;
+           always_ff @(posedge clk) begin int c = m + 1; c++; y <= c; end
+         endmodule",
+    ] {
+        let detail = error(source);
+        assert!(
+            detail.contains("initializer that is not constant"),
+            "{detail}"
+        );
+    }
+}
+
 #[test]
 fn concatenated_targets_select_with_the_entry_value() {
     assert_eq!(

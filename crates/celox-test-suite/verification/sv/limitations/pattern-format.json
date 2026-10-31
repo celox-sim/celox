@@ -1,0 +1,57 @@
+{
+  "source": "src/sv/cases/string_format.vtest",
+  "method": "The shared cases pattern_format and pattern_format_keys_and_handles run in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim. The reduced sources run standalone with verilator --binary, iverilog -g2012 -s Top / vvp -n, and xezim -s Top.",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "source": "module Top;\n    int q[$];\n    byte signed d[];\n    string names[$];\n    int i;\n    string s, t;\n    initial begin\n        q = {1, 2, 3};\n        d = new[2];\n        d[0] = -1;\n        d[1] = 5;\n        names = {\"p\", \"q\"};\n        i = -7;\n        t = \"str\";\n        $display(\"%p|%p|%p|%p|%p|%0p\", q, d, names, i, t, q);\n        s = $sformatf(\"%p|%p|%p|%p|%p|%0p\", q, d, names, i, t, q);\n        $display(\"%s\", s);\n        q.delete();\n        $display(\"[%p]\", q);\n    end\nendmodule\n",
+      "stdout": "'{'h1, 'h2, 'h3}|'{'hff, 'h5}|'{\"p\", \"q\"}|-7|\"str\"|'{'h1, 'h2, 'h3}\n'{'h1, 'h2, 'h3}|'{'hff, 'h5}|'{\"p\", \"q\"}|-7|\"str\"|'{'h1, 'h2, 'h3}\n['{}]\n"
+    },
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "source": "module Top;\n    int a[string];\n    bit [7:0] m[int];\n    initial begin\n        a[\"x\"] = 10;\n        a[\"a\"] = 20;\n        m[-2] = 8'h41;\n        m[7] = 8'h0;\n        $display(\"%p|%p\", a, m);\n    end\nendmodule\n",
+      "stdout": "'{\"a\":'h14, \"x\":'ha}|'{'h7:'h0, 'hfffffffe:'h41}\n"
+    },
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "source": "class Item; int id; endclass\nmodule Top;\n    Item item, items[$];\n    initial begin\n        items.push_back(null);\n        items.push_back(null);\n        $display(\"%p|%p|%p\", items, item, \"lit\");\n    end\nendmodule\n",
+      "stdout": "'{null, null}|null|7104884\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "source": "module Top;\n    int q[$];\n    byte signed d[];\n    string names[$];\n    int i;\n    string s, t;\n    initial begin\n        q = {1, 2, 3};\n        d = new[2];\n        d[0] = -1;\n        d[1] = 5;\n        names = {\"p\", \"q\"};\n        i = -7;\n        t = \"str\";\n        $display(\"%p|%p|%p|%p|%p|%0p\", q, d, names, i, t, q);\n        s = $sformatf(\"%p|%p|%p|%p|%p|%0p\", q, d, names, i, t, q);\n        $display(\"%s\", s);\n        q.delete();\n        $display(\"[%p]\", q);\n    end\nendmodule\n",
+      "status": "runtime_error",
+      "stderr": "ERROR: p1.sv:15: $display does not support argument type (116).\nERROR: p1.sv:16: $sformatf does not support argument type (116).\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "source": "module Top;\n    int a[string];\n    bit [7:0] m[int];\n    initial begin\n        a[\"x\"] = 10;\n        a[\"a\"] = 20;\n        m[-2] = 8'h41;\n        m[7] = 8'h0;\n        $display(\"%p|%p\", a, m);\n    end\nendmodule\n",
+      "status": "compile_error",
+      "stderr": "p2.sv:2: error: Type names are not valid expressions here.\np2.sv:2: internal error: I do not know how to elaborate this expression.\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "source": "class Item; int id; endclass\nmodule Top;\n    Item item, items[$];\n    initial begin\n        items.push_back(null);\n        items.push_back(null);\n        $display(\"%p|%p|%p\", items, item, \"lit\");\n    end\nendmodule\n",
+      "status": "compile_error",
+      "stderr": "p3.sv:5: Error: Class/null r-value not allowed in this context.\np3.sv:6: Error: Class/null r-value not allowed in this context.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "source": "module Top;\n    int q[$];\n    byte signed d[];\n    string names[$];\n    int i;\n    string s, t;\n    initial begin\n        q = {1, 2, 3};\n        d = new[2];\n        d[0] = -1;\n        d[1] = 5;\n        names = {\"p\", \"q\"};\n        i = -7;\n        t = \"str\";\n        $display(\"%p|%p|%p|%p|%p|%0p\", q, d, names, i, t, q);\n        s = $sformatf(\"%p|%p|%p|%p|%p|%0p\", q, d, names, i, t, q);\n        $display(\"%s\", s);\n        q.delete();\n        $display(\"[%p]\", q);\n    end\nendmodule\n",
+      "stdout": "'{1, 2, 3}|'{-1, 5}|'{\"p\", \"q\"}|-7|\"str\"|'{1, 2, 3}\n'{1, 2, 3}|'{-1, 5}|'{\"p\", \"q\"}|-7|\"str\"|'{1, 2, 3}\n['{}]\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "source": "class Item; int id; endclass\nmodule Top;\n    Item item, items[$];\n    initial begin\n        items.push_back(null);\n        items.push_back(null);\n        $display(\"%p|%p|%p\", items, item, \"lit\");\n    end\nendmodule\n",
+      "stdout": "'{0, 0}|null|7104884\n"
+    }
+  ]
+}

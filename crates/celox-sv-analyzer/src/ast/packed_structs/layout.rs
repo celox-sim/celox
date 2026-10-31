@@ -17,7 +17,10 @@ pub(in crate::ast) fn capture_member_type(
     mut ty: Type,
     env: &HashMap<String, i128>,
 ) -> Option<Type> {
-    if !ty.unpacked_ranges.is_empty() || matches!(ty.kind, TypeKind::Real | TypeKind::Shortreal) {
+    if !ty.unpacked_ranges.is_empty()
+        || ty.unpacked_struct.is_some()
+        || matches!(ty.kind, TypeKind::Real | TypeKind::Shortreal)
+    {
         return None;
     }
     for range in &mut ty.packed_ranges {

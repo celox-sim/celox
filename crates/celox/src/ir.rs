@@ -1,4 +1,4 @@
-use crate::HashMap;
+use crate::{HashMap, HashSet};
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
     AbsoluteAddrBase, BitAccess, InstanceId, ModuleId, RegionedAbsoluteAddrBase,
@@ -107,6 +107,80 @@ impl std::ops::Deref for RuntimeDesign {
 }
 
 impl RuntimeDesign {
+    /// Add compiler-owned storage after source hierarchy projection. The slot
+    /// remains an ordinary state object for layout, roots, images and snapshots.
+    pub(crate) fn allocate_testbench_slot(
+        &mut self,
+        width: usize,
+        is_string: bool,
+    ) -> AbsoluteAddr {
+        let instance_id = *self
+            .instances
+            .keys()
+            .min()
+            .expect("testbench root instance");
+        let object = self
+            .semantic
+            .state_objects
+            .keys()
+            .map(|a| a.var_id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let source = self
+            .variables
+            .values()
+            .map(|v| v.source_id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let address = AbsoluteAddr {
+            instance_id,
+            var_id: celox_design::StateObjectId(object),
+        };
+        let source_id = SourceVarId(source);
+        let path = vec![format!("__celox_tb_{object}")];
+        self.semantic.state_objects.insert(
+            address,
+            celox_design::VariableMetadata {
+                width: width.max(1),
+                is_4state: false,
+                kind: celox_design::DomainKind::Other,
+                type_kind: celox_design::PortTypeKind::Bit,
+                array_dims: vec![],
+                value_kind: if is_string {
+                    celox_design::ValueKind::StrRef
+                } else {
+                    Default::default()
+                },
+            },
+        );
+        self.variables.insert(
+            address,
+            RuntimeVariable {
+                address,
+                source_id,
+                path: path.clone(),
+                var_kind: VariableKind::Variable,
+                signed: false,
+                packed_dims: vec![width.max(1)],
+                unpacked_ranges: vec![],
+            },
+        );
+        let instance = self.instances.get_mut(&instance_id).unwrap();
+        instance.state_addresses.push(address);
+        instance.source_variables.insert(source_id, address);
+        // Compiler storage is deliberately absent from source lookup and VCD.
+        address
+    }
+
+    pub(crate) fn allocate_testbench_copy(&mut self, source: AbsoluteAddr) -> AbsoluteAddr {
+        let info = self.semantic.state_objects[&source].clone();
+        let address = self.allocate_testbench_slot(info.width, false);
+        self.semantic.state_objects.insert(address, info);
+        address
+    }
+
     fn from_projection(
         semantic: celox_design::ElaboratedDesign<AbsoluteAddr>,
         frontend: FrontendLookup,
@@ -456,6 +530,9 @@ pub struct RuntimeProgram {
     pub design: RuntimeDesign,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+    /// Objects accessed by RTL before optimization. Retained so host-side
+    /// testbench writes can distinguish private variables from hardware.
+    pub(crate) rtl_accesses: HashSet<AbsoluteAddr>,
 }
 
 /// Lowered SIR whose backend-independent optimization pipeline has not run.
@@ -839,7 +916,15 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
                 .iter()
                 .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
         )
-        .chain(&program.sir.processes)
+        .chain(
+            program
+                .sir
+                .processes
+                .iter()
+                .zip(&program.runtime.runtime_schema.processes)
+                .filter(|(_, slots)| slots.kind != celox_design::ProcessKind::Callable)
+                .map(|(unit, _)| unit),
+        )
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
@@ -1163,12 +1248,49 @@ impl RuntimeProgram {
         scheduled: celox_frontend_core::ScheduledRtl,
     ) -> Result<(SirProgram, Self), DesignProjectionError> {
         let design = RuntimeDesign::from_projection(scheduled.design, scheduled.frontend_lookup)?;
+        let rtl_accesses = {
+            let mut rtl_accesses = HashSet::default();
+            for unit in scheduled
+                .sir
+                .eval_comb
+                .iter()
+                .chain(scheduled.sir.eval_apply_ffs.values().flatten())
+                .chain(scheduled.sir.eval_comb_apply_ffs.values().flatten())
+                .chain(scheduled.sir.eval_only_ffs.values().flatten())
+                .chain(scheduled.sir.apply_ffs.values().flatten())
+                .chain(scheduled.sir.processes.iter())
+            {
+                for inst in unit.blocks.values().flat_map(|block| &block.instructions) {
+                    match inst {
+                        SIRInstruction::Load(_, addr, ..) | SIRInstruction::Store(addr, ..) => {
+                            rtl_accesses.insert(addr.absolute_addr());
+                        }
+                        SIRInstruction::Commit(src, dst, ..) => {
+                            rtl_accesses.insert(src.absolute_addr());
+                            rtl_accesses.insert(dst.absolute_addr());
+                        }
+                        SIRInstruction::Imm(..)
+                        | SIRInstruction::Binary(..)
+                        | SIRInstruction::Unary(..)
+                        | SIRInstruction::Concat(..)
+                        | SIRInstruction::Slice(..)
+                        | SIRInstruction::Mux(..)
+                        | SIRInstruction::RuntimeEvent { .. }
+                        | SIRInstruction::CombCaptureEvent { .. }
+                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                        | SIRInstruction::ExternCall { .. } => {}
+                    }
+                }
+            }
+            rtl_accesses
+        };
         Ok((
             scheduled.sir,
             Self {
                 design,
                 runtime_schema: scheduled.runtime_schema,
                 testbench: None,
+                rtl_accesses,
             },
         ))
     }

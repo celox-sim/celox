@@ -310,3 +310,401 @@ endmodule"#)
 endmodule"#)
  (top Top) (run_until 0) (assert_eq q 0) (assert_eq r 7)
  (run_until 2) (assert_eq q 7))
+
+(case process_identity_and_status
+ (source "process.sv" #"
+module Top(output int checks, late);
+ process root, child, old_child, replacement;
+ process::state state;
+ initial begin late=0;
+  root=process::self(); checks=(root!=null && root==process::self());
+  checks += (root.status()==process::RUNNING)*2;
+  fork begin child=process::self(); #4; late=1; end join_none
+  #1;
+  state=child.status(); checks += (state==process::WAITING)*4;
+  child.kill(); old_child=child;
+  checks += (child.status()==process::KILLED)*8;
+  fork begin replacement=process::self(); #1; end join_none
+  #2;
+  checks += (old_child!=replacement && old_child.status()==process::KILLED)*16;
+  checks += (replacement.status()==process::FINISHED)*32;
+  #4; checks += (late==0)*64;
+ end
+endmodule"#)
+ (top Top) (run_until 8) (assert_eq checks 127) (assert_eq late 0))
+
+(case process_finished_parent_kills_descendants
+ (source "process.sv" #"
+module Top(output int checks, late);
+ process parent, leaf;
+ initial begin late=0;
+  fork begin
+   parent=process::self();
+   fork begin leaf=process::self(); #10; late=1; end join_none
+   #1;
+  end join_none
+  #2;
+  checks=(parent.status()==process::FINISHED);
+  parent.kill();
+  checks += (parent.status()==process::FINISHED)*2;
+  checks += (leaf.status()==process::KILLED)*4;
+  leaf.await(); parent.await();
+  #10; checks += (late==0)*8;
+ end
+endmodule"#)
+ (top Top) (run_until 12) (assert_eq checks 15) (assert_eq late 0))
+
+(case process_suspend_and_resume_waits
+ (source "process.sv" #"
+module Top(output int delayed, event_time, level_time, checks);
+ process a,b,c;
+ bit event_signal, flag;
+ initial begin delayed=0; event_time=0; level_time=0;
+  fork
+   begin a=process::self(); #5; delayed=$time; end
+   begin b=process::self(); @(posedge event_signal); event_time=$time; end
+   begin c=process::self(); wait(flag); level_time=$time; end
+  join_none
+  #1; a.suspend(); b.suspend(); c.suspend();
+  checks=(a.status()==process::SUSPENDED && b.status()==process::SUSPENDED && c.status()==process::SUSPENDED);
+  #2; flag=1; event_signal=1;
+  #4; a.resume(); b.resume(); c.resume();
+  #1; checks+=(delayed==7 && level_time==7 && event_time==0)*2;
+  event_signal=0;
+  #1; event_signal=1;
+  b.await(); checks+=(b.status()==process::FINISHED)*4;
+ end
+endmodule"#)
+ (top Top) (run_until 10) (assert_eq checks 7) (assert_eq delayed 7) (assert_eq level_time 7) (assert_eq event_time 9))
+
+(case process_self_suspend_and_await
+ (source "process.sv" #"
+module Top(output int phase, finished_at, checks);
+ process worker;
+ initial begin phase=0; finished_at=0;
+  fork begin
+   worker=process::self(); worker.suspend(); phase=1; #3; phase=2;
+  end join_none
+  #2; checks=(worker.status()==process::SUSPENDED && phase==0);
+  worker.resume(); worker.await(); finished_at=$time;
+  checks+=(worker.status()==process::FINISHED && phase==2)*2;
+  worker.suspend(); worker.resume(); worker.kill();
+  checks+=(worker.status()==process::FINISHED)*4;
+ end
+endmodule"#)
+ (top Top) (run_until 6) (assert_eq checks 7) (assert_eq phase 2) (assert_eq finished_at 5))
+
+(case process_status_wait_and_disable
+ (source "process.sv" #"
+module Top(output int checks, observed_at, late);
+ process child, victim;
+ initial begin checks=0; observed_at=0; late=0;
+  fork begin child=process::self(); #3; end join_none
+  #1; wait(child.status()==process::FINISHED); observed_at=$time;
+  checks=(child.status()==process::FINISHED);
+  fork begin victim=process::self(); #10; late=1; end join_none
+  #1; disable fork;
+  checks+=(victim.status()==process::KILLED)*2;
+ end
+endmodule"#)
+ (top Top) (run_until 15) (assert_eq checks 3) (assert_eq observed_at 3) (assert_eq late 0))
+
+(case process_random_state_and_handles
+ (source "process.sv" #"
+module Top(output int checks);
+ class Holder; process saved; endclass
+ process p, queue[$];
+ Holder holder;
+ string state, text;
+ int unsigned a,b;
+ initial begin
+  holder=new(); p=process::self(); holder.saved=process::self();
+  queue.push_back(process::self()); p=queue.pop_front();
+  checks=(p==holder.saved && p==process::self());
+  holder.saved.srandom(42); state=p.get_randstate(); text={"state:",p.get_randstate()};
+  a=$urandom; p.set_randstate(state); b=$urandom;
+  checks+=(a==b && state.len()>0 && text.len()>6)*2;
+  p.srandom(42); b=$urandom; checks+=(a==b)*4;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 7))
+
+; User declarations take precedence over the implicit std wildcard import (26.7).
+(case process_package_constants_keep_their_scope
+ (source "process_package.sv" #"
+package process;
+ parameter int FINISHED=8, RUNNING=9, WAITING=10, SUSPENDED=11, KILLED=12;
+ function int self(); return 13; endfunction
+endpackage"#)
+ (source "process_names.sv" #"
+module Top(output int checks);
+ initial begin
+  checks=(process::FINISHED==8);
+  checks+=(process::RUNNING==9)*2;
+  checks+=(process::WAITING==10)*4;
+  checks+=(process::SUSPENDED==11)*8;
+  checks+=(process::KILLED==12)*16;
+  checks+=(process::self()==13)*32;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 63))
+
+; Cancellation of the last program initial implies finish (24.3).
+(case process_self_kill_finishes_program
+ (source "process_program.sv" #"
+module Top(output int ticks);
+ Tb tb();
+ initial begin ticks=0; forever #2 ticks++; end
+ initial #10 $finish;
+ final $display("final at %0d", $time);
+endmodule
+program Tb;
+ initial begin
+  process p;
+  p=process::self(); #3; p.kill();
+  $display("unreachable");
+ end
+endprogram"#)
+ (top Top) (run_to_finish) (assert_eq ticks 1) (expect_output "final at 3\n"))
+
+(case process_external_kill_finishes_program
+ (source "process_program.sv" #"
+package handles; process victim; endpackage
+module Top(output int ticks);
+ Tb tb();
+ initial begin ticks=0; forever #2 ticks++; end
+ initial #10 $finish;
+ final $display("final at %0d", $time);
+ import handles::victim;
+ initial begin #3; victim.kill(); $display("unreachable"); end
+endmodule
+program Tb;
+ initial begin handles::victim=process::self(); #100; end
+endprogram"#)
+ (top Top) (run_to_finish) (assert_eq ticks 1) (expect_output "final at 3\n"))
+
+; $exit ends all initial procedures of its program (24.7); observers of a
+; sibling must see completion even though that sibling did not execute $exit.
+(case process_program_exit_wakes_sibling_observers
+ (source "process_exit.sv" #"
+package handles; process sibling; endpackage
+module Top(output bit [1:0] checks, output int awaited_at, observed_at, late);
+ Producer producer(late);
+ Consumer consumer(checks, awaited_at, observed_at);
+endmodule
+program Producer(output int late);
+ initial begin late=0; handles::sibling=process::self(); #30; late=1; end
+ initial begin #3; $exit; end
+endprogram
+program Consumer(output bit [1:0] checks, output int awaited_at, observed_at);
+ import handles::sibling;
+ initial begin
+  checks[0]=0; awaited_at=0;
+  #1; sibling.await(); awaited_at=$time; checks[0]=1;
+  #20;
+ end
+ initial begin
+  checks[1]=0; observed_at=0;
+  #1; wait(sibling.status()==process::FINISHED); observed_at=$time; checks[1]=1;
+  #20;
+ end
+endprogram"#)
+ (top Top) (run_until 5) (assert_eq checks 3) (assert_eq awaited_at 3)
+ (assert_eq observed_at 3) (assert_eq late 0))
+
+; A false status predicate stays WAITING; it must not notify its own observers
+; repeatedly and prevent the cancellation scheduled at time 3 (9.7).
+(case process_mutual_status_waits_advance_to_cancellation
+ (source "process_cycle.sv" #"
+module Top(output bit [1:0] checks, output int observed_at);
+ process first, second;
+ initial begin
+  checks=0; observed_at=0;
+  fork
+   begin first=process::self(); wait(second!=null);
+    wait(second.status()==process::FINISHED); checks[0]=1;
+   end
+   begin second=process::self(); wait(first!=null);
+    wait(first.status()==process::KILLED); checks[1]=1; observed_at=$time;
+   end
+  join_none
+  #3; first.kill();
+ end
+endmodule"#)
+ (top Top) (run_until 5) (assert_eq checks 2) (assert_eq observed_at 3))
+
+; Killing the last program during finalization must leave both finals intact.
+; Identical writes avoid depending on final-procedure ordering (9.2.3, 24.3).
+(case process_final_kill_preserves_cleanup
+ (source "process_final.sv" #"
+package handles; process victim; endpackage
+module Top;
+ import handles::victim;
+ Tb tb();
+ initial #3 $finish;
+ final begin victim.kill(); $write("cleanup;"); end
+ final $write("cleanup;");
+endmodule
+program Tb;
+ initial begin handles::victim=process::self(); #30; end
+endprogram"#)
+ (top Top) (run_to_finish) (expect_output "cleanup;cleanup;"))
+
+; User package qualifiers also win over std's implicit class in type binding.
+(case process_package_qualified_types_keep_their_scope
+ (source "process_types.sv" #"
+package process;
+ typedef bit [63:0] state;
+ typedef logic [127:0] payload;
+endpackage"#)
+ (source "process_type_user.sv" #"
+module Top(output int checks);
+ process::state value;
+ process::payload data;
+ initial begin
+  value=64'h8000000000000000;
+  data=128'h80000000000000000000000000000000;
+  checks=($bits(value)==64);
+  checks+=($bits(data)==128)*2;
+  checks+=value[63]*4;
+  checks+=data[127]*8;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 15))
+
+; All final procedures execute in one process, independent of their order (9.2.3).
+(case process_final_procedures_share_identity_and_rng
+ (source "final_identity.sv" #"
+package phase;
+ process saved;
+ string last_state;
+ function automatic void visit();
+  process p;
+  string prior_state, following_state;
+  int unsigned a,b;
+  bit valid;
+  p=process::self(); valid=(saved==null || saved==p);
+  if(saved==null) begin saved=p; p.srandom(42); end
+  else valid=valid && p.get_randstate()==last_state;
+  valid=valid && saved.status()==process::RUNNING;
+  prior_state=p.get_randstate(); a=$urandom; following_state=p.get_randstate();
+  p.set_randstate(prior_state); b=$urandom;
+  valid=valid && a==b && p.get_randstate()==following_state;
+  last_state=following_state;
+  if(valid) $write("ok;"); else $write("bad;");
+ endfunction
+endpackage
+module Top;
+ Child child();
+ initial begin phase::saved=null; phase::last_state=""; #1 $finish; end
+ final phase::visit();
+ final phase::visit();
+endmodule
+module Child;
+ final phase::visit();
+endmodule"#)
+ (top Top) (run_to_finish) (expect_output "ok;ok;ok;"))
+
+; Killing an ancestor also retires the running caller. Its latest RNG draw
+; must be saved before that retirement (9.7, 18.13.3-18.13.5).
+(case process_ancestor_kill_preserves_caller_rng
+ (source "ancestor_rng.sv" #"
+module Top(output int checks, late);
+ process root, ancestor, child;
+ int unsigned reference_first, reference_second, child_draw;
+ initial begin
+  checks=0; late=0; child_draw=0;
+  root=process::self(); root.srandom(42);
+  reference_first=$urandom; reference_second=$urandom;
+  fork begin
+   ancestor=process::self();
+   fork begin
+    child=process::self(); child.srandom(42);
+    child_draw=$urandom; ancestor.kill(); late=1;
+   end join_none
+   #30;
+  end join_none
+  #1;
+  checks=(child_draw==reference_first);
+  checks+=(ancestor.status()==process::KILLED)*2;
+  checks+=(child.status()==process::KILLED)*4;
+  root.set_randstate(child.get_randstate());
+  checks+=($urandom==reference_second)*8;
+  checks+=(late==0)*16;
+ end
+endmodule"#)
+ (top Top) (run_until 2) (assert_eq checks 31) (assert_eq late 0))
+
+; Process calls later in a nested loop still classify an earlier wait as a
+; level wait. On resume, a predicate made true while suspended is rechecked (9.7).
+(case process_nested_calls_preserve_level_wait_resume
+ (source "nested_level.sv" #"
+module Top(output int count, resumed_at, checks);
+ bit go;
+ process worker;
+ initial begin
+  count=0; resumed_at=0; checks=0; go=0;
+  forever begin
+   wait(go);
+   if(go) begin worker=process::self(); go=0; count++; resumed_at=$time; end
+  end
+ end
+ initial begin
+  #1; go=1;
+  #1; worker.suspend();
+  #1; go=1;
+  #1; worker.resume();
+  #1; checks=(count==2 && resumed_at==4); worker.kill();
+ end
+endmodule"#)
+ (top Top) (run_until 6)
+ (assert_eq count 2) (assert_eq resumed_at 4) (assert_eq checks 1))
+
+; Automatic event operands remain shared with a sibling during suspension.
+; Resume samples their current expression, discarding the suspended change (9.7).
+(case process_resume_resamples_automatic_event_expression
+ (source "resume_probe.sv" #"
+module Top(output int hits, event_at);
+ process worker;
+ initial begin
+  automatic bit x=0, y=0;
+  hits=0; event_at=0;
+  fork
+   begin worker=process::self(); @(x ^ y); hits++; event_at=$time; end
+   begin #2; x=1; #4; y=1; end
+  join_none
+  #1; worker.suspend();
+  #3; worker.resume();
+ end
+endmodule"#)
+ (top Top) (run_until 5) (assert_eq hits 0) (assert_eq event_at 0)
+ (run_until 7) (assert_eq hits 1) (assert_eq event_at 6))
+
+; $exit ends every process in its program, including suspended delay waits.
+; A different live program cannot restart an ended continuation with resume (24.7, 9.7).
+(case process_resume_after_program_exit_is_noop
+ (source "exit_resume.sv" #"
+package handles;
+ process victim;
+endpackage
+module Top(output int late, checks, ended_state);
+ Producer producer(late);
+ Consumer consumer(checks, ended_state);
+endmodule
+program Producer(output int late);
+ import handles::victim;
+ initial begin late=0; victim=process::self(); #6; late=1; end
+ initial begin #1; victim.suspend(); #1; $exit; end
+endprogram
+program Consumer(output int checks, ended_state);
+ import handles::victim;
+ initial begin
+  checks=0; ended_state=0;
+  #3; ended_state=victim.status(); checks=(ended_state==process::FINISHED);
+  victim.resume();
+  #5; checks+=(victim.status()==process::FINISHED)*2;
+  #2;
+ end
+endprogram"#)
+ (top Top) (run_until 9)
+ (assert_eq late 0) (assert_eq checks 3) (assert_eq ended_state 0))

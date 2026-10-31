@@ -47,9 +47,12 @@ impl BodyBuilder<'_, '_, '_> {
                 key_width,
                 signed,
                 string,
+                object,
             } = container.layout.kind
             {
-                index_type = if string {
+                index_type = if object {
+                    container.key.clone().expect("a class index type")
+                } else if string {
                     type_binding::builtin_type("string", None).expect("string is a builtin type")
                 } else {
                     let mut ty = int_type();

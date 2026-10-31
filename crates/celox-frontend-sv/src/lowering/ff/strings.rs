@@ -7,7 +7,7 @@
 //! that build a string fill a heap buffer and intern it at the end.
 
 use super::*;
-use celox_heap::ops;
+use celox_heap::{containers as heap, ops};
 use sv::ir::{Radix, StringOp};
 
 impl Ff<'_, '_> {
@@ -17,14 +17,50 @@ impl Ff<'_, '_> {
         op: StringOp,
         args: &[Option<sv::ir::Expr>],
     ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
-        let args = args
+        let mut args = args
             .iter()
             .map(|arg| {
                 arg.clone()
                     .ok_or_else(|| unsupported(format!("omitted argument of `{op}`")))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // A format captures each operand at its own type, in order.
+        if let StringOp::Format { ticks_per_unit } = op {
+            return self.format_string(ticks_per_unit, &args);
+        }
+        if args.iter().any(|arg| self.m.calls(arg)) {
+            for (index, arg) in args.iter_mut().enumerate() {
+                let context = match op {
+                    StringOp::FromBits | StringOp::Concat => None,
+                    StringOp::Itoa(_) => Some((32, true)),
+                    _ if index == 0 || matches!(op, StringOp::Compare | StringOp::ICompare) => {
+                        Some((32, false))
+                    }
+                    StringOp::Putc if index == 2 => Some((64, false)),
+                    _ => Some((64, true)),
+                };
+                *arg = self.heap_operand(arg, context, None)?;
+            }
+        }
         let result = match op {
+            StringOp::Format { .. } => unreachable!("formatted above"),
+            StringOp::Pattern(layout) => {
+                let handle = self.handle(&args[0])?;
+                let code = match layout {
+                    Some(layout) => ops::encode(
+                        heap::PATTERN,
+                        self.container_parameter(layout)
+                            | if layout.signed {
+                                heap::SIGNED_ELEMENTS
+                            } else {
+                                0
+                            },
+                    ),
+                    None => heap::HANDLE_PATTERN,
+                };
+                let buffer = self.heap_call(code, &[handle]);
+                self.heap_call(ops::FREEZE, &[buffer])
+            }
             StringOp::FromBits => {
                 let buffer = self.heap_call(ops::NEW, &[]);
                 let buffer = self.append_bits(buffer, &args[0])?;

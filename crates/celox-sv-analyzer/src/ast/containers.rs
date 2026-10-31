@@ -34,10 +34,17 @@ pub(super) fn with_dimensions(
         DimensionKind::Index(id) => {
             let key_type = match &tree.declarations().expression(id).kind {
                 ExprKind::Type(id) => type_binding::bind(*id, tree, context)?,
-                ExprKind::Name(name) => context
-                    .type_aliases
-                    .get(&instances::normalize_identifier(&name.spelling))
-                    .cloned(),
+                ExprKind::Name(name) => {
+                    let name = instances::normalize_identifier(&name.spelling);
+                    match context.type_aliases.get(&name) {
+                        Some(ty) => Some(ty.clone()),
+                        // A class: the index is an object handle (IEEE
+                        // 1800-2023 7.8.5).
+                        None if context.get(&name).is_none() => classes::resolve(tree, &name)
+                            .and_then(|class| classes::handle_type(tree, &class)),
+                        None => None,
+                    }
+                }
                 _ => None,
             };
             match key_type {
@@ -45,21 +52,24 @@ pub(super) fn with_dimensions(
                 Some(ty) => {
                     index_type = Some(ty.clone());
                     let string = ty.kind() == TypeKind::String;
+                    let object = ty.kind() == TypeKind::Object && ty.container.is_none();
                     let shape = casts::expr_type_from_type(&tree.state, &ty, &context.const_env)
                         .ok_or_else(|| unsupported("associative index type"))?;
                     if !string
+                        && !object
                         && (!matches!(ty.kind(), TypeKind::Bit | TypeKind::Logic | TypeKind::Reg)
                             || shape.width > 64
                             || !ty.unpacked_ranges.is_empty())
                     {
                         return Err(unsupported(
-                            "associative indices require strings or integral types up to 64 bits",
+                            "associative indices require strings, class handles or integral types up to 64 bits",
                         ));
                     }
                     Some(ContainerKind::Associative {
                         key_width: shape.width as u32,
-                        signed: shape.signed,
+                        signed: shape.signed && !object,
                         string,
+                        object,
                     })
                 }
             }
@@ -73,27 +83,46 @@ pub(super) fn with_dimensions(
             constant_binding::bind_unpacked_ranges(dims, tree, context)?,
         ));
     };
-    if dims.len() != 1 || base.container.is_some() || !base.unpacked_ranges.is_empty() {
-        return Err(unsupported("multidimensional dynamic container"));
+    // `T a[x][y]`: each element of `a` is a container `T [y]` (IEEE
+    // 1800-2023 7.4.5, 7.8), held by its handle like any container value.
+    let base = if dims.len() > 1 {
+        with_dimensions(base, &dims[1..], tree, context)?
+    } else {
+        base
+    };
+    if base.container.is_none() && dims.len() > 1 || !base.unpacked_ranges.is_empty() {
+        return Err(unsupported(
+            "dynamic container of fixed-size unpacked arrays",
+        ));
     }
     if matches!(base.kind(), TypeKind::Real | TypeKind::Shortreal) {
         return Err(unsupported("real dynamic container elements"));
     }
+    let record = match base.unpacked_struct() {
+        Some(aggregate) => unpacked_structs::record(&tree.state, aggregate, &context.const_env)?,
+        None => None,
+    };
     let shape = casts::expr_type_from_type(&tree.state, &base, &context.const_env)
         .ok_or_else(|| unsupported("dynamic container element type"))?;
-    if shape.width == 0 || shape.width > 64 {
+    if record.is_none() && (shape.width == 0 || shape.width > 64) {
         return Err(unsupported("dynamic container elements wider than 64 bits"));
     }
     let handle = match base.kind() {
+        // An element in a record, or a nested container, is a handle.
+        _ if record.is_some() || base.container.is_some() => Some(HandleProperty::Object),
         TypeKind::String => Some(HandleProperty::String),
         TypeKind::Object => Some(HandleProperty::Object),
         _ => None,
     };
     let layout = ContainerLayout {
         kind,
-        width: shape.width as u32,
-        signed: shape.signed,
-        two_state: base.kind() == TypeKind::Bit || handle.is_some(),
+        width: if record.is_some() {
+            classes::HANDLE_WIDTH as u32
+        } else {
+            shape.width as u32
+        },
+        signed: shape.signed && record.is_none(),
+        two_state: matches!(base.kind(), TypeKind::Bit | TypeKind::Process) || handle.is_some(),
         handle,
     };
     let mut ty = Type::new(TypeKind::Object);
@@ -105,6 +134,7 @@ pub(super) fn with_dimensions(
         key: index_type,
         layout,
         element: base,
+        record,
     }));
     Ok(ty)
 }
@@ -129,6 +159,40 @@ pub(super) fn native_type(
         && let Some(shape) = dims.get(&name)
     {
         return Ok(shape.container.clone());
+    }
+    // An element popped from a queue of containers.
+    let callee = match &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    {
+        ExprKind::Call { expression, .. } => Some(*expression),
+        ExprKind::Member { .. } => Some(expression_binding::ungroup(id, native)),
+        _ => None,
+    };
+    if let Some(callee) = callee
+        && let ExprKind::Member {
+            expression, name, ..
+        } = &native.expression(callee).kind
+        && matches!(name.spelling.as_str(), "pop_front" | "pop_back")
+        && let Some(outer) = native_type(*expression, native, tree, dims)?
+        && let Some(inner) = outer.element.container.clone()
+    {
+        return Ok(Some(inner));
+    }
+    // An element of a container of containers, `m[a]` of `m[a][b]`.
+    if let ExprKind::Select {
+        expression,
+        dimension,
+    } = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+        && matches!(
+            dimension.kind,
+            DimensionKind::Index(_) | DimensionKind::Queue(None)
+        )
+        && let Some(outer) = native_type(*expression, native, tree, dims)?
+    {
+        return Ok(outer.element.container.clone());
     }
     Ok(None)
 }
@@ -237,6 +301,11 @@ fn element_value(
     target: &ContainerType,
 ) -> Converted<Expr> {
     let native = tree.declarations();
+    // An element that is itself a container takes a container value, as an
+    // assignment to a container variable does.
+    if let Some(inner) = target.element.container.as_deref() {
+        return assignment(id, tree, dims, inner);
+    }
     if native_type(id, native, tree, dims)?.is_some() {
         return Err(unsupported("container used as an element"));
     }
@@ -248,8 +317,17 @@ fn element_value(
             "container element assignment".into()
         })?;
     }
+    if let Some(aggregate) = target.element.unpacked_struct() {
+        unpacked_structs::check_value(aggregate, id, native, tree, dims)?;
+    }
     let shape = procedural::dimensions_from_type(&target.element);
     let value = expression_binding::bind_value(id, native, tree, dims, Some(&shape))?;
+    if let Some(record) = &target.record {
+        return Ok(classes::object_call(
+            ObjectOp::Box(record.clone()),
+            vec![value],
+        ));
+    }
     Ok(if target.layout.handle == Some(HandleProperty::String) {
         expression_binding::string_operand(value, dims)
     } else {
@@ -264,6 +342,17 @@ fn index_value(
     target: &ContainerType,
 ) -> Converted<Expr> {
     let native = tree.declarations();
+    // A class index takes handles of its class or a derived one.
+    if let Some(class) = target.key.as_ref().and_then(|key| key.class()).filter(|_| {
+        matches!(
+            target.layout.kind,
+            ContainerKind::Associative { object: true, .. }
+        )
+    }) {
+        expression_binding::check_handle_assignment(tree, id, native, dims, class, || {
+            "associative array index".into()
+        })?;
+    }
     if matches!(
         target.layout.kind,
         ContainerKind::Associative { string: true, .. }
@@ -350,6 +439,15 @@ pub(super) fn value(
                 ));
             }
 
+            if target.record.is_some() {
+                return Err(unsupported(
+                    "comparison of dynamic containers of unpacked structures",
+                ));
+            }
+            // The elements are inner containers' handles, not their values.
+            if target.element.container.is_some() {
+                return Err(unsupported("comparison of nested dynamic containers"));
+            }
             let op = match operator.as_str() {
                 "==" | "!=" => ContainerOp::Equal,
                 "===" | "!==" => ContainerOp::CaseEqual,
@@ -388,24 +486,32 @@ pub(super) fn value(
                 }
                 _ => return Err(unsupported("dynamic container slice")),
             };
-            Ok(Some(call(
-                ContainerOp::Get,
-                target.layout,
-                vec![
-                    expression_binding::value(*expression, native, tree, dims)?,
-                    match index {
-                        Some(index) => index_value(index, *expression, tree, dims, &target)?,
-                        None => Expr::Binary {
-                            left: Box::new(call(
-                                ContainerOp::Size,
-                                target.layout,
-                                vec![expression_binding::value(*expression, native, tree, dims)?],
-                            )),
-                            op: BinaryOp::Sub,
-                            right: Box::new(Expr::Literal("1".into())),
+            Ok(Some(element_read(
+                &target,
+                call(
+                    ContainerOp::Get,
+                    target.layout,
+                    vec![
+                        expression_binding::value(*expression, native, tree, dims)?,
+                        match index {
+                            Some(index) => index_value(index, *expression, tree, dims, &target)?,
+                            None => Expr::Binary {
+                                left: Box::new(call(
+                                    ContainerOp::Size,
+                                    target.layout,
+                                    vec![expression_binding::value(
+                                        *expression,
+                                        native,
+                                        tree,
+                                        dims,
+                                    )?],
+                                )),
+                                op: BinaryOp::Sub,
+                                right: Box::new(Expr::Literal("1".into())),
+                            },
                         },
-                    },
-                ],
+                    ],
+                ),
             )))
         }
         ExprKind::Call { .. } | ExprKind::Member { .. } => {
@@ -441,6 +547,11 @@ pub(super) fn value(
                         "sort" => ContainerOp::Sort,
                         _ => ContainerOp::Rsort,
                     };
+                    if op != ContainerOp::Reverse && target.element.unpacked_struct().is_some() {
+                        return Err(unsupported(
+                            "sorting unpacked structures requires a with expression",
+                        ));
+                    }
                     if op != ContainerOp::Reverse
                         && target.layout.handle == Some(HandleProperty::Object)
                     {
@@ -529,10 +640,15 @@ pub(super) fn value(
                     let shape = dims
                         .get(&instances::normalize_identifier(&name.spelling))
                         .ok_or_else(|| unsupported("associative traversal index variable"))?;
-                    if let ContainerKind::Associative { string, .. } = target.layout.kind
+                    // The index variable of a class index is passed by
+                    // reference, so it has the index's class (IEEE 1800-2023
+                    // 7.9.4).
+                    let key_class = target.key.as_ref().and_then(|key| key.class());
+                    if let ContainerKind::Associative { string, object, .. } = target.layout.kind
                         && (shape.string != string
                             || shape.container.is_some()
-                            || !shape.unpacked.is_empty())
+                            || !shape.unpacked.is_empty()
+                            || object && shape.class.as_deref() != key_class)
                     {
                         return Err(unsupported(
                             "incompatible associative traversal index variable",
@@ -547,7 +663,14 @@ pub(super) fn value(
                     args.push(index_value(id, *base, tree, dims, &target)?);
                 }
             }
-            Ok(Some(call(op, target.layout, args)))
+            let value = call(op, target.layout, args);
+            Ok(Some(
+                if matches!(op, ContainerOp::PopFront | ContainerOp::PopBack) {
+                    element_read(&target, value)
+                } else {
+                    value
+                },
+            ))
         }
         _ => Ok(None),
     }
@@ -602,15 +725,23 @@ fn query(
         if arguments.len() != 1 {
             return Err(unsupported("dynamic array query arguments"));
         }
+        // A container of containers has one unpacked dimension per level.
+        let mut innermost = target.clone();
+        let mut unpacked = 1;
+        while let Some(inner) = innermost.element.container.clone() {
+            innermost = inner;
+            unpacked += 1;
+        }
         return Ok(Some(Expr::Literal(
             if name.spelling == "$unpacked_dimensions" {
-                1
+                unpacked
             } else {
-                1 + if target.layout.handle.is_some() {
-                    0
-                } else {
-                    target.element.packed_ranges.len()
-                }
+                unpacked
+                    + if innermost.layout.handle.is_some() {
+                        0
+                    } else {
+                        innermost.element.packed_ranges.len()
+                    }
             }
             .to_string(),
         )));
@@ -752,7 +883,22 @@ mod tests {
     fn unsupported_container_forms_fail_before_lowering() {
         for (source, expected) in [
             ("module Top; bit[127:0] a[]; endmodule", "wider than 64"),
-            ("module Top; int a[][]; endmodule", "multidimensional"),
+            (
+                "module Top; int a[][2]; endmodule",
+                "dynamic container of fixed-size unpacked arrays",
+            ),
+            (
+                "module Top; int a[][], b[][]; bit x; initial x = a == b; endmodule",
+                "comparison of nested dynamic containers",
+            ),
+            (
+                "module Top; class A; endclass class B; endclass int m[A]; B b; initial begin b = new; m[b] = 1; end endmodule",
+                "associative array index",
+            ),
+            (
+                "module Top; class A; endclass class B; endclass int m[A]; B k; initial void'(m.first(k)); endmodule",
+                "incompatible associative traversal index variable",
+            ),
             ("module Top; int a[*]; endmodule", "wildcard"),
             (
                 "module Top; int a[string]; initial a[123] = 7; endmodule",
@@ -881,4 +1027,201 @@ mod method_call_tests {
             );
         }
     }
+}
+
+/// An element that `get` reads, as a whole value: the flat structure value
+/// of a record element.
+fn element_read(target: &ContainerType, get: Expr) -> Expr {
+    match &target.record {
+        Some(record) => classes::object_call(ObjectOp::Unbox(record.clone()), vec![get]),
+        None => get,
+    }
+}
+
+/// The container and the element read of native expression `id` when it
+/// reads an element of unpacked structure type (`q[i]`, `q.pop_front()`),
+/// before a record element is unboxed.
+fn struct_element(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Arc<ContainerType>, Expr)>> {
+    let id = expression_binding::ungroup(id, native);
+    let base = match &native.expression(id).kind {
+        ExprKind::Select { expression, .. } => *expression,
+        ExprKind::Call { .. } | ExprKind::Member { .. } => {
+            let callee = match &native.expression(id).kind {
+                ExprKind::Call { expression, .. } => *expression,
+                _ => id,
+            };
+            match &native.expression(callee).kind {
+                ExprKind::Member {
+                    expression, name, ..
+                } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") => *expression,
+                _ => return Ok(None),
+            }
+        }
+        _ => return Ok(None),
+    };
+    let Some(target) = native_type(base, native, tree, dims)? else {
+        return Ok(None);
+    };
+    if target.element.unpacked_struct().is_none() {
+        return Ok(None);
+    }
+    let Some(value) = value(id, native, tree, dims, false)? else {
+        return Ok(None);
+    };
+    let raw = match value {
+        Expr::Call {
+            callee: Callee::Object(op),
+            mut args,
+            ..
+        } if matches!(*op, ObjectOp::Unbox(_)) => args
+            .pop()
+            .flatten()
+            .ok_or_else(|| unsupported("structure record read"))?,
+        value => value,
+    };
+    Ok(Some((target, raw)))
+}
+
+/// The unpacked structure type of native expression `id` when it reads a
+/// container element of such a type.
+pub(super) fn native_struct_element(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<Option<Arc<unpacked_structs::UnpackedStruct>>> {
+    let id = expression_binding::ungroup(id, native);
+    let base = match &native.expression(id).kind {
+        ExprKind::Select { expression, .. } => *expression,
+        ExprKind::Call { expression, .. } => match &native.expression(*expression).kind {
+            ExprKind::Member {
+                expression, name, ..
+            } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") => *expression,
+            _ => return Ok(None),
+        },
+        ExprKind::Member {
+            expression, name, ..
+        } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") => *expression,
+        _ => return Ok(None),
+    };
+    Ok(native_type(base, native, tree, dims)?
+        .and_then(|target| target.element.unpacked_struct().cloned()))
+}
+
+/// A member `e.m` (or `e.m.n`) of a container element `e` of unpacked
+/// structure type: its type and its value.
+pub(super) fn element_member(
+    id: ExprId,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    dims: &PackedDimensions,
+) -> Converted<Option<(Type, Expr)>> {
+    let mut names = Vec::new();
+    let mut current = expression_binding::ungroup(id, native);
+    let element = loop {
+        let ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } = &native.expression(current).kind
+        else {
+            return Ok(None);
+        };
+        if separator != "." {
+            return Ok(None);
+        }
+        names.push(instances::normalize_identifier(&name.spelling));
+        current = expression_binding::ungroup(*expression, native);
+        if native_struct_element(current, native, tree, dims)?.is_some() {
+            break current;
+        }
+    };
+    names.reverse();
+    let Some((target, raw)) = struct_element(element, native, tree, dims)? else {
+        return Ok(None);
+    };
+    let aggregate = target
+        .element
+        .unpacked_struct()
+        .expect("a structure element")
+        .clone();
+    // A path into a packed structure member selects its bits; a path
+    // through a class handle member continues as a property access.
+    let mut packed = Vec::new();
+    let (member_type, leaves) = loop {
+        if let Some(found) = unpacked_structs::member_leaves(&aggregate, &names) {
+            break found;
+        }
+        let Some(name) = names.pop() else {
+            return Ok(None);
+        };
+        packed.insert(0, name);
+    };
+    if !packed.is_empty() && member_type.members.is_empty() {
+        return Ok(None);
+    }
+    let leaves_in_order = aggregate.leaves();
+    let parts = leaves
+        .iter()
+        .map(|leaf| {
+            let index = leaves_in_order
+                .iter()
+                .position(|candidate| candidate.path == leaf.path)
+                .expect("a leaf of the structure");
+            match &target.record {
+                Some(record) => {
+                    classes::object_call(ObjectOp::Load(record.fields[index]), vec![raw.clone()])
+                }
+                None => Expr::Select {
+                    expr: Box::new(raw.clone()),
+                    msb: ConstExpr::Literal((leaf.offset + leaf.width - 1).to_string()),
+                    lsb: ConstExpr::Literal(leaf.offset.to_string()),
+                    signed: leaf.r#type.is_signed,
+                },
+            }
+        })
+        .collect::<Vec<_>>();
+    // Each leaf is read from the element, which a pop or any other call
+    // with an effect (a subroutine, `$urandom`) would change.
+    if parts.len() > 1 && inlining::effectful(&raw) {
+        return Err(unsupported(
+            "structure member with several members of an element read with a side effect",
+        ));
+    }
+    let value = if member_type.unpacked_struct().is_some() {
+        Expr::Concat(parts)
+    } else {
+        parts.into_iter().next().expect("one leaf")
+    };
+    let mut member_type = member_type;
+    let mut value = value;
+    for name in packed {
+        let Some(member) = member_type
+            .members
+            .iter()
+            .find(|member| member.name() == name)
+            .cloned()
+        else {
+            return Err(unsupported(format!("structure member `{name}`")));
+        };
+        if member.is_tagged() {
+            return Err(unsupported("tagged union member of a container element"));
+        }
+        let width = casts::expr_type_from_type(&tree.state, member.r#type(), &dims.const_env)
+            .ok_or_else(|| unsupported("structure member width"))?
+            .width;
+        value = Expr::Select {
+            expr: Box::new(value),
+            msb: ConstExpr::Literal((member.offset() + width - 1).to_string()),
+            lsb: ConstExpr::Literal(member.offset().to_string()),
+            signed: member.r#type().is_signed(),
+        };
+        member_type = member.r#type().clone();
+    }
+    Ok(Some((member_type, value)))
 }

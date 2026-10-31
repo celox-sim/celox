@@ -65,6 +65,12 @@ because its name is required by IEEE 1800-2023 22.11. Upstream preprocessing
 verdicts check process success and expected failure; they do not compare the
 emitted text against a golden file.
 
+Built-in process handles update eight expectations: both state modes of
+`9.7--process_cls_await`, `9.7--process_cls_kill`, `9.7--process_cls_self`,
+and `9.7--process_cls_suspend_resume` now pass. CI reports only these four
+fail-to-pass transitions per mode; the same sources also pass the local
+simulation driver in both modes. No failure expectation is broadened.
+
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
 rules from tool exit codes or `should_fail` metadata. A negative test may pass

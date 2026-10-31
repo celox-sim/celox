@@ -153,7 +153,9 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
         Self {
             events: design.events.clone(),
             kinds: design.event_kinds(),
-            timed: !processes.is_empty(),
+            timed: processes
+                .iter()
+                .any(|process| process.slots.kind != crate::ProcessKind::Callable),
             counted,
             probes: schema.occurrence_probes.clone(),
             processes,

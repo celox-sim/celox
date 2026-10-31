@@ -8,6 +8,32 @@ use celox::{
     SimBackend, Simulation, SlotIo,
 };
 
+// Called only for packed storage of at most128 bits. Keep the common64-bit
+// path in one machine word instead of promoting every scalar operation.
+fn packed_u64(backend: &NativeBackend, signal: SignalRef) -> u64 {
+    let mask = u64::MAX
+        .checked_shr((64 - signal.width) as u32)
+        .unwrap_or(0);
+    let value = match signal.width {
+        0..=8 => u64::from(backend.get_as::<u8>(signal)),
+        9..=16 => u64::from(u16::from_le(backend.get_as::<u16>(signal))),
+        17..=32 => u64::from(u32::from_le(backend.get_as::<u32>(signal))),
+        _ => u64::from_le(backend.get_as::<u64>(signal)),
+    };
+    value & mask
+}
+
+fn packed_word(backend: &NativeBackend, signal: SignalRef) -> BigUint {
+    if signal.width <= 64 {
+        BigUint::from(packed_u64(backend, signal))
+    } else {
+        let mask = u128::MAX
+            .checked_shr((128 - signal.width) as u32)
+            .unwrap_or(0);
+        BigUint::from(u128::from_le(backend.get_as::<u128>(signal)) & mask)
+    }
+}
+
 /// What the VPI entry points read and write.
 pub(crate) trait VpiState {
     /// The image the state belongs to: its reflection and layout.
@@ -34,6 +60,11 @@ pub(crate) trait VpiState {
     /// The stored value, without settling the design.
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint);
 
+    /// Packed native words, when the runtime can read them without allocating.
+    fn get_word(&self, _signal: SignalRef) -> Option<(u64, u64)> {
+        None
+    }
+
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint);
 
     /// Override a signal until [`Self::release`]; `false` when it cannot be
@@ -56,12 +87,64 @@ impl VpiState for NativeProgramInstance {
         self.program_image()
     }
 
+    fn get_word(&self, signal: SignalRef) -> Option<(u64, u64)> {
+        if signal.array_layout.is_some() || signal.width > 64 {
+            return None;
+        }
+        let value = packed_u64(self.backend(), signal);
+        let mask = if signal.is_4state && self.program_image().four_state() {
+            packed_u64(
+                self.backend(),
+                SignalRef {
+                    offset: signal.offset + signal.width.div_ceil(8),
+                    ..signal
+                },
+            )
+        } else {
+            0
+        };
+        Some((value, mask))
+    }
+
     fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
-        self.backend().get_four_state(signal)
+        // Packed scalar reads dominate callback polling. Read their stored
+        // word directly; arrays keep the backend's gather/plane layout.
+        if signal.array_layout.is_none() && signal.width <= 128 {
+            let value = packed_word(self.backend(), signal);
+            let unknown = if signal.is_4state && self.program_image().four_state() {
+                let mask_signal = SignalRef {
+                    offset: signal.offset + signal.width.div_ceil(8),
+                    ..signal
+                };
+                packed_word(self.backend(), mask_signal)
+            } else {
+                BigUint::default()
+            };
+            (value, unknown)
+        } else {
+            self.backend().get_four_state(signal)
+        }
     }
 
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
-        self.backend_mut().set_four_state(signal, value, mask);
+        // The typed setter writes packed words and clears a four-state mask
+        // without allocating an intermediate byte vector. Unknown four-state
+        // values and arrays retain the backend's general plane writer.
+        if signal.array_layout.is_none()
+            && signal.width <= 128
+            && (mask.bits() == 0 || !signal.is_4state || !self.program_image().four_state())
+        {
+            let mut words = value.iter_u64_digits();
+            let low = words.next().unwrap_or(0);
+            if signal.width <= 64 {
+                self.backend_mut().set(signal, low.to_le());
+            } else {
+                let word = u128::from(low) | (u128::from(words.next().unwrap_or(0)) << 64);
+                self.backend_mut().set(signal, word.to_le());
+            }
+        } else {
+            self.backend_mut().set_four_state(signal, value, mask);
+        }
     }
 
     fn force(&mut self, id: ReflectionSignalId, value: BigUint, mask: BigUint) -> bool {
@@ -250,6 +333,192 @@ impl Runtime {
                 })
             }
             Runtime::Timed(timed) => timed.drain_runtime_events(),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn packed_reads_match_backend_across_word_boundaries_and_padding() {
+        let widths = [
+            1usize, 3, 8, 9, 16, 17, 24, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129,
+        ];
+        let ports = widths
+            .iter()
+            .flat_map(|width| {
+                [
+                    format!("input logic [{}:0] p{width}", width - 1),
+                    format!("output logic [{}:0] q{width}", width - 1),
+                ]
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let assignments = widths
+            .iter()
+            .map(|width| format!("assign q{width}=p{width};"))
+            .collect::<String>();
+        let source = format!("module Top({ports}); {assignments} endmodule");
+        for four_state in [false, true] {
+            let simulator = celox::Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("packed_reads.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .opt_level(celox::OptLevel::O1)
+            .build()
+            .unwrap();
+            // Safety: this test executes only an image produced in-process.
+            let mut instance = unsafe {
+                NativeProgramInstance::from_image(simulator.shared_code().program_image().clone())
+            }
+            .unwrap();
+            for width in widths {
+                let signal = instance.signal_ref(&format!("Top.p{width}")).unwrap();
+                let bytes = width.div_ceil(8);
+                let planes = if four_state { 2 } else { 1 };
+                for pattern in [0u8, 0xff, 0x55, 0x80] {
+                    let (memory, size) = instance.backend_mut().memory_as_mut_ptr();
+                    assert!(signal.offset + bytes * planes <= size);
+                    // Safety: write exactly this signal's allocated planes.
+                    // Deliberately leave nonzero padding bits in the last byte;
+                    // the public reads must remove them in both value and mask.
+                    let storage = unsafe {
+                        std::slice::from_raw_parts_mut(memory.add(signal.offset), bytes * planes)
+                    };
+                    for (index, byte) in storage.iter_mut().enumerate() {
+                        *byte = pattern.rotate_left(index as u32);
+                    }
+                    let expected = instance.backend().get_four_state(signal);
+                    if width <= 64 {
+                        let (value, mask) = VpiState::get_word(&instance, signal).unwrap();
+                        assert_eq!(
+                            (BigUint::from(value), BigUint::from(mask)),
+                            expected,
+                            "raw word width={width}, four_state={four_state}, pattern={pattern:x}"
+                        );
+                    } else {
+                        assert!(VpiState::get_word(&instance, signal).is_none());
+                    }
+                    assert_eq!(
+                        VpiState::get_four_state(&instance, signal),
+                        instance.backend().get_four_state(signal),
+                        "width={width}, four_state={four_state}, pattern={pattern:x}"
+                    );
+                }
+                let empty = SignalRef { width: 0, ..signal };
+                assert_eq!(
+                    VpiState::get_four_state(&instance, empty),
+                    instance.backend().get_four_state(empty)
+                );
+            }
+        }
+    }
+    #[test]
+    fn packed_writes_match_backend_and_preserve_neighboring_planes() {
+        let widths = [
+            1usize, 3, 8, 9, 16, 17, 24, 31, 32, 33, 63, 64, 65, 96, 127, 128, 129,
+        ];
+        let ports = widths
+            .iter()
+            .flat_map(|width| {
+                [
+                    format!("input logic [{}:0] p{width}", width - 1),
+                    format!("output logic [{}:0] q{width}", width - 1),
+                ]
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let assignments = widths
+            .iter()
+            .map(|width| format!("assign q{width}=p{width};"))
+            .collect::<String>();
+        let source = format!(
+            "module Top({ports},input bit [127:0] b,output bit [127:0] bo); {assignments} assign bo=b; endmodule"
+        );
+        let names = widths
+            .iter()
+            .flat_map(|width| [format!("Top.p{width}"), format!("Top.q{width}")])
+            .chain(["Top.b".into(), "Top.bo".into()])
+            .collect::<Vec<_>>();
+        let writable = widths
+            .iter()
+            .map(|width| format!("Top.p{width}"))
+            .chain(["Top.b".into()])
+            .collect::<Vec<_>>();
+        for four_state in [false, true] {
+            let simulator = celox::Simulator::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("packed_writes.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .opt_level(celox::OptLevel::O1)
+            .build()
+            .unwrap();
+            let image = simulator.shared_code().program_image().clone();
+            // Safety: both instances use an image compiled in this test.
+            let (mut fast, mut reference) = unsafe {
+                (
+                    NativeProgramInstance::from_image(image.clone()).unwrap(),
+                    NativeProgramInstance::from_image(image).unwrap(),
+                )
+            };
+            for name in &writable {
+                let signal = fast.signal_ref(name).unwrap();
+                let reference_signal = reference.signal_ref(name).unwrap();
+                let ones = (BigUint::from(1u8) << signal.width) - BigUint::from(1u8);
+                let high = BigUint::from(1u8) << (signal.width - 1);
+                let patterns = [
+                    (
+                        (BigUint::from(1u8) << (signal.width + 5)) | &ones,
+                        BigUint::default(),
+                    ),
+                    (ones.clone(), ones.clone()),
+                    (BigUint::default(), ones.clone()),
+                    (high.clone(), high),
+                    (BigUint::from(1u8), BigUint::default()),
+                    (BigUint::default(), BigUint::default()),
+                ];
+                for (value, mask) in patterns {
+                    VpiState::set_four_state(&mut fast, signal, value.clone(), mask.clone());
+                    reference
+                        .backend_mut()
+                        .set_four_state(reference_signal, value, mask);
+                    // Inspect the actual stored bytes too, including padding
+                    // and transitions from unknown masks back to known values.
+                    let bytes = signal.width.div_ceil(8)
+                        * if signal.is_4state && four_state { 2 } else { 1 };
+                    let (fast_ptr, fast_size) = fast.backend().memory_as_ptr();
+                    let (reference_ptr, reference_size) = reference.backend().memory_as_ptr();
+                    assert!(
+                        signal.offset + bytes <= fast_size
+                            && reference_signal.offset + bytes <= reference_size
+                    );
+                    // Safety: these views cover only the selected stored planes.
+                    unsafe {
+                        assert_eq!(
+                            std::slice::from_raw_parts(fast_ptr.add(signal.offset), bytes),
+                            std::slice::from_raw_parts(
+                                reference_ptr.add(reference_signal.offset),
+                                bytes
+                            ),
+                            "{name}, four_state={four_state}"
+                        );
+                    }
+                    for neighbor in &names {
+                        assert_eq!(
+                            fast.backend()
+                                .get_four_state(fast.signal_ref(neighbor).unwrap()),
+                            reference
+                                .backend()
+                                .get_four_state(reference.signal_ref(neighbor).unwrap()),
+                            "neighbor={neighbor}, written={name}, four_state={four_state}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

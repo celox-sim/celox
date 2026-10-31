@@ -5,13 +5,31 @@ use celox_sv_syntax::{BodyItemKind, ParameterKind, TypeAliasTarget};
 pub(super) fn type_aliases_from_scope(
     tree: &AnalysisContext<'_>,
 ) -> Converted<HashMap<String, Type>> {
-    type_aliases_from_scope_with_env(tree, &HashMap::default())
+    // Constants of this scope are not available until parameter collection.
+    // The subsequent pass with an environment requires complete defaults.
+    type_aliases_in_scope(
+        tree,
+        &HashMap::default(),
+        &HashMap::default(),
+        true,
+        None,
+        true,
+        None,
+    )
 }
 pub(super) fn type_aliases_from_scope_with_env(
     syntax_tree: &AnalysisContext<'_>,
     const_env: &HashMap<String, i128>,
 ) -> Converted<HashMap<String, Type>> {
-    type_aliases_in_scope(syntax_tree, const_env, &HashMap::default(), true, None)
+    type_aliases_in_scope(
+        syntax_tree,
+        const_env,
+        &HashMap::default(),
+        true,
+        None,
+        false,
+        None,
+    )
 }
 
 /// Resolve a selected body while retaining its enclosing lexical type bindings.
@@ -21,7 +39,36 @@ pub(super) fn type_aliases_from_body_with_env(
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
 ) -> Converted<HashMap<String, Type>> {
-    type_aliases_in_scope(syntax_tree, const_env, inherited, false, Some(items))
+    type_aliases_in_scope(
+        syntax_tree,
+        const_env,
+        inherited,
+        false,
+        Some(items),
+        false,
+        None,
+    )
+}
+
+/// The typedefs of elaborated generate scope `path`, such as `g[1]`, whose
+/// enumeration, struct and union types are their own in each scope, also
+/// in each iteration of a loop (IEEE 1800-2023 27.4).
+pub(super) fn type_aliases_of_generate_scope(
+    syntax_tree: &AnalysisContext<'_>,
+    items: &[celox_sv_syntax::BodyItemId],
+    const_env: &HashMap<String, i128>,
+    inherited: &HashMap<String, Type>,
+    path: &str,
+) -> Converted<HashMap<String, Type>> {
+    type_aliases_in_scope(
+        syntax_tree,
+        const_env,
+        inherited,
+        false,
+        Some(items),
+        false,
+        Some(path),
+    )
 }
 
 fn type_aliases_in_scope(
@@ -30,6 +77,8 @@ fn type_aliases_in_scope(
     inherited: &HashMap<String, Type>,
     include_header: bool,
     items: Option<&[celox_sv_syntax::BodyItemId]>,
+    defer_class_defaults: bool,
+    generate_scope: Option<&str>,
 ) -> Converted<HashMap<String, Type>> {
     let mut aliases = scope::imported(&syntax_tree.state).type_aliases.clone();
     aliases.extend(
@@ -84,13 +133,15 @@ fn type_aliases_in_scope(
                     syntax_tree,
                     const_env,
                     &aliases,
+                    defer_class_defaults,
                 )?
                 else {
                     continue;
                 };
                 let context = PackedDimensions::new(HashMap::default(), const_env, &aliases);
-                let ty =
+                let mut ty =
                     containers::with_dimensions(base, &alias.dimensions, syntax_tree, &context)?;
+                ty.name_declaration(|| declaration_name(syntax_tree, alias, generate_scope));
                 aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
             }
             _ => {}
@@ -126,6 +177,34 @@ fn type_aliases_in_scope(
         }
     }
     Ok(aliases)
+}
+
+/// The name of typedef `alias`, qualified by the module, interface, program
+/// or package that declares it and by its generate scope.
+fn declaration_name(
+    tree: &AnalysisContext<'_>,
+    alias: &celox_sv_syntax::TypeAlias,
+    generate_scope: Option<&str>,
+) -> String {
+    let name = instances::normalize_identifier(&alias.name.spelling);
+    let name = match generate_scope {
+        Some(path) => format!("{path}.{name}"),
+        None => name,
+    };
+    match classes::enclosing_unit(tree.declarations(), alias.tokens) {
+        Some(unit) => format!(
+            "{}::{name}",
+            instances::normalize_identifier(&unit.name.spelling)
+        ),
+        // Each source file's compilation unit is a scope of its own, as for
+        // its classes (IEEE 1800-2023 3.12.1).
+        None => {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = fxhash::FxHasher::default();
+            tree.compilation_path().hash(&mut hasher);
+            format!("{}::{name}@{:016x}", packages::UNIT, hasher.finish())
+        }
+    }
 }
 
 fn bound_literal(value: i128) -> ConstExpr {
@@ -171,7 +250,8 @@ pub(super) fn enclose_aliased_packed_type(
     // array they form is unsigned, whatever its elements (IEEE 1800-2023
     // 7.4.1); a type name takes no signing of its own.
     if !direct_ranges.is_empty() {
-        r#type.enum_values = None;
+        r#type.packed_enum |= r#type.is_enum;
+        r#type.enum_domain = None;
         r#type.signed_element_depth = if r#type.is_signed {
             Some(direct_ranges.len())
         } else {

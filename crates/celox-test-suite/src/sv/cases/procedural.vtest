@@ -1510,3 +1510,24 @@
   (tick clk) (assert_eq result wide)
   (modify (set update 1))
   (tick clk) (assert_eq result 0))
+
+(case static_locals_with_run_time_initializers_run_before_procedures
+  (source "static_initializers.sv" #"
+    module Top(output bit [7:0] first, output bit [7:0] looped);
+      int m = 1;
+      initial m = 5;
+      initial begin
+        static int k = m + 1;
+        static int j = k * 10;
+        first = 8'(j);
+        for (int i = 0; i < 3; i++) begin
+          static int once = k;
+          once++;
+          looped = 8'(once);
+        end
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0)
+  (assert_eq first 20)
+  (assert_eq looped 5))

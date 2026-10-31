@@ -21,6 +21,10 @@ use crate::source_tree::SourceTree as SyntaxTree;
 #[derive(Default)]
 pub(super) struct AnalysisState {
     pub(crate) const_functions: const_functions::State,
+    foreign: std::rc::Rc<classes::foreign::Registry>,
+    foreign_arguments: RefCell<Vec<(String, classes::specializations::BoundArguments)>>,
+    foreign_names: RefCell<Vec<(String, classes::specializations::BoundArguments, String)>>,
+    foreign_error: RefCell<Option<AnalyzerError>>,
     scope: scope::State,
     interfaces: interface_ast::State,
     dimensions: dimensions::State,
@@ -93,6 +97,7 @@ impl<'a> AnalysisContext<'a> {
             syntax_tree,
             state: std::rc::Rc::new(AnalysisState {
                 next_call_site: packages.call_sites.clone(),
+                foreign: packages.foreign.clone(),
                 ..AnalysisState::default()
             }),
             parameter_overrides: Cow::Owned(HashMap::default()),
@@ -120,6 +125,7 @@ impl Deref for AnalysisContext<'_> {
     }
 }
 
+use crate::procedural::ParamDirection;
 pub use crate::system_functions::{
     ArrayQuery, Callee, ContainerKind, ContainerLayout, ContainerOp, ObjectOp, StringOp,
     SystemFunction, SystemTask,
@@ -134,6 +140,7 @@ mod case;
 mod casts;
 mod classes;
 mod comb_process;
+mod processes;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
 pub(crate) mod const_functions;
@@ -143,6 +150,7 @@ mod constants;
 mod declarations;
 mod dimensions;
 mod dpi;
+mod enums;
 mod expression_binding;
 mod expressions;
 mod ff_process;
@@ -177,6 +185,7 @@ mod subroutine_owners;
 pub(crate) mod timescales;
 pub(crate) mod type_parameters;
 mod types;
+mod unpacked_structs;
 pub(crate) mod validation;
 pub(crate) mod warnings;
 
@@ -695,6 +704,49 @@ impl Module {
         export_symbols: bool,
         header_ports: Option<&port_owners::Selection<'_>>,
     ) -> Result<Self, AnalyzerError> {
+        let registry = syntax_tree.state.foreign.clone();
+        for _ in 0..1024 {
+            let revision = registry.revision();
+            let mut symbols = (*imported).clone();
+            registry.extend(syntax_tree, &mut symbols);
+            let declarations_only = symbols.declarations_only;
+            let result = Self::from_selected_scope_once(
+                syntax_tree,
+                override_module_name,
+                parameter_overrides,
+                interfaces,
+                Arc::new(symbols),
+                export_symbols || registry.has_templates(),
+                header_ports,
+            );
+            if let Ok(module) = &result
+                && !declarations_only
+                && let Some(symbols) = &module.symbols
+            {
+                registry.finish(syntax_tree, symbols)?;
+            }
+            if registry.revision() == revision {
+                return result;
+            }
+            syntax_tree.state.classes.borrow_mut().clear();
+            syntax_tree.state.class_specializations.borrow_mut().clear();
+            syntax_tree.state.foreign_error.borrow_mut().take();
+            syntax_tree.state.foreign_names.borrow_mut().clear();
+        }
+        Err(unsupported(
+            "foreign class specialization discovery did not converge",
+        ))
+    }
+
+    fn from_selected_scope_once(
+        syntax_tree: &AnalysisContext<'_>,
+        override_module_name: &str,
+        parameter_overrides: &HashMap<String, ConstExpr>,
+        interfaces: &InterfaceLookup<'_>,
+        imported: Arc<scope::ScopeSymbols>,
+        export_symbols: bool,
+        header_ports: Option<&port_owners::Selection<'_>>,
+    ) -> Result<Self, AnalyzerError> {
         // The scope makes its class specializations until its class methods
         // have signatures.
         syntax_tree.state.class_specializations_frozen.set(false);
@@ -1132,12 +1184,20 @@ impl Module {
         }
         // A generate block shares its name space with the module's other
         // declarations (IEEE 1800-2023 27.6, 23.9).
+        // The members of a variable of unpacked structure type are named
+        // like declarations of a scope of the variable's name.
+        let aggregates: HashSet<&str> = signals
+            .iter()
+            .filter(|signal| signal.is_aggregate())
+            .map(Signal::name)
+            .collect();
         let scope_heads: HashSet<&str> = signals
             .iter()
             .filter(|signal| signal.hierarchical.is_none())
             .map(Signal::name)
             .chain(instances.iter().map(Instance::name))
             .filter_map(generate_scope_head)
+            .filter(|head| !aggregates.contains(head))
             .collect();
         if let Some(conflict) = ports
             .iter()
@@ -1203,6 +1263,7 @@ impl Module {
                         is_2state: function.return_is_2state,
                         string: function.return_string,
                         pattern_type: function.return_type.clone(),
+                        enum_domain: function.return_enum_domain.clone(),
                     },
                 )
             }));
@@ -1222,6 +1283,7 @@ impl Module {
                         is_2state: !r#type.is_4state(),
                         string: false,
                         pattern_type: None,
+                        enum_domain: None,
                     },
                 ))
             }));
@@ -1258,6 +1320,7 @@ impl Module {
             subroutine_directions: &subroutine_directions,
             automatic: lifetimes::automatic_by_default(syntax_tree),
             statics: Vec::new(),
+            explicit_statics: HashSet::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
         };
@@ -1325,18 +1388,25 @@ impl Module {
             &subroutine_directions,
             comb_processes
                 .iter_mut()
-                .map(|process| &mut process.body)
-                .chain(ff_processes.iter_mut().map(|process| &mut process.body))
+                .map(|process| (&mut process.body, false))
+                .chain(
+                    ff_processes
+                        .iter_mut()
+                        .map(|process| (&mut process.body, false)),
+                )
                 .chain(
                     initial_processes
                         .iter_mut()
-                        .map(|process| &mut process.body),
+                        .map(|process| (&mut process.body, !process.repeats)),
                 ),
+            Some(&body_state.explicit_statics),
         )?;
         for subroutine in &subroutines {
             kept.extend(subroutine.persistent_locals.iter().cloned());
         }
-        static_initializers.append(&mut body_state.static_initializers);
+        // Statics of subroutines are initialized first: a run-time
+        // initializer of a process local may call the subroutine.
+        static_initializers.splice(0..0, body_state.static_initializers.drain(..));
         locals.retain(|local| !kept.contains(&local.name));
         for name in kept {
             signals.push(Signal::new(name.clone(), statics[&name].clone()));
@@ -1347,10 +1417,18 @@ impl Module {
                 .iter()
                 .position(|process| !process.is_initializer())
                 .unwrap_or(initial_processes.len());
+            // They may read module variables, so they also stay after those
+            // initializers when processes are reordered by creation.
+            let creation_order = initial_processes
+                .iter()
+                .filter(|process| process.is_initializer())
+                .map(|process| process.creation_order)
+                .max()
+                .unwrap_or(0);
             initial_processes.insert(
                 first_block,
                 InitialProcess {
-                    creation_order: 0,
+                    creation_order,
                     site: None,
                     condition: None,
                     body: static_initializers,
@@ -1405,6 +1483,21 @@ impl Module {
                 }
             }
         }
+        let nets = signals
+            .iter()
+            .filter(|signal| signal.is_net())
+            .map(Signal::name)
+            .chain(ports.iter().filter(|port| port.is_net).map(Port::name))
+            .collect();
+        procedural::references::validate(
+            subroutines.iter().chain(imported.subroutines.iter()),
+            &comb_processes,
+            &ff_processes,
+            &initial_processes,
+            &subroutine_directions,
+            &subroutine_params,
+            &nets,
+        )?;
         procedural::timed_tasks::classify(
             subroutines.iter().chain(imported.subroutines.iter()),
             &mut comb_processes,
@@ -1417,6 +1510,7 @@ impl Module {
             .collect();
         // A package keeps its symbols for the scopes that use it.
         let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
+            package_scopes: imported.package_scopes.clone(),
             classes: classes::scope_classes(syntax_tree, &const_env),
             class_member_types: classes::specializations::export_member_types(syntax_tree),
             inline_randomizations,
@@ -1434,7 +1528,7 @@ impl Module {
                 .collect(),
             enum_constants: enum_constants.clone(),
             functions: functions.clone(),
-            function_return_types: packed_dimensions.function_return_types.clone(),
+            function_return_types: (*packed_dimensions.function_return_types).clone(),
             constant_functions: const_functions::installed(&syntax_tree.state.const_functions),
             subroutine_params: subroutine_params.clone(),
             subroutine_shapes: subroutine_shapes.clone(),
@@ -1649,6 +1743,8 @@ pub struct Parameter {
     is_local: bool,
     /// See [`Type::signed_element_depth`].
     signed_element_depth: Option<usize>,
+    /// The enumerated type the parameter is declared with.
+    enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
 impl Parameter {
@@ -1673,6 +1769,7 @@ impl Parameter {
             has_declared_type,
             is_local,
             signed_element_depth: None,
+            enum_domain: None,
         }
     }
 
@@ -1894,6 +1991,12 @@ impl Signal {
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// A variable of unpacked structure type, which only names its leaf
+    /// variables.
+    pub(crate) fn is_aggregate(&self) -> bool {
+        self.r#type.unpacked_struct.is_some()
     }
 
     pub fn r#type(&self) -> &Type {
@@ -2142,8 +2245,11 @@ pub enum PortDirection {
 pub struct Type {
     container: Option<Arc<ContainerType>>,
     is_enum: bool,
-    /// Resolved legal values for a scalar enum; None if its domain is unsupported.
-    enum_values: Option<Vec<i128>>,
+    /// Resolved members of a scalar enum; None if its domain is unsupported.
+    enum_domain: Option<Arc<enums::EnumDomain>>,
+    /// A packed array whose elements are of an enumerated type, whose
+    /// methods are not supported on its elements.
+    packed_enum: bool,
     kind: TypeKind,
     is_signed: bool,
     packed_ranges: Vec<PackedRange>,
@@ -2155,6 +2261,29 @@ pub struct Type {
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
     class: Option<Arc<str>>,
+    /// The typedef that names an enumeration, struct or union type.
+    nominal: Nominal,
+    /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
+    unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
+}
+
+/// The declaration that names an enumeration, struct or union type, which
+/// tells it apart from another type of the same structure (IEEE 1800-2023
+/// 6.19, 6.22.1) where a class specialization is keyed by its type
+/// arguments (8.25). Type equality does not compare it.
+#[derive(Debug, Clone, Default)]
+struct Nominal(Option<Arc<str>>);
+
+impl PartialEq for Nominal {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Eq for Nominal {}
+
+impl std::hash::Hash for Nominal {
+    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2162,13 +2291,17 @@ struct ContainerType {
     key: Option<Type>,
     layout: system_functions::ContainerLayout,
     element: Type,
+    /// The record that holds an element of unpacked structure type which is
+    /// not kept as a flat value.
+    record: Option<system_functions::Record>,
 }
 
 impl Type {
     fn implicit() -> Self {
         Self {
             is_enum: false,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             kind: TypeKind::Implicit,
             is_signed: false,
             packed_ranges: Vec::new(),
@@ -2177,6 +2310,8 @@ impl Type {
             signed_element_depth: None,
             class: None,
             container: None,
+            nominal: Nominal::default(),
+            unpacked_struct: None,
         }
     }
 
@@ -2184,7 +2319,8 @@ impl Type {
         Self {
             kind,
             is_enum: false,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             is_signed: false,
             packed_ranges: Vec::new(),
             unpacked_ranges: Vec::new(),
@@ -2192,7 +2328,30 @@ impl Type {
             signed_element_depth: None,
             class: None,
             container: None,
+            unpacked_struct: None,
+            nominal: Nominal::default(),
         }
+    }
+
+    /// Name an enumeration, struct or union type after typedef `name`,
+    /// unless an earlier typedef already named it (`typedef A B` names the
+    /// type of `A`).
+    fn name_declaration(&mut self, name: impl FnOnce() -> String) {
+        if (self.is_enum || !self.members.is_empty() || self.unpacked_struct.is_some())
+            && self.nominal.0.is_none()
+        {
+            self.nominal = Nominal(Some(name().into()));
+        }
+    }
+
+    /// The typedef that names this enumeration, struct or union type.
+    fn declaration_name(&self) -> Option<&str> {
+        self.nominal.0.as_deref()
+    }
+
+    /// The members of an unpacked structure type.
+    pub(in crate::ast) fn unpacked_struct(&self) -> Option<&Arc<unpacked_structs::UnpackedStruct>> {
+        self.unpacked_struct.as_ref()
     }
 
     /// The class of an object handle type.
@@ -2256,6 +2415,8 @@ pub enum TypeKind {
     /// IEEE 1800-2023 8.4: a handle of a class object, `null` or an object
     /// in the heap.
     Object,
+    /// A scheduler-owned process reference (9.7), independent of the heap.
+    Process,
     Bit,
     Logic,
     Reg,
@@ -2716,6 +2877,8 @@ struct Function {
     return_real: bool,
     /// Whether the function returns a `string`.
     return_string: bool,
+    /// Whether the function returns a class handle.
+    return_handle: bool,
     name: String,
     params: Vec<FunctionParam>,
     /// The function's value as one expression of its arguments, or `None`
@@ -2730,6 +2893,8 @@ struct Function {
     return_dimensions: Option<usize>,
     return_signed: bool,
     return_is_2state: bool,
+    /// The members of an enumerated return type, for its methods.
+    return_enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
 fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
@@ -2753,21 +2918,6 @@ fn dpi_argument_metadata(import: &crate::ir::DpiImport) -> Arc<[FunctionArgument
             has_default: false,
         })
         .collect()
-}
-
-/// How a function argument is passed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ParamDirection {
-    Input,
-    Output,
-    Inout,
-}
-
-impl ParamDirection {
-    /// Whether the call writes the actual argument back.
-    fn is_written(self) -> bool {
-        !matches!(self, ParamDirection::Input)
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2956,7 +3106,9 @@ struct UnpackedDimension {
 struct VariableDimensions {
     container: Option<Arc<ContainerType>>,
     randomizable: bool,
-    enum_values: Option<Vec<i128>>,
+    enum_domain: Option<Arc<enums::EnumDomain>>,
+    /// See [`Type::packed_enum`].
+    packed_enum: bool,
     real: bool,
     /// A `string`: each element is a heap handle, not packed bits.
     string: bool,
@@ -2969,6 +3121,9 @@ struct VariableDimensions {
     members: Vec<packed_structs::PackedMember>,
     /// See [`Type::signed_element_depth`].
     signed_element_depth: Option<usize>,
+    /// A variable of unpacked structure type: the names of its members
+    /// are variables (see [`unpacked_structs`]).
+    unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
 }
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
@@ -2993,14 +3148,16 @@ struct FunctionReturnMetadata {
     string: bool,
     /// Declared aggregate type, available before function bodies are inlined.
     pattern_type: Option<Type>,
+    /// The members of an enumerated return type, for its methods.
+    enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct PackedDimensions {
     variables: ScopedMap<VariableDimensions>,
     const_env: SharedMap<i128>,
-    type_aliases: HashMap<String, Type>,
-    function_return_types: HashMap<String, FunctionReturnMetadata>,
+    type_aliases: SharedMap<Type>,
+    function_return_types: SharedMap<FunctionReturnMetadata>,
     functions: Arc<HashMap<String, Function>>,
     parameter_values: SharedMap<Expr>,
     /// Constant array initializers for binding child parameter values.
@@ -3030,8 +3187,8 @@ impl PackedDimensions {
         Self {
             variables: variables.into(),
             const_env: const_env.clone().into(),
-            type_aliases: type_aliases.clone(),
-            function_return_types: HashMap::default(),
+            type_aliases: type_aliases.clone().into(),
+            function_return_types: SharedMap::default(),
             functions: Arc::default(),
             parameter_values: SharedMap::default(),
             array_parameter_values: SharedMap::default(),

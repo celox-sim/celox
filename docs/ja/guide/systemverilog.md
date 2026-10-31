@@ -89,12 +89,12 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 
 デザインの変更が必要になりやすいのは、次の機能です。
 
-- [単純なクラス](./systemverilog-reference#classes)を超えるクラスを使う検証、並行アサーション。
+- [単純なクラス](./systemverilog-reference#classes)を超えるクラスを使う検証、[単一サイクルBoolean部分集合](./systemverilog-reference#並行アサーション)を超える並行アサーション。
 - `fork` / `join`、named event、`a = #1 b` のような代入内のタイミング制御、
   `always_ff` のイベント制御の `iff`（[#452](https://github.com/celox-sim/celox/issues/452)）。
 - ラッチ内のノンブロッキング代入、複数ドライバ、トライステートバス。`always_comb` の暗黙のラッチ推論は 共通の `[diagnostics]` 設定で `inferred_latch = "warn"` または `"allow"` を指定して許可します。
 - 非 ANSI モジュールポート、ワイルドカード `.*` 接続、ゲートプリミティブ、`bind`。
-- `real`、unpacked 構造体、interface の一部の機能。
+- `real`、ポート・固定長配列の unpacked 構造体、interface の一部の機能。
 
 [制約の一覧](./systemverilog-reference#what-is-not-supported)に、より細かな条件と追跡 issue をまとめています。
 未対応の構文は、構文名と追跡 issue を含む診断を返します。

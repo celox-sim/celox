@@ -209,6 +209,102 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                 }
                 "compile_error" | "mismatch" | "runtime_error" => {
                     let (expected_status, phase, diagnostic) = match (tool, name) {
+                        (
+                            "verilator",
+                            "fork_control::process_program_exit_wakes_sibling_observers",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "the simulation ended before the script did",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_ancestor_kill_preserves_caller_rng",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x1f, got 0xb",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_finished_parent_kills_descendants",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0xf, got 0x0",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_self_kill_finishes_program"
+                            | "fork_control::process_external_kill_finishes_program",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq ticks: expected 0x1, got 0x5",
+                        ),
+                        (
+                            "verilator" | "icarus",
+                            "timing::final_procedure_output_survives_program_completion",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "the design did not finish after run_to_finish",
+                        ),
+                        ("icarus", "fork_control::process_self_kill_finishes_program") => {
+                            ("compile_error", "compile", "source_0.sv:10: syntax error")
+                        }
+                        (
+                            "icarus",
+                            "fork_control::process_external_kill_finishes_program"
+                            | "fork_control::process_final_kill_preserves_cleanup"
+                            | "fork_control::process_program_exit_wakes_sibling_observers",
+                        ) => ("compile_error", "compile", "source_0.sv:2: syntax error"),
+                        (
+                            "verilator",
+                            "fork_control::process_mutual_status_waits_advance_to_cancellation",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x2, got 0x0",
+                        ),
+                        ("verilator", "fork_control::process_status_wait_and_disable") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x3, got 0x0",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_self_suspend_and_await"
+                            | "fork_control::process_suspend_and_resume_waits"
+                            | "fork_control::process_nested_calls_preserve_level_wait_resume"
+                            | "fork_control::process_resume_after_program_exit_is_noop",
+                        ) => (
+                            "runtime_error",
+                            "execute",
+                            "native testbench failed: exit status: 1",
+                        ),
+                        (
+                            "verilator",
+                            "fork_control::process_resume_resamples_automatic_event_expression",
+                        ) => ("compile_error", "compile", "%Error-LIFETIME:"),
+                        (
+                            "icarus",
+                            "fork_control::process_nested_calls_preserve_level_wait_resume",
+                        ) => ("compile_error", "compile", "source_0.sv:4: syntax error"),
+                        (
+                            "icarus",
+                            "fork_control::process_ancestor_kill_preserves_caller_rng"
+                            | "fork_control::process_final_procedures_share_identity_and_rng"
+                            | "fork_control::process_finished_parent_kills_descendants"
+                            | "fork_control::process_identity_and_status"
+                            | "fork_control::process_mutual_status_waits_advance_to_cancellation"
+                            | "fork_control::process_random_state_and_handles"
+                            | "fork_control::process_resume_after_program_exit_is_noop"
+                            | "fork_control::process_resume_resamples_automatic_event_expression"
+                            | "fork_control::process_self_suspend_and_await"
+                            | "fork_control::process_status_wait_and_disable"
+                            | "fork_control::process_suspend_and_resume_waits",
+                        ) => ("compile_error", "compile", "source_0.sv:3: syntax error"),
                         ("verilator", "fork::compound_event_activations_outlive_parent") => (
                             "runtime_error",
                             "execute",
@@ -306,6 +402,26 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "class::imported_member_type_dimensions"
                             | "class::imported_member_type_inheritance",
                         ) => ("compile_error", "compile", "source_0.sv:3: syntax error"),
+                        ("icarus", "class::package_constant_class_defaults") => {
+                            ("compile_error", "compile", "source_0.sv:4: syntax error")
+                        }
+                        ("icarus", "class::method_ranges_of_scope_declarations") => {
+                            ("compile_error", "compile", "source_0.sv:9: syntax error")
+                        }
+                        ("icarus", "class::generate_scope_enum_type_arguments") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("verilator", "class::generate_scope_enum_type_arguments") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq sum: expected 0x4bc, got 0x8ae",
+                        ),
+                        ("icarus", "class::named_aggregate_type_arguments") => {
+                            ("compile_error", "compile", "source_0.sv:8: syntax error")
+                        }
+                        ("icarus", "class::package_constant_type_arguments") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
                         ("icarus", "class::type_alias_members") => {
                             ("compile_error", "compile", "source_0.sv:3: syntax error")
                         }
@@ -355,6 +471,121 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Unsupported: tristate in top-level IO",
                         ),
+                        ("verilator", "references::ref_actual_of_an_equivalent_type") => (
+                            "compile_error",
+                            "compile",
+                            "Ref argument requires matching types",
+                        ),
+                        (
+                            "verilator",
+                            "references::ref_array_element_index_is_fixed_at_the_call"
+                            | "references::ref_class_property_names_the_object_of_the_call"
+                            | "unpacked_structs::reference_formal_handles_survive_heap_collections"
+                            | "unpacked_structs::reference_formals",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "External variable referenced by non-inlined function/task",
+                        ),
+                        (
+                            "icarus",
+                            "references::const_ref_in_a_continuous_assignment"
+                            | "references::const_ref_reads_the_current_value"
+                            | "references::ref_static_class_properties",
+                        ) => ("compile_error", "compile", "syntax error"),
+                        (
+                            "icarus",
+                            "references::ref_actual_of_an_equivalent_type"
+                            | "references::ref_array_element_index_is_fixed_at_the_call"
+                            | "references::ref_default_and_named_arguments"
+                            | "references::ref_element_select_past_the_element"
+                            | "references::ref_formals_of_one_actual_alias_each_other"
+                            | "references::ref_writes_are_seen_before_the_return",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Reference ports not supported yet",
+                        ),
+                        (
+                            "icarus",
+                            "references::ref_class_property_names_the_object_of_the_call"
+                            | "references::ref_element_after_an_input_in_forked_activations"
+                            | "references::ref_elements_of_concurrent_task_activations"
+                            | "references::ref_fills_caller_queues"
+                            | "references::ref_property_forwarded_to_output_and_inout"
+                            | "references::ref_property_of_this"
+                            | "references::ref_replaces_a_class_handle"
+                            | "references::ref_task_keeps_a_property_while_suspended"
+                            | "references::ref_task_keeps_the_reference_while_suspended",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Overriding the default variable lifetime is not yet supported",
+                        ),
+                        ("verilator", "class::foreign_generic_constructor_lexical_scope") => {
+                            ("compile_error", "compile", "FuncRef without fvar")
+                        }
+                        (
+                            "verilator",
+                            "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x7f, got 0x5f",
+                        ),
+                        ("verilator", "class::foreign_generic_inherited_constants") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq checks: expected 0x1f, got 0x0",
+                        ),
+                        ("verilator", "class::foreign_generic_nominal_and_nested_types") => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: Multiple '::' package/class reference",
+                        ),
+                        ("icarus", "class::container_type_aliases_of_classes") => (
+                            "compile_error",
+                            "compile",
+                            "Overriding the default variable lifetime is not yet supported",
+                        ),
+                        ("icarus", "class::enumeration_constants_of_classes") => {
+                            ("compile_error", "compile", "source_0.sv:12: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_constructor_lexical_scope") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
+                        (
+                            "icarus",
+                            "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+                        ) => ("compile_error", "compile", "source_0.sv:5: syntax error"),
+                        (
+                            "icarus",
+                            "class::foreign_generic_in_a_module_with_interface_instances",
+                        ) => ("compile_error", "compile", "source_0.sv:3: syntax error"),
+                        ("icarus", "class::foreign_generic_inherited_constants") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_multiple_user_classes") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_nominal_and_nested_types") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_package_type_static_storage") => {
+                            ("compile_error", "compile", "source_0.sv:10: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_template_of_the_named_package") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_static_handle_identity") => {
+                            ("compile_error", "compile", "source_0.sv:11: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_static_state_across_modules") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::foreign_generic_unit_type_constructor") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };
                     assert_eq!(status, expected_status, "{name}");

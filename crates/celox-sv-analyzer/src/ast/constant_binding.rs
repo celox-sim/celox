@@ -27,7 +27,7 @@ pub(super) fn value_expression(
 ) -> Converted<Option<ConstExpr>> {
     let mut context = dimensions.clone();
     context.const_env = HashMap::default().into();
-    context.type_aliases = HashMap::default();
+    context.type_aliases = SharedMap::default();
     bind_in_context(root, native, tree, &context, dimensions)
 }
 pub(super) fn bind(

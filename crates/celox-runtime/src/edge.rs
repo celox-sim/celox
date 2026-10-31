@@ -358,7 +358,9 @@ where
     };
     let new = edge.level();
     let fires = info.fires(known(from), edge);
-    let settle = dirty || info.comb_read;
+    let comb_read =
+        info.comb_read && (dirty || !executor.backend_mut().eval_clock_aliases(event)?);
+    let settle = dirty || comb_read;
     if let Some(plan) = plan {
         // A gated clock is judged from the lever's real level before the
         // edge, x and z included.
@@ -381,11 +383,11 @@ where
         return Ok(if settled {
             EdgeOutcome::Settled
         } else {
-            moved_only(info.comb_read)
+            moved_only(comb_read)
         });
     }
     if !fires {
-        return Ok(moved_only(info.comb_read));
+        return Ok(moved_only(comb_read));
     }
     if settle {
         executor.eval_comb_apply_ff_at(event)?;
@@ -406,7 +408,115 @@ pub fn run_edges<X, E>(
     scratch: &mut DerivedTickScratch,
     moves: &[(E, Edge)],
     dirty: bool,
+    write: impl SignalWrite<X::Backend>,
+) -> Result<EdgeOutcome, Halt>
+where
+    X: TickExecutor,
+    X::Backend: SimBackend<Event = E>,
+    E: EventHandle,
+{
+    run_edges_impl(executor, plans, edges, scratch, moves, dirty, write, None)
+}
+
+/// Bounded reuse of coincident-edge plans for a simulator's fixed topology.
+/// Signal levels and gate predicates are still evaluated on every call.
+/// Changing either topology automatically discards the cached plans.
+pub struct CoincidentEdgeCache<E> {
+    topology: Option<(DerivedTickPlans<E>, EventEdges)>,
+    entries: Vec<(Vec<(usize, bool)>, DerivedTickPlan<E>)>,
+    replace: usize,
+}
+
+impl<E> Default for CoincidentEdgeCache<E> {
+    fn default() -> Self {
+        Self {
+            topology: None,
+            entries: Vec::new(),
+            replace: 0,
+        }
+    }
+}
+
+impl<E: EventHandle> CoincidentEdgeCache<E> {
+    /// Run explicit edges while retaining up to eight recurring combinations.
+    #[allow(clippy::too_many_arguments)]
+    pub fn run<X>(
+        &mut self,
+        executor: &mut X,
+        plans: &DerivedTickPlans<E>,
+        edges: &EventEdges,
+        scratch: &mut DerivedTickScratch,
+        moves: &[(E, Edge)],
+        dirty: bool,
+        write: impl SignalWrite<X::Backend>,
+    ) -> Result<EdgeOutcome, Halt>
+    where
+        X: TickExecutor,
+        X::Backend: SimBackend<Event = E>,
+    {
+        if self.topology.as_ref().is_none_or(|(old_plans, old_edges)| {
+            !std::sync::Arc::ptr_eq(old_plans, plans) || !std::sync::Arc::ptr_eq(old_edges, edges)
+        }) {
+            self.entries.clear();
+            self.replace = 0;
+            self.topology = Some((std::sync::Arc::clone(plans), std::sync::Arc::clone(edges)));
+        }
+        run_edges_impl(
+            executor,
+            plans,
+            edges,
+            scratch,
+            moves,
+            dirty,
+            write,
+            Some(self),
+        )
+    }
+
+    fn plan(
+        &mut self,
+        changed: &[(E, bool)],
+        make: impl FnOnce() -> DerivedTickPlan<E>,
+    ) -> &DerivedTickPlan<E> {
+        let index = if let Some(index) = self.entries.iter().position(|(known, _)| {
+            known.len() == changed.len()
+                && known
+                    .iter()
+                    .zip(changed)
+                    .all(|(&(id, fires), &(event, now))| id == event.id() && fires == now)
+        }) {
+            index
+        } else {
+            let key = changed
+                .iter()
+                .map(|&(event, fires)| (event.id(), fires))
+                .collect();
+            let entry = (key, make());
+            if self.entries.len() < 8 {
+                let index = self.entries.len();
+                self.entries.push(entry);
+                index
+            } else {
+                let index = self.replace;
+                self.replace = (index + 1) % self.entries.len();
+                self.entries[index] = entry;
+                index
+            }
+        };
+        &self.entries[index].1
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_edges_impl<X, E>(
+    executor: &mut X,
+    plans: &DerivedTickPlans<E>,
+    edges: &[EventEdge],
+    scratch: &mut DerivedTickScratch,
+    moves: &[(E, Edge)],
+    dirty: bool,
     mut write: impl SignalWrite<X::Backend>,
+    cache: Option<&mut CoincidentEdgeCache<E>>,
 ) -> Result<EdgeOutcome, Halt>
 where
     X: TickExecutor,
@@ -426,8 +536,10 @@ where
             write,
         );
     }
-    let mut sources: Vec<EventDomain<E>> = Vec::with_capacity(moves.len());
+    let cached = cache.is_some();
+    let mut sources: Vec<EventDomain<E>> = Vec::with_capacity(if cached { 0 } else { moves.len() });
     let mut moved_plans = Vec::new();
+    let mut changed = Vec::with_capacity(if cached { moves.len() } else { 0 });
     let mut transitions: Vec<(SignalRef, (u8, u8))> = Vec::new();
     let mut comb_read = false;
     let mut any_moved = false;
@@ -442,23 +554,55 @@ where
         any_moved = true;
         write.write(executor.backend_mut(), info.signal, new);
         transitions.push((info.signal, (old, new)));
-        comb_read |= info.comb_read;
-        if info.fires(known(old), edge) {
-            let address = executor.backend().id_to_addr_slice()[id];
-            sources.push(EventDomain {
-                eval_apply: event,
-                eval_only: executor.backend().resolve_eval_only_event(&address),
-                apply: executor.backend().resolve_apply_event(&address),
-            });
-        }
-        if let Some(Some(plan)) = plans.get(id) {
-            moved_plans.push(plan);
+        comb_read |=
+            info.comb_read && (dirty || !executor.backend_mut().eval_clock_aliases(event)?);
+        let fires = info.fires(known(old), edge);
+        if cached {
+            changed.push((event, fires));
+        } else {
+            if fires {
+                let address = executor.backend().id_to_addr_slice()[id];
+                sources.push(EventDomain {
+                    eval_apply: event,
+                    eval_only: executor.backend().resolve_eval_only_event(&address),
+                    apply: executor.backend().resolve_apply_event(&address),
+                });
+            }
+            if let Some(Some(plan)) = plans.get(id) {
+                moved_plans.push(plan);
+            }
         }
     }
     if !any_moved {
         return Ok(EdgeOutcome::Unchanged);
     }
-    let plan = DerivedTickPlan::merge(sources, moved_plans);
+    let uncached;
+    let make = || {
+        // Resolving phase handles and collecting constituent plans belongs to
+        // a cache miss. Hits still inspect and drive the actual signal levels
+        // above, and evaluate gate predicates when the retained plan runs.
+        for &(event, fires) in &changed {
+            let id = event.id();
+            if fires {
+                let address = executor.backend().id_to_addr_slice()[id];
+                sources.push(EventDomain {
+                    eval_apply: event,
+                    eval_only: executor.backend().resolve_eval_only_event(&address),
+                    apply: executor.backend().resolve_apply_event(&address),
+                });
+            }
+            if let Some(Some(plan)) = plans.get(id) {
+                moved_plans.push(plan);
+            }
+        }
+        DerivedTickPlan::merge(sources, moved_plans)
+    };
+    let plan = if let Some(cache) = cache {
+        cache.plan(&changed, make)
+    } else {
+        uncached = make();
+        &uncached
+    };
     let lever_transitions: Vec<(u8, u8)> = plan
         .lever_signals()
         .map(|signal| {

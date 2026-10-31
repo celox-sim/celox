@@ -43,6 +43,10 @@ struct LiveInput {
     port: u32,
     expr: CompiledExpr,
     mask_source: Option<TestbenchTarget<SignalRef, CompiledExpr>>,
+    // Direct input bindings permit a chain of bitwise complements. Preserve
+    // the source payload under X/Z at the component ABI, even though HDL
+    // evaluation may canonicalize those unobservable payload bits.
+    invert_unknown_payload: bool,
     width: usize,
 }
 
@@ -302,20 +306,22 @@ fn take_output_writes(component: &mut LiveComponent) -> Vec<ComponentWrite> {
 
 fn stage_component_inputs<B: SimBackend>(component: &mut LiveComponent, backend: &mut B) {
     for input in &component.inputs {
-        let value = eval_backend_expr(backend, &input.expr).to_biguint();
-        let mask_xz = input
-            .mask_source
-            .as_ref()
-            .map(|source| {
-                let (_, mut mask) = backend.get_four_state(source.signal);
-                if let Some(selection) = &source.selection {
-                    let offset = eval_backend_expr(backend, &selection.offset).to_u64() as usize;
-                    mask >>= offset;
-                    mask &= width_mask(selection.width);
-                }
-                mask
-            })
-            .unwrap_or_default();
+        let mut value = eval_backend_expr(backend, &input.expr).to_biguint();
+        let mask_xz = if let Some(source) = &input.mask_source {
+            let (mut raw, mut mask) = backend.get_four_state(source.signal);
+            if let Some(selection) = &source.selection {
+                let offset = eval_backend_expr(backend, &selection.offset).to_u64() as usize;
+                raw = (raw >> offset) & width_mask(selection.width);
+                mask = (mask >> offset) & width_mask(selection.width);
+            }
+            if input.invert_unknown_payload {
+                raw ^= &mask;
+            }
+            value = (value & (width_mask(input.width) ^ &mask)) | (raw & &mask);
+            mask
+        } else {
+            num_bigint::BigUint::ZERO
+        };
         let mut words: Vec<_> = value.iter_u64_digits().collect();
         let mut mask_words: Vec<_> = mask_xz.iter_u64_digits().collect();
         words.resize(input.width.div_ceil(64).max(1), 0);
@@ -463,6 +469,33 @@ impl ComponentRuntime {
                         port,
                         expr: expr.clone(),
                         mask_source: binding.input_target.clone(),
+                        invert_unknown_payload: expr
+                            .bytecode()
+                            .ops()
+                            .iter()
+                            .rev()
+                            .take_while(|op| {
+                                matches!(
+                                    op,
+                                    celox_testbench::ExprOpcode::Resize { .. }
+                                        | celox_testbench::ExprOpcode::TypedUnary {
+                                            op: celox_testbench::TestbenchOperator::BitNot,
+                                            ..
+                                        }
+                                )
+                            })
+                            .filter(|op| {
+                                matches!(
+                                    op,
+                                    celox_testbench::ExprOpcode::TypedUnary {
+                                        op: celox_testbench::TestbenchOperator::BitNot,
+                                        ..
+                                    }
+                                )
+                            })
+                            .count()
+                            % 2
+                            != 0,
                         width: connection.width as usize,
                     });
                     if connection.is_clock || connection.is_reset {

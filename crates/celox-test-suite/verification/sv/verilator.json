@@ -2,7 +2,9 @@
   "case_files": [
     "verilator/always_comb.json",
     "verilator/class.json",
+    "verilator/concurrent_assertions.json",
     "verilator/fork.json",
+    "verilator/fork_control.json",
     "verilator/fork_deferred.json",
     "verilator/generate.json",
     "verilator/hierarchical_references.json",
@@ -16,14 +18,17 @@
     "verilator/procedural.json",
     "verilator/program.json",
     "verilator/random_plusargs.json",
+    "verilator/references.json",
     "verilator/review_regressions.json",
     "verilator/scan.json",
     "verilator/string.json",
+    "verilator/string_format.json",
     "verilator/synthesizable.json",
     "verilator/system_functions.json",
     "verilator/tagged_unions.json",
     "verilator/timing.json",
-    "verilator/types.json"
+    "verilator/types.json",
+    "verilator/unpacked_structs.json"
   ],
   "exclude_stronger_than_sv": false,
   "include_ignored": false,

@@ -123,6 +123,7 @@ impl<B: SimBackend> Simulator<B> {
     ) -> Result<(), StateError> {
         if record.activations.is_empty()
             && record.reactive.is_empty()
+            && record.observed.is_empty()
             && record.re_inactive.is_empty()
             && record.re_nba_queue.is_empty()
         {
@@ -225,6 +226,10 @@ impl<B: SimBackend> Simulator<B> {
         let statuses = self.process_statuses();
         let mut cells: HashMap<usize, u64> = HashMap::default();
         for (index, activation) in state.activations.iter().enumerate() {
+            if activation.control.exposed {
+                return Err(StateError::Objects("built-in process handles".into()));
+            }
+
             let status = statuses
                 .get(activation.kernel)
                 .ok_or_else(|| mismatch("unknown activation kernel"))?;
@@ -504,7 +509,7 @@ impl<B: SimBackend> Simulator<B> {
                             && !(first..first + count).any(is_probe)
                     }
                     Some(ProcessStatus::Wait | ProcessStatus::Pending) => {
-                        delay
+                        (delay & !celox_design::PROCESS_LEVEL_WAIT)
                             < self
                                 .program
                                 .runtime_schema
@@ -581,6 +586,7 @@ impl<B: SimBackend> Simulator<B> {
                 })
                 .transpose()?;
             decoded[index] = Some(Activation {
+                control: Default::default(),
                 kernel,
                 parent: a.parent.map(|id| mapping[&id].0),
                 private,
@@ -625,6 +631,7 @@ impl<B: SimBackend> Simulator<B> {
             .chain(&record.ready)
             .chain(&record.inactive)
             .chain(&record.reactive)
+            .chain(&record.observed)
             .chain(&record.re_inactive)
         {
             if let Some(&index) = processes.get(id) {
@@ -639,7 +646,6 @@ impl<B: SimBackend> Simulator<B> {
         for (ids, reactive) in [
             (&record.ready, false),
             (&record.inactive, false),
-            (&record.reactive, true),
             (&record.re_inactive, true),
         ] {
             for id in ids {
@@ -691,7 +697,7 @@ impl<B: SimBackend> Simulator<B> {
         for waiter in &record.waiters {
             if let Some(&index) = processes.get(&waiter.process) {
                 if control(index).is_some_and(|(status, site)| {
-                    site != waiter.site
+                    (site & !celox_design::PROCESS_LEVEL_WAIT) != waiter.site
                         || !matches!(
                             celox_design::ProcessStatus::from_code(status as u8),
                             Some(

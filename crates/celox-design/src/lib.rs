@@ -475,6 +475,10 @@ pub enum ProcessStatus {
     DisableFork,
     /// A side-effect-free event-expression probe completed; no HDL continuation ran.
     EventProbe,
+    /// Resume an assertion predicate in Observed after Active/NBA quiescence.
+    AssertionObserved,
+    /// Resume an assertion action in Reactive after every Observed predicate.
+    AssertionReactive,
 }
 
 impl ProcessStatus {
@@ -498,6 +502,8 @@ impl ProcessStatus {
             Self::WaitFork => 14,
             Self::DisableFork => 15,
             Self::EventProbe => 16,
+            Self::AssertionObserved => 17,
+            Self::AssertionReactive => 18,
         }
     }
 
@@ -519,6 +525,8 @@ impl ProcessStatus {
             14 => Some(Self::WaitFork),
             15 => Some(Self::DisableFork),
             16 => Some(Self::EventProbe),
+            17 => Some(Self::AssertionObserved),
+            18 => Some(Self::AssertionReactive),
             _ => None,
         }
     }
@@ -533,6 +541,12 @@ pub enum HostRequestKind {
     Vcd,
     Scan,
     Distribution,
+    Process,
+    // Append new variants: native images persist Serde variant indices.
+    /// Services owned by an explicitly invoked testbench kernel.
+    Testbench,
+    /// Formatting to a string (`$sformatf`).
+    Format,
 }
 
 impl HostRequestKind {
@@ -544,6 +558,9 @@ impl HostRequestKind {
             Self::Vcd => 3,
             Self::Scan => 4,
             Self::Distribution => 5,
+            Self::Process => 6,
+            Self::Testbench => 7,
+            Self::Format => 8,
         };
         (family << 32) | site as u64
     }
@@ -556,11 +573,52 @@ impl HostRequestKind {
             3 => Self::Vcd,
             4 => Self::Scan,
             5 => Self::Distribution,
+            6 => Self::Process,
+            7 => Self::Testbench,
+            8 => Self::Format,
             _ => return None,
         };
         Some((family, request as u32))
     }
 }
+
+/// Operations on the built-in process class (IEEE 1800-2023 9.7).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u32)]
+pub enum ProcessOp {
+    SelfHandle,
+    Status,
+    Kill,
+    Await,
+    Suspend,
+    Resume,
+    Srandom,
+    GetRandstate,
+    SetRandstate,
+    /// Begin evaluation of a level-wait predicate; clear its old observations.
+    Observe,
+}
+impl ProcessOp {
+    pub fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            0 => Self::SelfHandle,
+            1 => Self::Status,
+            2 => Self::Kill,
+            3 => Self::Await,
+            4 => Self::Suspend,
+            5 => Self::Resume,
+            6 => Self::Srandom,
+            7 => Self::GetRandstate,
+            8 => Self::SetRandstate,
+            9 => Self::Observe,
+            _ => return None,
+        })
+    }
+}
+
+/// Flag in a wait's control word that distinguishes level waits from events.
+/// A resumed suspended level wait must check its predicate immediately.
+pub const PROCESS_LEVEL_WAIT: u64 = 1 << 63;
 
 /// A state slot exchanged with a synchronous host operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -658,6 +716,8 @@ pub enum ProcessKind {
     Regular,
     /// A final procedure runs only when simulation ends (IEEE 1800-2023 9.2.3).
     Final,
+    /// Invoked explicitly by its caller; never enqueued as an initial procedure.
+    Callable,
 }
 
 /// A pure expression evaluated with the storage of one waiting activation.
@@ -1298,8 +1358,14 @@ pub struct SchedulerSlots<A> {
     /// Where a shared combinational settle continues.
     pub cont: A,
     /// Set when state combinational logic reads may have changed since its
-    /// last settle.
+    /// last settle. The caller initializes this before every scheduler run;
+    /// timed runs set it even after a checkpoint restore or partial-slot exit.
     pub dirty: A,
+    /// Set by a caller that observes the design itself (the compiled
+    /// testbench) while it runs the scheduler: a run that reaches its limit
+    /// then leaves a deferred settle pending instead of settling for the
+    /// host.
+    pub defer_limit_settle: A,
     /// The number of time slots the run ran.
     pub count: A,
     /// The kernel running when the run returned, `u64::MAX` for none.
@@ -1338,6 +1404,7 @@ impl<A> SchedulerSlots<A> {
             finish: map(self.finish),
             cont: map(self.cont),
             dirty: map(self.dirty),
+            defer_limit_settle: map(self.defer_limit_settle),
             count: map(self.count),
             current: map(self.current),
             levels: map(self.levels),
@@ -1362,6 +1429,7 @@ impl<A> SchedulerSlots<A> {
             &self.finish,
             &self.cont,
             &self.dirty,
+            &self.defer_limit_settle,
             &self.count,
             &self.current,
             &self.levels,
@@ -2213,6 +2281,9 @@ mod tests {
             HostRequestKind::Vcd,
             HostRequestKind::Scan,
             HostRequestKind::Distribution,
+            HostRequestKind::Process,
+            HostRequestKind::Testbench,
+            HostRequestKind::Format,
         ] {
             for site in [0, 1, u32::MAX] {
                 assert_eq!(
@@ -2221,7 +2292,7 @@ mod tests {
                 );
             }
         }
-        for invalid in [0, u32::MAX as u64, 6u64 << 32, 1u64 << 63] {
+        for invalid in [0, u32::MAX as u64, 9u64 << 32, 1u64 << 63] {
             assert_eq!(HostRequestKind::decode(invalid), None);
         }
         assert_eq!(

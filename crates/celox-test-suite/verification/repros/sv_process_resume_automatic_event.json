@@ -1,0 +1,56 @@
+{
+  "standard": "IEEE 1800-2023 9.4.2, 9.7, 6.21",
+  "source": "sv_process_resume_automatic_event.sv",
+  "expected_output": "at1 hits=0 event_at=0\nat3 hits=0 event_at=0\nat5 hits=0 event_at=0\nat8 hits=1 event_at=6\n",
+  "xezim_version": "xezim version 0.11.3",
+  "source_revision": "5eab5f276c9062cfd17db4987a1e91de74fdbe5d",
+  "core_revision": "1947ac68859f823610c63833f61d52d6d7695342",
+  "build": "Pinned sources, existing Nix recipe with a regenerated lock in an isolated validation package; no simulator source changes.",
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "observations": [
+    {
+      "top": "Top",
+      "celox": {
+        "2state": {
+          "exit_code": 0,
+          "output": "at1 hits=0 event_at=0\nat3 hits=0 event_at=0\nat5 hits=0 event_at=0\nat8 hits=1 event_at=6\n"
+        },
+        "4state": {
+          "exit_code": 0,
+          "output": "at1 hits=0 event_at=0\nat3 hits=0 event_at=0\nat5 hits=0 event_at=0\nat8 hits=1 event_at=6\n"
+        }
+      },
+      "xezim": {
+        "exit_code": 0,
+        "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nat1 hits=1 event_at=0\nat3 hits=1 event_at=0\nat5 hits=1 event_at=0\nat8 hits=1 event_at=0\nSimulation finished at time 8 ($finish called)\n"
+      },
+      "verilator": {
+        "phase": "compile",
+        "exit_code": 1,
+        "output": "%Warning-WIDTHTRUNC: /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:8:60: Operator ASSIGN expects 32 bits on the Assign RHS, but Assign RHS's TIME generates 64 bits.\n                                                                                                                                                                    : ... note: In instance 'Top'\n    8 |    begin worker=process::self(); @(x ^ y); hits++; event_at=$time; end\n      |                                                            ^\n                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=5.052\n                     ... Use \"/* verilator lint_off WIDTHTRUNC */\" and lint_on around source to disable this message.\n%Error-LIFETIME: /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:9:14: Invalid reference: Process might outlive variable 'x'.\n                                                                                                                                                                : ... note: In instance 'Top'\n                                                                                                                                                                : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    9 |    begin #2; x=1; #4; y=1; end\n      |              ^\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error-LIFETIME: /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:9:23: Invalid reference: Process might outlive variable 'y'.\n                                                                                                                                                                : ... note: In instance 'Top'\n                                                                                                                                                                : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    9 |    begin #2; x=1; #4; y=1; end\n      |                       ^\n%Error: Exiting due to 2 error(s)\n"
+      }
+    },
+    {
+      "top": "Wrapped",
+      "celox": {
+        "2state": {
+          "exit_code": 0,
+          "output": "at1 hits=0 event_at=0\nat3 hits=0 event_at=0\nat5 hits=0 event_at=0\nat8 hits=1 event_at=6\n"
+        },
+        "4state": {
+          "exit_code": 0,
+          "output": "at1 hits=0 event_at=0\nat3 hits=0 event_at=0\nat5 hits=0 event_at=0\nat8 hits=1 event_at=6\n"
+        }
+      },
+      "xezim": {
+        "exit_code": 0,
+        "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nat1 hits=1 event_at=0\nat3 hits=1 event_at=0\nat5 hits=1 event_at=0\nat8 hits=1 event_at=0\nSimulation finished at time 8 ($finish called)\n"
+      },
+      "verilator": {
+        "phase": "compile",
+        "exit_code": 1,
+        "output": "%Warning-PINMISSING: /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:16:21: Instance has missing pin: 'hits'\n   16 | module Wrapped; Top t(); endmodule\n      |                     ^\n                     /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:2:23: ... Location of port declaration\n    2 | module Top(output int hits, event_at);\n      |                       ^~~~\n                     ... For warning description see https://verilator.org/warn/PINMISSING?v=5.052\n                     ... Use \"/* verilator lint_off PINMISSING */\" and lint_on around source to disable this message.\n%Warning-PINMISSING: /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:16:21: Instance has missing pin: 'event_at'\n   16 | module Wrapped; Top t(); endmodule\n      |                     ^\n                     /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:2:29: ... Location of port declaration\n    2 | module Top(output int hits, event_at);\n      |                             ^~~~~~~~\n%Warning-WIDTHTRUNC: /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:8:60: Operator ASSIGN expects 32 bits on the Assign RHS, but Assign RHS's TIME generates 64 bits.\n                                                                                                                                                                    : ... note: In instance 'Wrapped.t'\n    8 |    begin worker=process::self(); @(x ^ y); hits++; event_at=$time; end\n      |                                                            ^\n                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=5.052\n                     ... Use \"/* verilator lint_off WIDTHTRUNC */\" and lint_on around source to disable this message.\n%Error-LIFETIME: /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:9:14: Invalid reference: Process might outlive variable 'x'.\n                                                                                                                                                                : ... note: In instance 'Wrapped.t'\n                                                                                                                                                                : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    9 |    begin #2; x=1; #4; y=1; end\n      |              ^\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error-LIFETIME: /home/tsukasa/develop/celox/.worktrees/sv-builtin-process/crates/celox-test-suite/verification/repros/sv_process_resume_automatic_event.sv:9:23: Invalid reference: Process might outlive variable 'y'.\n                                                                                                                                                                : ... note: In instance 'Wrapped.t'\n                                                                                                                                                                : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    9 |    begin #2; x=1; #4; y=1; end\n      |                       ^\n%Error: Exiting due to 2 error(s)\n"
+      }
+    }
+  ]
+}
