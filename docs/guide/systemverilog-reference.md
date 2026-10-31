@@ -473,9 +473,12 @@ Dynamic arrays (`T a[]`) support `new[n]`, `new[n](a)`, `size()` and
 `delete()` (IEEE 1800-2023 7.5). Queues (`T q[$]`, `T q[$:N]`) support
 `size`, `insert`, `delete`, `push_front`, `push_back`, `pop_front` and
 `pop_back`. Queue indices may use `$` and `$+1`.
-Associative arrays support integral keys up to 64 bits, `string` keys or
-class handle keys (7.8.5), which keep their objects alive; `num` / `size`,
-`exists`, `delete`, and `first` / `last` / `next` / `prev` (7.8–7.10).
+Associative arrays support integral keys of any width, packed structures
+included, which order numerically by the signedness of the index type (7.8.4),
+`string` keys or class handle keys (7.8.5), which keep their objects alive;
+`num` / `size`, `exists`, `delete`, and `first` / `last` / `next` / `prev`
+(7.8–7.10). The locator methods that return indices (`find_index` and the
+like) are not supported for integral keys wider than 64 bits.
 Traversal leaves its index unchanged when no key is found. A container
 declared with several dynamic dimensions, `T m[a][b]`, holds containers as
 elements: `m[a][b] = v` updates the inner container of `m[a]`, which reads as

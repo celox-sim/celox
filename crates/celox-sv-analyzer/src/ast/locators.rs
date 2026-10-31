@@ -215,6 +215,22 @@ fn parse(
     let Some(array) = array(*base, native, tree, session, dims)? else {
         return Ok(None);
     };
+    // A queue of indices wider than 64 bits would hold them in records, as
+    // a queue of such elements does, which the indices are not built as.
+    if method.returns_index()
+        && let Array::Container(container) = &array
+        && let ContainerKind::Associative {
+            key_width,
+            string: false,
+            object: false,
+            ..
+        } = container.layout.kind
+        && key_width > 64
+    {
+        return Err(unsupported(
+            "array locator index method of an associative array with indices wider than 64 bits",
+        ));
+    }
     // `a.min()` lists one empty argument.
     let arguments = match arguments {
         [argument] if argument.name.is_none() && argument.value.is_none() => &[],

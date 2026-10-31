@@ -930,6 +930,10 @@
     "sv_conditional_unpacked_arrays": {
       "title": "A conditional operator whose operands are unpacked arrays yields an array of zeros instead of the selected operand: `h = s ? c : d` with s = 1 leaves h = '{0, 0}",
       "standard": "IEEE 1800-2023 11.4.11"
+    },
+    "sv_wide_associative_keys": {
+      "title": "Associative arrays with integral indices wider than 64 bits do not order their indices numerically: bit [64:0] indices 'h0_ffff_ffff_ffff_ffff and 'h1_ffff_ffff_ffff_ffff come before 5, and a signed bit [127:0] index of -1 orders as 2^128-1 between 0 and 5",
+      "standard": "IEEE 1800-2023 7.8.4"
     }
   },
   "cases": [
@@ -4819,6 +4823,22 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X90",
       "note": "m[next_index()].push_back(7) calls next_index() three times per statement (i = 6 after two statements, elements lost), and $unpacked_dimensions(grid)/$dimensions(grid) of int grid[][] print 1 2 instead of 2 3."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::wide_associative_keys",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_wide_associative_keys",
+      "note": "foreach visits the bit [64:0] indices as 'h0_ffff_ffff_ffff_ffff, 'h1_ffff_ffff_ffff_ffff, 5, 'h1_0000_0000_0000_0000, first/next stop after one index whose digits are wrong, and first of the packed structure index returns a value that names no element. Reproduced by verification/repros/sv_wide_associative_keys.json."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::wide_signed_associative_keys",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_wide_associative_keys",
+      "note": "The signed bit [127:0] indices print and order as unsigned (-1 as 340282366920938463463374607431768211455, after 0), and first and last return wrong indices. Reproduced by verification/repros/sv_wide_associative_keys.json."
     },
     {
       "suite": "sv",

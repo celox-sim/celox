@@ -3304,6 +3304,23 @@
     }
   },
   {
+    "id": "sv_verilator_wide_signed_associative_order",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 orders the indices of an associative array with a signed bit [127:0] index as unsigned: foreach visits 0, 5, -1 and first returns 0. IEEE 1800-2023 7.8.4 orders an integral index of any width numerically, signed or unsigned by the signedness of the index type, so -1 comes first; Verilator orders the unsigned bit [64:0] and packed structure indices of containers::wide_associative_keys as expected, and xezim 0.11.3 orders neither (wide_associative_keys in its review).",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_wide_associative_keys.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "containers::wide_signed_associative_keys"
+      ]
+    }
+  },
+  {
     "id": "sv_verilator_array_locator_fixed_indices",
     "category": "simulator_disagreement",
     "phase": "execute",
