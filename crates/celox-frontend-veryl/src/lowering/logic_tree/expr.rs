@@ -1369,7 +1369,8 @@ pub(super) fn eval_function_body_return(
             symbolic_store.insert(*id, loop_store);
         }
         symbolic_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-        let _loop_range = super::LoopRangeScope::enter(arena, for_stmt);
+        let mut loop_range = super::LoopRangeScope::enter(arena, for_stmt);
+        let arena = &mut *loop_range;
         let iter_store_before = symbolic_store.fork();
 
         let iter_state = for_stmt.body.iter().try_fold(
