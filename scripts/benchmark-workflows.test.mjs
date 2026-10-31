@@ -65,7 +65,7 @@ test("CodSpeed reports the current upload even after failure or cancellation", (
   }
 });
 
-test("master daily runs the full suite; develop defaults to pinned and HEAD boot checks", () => {
+test("master daily runs the full suite; manual develop runs default to pinned and HEAD boot checks", () => {
   for (const [name, master, develop] of [
     ["linux-suite-matrix", true, false], ["heliodor", false, true],
     ["heliodor-head", true, true], ["arm64-linux-boot-full", false, false],
@@ -74,7 +74,7 @@ test("master daily runs the full suite; develop defaults to pinned and HEAD boot
     assert.equal(runs(name, "workflow_dispatch", "develop"), develop, name);
   }
   assert.match(job(heliodor, "linux-suite"), /needs: linux-suite-matrix/);
-  assert.match(read("nightly"), /gh workflow run heliodor-bench\.yml --repo "\$GITHUB_REPOSITORY" --ref develop/);
+  assert.doesNotMatch(read("nightly"), /external-comparisons\.yml|heliodor-bench\.yml/);
 });
 
 test("explicit selections and ARM64 profiles retain their separate execution paths", () => {
