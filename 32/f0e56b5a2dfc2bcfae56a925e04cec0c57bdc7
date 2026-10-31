@@ -1,0 +1,1 @@
+Address review 5725286457: preserve string-array rows and their element type in patterns, and convert continuous string-element assignments. Add reproductions and focused external-tool evidence.
