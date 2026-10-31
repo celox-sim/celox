@@ -11,6 +11,7 @@ mod coverage;
 mod declarations;
 mod dpi;
 mod expressions;
+mod gates;
 mod generate;
 mod implicit_nets;
 mod instances;

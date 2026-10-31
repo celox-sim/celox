@@ -1671,3 +1671,19 @@ Verilator; its four-state case is unsupported.
 Icarus 13.0 rejects both simple and compound assignment expressions in the default
 standalone source. Its exclusions cover all seven `operators::assignment_expression_*`
 cases. Celox retains the value, type, index-evaluation and short-circuit assertions.
+
+### Primitive outputs to two-state struct members
+
+`logic_gates::scalar_two_state_member` retains the implicit conversion when a
+logic gate drives a `bit` member of a packed structure variable. IEEE
+1800-2023 6.5 includes primitive outputs driving independent structure elements
+and requires automatic assignment type conversion. The case runs on all Celox
+backends, including the interpreter.
+
+Icarus 13.0 rejects the standalone
+[`sv_gate_two_state_member.sv`](verification/repros/sv_gate_two_state_member.sv)
+with a non-default-strength driver diagnostic even though no explicit strength
+is specified. Its exact case ID is excluded only on Icarus. The
+[retained observation](verification/repros/sv_gate_two_state_member.json) also
+records Verilator 5.052 accepting the source in lint mode; this does not claim
+four-state execution agreement. `--include-ignored` reruns the Icarus failure.

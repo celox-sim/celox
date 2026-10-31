@@ -16,6 +16,7 @@ outline: [2, 3]
 | 領域 | サポート内容 |
 | --- | --- |
 | モジュール | ANSI ポート、non-ANSI ポート（ヘッダのポート名と本体の `input` / `output` / `inout` 宣言。同名のネットまたは変数の宣言で型を補える）、`parameter` / `localparam`、型パラメータ（`parameter type`）、名前付き・位置指定のポート／パラメータ接続、階層、インスタンス配列（接続は全要素に共通、または全要素の幅に等しければ要素ごとに分割）、トップ以外のモジュールの `inout` ポートで、どちらか一方の側に連続代入のドライバが1つだけあるネット（`assign io = oe ? d : 'z;` のようなトライステートを含む。両側から駆動値または `z` が読める） |
+| 論理ゲート | 遅延・強度指定のない、端子が1ビットの `and`、`nand`、`or`、`nor`、`xor`、`xnor`。名前付き・名前なし、同一宣言での複数インスタンス、generate スコープ（IEEE 1800-2023 28.4） |
 | プログラム | ポートとパラメータを持つ `program` 宣言。モジュールと同じくモジュールからインスタンス化し、その `initial` 手続きはリアクティブ領域セットで実行します（下記の「プログラム」を参照） |
 | generate | `for`（`genvar`）、`if`、`case`。`**` を含む定数式 |
 | package | 型、パラメータ、enum、関数。`import p::*;`、`import p::x;`、`p::x` で参照 |
@@ -242,7 +243,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 - `always_latch` 内のノンブロッキング代入（[#431](https://github.com/celox-sim/celox/issues/431)）。対応するラッチではブロッキング代入を使用してください。
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
-  ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
+  ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートの遅延・強度指定・インスタンス配列と、その他のゲート／スイッチプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
 - 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・固定長配列の要素としての unpacked 構造体、配列（動的配列・キュー・連想配列を含む）・`real`・既定値を持つメンバ。
 - 順序回路のプロセス：`always_ff` のイベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
