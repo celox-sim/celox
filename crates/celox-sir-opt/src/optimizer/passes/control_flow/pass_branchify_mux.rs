@@ -17,7 +17,9 @@ mod selector;
 
 use cleanup::inline_param_only_jump_blocks;
 use controlled_joins::eliminate_controlled_join_muxes;
-use coupled::{branchify_coupled_priority_chains, branchify_coupled_state_updates};
+use coupled::{
+    branchify_coupled_priority_chains, branchify_coupled_state_updates, verify_coupled_rewrites,
+};
 use cross_block::{
     apply_cross_block_branchify, apply_cross_block_group_branchify,
     apply_cross_block_priority_chain, find_cross_block_branchify_plans,
@@ -497,6 +499,7 @@ fn run_branchify_mux(
             &use_counts,
             &mut next_block_id,
             &mut reg_counter,
+            verify_coupled_rewrites,
         );
         if let Some(start) = priority_start {
             tracing::debug!(
@@ -505,8 +508,13 @@ fn run_branchify_mux(
             );
         }
         let state_start = stage_timing.then(crate::timing::now);
-        applied +=
-            branchify_coupled_state_updates(eu, &use_counts, &mut next_block_id, &mut reg_counter);
+        applied += branchify_coupled_state_updates(
+            eu,
+            &use_counts,
+            &mut next_block_id,
+            &mut reg_counter,
+            verify_coupled_rewrites,
+        );
         if let Some(start) = state_start {
             tracing::debug!(
                 "[branchify-timing] coupled state updates: {:?}",

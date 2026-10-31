@@ -1128,12 +1128,14 @@ mod tests {
                 offset,
                 byte_len,
             });
-            let oracle = |definition: &Definition, query: &MemoryEffect<u8>| {
+            let mut oracle = |definition: &Definition, query: &MemoryEffect<u8>| {
                 self.writes[definition]
                     .iter()
                     .any(|&write| effects_may_alias(write, *query))
             };
-            walker.clobber(&self.graph, start, &query, &oracle).unwrap()
+            walker
+                .clobber(&self.graph, start, &query, &mut oracle)
+                .unwrap()
         }
     }
 
