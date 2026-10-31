@@ -17,6 +17,39 @@ pub fn preprocess_source(
     macros: &[(String, Option<String>)],
     includes: &[&Path],
 ) -> Result<String, AnalyzerError> {
+    preprocessor(macros, includes)?
+        .preprocess(code, path)
+        .map(|source| source.text())
+        .map_err(|error| AnalyzerError::Parse(error.to_string()))
+}
+
+/// Expand ordered source files as one compilation unit (IEEE 1800-2023 3.12.1).
+/// Macros, including definitions and undefinitions in headers, survive between
+/// files. Each call starts a fresh unit with the supplied command-line macros.
+/// The returned text retains file boundaries through `line directives.
+pub fn preprocess_sources(
+    sources: &[(&str, &Path)],
+    macros: &[(String, Option<String>)],
+    includes: &[&Path],
+) -> Result<String, AnalyzerError> {
+    let mut preprocessor = preprocessor(macros, includes)?;
+    let mut expanded = String::new();
+    for (code, path) in sources {
+        let source = preprocessor
+            .preprocess(code, path)
+            .map_err(|error| AnalyzerError::Parse(error.to_string()))?;
+        // A newline also separates files ending in a line comment or token.
+        expanded.push_str(&format!("\n`line 1 {:?} 0\n", path.to_string_lossy()));
+        expanded.push_str(&source.text());
+        expanded.push('\n');
+    }
+    Ok(expanded)
+}
+
+fn preprocessor(
+    macros: &[(String, Option<String>)],
+    includes: &[&Path],
+) -> Result<celox_sv_syntax::Preprocessor, AnalyzerError> {
     let mut preprocessor = celox_sv_syntax::Preprocessor::new(celox_sv_syntax::Options {
         include_paths: includes.iter().map(|path| path.to_path_buf()).collect(),
         ..Default::default()
@@ -27,10 +60,7 @@ pub fn preprocess_source(
             .preprocess(&definition, Path::new("<command-line>"))
             .map_err(|error| AnalyzerError::Parse(error.to_string()))?;
     }
-    preprocessor
-        .preprocess(code, path)
-        .map(|source| source.text())
-        .map_err(|error| AnalyzerError::Parse(error.to_string()))
+    Ok(preprocessor)
 }
 
 /// Parse native source syntax with authored tokens and original source origins.
@@ -209,7 +239,13 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert!(expanded.contains("N=7+1"), "{expanded}");
+        assert!(
+            expanded
+                .split_whitespace()
+                .collect::<String>()
+                .contains("N=7+1"),
+            "{expanded}"
+        );
         let separate = preprocess_source(
             "`ifdef LOCAL\nmodule Leaked; endmodule\n`else\nmodule Separate; endmodule\n`endif\n",
             path,
