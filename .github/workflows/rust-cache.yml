@@ -32,6 +32,11 @@ concurrency:
 
 env:
   CARGO_INCREMENTAL: "0"
+  # Validation favors build time; benchmark and publication workflows retain LTO.
+  CARGO_PROFILE_DEV_LTO: "off"
+  CARGO_PROFILE_VTEST_LTO: "off"
+  CARGO_PROFILE_RELEASE_LTO: "off"
+  CARGO_PROFILE_WASM_RELEASE_LTO: "off"
 
 jobs:
   # Same job ID, runner, toolchain and environment as CI's Rust Tests cache.
