@@ -4,6 +4,7 @@ use celox_sv_syntax::{Declarations, DimensionKind, ExprId, ExprKind};
 mod calls;
 mod chandles;
 mod direct;
+mod element_members;
 mod enums;
 mod format_patterns;
 mod lvalues;
@@ -60,6 +61,33 @@ pub(super) fn bind(
 ) -> Converted<Expr> {
     bind_value(root, tree.declarations(), tree, session, dimensions, None)
 }
+/// The value of an assignment pattern without a type assigned to a
+/// selection, such as `m[i] = '{x: 1, y: 5}`: the pattern takes the type of
+/// the selected element (IEEE 1800-2023 10.9). `None` for any other
+/// assignment.
+pub(super) fn selected_pattern(
+    left: ExprId,
+    right: ExprId,
+    lhs: &LValue,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Expr>> {
+    let native = tree.declarations();
+    if !matches!(lhs, LValue::Select { .. })
+        || !matches!(
+            native.expression(ungroup(right, native)).kind,
+            ExprKind::Pattern { target: None, .. }
+        )
+    {
+        return Ok(None);
+    }
+    let Some(shape) = dimensions::operand_shape(left, tree, session, dimensions)? else {
+        return Ok(None);
+    };
+    bind_value(right, native, tree, session, dimensions, Some(&shape)).map(Some)
+}
+
 pub(super) fn expression(
     root: ExprId,
     native: &Declarations,

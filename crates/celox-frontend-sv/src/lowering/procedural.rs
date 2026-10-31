@@ -815,10 +815,18 @@ impl<'a> ProcModule<'a> {
     ) -> Result<(SourceVarId, Vec<MemoryWord>), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format).name();
         let radix = format.base();
-        let Some(sv::ir::SystemTaskArg::Str(filename)) = args.first() else {
-            return Err(unsupported(format!(
-                "`{name}` with a file name that is not a string literal"
-            )));
+        let filename = match args.first() {
+            Some(sv::ir::SystemTaskArg::Str(filename)) => unescape(filename),
+            Some(sv::ir::SystemTaskArg::Expr(sv::ir::Expr::Literal(value)))
+                if let Some(filename) = literal_characters(value) =>
+            {
+                filename
+            }
+            _ => {
+                return Err(unsupported(format!(
+                    "`{name}` with a file name that is not a constant string"
+                )));
+            }
         };
         // Veryl also emits a constant element select, which loads from that
         // element on.
@@ -881,7 +889,7 @@ impl<'a> ProcModule<'a> {
                 "{name}: address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
             )));
         }
-        let content = std::fs::read_to_string(unescape(filename)).map_err(|error| {
+        let content = std::fs::read_to_string(&filename).map_err(|error| {
             sv::AnalyzerError::MemoryFile(format!("{name}: failed to read {filename}: {error}"))
         })?;
         let parsed = celox_frontend_core::memory_file::parse_memory_range(
@@ -897,7 +905,7 @@ impl<'a> ProcModule<'a> {
                 .warning
                 .map(|detail| crate::FrontendWarningKind::MemoryFileWordCount {
                     task: name.to_string(),
-                    file: unescape(filename),
+                    file: filename.clone(),
                     detail,
                 });
         let writes = parsed.writes;
@@ -1701,6 +1709,19 @@ pub(super) fn system_task_template(
         }
     }
     (template, values)
+}
+
+/// The characters of a constant integral value that holds a character
+/// string, such as a `string` parameter substituted as its bytes: one per
+/// byte, most significant first, without the zero bytes that only pad it
+/// (IEEE 1800-2023 21.4, 6.16). `None` for a value with unknown bits.
+fn literal_characters(value: &str) -> Option<String> {
+    let literal = sv::typecheck::parse_integral_literal(value)?;
+    if literal.mask != BigUint::from(0u8) {
+        return None;
+    }
+    let bytes = literal.value.to_bytes_be();
+    String::from_utf8(bytes.into_iter().filter(|byte| *byte != 0).collect()).ok()
 }
 
 /// The value of a string literal's escape sequences (IEEE 1800-2023 5.9.1).

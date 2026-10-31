@@ -47,13 +47,22 @@ fn selected_member<'a>(
     dimensions: &'a PackedDimensions,
 ) -> Option<(usize, &'a Type)> {
     let root = dimensions.get(path.first()?)?;
-    if !root.unpacked.is_empty() || root.packed.len() != 1 {
+    if !root.unpacked.is_empty() {
+        return None;
+    }
+    member_in(root, &path[1..])
+}
+
+/// The offset and type of member path `path` in a packed structure of
+/// `root`'s element type.
+fn member_in<'a>(root: &'a VariableDimensions, path: &[String]) -> Option<(usize, &'a Type)> {
+    if root.packed.len() != 1 {
         return None;
     }
     let mut members = root.members.as_slice();
     let mut offset = 0usize;
     let mut selected = None;
-    for name in &path[1..] {
+    for name in path {
         let member = members.iter().find(|member| &member.name == name)?;
         if member.is_void {
             return None;
@@ -193,4 +202,82 @@ pub(in crate::ast) fn select_member(
             path.join(".")
         ))
     })
+}
+
+/// Select member path `members` of the element of unpacked array variable
+/// `name` that `indices` select, such as `m[i].y` (IEEE 1800-2023 7.2.1):
+/// the member's bits in that element, which an index outside the array's
+/// range or with unknown bits reads as the default value and never writes,
+/// like the element itself (7.4.5).
+pub(in crate::ast) fn select_element_member(
+    tree: &AnalysisContext<'_>,
+    name: String,
+    members: &[String],
+    indices: Vec<ConstExpr>,
+    dimensions: &PackedDimensions,
+    select: impl FnOnce(String, &PackedDimensions, bool) -> Converted<LValue>,
+) -> Converted<LValue> {
+    let path = std::iter::once(name.clone())
+        .chain(members.iter().cloned())
+        .collect::<Vec<_>>();
+    let (offset, ty) = element_member(&name, members, dimensions)?;
+    let relative = select(
+        name.clone(),
+        &member_dimensions(&name, ty, dimensions),
+        true,
+    )?;
+    let Some(LValue::Select {
+        msb,
+        lsb,
+        signed,
+        is_2state,
+        ..
+    }) = finish_lvalue(tree, &path, offset, ty, relative, dimensions)
+    else {
+        return Err(unsupported(format!(
+            "select of structure member `{}` outside the member",
+            path.join(".")
+        )));
+    };
+    let mut lvalue =
+        crate::ast::selects::lvalue_from_range(tree, name, indices, msb, lsb, false, dimensions)?;
+    if let LValue::Select {
+        signed: selected_signed,
+        is_2state: selected_2state,
+        ..
+    } = &mut lvalue
+    {
+        *selected_signed = signed;
+        *selected_2state = is_2state;
+    }
+    Ok(lvalue)
+}
+
+/// The offset and type of member path `members` in an element of unpacked
+/// array variable `name`. A member of a tagged union is rejected: its tag is
+/// checked only in a variable of its own (see `member_access`).
+pub(in crate::ast) fn element_member<'a>(
+    name: &str,
+    members: &[String],
+    dimensions: &'a PackedDimensions,
+) -> Converted<(usize, &'a Type)> {
+    let path = || format!("{name}.{}", members.join("."));
+    let root = dimensions
+        .get(name)
+        .filter(|root| !root.unpacked.is_empty())
+        .ok_or_else(|| unsupported(format!("structure member `{}`", path())))?;
+    let mut level = root.members.as_slice();
+    for member in members {
+        let Some(member) = level.iter().find(|candidate| &candidate.name == member) else {
+            break;
+        };
+        if member.is_tagged() {
+            return Err(unsupported(format!(
+                "member `{}` of a tagged union element of an unpacked array",
+                path()
+            )));
+        }
+        level = &member.r#type.members;
+    }
+    member_in(root, members).ok_or_else(|| unsupported(format!("structure member `{}`", path())))
 }

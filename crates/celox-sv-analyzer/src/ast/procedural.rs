@@ -918,6 +918,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 &self.dims,
                 Some(&shape),
             )?
+        } else if op == "="
+            && let Some(value) = expression_binding::selected_pattern(
+                left,
+                right,
+                &written,
+                self.tree,
+                self.session,
+                &self.dims,
+            )?
+        {
+            value
         } else if op == "=" {
             expression_binding::expression(
                 right,
