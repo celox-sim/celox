@@ -276,6 +276,15 @@ check runtime clipping, empty queues, `$` bounds, copies, string elements,
 argument side effects, wide signed/unsigned bounds, and unknown bounds and elements.
 Element-reference persistence remains unsupported.
 
+Sampled-value functions in Boolean concurrent assertions (16.9.3) update
+10 rows: both state modes of the generated `20.13--past`, `rose`, `fell`,
+`stable` and `changed` cases change from fail to pass. The focused official
+run checked all 16 `generated/sampled_functions` files in both modes: each
+mode has 6 passes and 10 failures. The ten global-clock (`*_gclk`) functions
+remain unsupported; this is not a full-corpus measurement. Shared regressions
+cover sampled/history nesting, gated histories, X/Z transitions, history while
+assertions are disabled, and sampling before NBA and Reactive actions.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
