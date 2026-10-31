@@ -5381,3 +5381,273 @@ fn packed_bit_deposits_update_the_containing_vectors_saved_force_value() {
         }
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vpi_real_and_shortreal_values_use_floating_point_formats() {
+    let _serial = lock_vpi();
+    let source = "module Top(input real a, output real y, input shortreal b, output shortreal z); assign y=a; assign z=b; endmodule";
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("real_vpi.sv"))], "Top")
+            .build()
+            .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        for (input, output, short) in [(c"Top.a", c"Top.y", false), (c"Top.b", c"Top.z", true)] {
+            let input = vpi_handle_by_name(input.as_ptr(), ptr::null_mut());
+            let output = vpi_handle_by_name(output.as_ptr(), ptr::null_mut());
+            assert_eq!(
+                vpi_get(VPI_TYPE, input),
+                if short {
+                    VPI_SHORT_REAL_VAR
+                } else {
+                    VPI_REAL_VAR
+                }
+            );
+            assert!(vpi_handle_by_index(input, 0).is_null());
+            for flags in [VPI_NO_DELAY, VPI_INERTIAL_DELAY] {
+                for number in [-0.0, 5.03, -123.75, f64::INFINITY, f64::NAN] {
+                    let value = VpiValue {
+                        format: VPI_REAL_VAL,
+                        value: VpiValueData { real: number },
+                    };
+                    assert_eq!(vpi_put_value(input, &value, ptr::null(), flags), input);
+                    assert!(!run_callbacks_result().unwrap());
+                    let expected = if short {
+                        (number as f32) as f64
+                    } else {
+                        number
+                    };
+                    for handle in [input, output] {
+                        let mut read = VpiValue {
+                            format: VPI_REAL_VAL,
+                            value: VpiValueData { real: 0.0 },
+                        };
+                        vpi_get_value(handle, &mut read);
+                        if expected.is_nan() {
+                            assert!(read.value.real.is_nan());
+                        } else {
+                            assert_eq!(read.value.real.to_bits(), expected.to_bits());
+                        }
+                        if expected.is_finite()
+                            && expected >= i32::MIN as f64
+                            && expected <= i32::MAX as f64
+                        {
+                            read.format = VPI_INT_VAL;
+                            vpi_get_value(handle, &mut read);
+                            assert_eq!(read.value.integer, expected.round() as i32);
+                        }
+                    }
+                }
+            }
+            let integer = VpiValue {
+                format: VPI_INT_VAL,
+                value: VpiValueData { integer: -37 },
+            };
+            assert_eq!(
+                vpi_put_value(input, &integer, ptr::null(), VPI_NO_DELAY),
+                input
+            );
+            let mut read = VpiValue {
+                format: VPI_REAL_VAL,
+                value: VpiValueData { real: 0.0 },
+            };
+            vpi_get_value(input, &mut read);
+            assert_eq!(read.value.real, -37.0);
+            vpi_free_object(input);
+            vpi_free_object(output);
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vpi_string_deposits_own_bytes_and_expose_the_string_value() {
+    let _serial = lock_vpi();
+    let source = "module Top(input string s, output int size); always_comb size=s.len(); endmodule";
+    let simulator =
+        Simulator::from_sv_sources(vec![(source, std::path::Path::new("string_vpi.sv"))], "Top")
+            .build()
+            .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        let s = vpi_handle_by_name(c"Top.s".as_ptr(), ptr::null_mut());
+        let size = vpi_handle_by_name(c"Top.size".as_ptr(), ptr::null_mut());
+        assert_eq!(vpi_get(VPI_TYPE, s), VPI_STRING_VAR);
+        assert!(vpi_handle_by_index(s, 0).is_null());
+        for flags in [VPI_NO_DELAY, VPI_INERTIAL_DELAY] {
+            for bytes in [b"".as_slice(), b"bytes", b"ansi\x1b[31m", b"\xff\xfe"] {
+                let text = std::ffi::CString::new(bytes).unwrap();
+                let value = VpiValue {
+                    format: VPI_STRING_VAL,
+                    value: VpiValueData {
+                        str_: text.as_ptr().cast_mut(),
+                    },
+                };
+                assert_eq!(vpi_put_value(s, &value, ptr::null(), flags), s);
+                drop(text);
+                assert!(!run_callbacks_result().unwrap());
+                let mut read = VpiValue {
+                    format: VPI_STRING_VAL,
+                    value: VpiValueData {
+                        str_: ptr::null_mut(),
+                    },
+                };
+                vpi_get_value(s, &mut read);
+                assert_eq!(CStr::from_ptr(read.value.str_).to_bytes(), bytes);
+                assert_eq!(vpi_get(VPI_SIZE, s), bytes.len() as i32);
+                read.format = VPI_INT_VAL;
+                vpi_get_value(size, &mut read);
+                assert_eq!(read.value.integer, bytes.len() as i32);
+            }
+        }
+        vpi_free_object(s);
+        vpi_free_object(size);
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vpi_escaped_signal_names_round_trip_through_lookup_and_properties() {
+    let _serial = lock_vpi();
+    let source = r#"module Top(input logic a, output wire y);
+        logic [3:0] \weird.signal[1] = 0;
+        assign y=\weird.signal[1] [0] ^ a; endmodule"#;
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("escaped_vpi.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        let top = vpi_handle_by_name(c"Top".as_ptr(), ptr::null_mut());
+        let signal = vpi_handle_by_name(c"\\weird.signal[1] ".as_ptr(), top);
+        assert!(!signal.is_null());
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_NAME, signal)),
+            c"\\weird.signal[1] "
+        );
+        assert_eq!(
+            CStr::from_ptr(vpi_get_str(VPI_FULL_NAME, signal)),
+            c"Top.\\weird.signal[1] "
+        );
+        let same = vpi_handle_by_name(vpi_get_str(VPI_FULL_NAME, signal), ptr::null_mut());
+        assert!(!same.is_null());
+        put_int(signal, 3);
+        let mut value = VpiValue {
+            format: VPI_INT_VAL,
+            value: VpiValueData { integer: 0 },
+        };
+        vpi_get_value(same, &mut value);
+        assert_eq!(value.value.integer, 3);
+        for handle in [signal, same, top] {
+            vpi_free_object(handle);
+        }
+    }
+}
+
+struct StringCallbackContext {
+    input: VpiHandle,
+    observed: Vec<Vec<u8>>,
+}
+unsafe extern "C" fn replace_original_string(data: *mut VpiCbData) -> i32 {
+    // Safety: registrations retain their copied value request; the test keeps
+    // its callback context and signal handle live through dispatch.
+    let context = unsafe { &mut *(*data).user_data.cast::<StringCallbackContext>() };
+    let bytes = unsafe { CStr::from_ptr((*(*data).value).value.str_) }.to_bytes();
+    if bytes == b"original" {
+        let replacement = VpiValue {
+            format: VPI_STRING_VAL,
+            value: VpiValueData {
+                str_: c"replacement".as_ptr().cast_mut(),
+            },
+        };
+        assert_eq!(
+            unsafe { vpi_put_value(context.input, &replacement, ptr::null(), VPI_NO_DELAY) },
+            context.input
+        );
+    }
+    0
+}
+unsafe extern "C" fn record_string_snapshot(data: *mut VpiCbData) -> i32 {
+    // Safety: the test owns the context, and VPI owns the live callback value.
+    let context = unsafe { &mut *(*data).user_data.cast::<StringCallbackContext>() };
+    context.observed.push(
+        unsafe { CStr::from_ptr((*(*data).value).value.str_) }
+            .to_bytes()
+            .to_vec(),
+    );
+    0
+}
+#[cfg(feature = "systemverilog")]
+#[test]
+fn string_callbacks_keep_the_triggering_bytes_when_an_earlier_callback_writes() {
+    let _serial = lock_vpi();
+    let source =
+        "module Top(input string text, output int size); always_comb size=text.len(); endmodule";
+    let simulator = Simulator::from_sv_sources(
+        vec![(source, std::path::Path::new("string_callbacks.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    let _session = install_runtime(trusted_instance(
+        simulator.shared_code().program_image().clone(),
+    ))
+    .unwrap();
+    unsafe {
+        let input = vpi_handle_by_name(c"Top.text".as_ptr(), ptr::null_mut());
+        let mut context = StringCallbackContext {
+            input,
+            observed: Vec::new(),
+        };
+        let mut value = VpiValue {
+            format: VPI_STRING_VAL,
+            value: VpiValueData {
+                str_: ptr::null_mut(),
+            },
+        };
+        let callback = VpiCbData {
+            reason: CB_VALUE_CHANGE,
+            cb_rtn: Some(replace_original_string),
+            obj: input,
+            time: ptr::null_mut(),
+            value: &mut value,
+            index: 0,
+            user_data: ptr::from_mut(&mut context).cast(),
+        };
+        let first = vpi_register_cb(&callback);
+        let second = vpi_register_cb(&VpiCbData {
+            cb_rtn: Some(record_string_snapshot),
+            ..callback
+        });
+        let initial = VpiValue {
+            format: VPI_STRING_VAL,
+            value: VpiValueData {
+                str_: c"original".as_ptr().cast_mut(),
+            },
+        };
+        assert_eq!(
+            vpi_put_value(input, &initial, ptr::null(), VPI_INERTIAL_DELAY),
+            input
+        );
+        assert!(!run_callbacks_result().unwrap());
+        assert_eq!(
+            context.observed,
+            [b"original".to_vec(), b"replacement".to_vec()]
+        );
+        vpi_remove_cb(first);
+        vpi_remove_cb(second);
+        vpi_free_object(input);
+    }
+}

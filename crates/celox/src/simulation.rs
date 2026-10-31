@@ -740,6 +740,15 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.backend.get_four_state(signal)
     }
 
+    /// Read the bytes of a string slot without settling or advancing time.
+    pub fn peek_string(&self, signal: SignalRef) -> Vec<u8> {
+        let backend = &self.simulator.backend;
+        backend
+            .heap()
+            .string(backend.get_as::<u32>(signal))
+            .to_vec()
+    }
+
     /// Modifies internal state via a callback and re-stabilizes combinational logic.
     ///
     /// A write that changes an event signal, and any write while a process

@@ -159,6 +159,18 @@ mod host_api {
             }
         }
 
+        /// Read the bytes of a string slot without evaluating the design.
+        pub fn get_string(&self, signal: crate::SignalRef) -> Vec<u8> {
+            let handle = self.backend.get_as::<u32>(signal);
+            self.backend.heap().string(handle).to_vec()
+        }
+
+        /// Store a SystemVerilog string, preserving host write tracking.
+        pub fn set_string(&mut self, signal: crate::SignalRef, bytes: &[u8]) {
+            let handle = self.backend.heap_mut().intern(bytes);
+            self.set(signal, handle);
+        }
+
         pub fn set<T: Copy>(&mut self, signal: crate::SignalRef, val: T) {
             self.write(signal, |backend| backend.set(signal, val));
         }
@@ -233,6 +245,17 @@ mod host_api {
         /// The stored payload and X/Z mask.
         pub fn get_four_state(&self, signal: crate::SignalRef) -> (crate::BigUint, crate::BigUint) {
             self.io.get_four_state(signal)
+        }
+
+        /// Read the bytes of a string slot without advancing simulation time.
+        pub fn get_string(&self, signal: crate::SignalRef) -> Vec<u8> {
+            self.io.get_string(signal)
+        }
+
+        /// Deposit a string in this slot; the observer's write is settled on return.
+        pub fn set_string(&mut self, signal: crate::SignalRef, bytes: &[u8]) {
+            self.wrote = true;
+            self.io.set_string(signal, bytes);
         }
 
         pub fn set<T: Copy>(&mut self, signal: crate::SignalRef, val: T) {
