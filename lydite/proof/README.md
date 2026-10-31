@@ -1,6 +1,6 @@
 # Correctness of memory simplification
 
-The target is `memory_read` / `memory_write` in `crates/lydite-ir/src/term.rs`. Only Lean 4.34.1 + Std are used.
+The target is `memory_read` / `memory_write` in `crates/aplite/src/term.rs`. Only Lean 4.34.1 + Std are used.
 
 ## What is proved
 
@@ -32,7 +32,7 @@ Rust has string ops, Vec arguments and runtime Sorts. That inputs are well-forme
 
 ## Cross-checking the implementation and negative examples
 
-`check_rust_rules.rs` directly imports the real `../../crates/lydite-ir/src/term.rs` and compares it against an independent evaluator that does not use Z3.
+`check_rust_rules.rs` directly imports the real `../../crates/aplite/src/term.rs` and compares it against an independent evaluator that does not use Z3.
 
 - All 256 memories with 2-bit addresses and 2-bit words
 - All 64 assignments of 3 address variables, including actual-address collisions under identical and different syntax

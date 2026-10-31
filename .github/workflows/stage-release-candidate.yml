@@ -1,0 +1,47 @@
+name: Stage Release Candidate
+
+on:
+  pull_request:
+    types: [closed]
+    branches: [master]
+
+# Each merged release PR must reach staging. Do not put these one-shot events
+# in a concurrency group: even cancel-in-progress: false replaces pending runs.
+# The non-force push below prevents an older event from rewinding release.
+permissions: {}
+
+jobs:
+  stage-candidate:
+    name: Stage release candidate
+    if: >-
+      github.event_name == 'pull_request' && github.event.pull_request.merged == true &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'release-please--branches--master--components--celox'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-workflows: write
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          fetch-depth: 0
+          token: ${{ steps.release-token.outputs.token }}
+
+      - name: Advance release to the merged candidate
+        env:
+          CANDIDATE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$CANDIDATE_SHA"
+          node scripts/check-release-version.mjs
+          # No force push: release contains only successive master candidates.
+          git push origin "$CANDIDATE_SHA:refs/heads/release"
+

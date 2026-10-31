@@ -1,0 +1,96 @@
+{
+ "standard": "IEEE 1800-2023 13.5.2, 13.3, 13.5.3",
+ "xezim_build": "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+ "xezim_limitation": "Available installed 0.11.3 build, git unknown. No claim of current-pin validation.",
+ "probes": [
+  {
+   "case": "references::*",
+   "source": "ref_arguments.sv",
+   "expected_output": "seen=11\nb_seen=5 g=6\nobserve=9\ndefault g=2\narr1=13 arr3=4\nrow=5 read=5\nearly=3 late=7 local=107\nproperty=110",
+   "observations": [
+    {
+     "top": "Top",
+     "verilator_compile": {
+      "command": [
+       "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+       "--binary",
+       "--timing",
+       "-Wno-fatal",
+       "--top-module",
+       "Top",
+       "--Mdir",
+       "<checkout>/work/ref-probes/Top/obj",
+       "<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv"
+      ],
+      "exit_code": 1,
+      "output": "%Error-IMPURE: <checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:11:26: Unsupported: External variable referenced by non-inlined function/task: 'elem'\n                                                                                                                                     : ... note: In instance 'Top'\n   11 |  function automatic void elem(ref int x); x = x + 10; i = 3; x = x + 1; endfunction\n      |                          ^~~~\n               <checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:11:55: ... Location of the external reference: 'i'\n   11 |  function automatic void elem(ref int x); x = x + 10; i = 3; x = x + 1; endfunction\n      |                                                       ^\n               ... For error description see https://verilator.org/warn/IMPURE?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+     },
+     "icarus_compile": {
+      "command": [
+       "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+       "-g2012",
+       "-s",
+       "Top",
+       "-o",
+       "<checkout>/work/ref-probes/Top/probe.vvp",
+       "<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv"
+      ],
+      "exit_code": 4,
+      "output": "<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:9: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:20: error: Syntax error in task/function port declaration.\n<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:41: syntax error\nI give up.\n"
+     },
+     "xezim_run": {
+      "command": [
+       "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+       "-s",
+       "Top",
+       "<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nseen=10\nb_seen=0 g=6\nobserve=1\ndefault g=1\narr1=2 arr3=13\nrow=0 read=0\nearly=3 late=3 local=103\nproperty=11\nSimulation finished at time 9 ($finish called)\n"
+     }
+    },
+    {
+     "top": "Wrapped",
+     "verilator_compile": {
+      "command": [
+       "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+       "--binary",
+       "--timing",
+       "-Wno-fatal",
+       "--top-module",
+       "Wrapped",
+       "--Mdir",
+       "<checkout>/work/ref-probes/Wrapped/obj",
+       "<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv"
+      ],
+      "exit_code": 1,
+      "output": "%Error-IMPURE: <checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:11:26: Unsupported: External variable referenced by non-inlined function/task: 'elem'\n                                                                                                                                     : ... note: In instance 'Wrapped.dut'\n   11 |  function automatic void elem(ref int x); x = x + 10; i = 3; x = x + 1; endfunction\n      |                          ^~~~\n               <checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:11:55: ... Location of the external reference: 'i'\n   11 |  function automatic void elem(ref int x); x = x + 10; i = 3; x = x + 1; endfunction\n      |                                                       ^\n               ... For error description see https://verilator.org/warn/IMPURE?v=5.052\n%Error: Exiting due to 1 error(s)\n"
+     },
+     "icarus_compile": {
+      "command": [
+       "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+       "-g2012",
+       "-s",
+       "Wrapped",
+       "-o",
+       "<checkout>/work/ref-probes/Wrapped/probe.vvp",
+       "<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv"
+      ],
+      "exit_code": 4,
+      "output": "<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:9: syntax error\n<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:20: error: Syntax error in task/function port declaration.\n<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv:41: syntax error\nI give up.\n"
+     },
+     "xezim_run": {
+      "command": [
+       "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+       "-s",
+       "Wrapped",
+       "<checkout>/crates/celox-test-suite/verification/repros/ref_arguments.sv"
+      ],
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nseen=10\nb_seen=0 g=6\nobserve=1\ndefault g=1\narr1=2 arr3=13\nrow=0 read=0\nearly=3 late=3 local=103\nproperty=11\nSimulation finished at time 9 ($finish called)\n"
+     }
+    }
+   ]
+  }
+ ]
+}

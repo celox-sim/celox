@@ -10,6 +10,9 @@ pub struct BuildConfig {
     pub parallel_lanes: u32,
     /// Permit inferred latches in `always_comb`. Disabled by default.
     pub allow_inferred_latches: bool,
+    /// Variables may hold X/Z. Two-state builds treat a case whose labels
+    /// cover every binary selector value as complete.
+    pub four_state: bool,
 }
 
 impl Default for BuildConfig {
@@ -19,6 +22,7 @@ impl Default for BuildConfig {
             reset_type: ResetType::AsyncLow,
             parallel_lanes: 1,
             allow_inferred_latches: false,
+            four_state: true,
             file_dependencies: Default::default(),
         }
     }
@@ -31,6 +35,7 @@ impl From<&veryl_metadata::Build> for BuildConfig {
             reset_type: build.reset_type,
             parallel_lanes: 1,
             allow_inferred_latches: false,
+            four_state: true,
             file_dependencies: Default::default(),
         }
     }

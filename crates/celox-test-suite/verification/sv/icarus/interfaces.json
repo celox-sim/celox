@@ -11,6 +11,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -37,6 +38,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -63,6 +65,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -89,6 +92,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -115,6 +119,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -141,6 +146,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -167,6 +173,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -204,6 +211,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -230,6 +238,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -256,6 +265,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -282,6 +292,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -317,6 +328,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ]
       },
@@ -426,6 +438,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -452,6 +465,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -547,6 +561,7 @@
           "verification/sv/limitations/interface-array-ports-icarus.json",
           "verification/sv/limitations/implicit-interface-ports-icarus.json",
           "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
           "LIMITATIONS.md#systemverilog-suite"
         ],
         "id": "sv_icarus_interfaces",
@@ -561,6 +576,33 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+      "expectation": "Simulation",
+      "name": "interfaces::forwards_header_ports_through_modports",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_interfaces",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "reason": "Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports (\"sorry: modport task/function ports are not yet supported\") and multidimensional interface instance arrays (\"sorry: Multi-dimensional arrays of instances are not yet supported\"). Verilator passes these cases.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "verification/sv/limitations/interface-array-ports-icarus.json",
+          "verification/sv/limitations/implicit-interface-ports-icarus.json",
+          "verification/repros/sv_mixed_interface_connections_icarus.json",
+          "verification/repros/sv_header_modport_icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

@@ -254,7 +254,9 @@ impl<B: SimBackend> Simulator<B> {
         Ok(())
     }
 
-    fn source_vcd_external_values(&self) -> Vec<(num_bigint::BigUint, num_bigint::BigUint)> {
+    pub(super) fn source_vcd_external_values(
+        &self,
+    ) -> Vec<(num_bigint::BigUint, num_bigint::BigUint)> {
         let values = self.components.trace_values();
         self.sv_vcd
             .external_selections

@@ -13,7 +13,7 @@ use std::path::Path;
 /// Self-contained — does not reference any IR types. Can be cached
 /// alongside a shared backend artifact so that VCD
 /// works even on cache-hit paths.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VcdSignalDesc {
     /// VCD scope name (e.g. instance path).
     pub scope: String,
@@ -29,7 +29,7 @@ pub struct VcdSignalDesc {
 
 /// Describes a signal whose value is supplied by an external runtime rather
 /// than stored in Celox's flat simulation memory.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct VcdExternalSignalDesc {
     pub scope: String,
     pub name: String,
@@ -241,6 +241,12 @@ impl<W: Write> VcdWriter<W> {
     }
     pub fn get_ref(&self) -> &W {
         self.output.writer.get_ref()
+    }
+
+    /// The underlying writer. Writing to it directly bypasses the buffered
+    /// output, like [`BufWriter::get_mut`].
+    pub fn get_mut(&mut self) -> &mut W {
+        self.output.writer.get_mut()
     }
 
     /// The last timestamp written to the file, if any. Later dumps must not

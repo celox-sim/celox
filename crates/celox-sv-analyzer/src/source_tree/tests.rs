@@ -4,6 +4,7 @@ use fxhash::FxHashMap as HashMap;
 
 mod aggregate_types;
 mod alias_ownership;
+mod array_locators;
 mod array_parameter_patterns;
 mod array_parameter_types;
 mod assignment;

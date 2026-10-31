@@ -58,7 +58,7 @@ export function lyditeScope(files, packages, lock = null) {
     return seen;
   };
   const coreRoots = packages
-    .filter((p) => isLydite(p.name) && p.name !== "lydite-celox")
+    .filter((p) => p.name === "aplite" || (isLydite(p.name) && p.name !== "lydite-celox"))
     .map((p) => p.name);
   const core = closure(coreRoots);
   const result = { core: false };
@@ -94,6 +94,7 @@ export function lyditeScope(files, packages, lock = null) {
         ".cargo/",
         ".github/actions/setup-rust/",
         "scripts/ci-lydite-changes.",
+        "scripts/check-aplite-release.",
         "scripts/ci-rust-scope.",
         "scripts/ci-changes.",
       ].some((prefix) => path.startsWith(prefix))
@@ -104,7 +105,7 @@ export function lyditeScope(files, packages, lock = null) {
       const inner = path.slice(owner.dir.length + 1);
       // Consumer tests do not depend on an upstream crate's private tests/docs.
       if (
-        !isLydite(owner.name) &&
+        owner.name !== "aplite" && !isLydite(owner.name) &&
         (/^(tests|benches|examples)\//.test(inner) || inner.endsWith(".md"))
       )
         continue;

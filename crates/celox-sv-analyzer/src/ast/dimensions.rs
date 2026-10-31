@@ -12,8 +12,8 @@ pub(super) use query_binding::{
 };
 
 /// Imported interface member shapes remain visible during native discovery.
-fn extend_interface_dimensions(state: &AnalysisState, dimensions: &mut PackedDimensions) {
-    let imported = scope::imported(state);
+fn extend_interface_dimensions(tree: &AnalysisContext<'_>, dimensions: &mut PackedDimensions) {
+    let imported = scope::imported(tree);
     if imported.interface_members.is_empty() {
         return;
     }
@@ -35,13 +35,13 @@ fn extend_interface_dimensions(state: &AnalysisState, dimensions: &mut PackedDim
 }
 
 pub(super) fn bound_bits_type(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expression: &Expr,
     dimensions: &PackedDimensions,
 ) -> Option<ExprType> {
     bound_query_type(
         expression,
-        expr_static_width(state, expression, dimensions)?,
+        expr_static_width(tree, expression, dimensions)?,
         dimensions,
         &dimensions.const_env,
     )
@@ -132,12 +132,17 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
         dimensions.insert(
             port.name().to_string(),
             VariableDimensions {
-                randomizable: (!port.r#type().is_enum || port.r#type().enum_values.is_some())
+                declared: type_names::Declared::new(port.r#type()),
+                container: port.r#type().container.clone(),
+                randomizable: port.r#type().container.is_none()
+                    && (!port.r#type().is_enum || port.r#type().enum_domain.is_some())
                     && port.randomizable,
-                enum_values: port.r#type().enum_values.clone(),
+                enum_domain: port.r#type().enum_domain.clone(),
+                packed_enum: port.r#type().packed_enum,
                 real: matches!(port.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                 string: matches!(port.r#type().kind(), TypeKind::String),
                 class: port.r#type().class().map(str::to_owned),
+                virtual_interface: port.r#type().virtual_interface.clone(),
                 packed: signal_packed_dimension_widths(port.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(port.r#type().unpacked_ranges()),
                 signed: port.r#type().is_signed(),
@@ -148,23 +153,44 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                         | TypeKind::Shortreal
                         | TypeKind::String
                         | TypeKind::Object
+                        | TypeKind::Process
+                        | TypeKind::Event
                 ),
                 members: port.r#type().members.clone(),
                 signed_element_depth: port.r#type().signed_element_depth,
+                unpacked_struct: port.r#type().unpacked_struct.clone(),
             },
         );
+    }
+    for port in ports {
+        if let Some(aggregate) = port.r#type().unpacked_struct() {
+            for (name, ty) in unpacked_structs::aggregates(port.name(), port.r#type()) {
+                dimensions.insert(name, procedural::dimensions_from_type(&ty));
+            }
+            for leaf in aggregate.leaves() {
+                dimensions.insert(
+                    leaf.name(port.name()),
+                    procedural::dimensions_from_type(&leaf.r#type),
+                );
+            }
+        }
     }
     for signal in signals {
         dimensions.insert(
             signal.name().to_string(),
             VariableDimensions {
-                randomizable: (!signal.r#type().is_enum || signal.r#type().enum_values.is_some())
+                declared: type_names::Declared::new(signal.r#type()),
+                container: signal.r#type().container.clone(),
+                randomizable: signal.r#type().container.is_none()
+                    && (!signal.r#type().is_enum || signal.r#type().enum_domain.is_some())
                     && !signal.is_net()
                     && !signal.is_const,
-                enum_values: signal.r#type().enum_values.clone(),
+                enum_domain: signal.r#type().enum_domain.clone(),
+                packed_enum: signal.r#type().packed_enum,
                 real: matches!(signal.r#type().kind(), TypeKind::Real | TypeKind::Shortreal),
                 string: matches!(signal.r#type().kind(), TypeKind::String),
                 class: signal.r#type().class().map(str::to_owned),
+                virtual_interface: signal.r#type().virtual_interface.clone(),
                 packed: signal_packed_dimension_widths(signal.r#type().packed_ranges()),
                 unpacked: unpacked_dimension_widths(signal.r#type().unpacked_ranges()),
                 signed: signal.r#type().is_signed(),
@@ -175,9 +201,12 @@ pub(super) fn packed_dimensions_from_ports_and_signals(
                         | TypeKind::Shortreal
                         | TypeKind::String
                         | TypeKind::Object
+                        | TypeKind::Process
+                        | TypeKind::Event
                 ),
                 members: signal.r#type().members.clone(),
                 signed_element_depth: signal.r#type().signed_element_depth,
+                unpacked_struct: signal.r#type().unpacked_struct.clone(),
             },
         );
     }
@@ -354,8 +383,10 @@ fn extend_variable_dimensions_from_const_env(
         }
         let packed_ranges = ranges.split_off(unpacked);
         let ty = Type {
+            container: None,
             is_enum: false,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             kind: TypeKind::Logic,
             is_signed: variable_type_is_signed(const_env, name),
             packed_ranges,
@@ -366,11 +397,19 @@ fn extend_variable_dimensions_from_const_env(
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            virtual_interface: None,
+            unpacked_struct: None,
+            spelling: type_names::Spelling::default(),
         };
         let mut shape = procedural::dimensions_from_type(&ty);
+        // The markers keep the shape, not the declared type.
+        shape.declared = type_names::Declared::default();
         if let Some(existing) = context.get(name) {
+            shape.declared = existing.declared.clone();
+            shape.container = existing.container.clone();
             shape.randomizable = existing.randomizable;
-            shape.enum_values = existing.enum_values.clone();
+            shape.enum_domain = existing.enum_domain.clone();
+            shape.packed_enum = existing.packed_enum;
             shape.members = existing.members.clone();
             shape.is_2state = existing.is_2state;
             shape.signed_element_depth = existing.signed_element_depth;
@@ -399,7 +438,7 @@ fn variable_type_is_signed(const_env: &HashMap<String, i128>, name: &str) -> boo
 }
 
 pub(super) fn extend_const_env_with_variable_types<'a>(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     const_env: &mut HashMap<String, i128>,
     variables: impl Iterator<Item = (&'a str, &'a Type)>,
 ) {
@@ -426,7 +465,7 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
         {
             for (bound, value) in [("left", left), ("right", right)] {
                 let key = variable_dimension_marker(name, index, bound);
-                if let Some(value) = eval_ast_const_expr(state, value, const_env) {
+                if let Some(value) = eval_ast_const_expr(functions, value, const_env) {
                     const_env.insert(key, value);
                 } else {
                     const_env.remove(&key);
@@ -434,16 +473,16 @@ pub(super) fn extend_const_env_with_variable_types<'a>(
             }
         }
         let dimension_width = |range: &PackedRange| {
-            let left = eval_ast_const_expr(state, range.left(), const_env)?;
-            let right = eval_ast_const_expr(state, range.right(), const_env)?;
+            let left = eval_ast_const_expr(functions, range.left(), const_env)?;
+            let right = eval_ast_const_expr(functions, range.right(), const_env)?;
             usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
         };
         let unpacked_widths = r#type
             .unpacked_ranges()
             .iter()
             .map(|range| {
-                let left = eval_ast_const_expr(state, range.left(), const_env)?;
-                let right = eval_ast_const_expr(state, range.right(), const_env)?;
+                let left = eval_ast_const_expr(functions, range.left(), const_env)?;
+                let right = eval_ast_const_expr(functions, range.right(), const_env)?;
                 usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)
             })
             .collect::<Option<Vec<_>>>();
@@ -525,6 +564,28 @@ pub(super) fn parameter_type_from_lookup(
 thread_local! {
     static SYNTAX_TYPE_DISCOVERIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     pub(super) static PARAMETER_TYPE_SCAN_ENTRIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(super) static CLASS_SIGNATURE_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Preparations of a class specialization that copy the scope tables.
+    pub(in crate::ast) static SPECIALIZATION_PREPARATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Copies of the scope tables that the scopes of classes are made in.
+    pub(in crate::ast) static CLASS_SCOPE_COPIES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Scope discoveries that queries settle.
+    pub(super) static SCOPE_SETTLES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Class signature bindings of the discoveries that bind them.
+    pub(super) static SETTLE_CLASS_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Specializations made for the references of class scopes.
+    pub(super) static CLASS_REFERENCE_SPECIALIZATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Discover without the settled scopes and repeated references that
+    /// queries share, to compare with the shared results.
+    pub(super) static UNSHARED_DISCOVERY: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a test asked for [`UNSHARED_DISCOVERY`].
+pub(super) fn unshared_discovery() -> bool {
+    #[cfg(test)]
+    return UNSHARED_DISCOVERY.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    false
 }
 
 #[cfg(test)]
@@ -533,22 +594,27 @@ mod tests;
 pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariablePackedDimensions {
     parameters
         .iter()
-        .filter(|parameter| !parameter.packed_ranges.is_empty())
+        .filter(|parameter| !parameter.packed_ranges.is_empty() || parameter.enum_domain.is_some())
         .map(|parameter| {
             (
                 parameter.name.clone(),
                 VariableDimensions {
+                    declared: type_names::Declared::default(),
+                    container: None,
                     randomizable: true,
-                    enum_values: None,
+                    enum_domain: parameter.enum_domain.clone(),
+                    packed_enum: false,
                     real: false,
                     string: false,
                     class: None,
+                    virtual_interface: None,
                     packed: function_packed_dimension_widths(&parameter.packed_ranges),
                     unpacked: Vec::new(),
                     signed: parameter.declared_signed.unwrap_or(false),
                     is_2state: parameter.declared_is_2state,
                     members: parameter.members.clone(),
                     signed_element_depth: parameter.signed_element_depth,
+                    unpacked_struct: None,
                 },
             )
         })

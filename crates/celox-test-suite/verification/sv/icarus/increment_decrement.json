@@ -1,0 +1,73 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 rejects an increment or decrement used as a value of a vector narrower than int, an array element or a packed structure member (\"sorry: ++ operation is not yet supported on vector slice.\"), does not support queues and associative arrays in classes, and aborts on ++ of a class property in an expression (\"draw_unary_inc_dec: Assertion `0' failed\"). IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable; Verilator 5.052 and xezim 0.11.3 pass both cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/increment-decrement-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_increment_operands",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects an increment or decrement used as a value of a vector narrower than int, an array element or a packed structure member (\"sorry: ++ operation is not yet supported on vector slice.\"), does not support queues and associative arrays in classes, and aborts on ++ of a class property in an expression (\"draw_unary_inc_dec: Assertion `0' failed\"). IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable; Verilator 5.052 and xezim 0.11.3 pass both cases.",
+        "upstream": []
+      },
+      "name": "increment_decrement::increment_decrement_class_members",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 evaluates the right operand of -> when the left one is false, so (i == 0) -> (j++ > 0) increments j. IEEE 1800-2023 11.4.7 does not evaluate the second operand of -> when the first one is logically false; xezim 0.11.3 shares the error and Verilator 5.052 rejects the operator there.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_increment_decrement_conditional_operands.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_implication_short_circuit",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 evaluates the right operand of -> when the left one is false, so (i == 0) -> (j++ > 0) increments j. IEEE 1800-2023 11.4.7 does not evaluate the second operand of -> when the first one is logically false; xezim 0.11.3 shares the error and Verilator 5.052 rejects the operator there.",
+        "upstream": []
+      },
+      "name": "increment_decrement::increment_decrement_implication",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Icarus 13.0 rejects an increment or decrement used as a value of a vector narrower than int, an array element or a packed structure member (\"sorry: ++ operation is not yet supported on vector slice.\"), does not support queues and associative arrays in classes, and aborts on ++ of a class property in an expression (\"draw_unary_inc_dec: Assertion `0' failed\"). IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable; Verilator 5.052 and xezim 0.11.3 pass both cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/sv/limitations/increment-decrement-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_increment_operands",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects an increment or decrement used as a value of a vector narrower than int, an array element or a packed structure member (\"sorry: ++ operation is not yet supported on vector slice.\"), does not support queues and associative arrays in classes, and aborts on ++ of a class property in an expression (\"draw_unary_inc_dec: Assertion `0' failed\"). IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable; Verilator 5.052 and xezim 0.11.3 pass both cases.",
+        "upstream": []
+      },
+      "name": "increment_decrement::increment_decrement_vectors",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

@@ -1,0 +1,171 @@
+{
+  "description": "Adapter-free probes for foreign package-class specialization. Outputs are observed directly, independently of shared-suite assertions. The shared reports retain their own exact failures; these smaller probes may expose a different subset of the same behavior.",
+  "tools": {
+    "celox": {
+      "base_revision": "a037246f79080d37487d12de591e90e9e3923711",
+      "build": "Working tree implementation of foreign generic package-class specialization."
+    },
+    "verilator": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052"
+    },
+    "xezim": {
+      "version": "xezim version 0.11.3",
+      "source_revision": "d491f9480123895e064ee4b37173a9d0f5d7383b",
+      "core_revision": "a25655a4f46dd47f6e9f4612729a725129e6187a",
+      "dependency_lock_sha256": "00a9cffdf344ecd66f4d7045ac41a8a944357a04a0c18658238bb16678d5cb90",
+      "build": "Exact repository-pinned upstream sources, built using the existing Nix recipe in an isolated validation package with a regenerated dependency lock. The repository's Nix package lock referenced core 48820a89 instead of the upstream manifest core a25655a4 and could not build. Neither simulator source nor repository lock files were changed. The binary reports git unknown; revision attribution comes from its Nix source inputs."
+    }
+  },
+  "probes": [
+    {
+      "source": "sv_foreign_generic_defaults.sv",
+      "source_sha256": "e29342c0a7712141ef8618d29bf061e0fea72fb58fc798b9e58cac39db3b5331",
+      "top": "Top",
+      "standard": "IEEE 1800-2023 8.25, 8.26.3",
+      "expected_output": "OBS checks=127 widths=9,9,5 counts=2,2,1",
+      "observations": {
+        "celox_2state": {
+          "status": "passed",
+          "output": "OBS checks=127 widths=9,9,5 counts=2,2,1"
+        },
+        "celox_4state": {
+          "status": "passed",
+          "output": "OBS checks=127 widths=9,9,5 counts=2,2,1"
+        },
+        "xezim": {
+          "status": "mismatch",
+          "output": "OBS checks=111 widths=9,9,5 counts=2,2,1"
+        },
+        "verilator": {
+          "status": "mismatch",
+          "output": "OBS checks=95 widths=9,9,5 counts=1,1,1"
+        }
+      }
+    },
+    {
+      "source": "sv_foreign_generic_nominal.sv",
+      "source_sha256": "73037e360fe34363b1cecac02239aef1570944e715552787f5f8f0a037f61b83",
+      "top": "Top",
+      "standard": "IEEE 1800-2023 6.22.1, 8.25",
+      "expected_output": "OBS nominal=1,2,1",
+      "observations": {
+        "celox_2state": {
+          "status": "passed",
+          "output": "OBS nominal=1,2,1"
+        },
+        "celox_4state": {
+          "status": "passed",
+          "output": "OBS nominal=1,2,1"
+        },
+        "xezim": {
+          "status": "mismatch",
+          "output": "OBS nominal=1,1,1"
+        },
+        "verilator": {
+          "status": "passed",
+          "output": "OBS nominal=1,2,1"
+        }
+      }
+    },
+    {
+      "source": "sv_foreign_generic_factory.sv",
+      "source_sha256": "e91831a82ae3f52105cba4097aed133652ae7f344318fb280435bbaf6c861257",
+      "top": "Observe",
+      "standard": "IEEE 1800-2023 8.23, 8.25",
+      "expected_output": "OBS factories=42,73 counts=1,1",
+      "observations": {
+        "celox_2state": {
+          "status": "passed",
+          "output": "OBS factories=42,73 counts=1,1"
+        },
+        "celox_4state": {
+          "status": "passed",
+          "output": "OBS factories=42,73 counts=1,1"
+        },
+        "xezim": {
+          "status": "mismatch",
+          "output": "OBS factories=42,42 counts=X,X"
+        },
+        "verilator": {
+          "status": "passed",
+          "output": "OBS factories=42,73 counts=1,1"
+        }
+      }
+    },
+    {
+      "source": "sv_foreign_generic_inheritance.sv",
+      "source_sha256": "4f26b9f8acb55a482ad9928cdecb83a1f9c1668e6217e52f12c21979480d4486",
+      "top": "Observe",
+      "standard": "IEEE 1800-2023 8.13, 8.18, 8.25",
+      "expected_output": "OBS inheritance=31",
+      "observations": {
+        "celox_2state": {
+          "status": "passed",
+          "output": "OBS inheritance=31"
+        },
+        "celox_4state": {
+          "status": "passed",
+          "output": "OBS inheritance=31"
+        },
+        "xezim": {
+          "status": "mismatch",
+          "output": "OBS inheritance=23"
+        },
+        "verilator": {
+          "status": "mismatch",
+          "output": "OBS inheritance=0"
+        }
+      }
+    },
+    {
+      "source": "sv_foreign_generic_constructor.sv",
+      "source_sha256": "5c288a86d6e55860ff72c3c5b643d1d46b7321cbe3081ea1f147624615ee3300",
+      "top": "Observe",
+      "standard": "IEEE 1800-2023 13.5.3",
+      "expected_output": "OBS constructor=23,1",
+      "observations": {
+        "celox_2state": {
+          "status": "passed",
+          "output": "OBS constructor=23,1"
+        },
+        "celox_4state": {
+          "status": "passed",
+          "output": "OBS constructor=23,1"
+        },
+        "xezim": {
+          "status": "mismatch",
+          "output": "OBS constructor=20,1"
+        },
+        "verilator": {
+          "status": "compile_error",
+          "detail": "%Error: Internal Error: crates/celox-test-suite/verification/repros/sv_foreign_generic_constructor.sv:14:11: ../V3Task.cpp:2179: FuncRef without fvar"
+        }
+      }
+    },
+    {
+      "source": "sv_foreign_generic_package_type.sv",
+      "source_sha256": "8546299af23d61397c759e9f069000f1185c7560d2150de27d9c28b514324e85",
+      "top": "Observe",
+      "standard": "IEEE 1800-2023 8.23, 8.25",
+      "expected_output": "OBS package_type=42,7,1",
+      "observations": {
+        "celox_2state": {
+          "status": "passed",
+          "output": "OBS package_type=42,7,1"
+        },
+        "celox_4state": {
+          "status": "passed",
+          "output": "OBS package_type=42,7,1"
+        },
+        "xezim": {
+          "status": "mismatch",
+          "output": "OBS package_type=X,7,1"
+        },
+        "verilator": {
+          "status": "passed",
+          "output": "OBS package_type=42,7,1"
+        }
+      }
+    }
+  ]
+}

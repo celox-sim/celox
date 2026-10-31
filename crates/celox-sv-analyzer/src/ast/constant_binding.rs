@@ -8,6 +8,7 @@ pub(super) fn expression(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Option<ConstExpr>> {
@@ -15,6 +16,7 @@ pub(super) fn expression(
         root,
         native,
         tree,
+        session,
         &PackedDimensions::new(HashMap::default(), env, aliases),
     )
 }
@@ -23,44 +25,49 @@ pub(super) fn value_expression(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<ConstExpr>> {
     let mut context = dimensions.clone();
     context.const_env = HashMap::default().into();
-    context.type_aliases = HashMap::default();
-    bind_in_context(root, native, tree, &context, dimensions)
+    context.type_aliases = SharedMap::default();
+    bind_in_context(root, native, tree, session, &context, dimensions)
 }
 pub(super) fn bind(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<ConstExpr>> {
-    bind_in(root, tree.declarations(), tree, dimensions)
+    bind_in(root, tree.declarations(), tree, session, dimensions)
 }
 pub(super) fn indexed_expression(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     {
         let mut context = dimensions.clone();
         context.constant_indexed_base = true;
-        expression_binding::bind_value(root, native, tree, &context, None)
+        expression_binding::bind_value(root, native, tree, session, &context, None)
     }
 }
 fn bind_in(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<ConstExpr>> {
-    bind_in_context(root, native, tree, dimensions, dimensions)
+    bind_in_context(root, native, tree, session, dimensions, dimensions)
 }
 fn bind_in_context(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     query_dimensions: &PackedDimensions,
 ) -> Converted<Option<ConstExpr>> {
@@ -125,8 +132,51 @@ fn bind_in_context(
                     operator,
                     right,
                 } => {
-                    if constants::binary_op_from_text(operator).is_none() {
+                    if !matches!(operator.as_str(), "->" | "<->")
+                        && constants::binary_op_from_text(operator).is_none()
+                    {
                         return Ok(None);
+                    }
+                    // A string operand orders the operands as strings
+                    // (11.4.4), not as the integral values of their bytes.
+                    if matches!(operator.as_str(), "<" | "<=" | ">" | ">=")
+                        && (typename_operand(*left, native).is_some()
+                            || typename_operand(*right, native).is_some())
+                    {
+                        let mut text = |id| -> Converted<Option<Vec<u8>>> {
+                            let id = expression_binding::ungroup(id, native);
+                            if let Some(argument) = typename_operand(id, native) {
+                                return Ok(Some(
+                                    type_names::query_string(
+                                        argument,
+                                        tree,
+                                        session,
+                                        query_dimensions,
+                                    )?
+                                    .into_bytes(),
+                                ));
+                            }
+                            Ok(match &native.expression(id).kind {
+                                ExprKind::Literal(text) => {
+                                    expression_binding::string_literal_bytes(text)
+                                }
+                                _ => None,
+                            })
+                        };
+                        let (Some(left), Some(right)) = (text(*left)?, text(*right)?) else {
+                            return Ok(None);
+                        };
+                        let ordering = left.cmp(&right);
+                        let holds = match operator.as_str() {
+                            "<" => ordering.is_lt(),
+                            "<=" => ordering.is_le(),
+                            ">" => ordering.is_gt(),
+                            _ => ordering.is_ge(),
+                        };
+                        values.push(ConstExpr::Literal(
+                            if holds { "1'b1" } else { "1'b0" }.into(),
+                        ));
+                        continue;
                     }
                     jobs.push(Job::Binary(operator.clone()));
                     jobs.push(Job::Enter(*right));
@@ -148,6 +198,7 @@ fn bind_in_context(
                         *expression,
                         native,
                         tree,
+                        session,
                         query_dimensions,
                     ) {
                         Ok(target) => target,
@@ -161,10 +212,16 @@ fn bind_in_context(
                     // Actual values retain the parent's specialization context.
                     // The symbolic context deliberately omits its numeric env,
                     // but a concat must be folded to a typed literal here.
-                    let expr =
-                        expression_binding::bind_value(id, native, tree, query_dimensions, None)?;
+                    let expr = expression_binding::bind_value(
+                        id,
+                        native,
+                        tree,
+                        session,
+                        query_dimensions,
+                        None,
+                    )?;
                     let Some(value) =
-                        selects::indexed_expression_value(&tree.state, expr, query_dimensions)
+                        selects::indexed_expression_value(tree, session, expr, query_dimensions)
                     else {
                         return Ok(None);
                     };
@@ -194,7 +251,7 @@ fn bind_in_context(
                     let name = arguments
                         .first()
                         .and_then(|a| a.value)
-                        .and_then(|id| expression_binding::native_name(&tree.state, id, native))
+                        .and_then(|id| expression_binding::native_name(tree, id, native))
                         .ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
                             name: "$isunbounded".into(),
                             detail: "argument must name a value parameter".into(),
@@ -266,18 +323,20 @@ fn bind_in_context(
                                 shape.packed.len() > 1 || !shape.unpacked.is_empty()
                             })
                         {
-                            let value = indexed_expression(id, native, tree, query_dimensions)?;
+                            let value =
+                                indexed_expression(id, native, tree, session, query_dimensions)?;
                             let value = if query_dimensions
                                 .array_parameter_values
                                 .contains_key(&name_key)
                             {
                                 selects::indexed_expression_value(
-                                    &tree.state,
+                                    tree,
+                                    session,
                                     value,
                                     query_dimensions,
                                 )
                             } else {
-                                expr_to_index_const(&tree.state, value, query_dimensions)
+                                expr_to_index_const(tree, session, value, query_dimensions)
                             };
                             values.push(
                                 value.ok_or_else(|| unsupported("parameter selection shape"))?,
@@ -291,34 +350,51 @@ fn bind_in_context(
                         ));
                         jobs.extend(indices.into_iter().rev().map(Job::Enter));
                     } else {
-                        let value = match indexed_expression(id, native, tree, query_dimensions) {
-                            Ok(value) => value,
-                            Err(AnalyzerError::Unsupported(_)) => return Ok(None),
-                            Err(error) => return Err(error),
-                        };
-                        let Some(value) =
-                            selects::indexed_expression_value(&tree.state, value, query_dimensions)
-                        else {
+                        let value =
+                            match indexed_expression(id, native, tree, session, query_dimensions) {
+                                Ok(value) => value,
+                                Err(AnalyzerError::Unsupported(_)) => return Ok(None),
+                                Err(error) => return Err(error),
+                            };
+                        let Some(value) = selects::indexed_expression_value(
+                            tree,
+                            session,
+                            value,
+                            query_dimensions,
+                        ) else {
                             return Ok(None);
                         };
                         values.push(value);
                     }
                 }
                 ExprKind::Call { .. } | ExprKind::Member { .. } => {
-                    let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||f==SystemFunction::Isunbounded)));
+                    let is_query = matches!(&native.expression(id).kind,ExprKind::Call{expression,..} if matches!(&native.expression(*expression).kind,ExprKind::Name(name) if SystemFunction::from_name(&name.spelling).is_some_and(|f|f.is_data_query()||matches!(f,SystemFunction::Isunbounded|SystemFunction::Typename))));
                     let mut context = if is_query {
                         query_dimensions.clone()
                     } else {
                         dimensions.clone()
                     };
                     context.subroutine_param_names =
-                        const_functions::argument_names(&tree.state.const_functions);
-                    let value =
-                        match expression_binding::bind_value(id, native, tree, &context, None) {
-                            Ok(value) => value,
-                            Err(AnalyzerError::Unsupported(_)) => return Ok(None),
-                            Err(error) => return Err(error),
-                        };
+                        Arc::new(const_functions::argument_names(&tree.functions));
+                    let value = match expression_binding::bind_value(
+                        id, native, tree, session, &context, None,
+                    ) {
+                        Ok(value) => value,
+                        Err(AnalyzerError::Unsupported(_)) => return Ok(None),
+                        Err(error) => return Err(error),
+                    };
+                    // A `$typename` string is the constant of its bytes, as a
+                    // string literal is (5.9).
+                    let value = match value {
+                        Expr::Call {
+                            callee: Callee::String(StringOp::FromBits),
+                            mut args,
+                            ..
+                        } if is_query && matches!(args.as_slice(), [Some(Expr::Literal(_))]) => {
+                            args.pop().flatten().unwrap()
+                        }
+                        value => value,
+                    };
                     let countbits = matches!(
                         &value,
                         Expr::Call {
@@ -328,23 +404,28 @@ fn bind_in_context(
                     );
                     let Some(value) = (if countbits {
                         constants::countbits_constant_call(
-                            &tree.state,
+                            tree,
+                            session,
                             value,
                             &dimensions.const_env,
                         )
                     } else {
-                        constants::user_call_value(&tree.state, value, &dimensions.const_env)
+                        constants::user_call_value(tree, session, value, &dimensions.const_env)
                     }) else {
                         return Ok(None);
                     };
                     values.push(value);
+                }
+                ExprKind::ArrayMethodWith { .. } => {
+                    return Err(unsupported("array method with expression"));
                 }
                 _ => return Ok(None),
             },
             Job::Cast(target) => {
                 let value = values.pop().ok_or_else(disagreement)?;
                 let Some(value) = casts::cast_constant_target(
-                    &tree.state,
+                    tree,
+                    session,
                     value,
                     target,
                     &query_dimensions.const_env,
@@ -363,9 +444,31 @@ fn bind_in_context(
             Job::Binary(op) => {
                 let right = values.pop().ok_or_else(disagreement)?;
                 let left = values.pop().ok_or_else(disagreement)?;
+                let left = if op == "->" || op == "<->" {
+                    ConstExpr::Unary {
+                        op: UnaryOp::LogicNot,
+                        expr: Box::new(left),
+                    }
+                } else {
+                    left
+                };
+                let right = if op == "<->" {
+                    ConstExpr::Unary {
+                        op: UnaryOp::LogicNot,
+                        expr: Box::new(right),
+                    }
+                } else {
+                    right
+                };
                 values.push(ConstExpr::Binary {
                     left: Box::new(left),
-                    op: constants::binary_op_from_text(&op).ok_or_else(disagreement)?,
+                    op: if op == "<->" {
+                        BinaryOp::Eq
+                    } else if op == "->" {
+                        BinaryOp::LogicOr
+                    } else {
+                        constants::binary_op_from_text(&op).ok_or_else(disagreement)?
+                    },
                     right: Box::new(right),
                 });
             }
@@ -382,14 +485,14 @@ fn bind_in_context(
             Job::System(function, count) => {
                 let start = values.len().checked_sub(count).ok_or_else(disagreement)?;
                 let args = values.split_off(start);
-                values.push(ConstExpr::call(&tree.state, Callee::System(function), args));
+                values.push(ConstExpr::call(Callee::System(function), args, session));
             }
             Job::Select(name, count) => {
                 let start = values.len().checked_sub(count).ok_or_else(disagreement)?;
                 let mut indices = values.split_off(start);
                 if let Some(indices) = indices
                     .iter()
-                    .map(|index| eval_ast_const_expr(&tree.state, index, &dimensions.const_env))
+                    .map(|index| eval_ast_const_expr(&tree.functions, index, &dimensions.const_env))
                     .collect::<Option<Vec<_>>>()
                     && let Some(literal) =
                         parameter_element_literal(&name, &indices, &dimensions.const_env)
@@ -414,57 +517,62 @@ fn bind_in_context(
 pub(super) fn packed_ranges(
     dimensions: &[Dimension],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<PackedRange>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    type_binding::binding::packed_ranges(dimensions, tree, &context)
+    type_binding::binding::packed_ranges(dimensions, tree, session, &context)
 }
 
 pub(super) fn unpacked_ranges(
     dimensions: &[Dimension],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<UnpackedRange>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     dimensions
         .iter()
-        .map(|dimension| bind_unpacked_dimension(dimension, tree, &context))
+        .map(|dimension| bind_unpacked_dimension(dimension, tree, session, &context))
         .collect()
 }
 
 pub(super) fn unpacked_dimension(
     dimension: &Dimension,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<UnpackedRange> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    bind_unpacked_dimension(dimension, tree, &context)
+    bind_unpacked_dimension(dimension, tree, session, &context)
 }
 
 /// Native array dimensions retain their authored bound handles.
 pub(super) fn bind_unpacked_ranges(
     dimensions: &[Dimension],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Vec<UnpackedRange>> {
     dimensions
         .iter()
-        .map(|dimension| bind_unpacked_dimension(dimension, tree, context))
+        .map(|dimension| bind_unpacked_dimension(dimension, tree, session, context))
         .collect()
 }
 pub(super) fn bind_unpacked_dimension(
     dimension: &Dimension,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<UnpackedRange> {
     let range = match dimension.kind {
-        DimensionKind::Range { left, right } => bind(left, tree, context)?
-            .zip(bind(right, tree, context)?)
+        DimensionKind::Range { left, right } => bind(left, tree, session, context)?
+            .zip(bind(right, tree, session, context)?)
             .map(|(left, right)| UnpackedRange::new(left, right)),
-        DimensionKind::Index(size) => bind(size, tree, context)?.map(UnpackedRange::sized),
+        DimensionKind::Index(size) => bind(size, tree, session, context)?.map(UnpackedRange::sized),
         DimensionKind::Unsized => return Err(unsupported("unsized unpacked array dimension")),
         DimensionKind::Queue(_) => return Err(unsupported("queue array dimension")),
         DimensionKind::Wildcard => return Err(unsupported("associative array dimension")),
@@ -475,11 +583,36 @@ pub(super) fn bind_unpacked_dimension(
     range.ok_or_else(|| unsupported("unresolved unpacked array dimension"))
 }
 
+/// The operand of native expression `id` if it is a `$typename` call.
+fn typename_operand(id: ExprId, native: &Declarations) -> Option<ExprId> {
+    let ExprKind::Call {
+        expression,
+        arguments,
+    } = &native
+        .expression(expression_binding::ungroup(id, native))
+        .kind
+    else {
+        return None;
+    };
+    let ExprKind::Name(name) = &native.expression(*expression).kind else {
+        return None;
+    };
+    match arguments.as_slice() {
+        [argument]
+            if SystemFunction::from_name(&name.spelling) == Some(SystemFunction::Typename) =>
+        {
+            argument.value
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn native_constant_literals_and_operators_supply_values() {
+        let session = &mut Session::default();
         for (text, expected) in [("8", 8), ("7+8", 15), ("$bits(logic)", 1)] {
             let tree = crate::source_tree::parse_source(
                 &format!("module M #(parameter P={text});endmodule"),
@@ -493,17 +626,18 @@ mod tests {
             else {
                 panic!()
             };
-            let value = bind(id, &tree, &PackedDimensions::default())
+            let value = bind(id, &tree, session, &PackedDimensions::default())
                 .unwrap()
                 .unwrap();
             assert_eq!(
-                eval_ast_const_expr(&tree.state, &value, &HashMap::default()),
+                eval_ast_const_expr(&tree.functions, &value, &HashMap::default()),
                 Some(expected)
             );
         }
     }
     #[test]
     fn deeply_grouped_native_binding_uses_no_recursive_walk() {
+        let session = &mut Session::default();
         let path = Path::new("deep-native-constant.sv");
         let tree =
             crate::source_tree::parse_source("module M #(parameter P=7);endmodule", path).unwrap();
@@ -524,7 +658,7 @@ mod tests {
             panic!()
         };
         assert_eq!(
-            bind_in(id, &native, &tree, &PackedDimensions::default()).unwrap(),
+            bind_in(id, &native, &tree, session, &PackedDimensions::default()).unwrap(),
             Some(ConstExpr::Literal("7".into()))
         );
     }

@@ -26,7 +26,8 @@
 //!     waiter count u32, then per waiter:
 //!       process str | site u64 | baseline count u32, then per baseline:
 //!         0 u8 | counter u32 | value bytes | mask bytes, or
-//!         1 u8 | value bytes | mask bytes
+//!         1 u8 | value bytes | mask bytes, or
+//!         2 u8 | gated counter u32 | all counter u32 | value bytes | mask bytes
 //!     ready count u32, then per process: process str
 //!     inactive count u32, then per process: process str
 //!     update count u32, then per update:
@@ -34,7 +35,11 @@
 //!     counted count u32, then per signal: signal str | 3 × counter u32
 //!     write count u32, then per host write: signal str | value bytes | mask bytes
 //!     host pending u8 | finished u8
+//!   version 3 replaces each process string with a tagged kernel path or
+//!   activation ID, then appends the named activation graph, typed shared
+//!   cells and Reactive/Re-Inactive/Re-NBA queues (see `activations`).
 //! strings (only with FLAG_STRINGS): count u32, then per string: bytes
+//! heap (only with FLAG_HEAP, version 5): next object handle u64
 //! scheduled event: time u64 | event str | signal str | value u8
 //! str: byte length u32 | UTF-8
 //! bytes: byte length u32 | little-endian bytes
@@ -46,12 +51,19 @@
 //!
 //! Version 1 files, which have no process section, still load. A file whose
 //! processes have nothing to record is written as version 1, which older
-//! builds read too.
+//! builds read too. Static-only process schedules retain version 2; graphs
+//! and reactive queues require version 3. Pending Observed assertion evaluations
+//! require version 4, and a heap section version 5. Versions 1 through 4
+//! remain readable.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 2;
+const VERSION: u16 = 5;
+
+mod activations;
+use activations::*;
+pub use activations::{ActivationRecord, FrameValueKind, FrameValueRecord, ProcessRef};
 const FLAG_FOUR_STATE: u16 = 1 << 0;
 const FLAG_SCHEDULE: u16 = 1 << 1;
 /// The schedule lists events whose signal was x or z. Set only when there are
@@ -59,6 +71,9 @@ const FLAG_SCHEDULE: u16 = 1 << 1;
 const FLAG_UNKNOWN_EVENTS: u16 = 1 << 2;
 /// String objects refer to a strings section after the schedule.
 const FLAG_STRINGS: u16 = 1 << 3;
+/// A heap section after the strings records the next object handle, which
+/// the handles of named events in the saved values stay below.
+const FLAG_HEAP: u16 = 1 << 4;
 
 /// How a state object gets its value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,14 +134,22 @@ pub struct ScheduleRecord {
 /// path of its status slot, a signal by its state object path.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ProcessRecord {
+    /// File-local activation graph; static kernels and frame slots are named.
+    pub activations: Vec<ActivationRecord>,
+    /// Values shared by automatic locals across activations.
+    pub cells: Vec<FrameValueRecord>,
+    pub reactive: Vec<ProcessRef>,
+    pub observed: Vec<ProcessRef>,
+    pub re_inactive: Vec<ProcessRef>,
+    pub re_nba_queue: Vec<NbaRecord>,
     /// Suspended processes and the time each resumes at.
-    pub wakeups: Vec<(String, u64)>,
+    pub wakeups: Vec<(ProcessRef, u64)>,
     /// Processes suspended at a wait.
     pub waiters: Vec<WaiterRecord>,
     /// Processes ready in the active region of the current time.
-    pub ready: Vec<String>,
+    pub ready: Vec<ProcessRef>,
     /// Processes resuming in the inactive region of the current time.
-    pub inactive: Vec<String>,
+    pub inactive: Vec<ProcessRef>,
     /// Queued nonblocking assignments, in issue order.
     pub nba_queue: Vec<NbaRecord>,
     /// Counter values each counted domain last triggered on, by counted
@@ -144,7 +167,7 @@ pub struct ProcessRecord {
 /// A process suspended at a wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WaiterRecord {
-    pub process: String,
+    pub process: ProcessRef,
     /// Index of the wait site among the process's sites.
     pub site: u64,
     /// What each term of the site compares against.
@@ -163,6 +186,15 @@ pub enum BaselineRecord {
     },
     /// The signal's value at the last check, as little-endian bytes.
     Value { value: Vec<u8>, mask: Vec<u8> },
+    /// A term whose `iff` gate a write judges at the write: its gated
+    /// counter when the wait began, its counter of all occurrences and the
+    /// signal's value at the last check, as little-endian bytes.
+    Gated {
+        gated: u32,
+        all: u32,
+        value: Vec<u8>,
+        mask: Vec<u8>,
+    },
 }
 
 /// A queued nonblocking assignment.
@@ -184,6 +216,9 @@ pub struct StateFile {
     pub schedule: Option<ScheduleRecord>,
     /// Contents of the strings that string objects refer to.
     pub strings: Vec<Vec<u8>>,
+    /// The handle the next heap object gets, when named events, whose
+    /// handles are saved as values, were created (IEEE 1800-2023 15.5).
+    pub next_object: Option<u64>,
 }
 
 /// A state file that could not be read.
@@ -223,7 +258,23 @@ impl StateFile {
             .as_ref()
             .map(|schedule| &schedule.processes)
             .filter(|processes| **processes != ProcessRecord::default());
-        put_u16(w, if processes.is_some() { VERSION } else { 1 })?;
+        let version = processes.map_or(1, |p| {
+            if !p.observed.is_empty() {
+                4
+            } else if needs_v3(p) {
+                3
+            } else {
+                2
+            }
+        });
+        // A heap section needs version 5, which always lists processes.
+        let empty = ProcessRecord::default();
+        let (version, processes) = match (self.next_object, &self.schedule) {
+            (Some(_), Some(_)) => (5, Some(processes.unwrap_or(&empty))),
+            (Some(_), None) => (5, processes),
+            (None, _) => (version, processes),
+        };
+        put_u16(w, version)?;
         let mut flags = 0;
         if self.four_state {
             flags |= FLAG_FOUR_STATE;
@@ -236,6 +287,9 @@ impl StateFile {
         }
         if !self.strings.is_empty() {
             flags |= FLAG_STRINGS;
+        }
+        if self.next_object.is_some() {
+            flags |= FLAG_HEAP;
         }
         put_u16(w, flags)?;
         put_len(w, self.objects.len())?;
@@ -285,7 +339,7 @@ impl StateFile {
                 }
             }
             if let Some(processes) = processes {
-                put_processes(w, processes)?;
+                put_processes(w, processes, version)?;
             }
         }
         if !self.strings.is_empty() {
@@ -293,6 +347,9 @@ impl StateFile {
             for string in &self.strings {
                 put_bytes(w, string)?;
             }
+        }
+        if let Some(next_object) = self.next_object {
+            put_u64(w, next_object)?;
         }
         Ok(())
     }
@@ -366,7 +423,7 @@ impl StateFile {
                 Vec::new()
             };
             let processes = if version >= 2 {
-                get_processes(r)?
+                get_processes(r, version)?
             } else {
                 ProcessRecord::default()
             };
@@ -389,6 +446,11 @@ impl StateFile {
         } else {
             Vec::new()
         };
+        let next_object = if flags & FLAG_HEAP != 0 {
+            Some(get_u64(r)?)
+        } else {
+            None
+        };
         let mut rest = [0; 1];
         if r.read(&mut rest)? != 0 {
             return Err(StateFileError::Malformed(
@@ -400,6 +462,7 @@ impl StateFile {
             objects,
             schedule,
             strings,
+            next_object,
         })
     }
 
@@ -501,20 +564,15 @@ fn put_bytes(w: &mut impl Write, bytes: &[u8]) -> io::Result<()> {
     w.write_all(bytes)
 }
 
-fn put_names(w: &mut impl Write, names: &[String]) -> io::Result<()> {
-    put_len(w, names.len())?;
-    names.iter().try_for_each(|name| put_str(w, name))
-}
-
-fn put_processes(w: &mut impl Write, processes: &ProcessRecord) -> io::Result<()> {
+fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) -> io::Result<()> {
     put_len(w, processes.wakeups.len())?;
     for (process, time) in &processes.wakeups {
-        put_str(w, process)?;
+        put_process(w, process, version)?;
         put_u64(w, *time)?;
     }
     put_len(w, processes.waiters.len())?;
     for waiter in &processes.waiters {
-        put_str(w, &waiter.process)?;
+        put_process(w, &waiter.process, version)?;
         put_u64(w, waiter.site)?;
         put_len(w, waiter.baselines.len())?;
         for baseline in &waiter.baselines {
@@ -530,11 +588,23 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord) -> io::Result<()
                     put_bytes(w, value)?;
                     put_bytes(w, mask)?;
                 }
+                BaselineRecord::Gated {
+                    gated,
+                    all,
+                    value,
+                    mask,
+                } => {
+                    w.write_all(&[2])?;
+                    w.write_all(&gated.to_le_bytes())?;
+                    w.write_all(&all.to_le_bytes())?;
+                    put_bytes(w, value)?;
+                    put_bytes(w, mask)?;
+                }
             }
         }
     }
-    put_names(w, &processes.ready)?;
-    put_names(w, &processes.inactive)?;
+    put_process_list(w, &processes.ready, version)?;
+    put_process_list(w, &processes.inactive, version)?;
     put_len(w, processes.nba_queue.len())?;
     for update in &processes.nba_queue {
         put_str(w, &update.target)?;
@@ -556,7 +626,14 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord) -> io::Result<()
         put_bytes(w, value)?;
         put_bytes(w, mask)?;
     }
-    w.write_all(&[processes.host_pending as u8, processes.finished as u8])
+    w.write_all(&[processes.host_pending as u8, processes.finished as u8])?;
+    if version >= 3 {
+        put_extension(w, processes)?;
+    }
+    if version >= 4 {
+        put_process_list(w, &processes.observed, version)?;
+    }
+    Ok(())
 }
 
 fn get_flag(r: &mut impl Read) -> Result<bool, StateFileError> {
@@ -574,17 +651,13 @@ fn get_len_bytes(r: &mut impl Read) -> Result<Vec<u8>, StateFileError> {
     Ok(get_bytes(r, len)?)
 }
 
-fn get_names(r: &mut impl Read) -> Result<Vec<String>, StateFileError> {
-    (0..get_u32(r)?).map(|_| get_str(r)).collect()
-}
-
-fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
+fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, StateFileError> {
     let wakeups = (0..get_u32(r)?)
-        .map(|_| Ok((get_str(r)?, get_u64(r)?)))
+        .map(|_| Ok((get_process(r, version)?, get_u64(r)?)))
         .collect::<Result<_, StateFileError>>()?;
     let waiters = (0..get_u32(r)?)
         .map(|_| {
-            let process = get_str(r)?;
+            let process = get_process(r, version)?;
             let site = get_u64(r)?;
             let baselines = (0..get_u32(r)?)
                 .map(|_| {
@@ -600,6 +673,12 @@ fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
                             value: get_len_bytes(r)?,
                             mask: get_len_bytes(r)?,
                         }),
+                        2 => Ok(BaselineRecord::Gated {
+                            gated: get_u32(r)?,
+                            all: get_u32(r)?,
+                            value: get_len_bytes(r)?,
+                            mask: get_len_bytes(r)?,
+                        }),
                         other => Err(StateFileError::Malformed(format!("baseline {other}"))),
                     }
                 })
@@ -611,8 +690,8 @@ fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
             })
         })
         .collect::<Result<_, StateFileError>>()?;
-    let ready = get_names(r)?;
-    let inactive = get_names(r)?;
+    let ready = get_process_list(r, version)?;
+    let inactive = get_process_list(r, version)?;
     let nba_queue = (0..get_u32(r)?)
         .map(|_| {
             Ok(NbaRecord {
@@ -630,7 +709,7 @@ fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
     let host_writes = (0..get_u32(r)?)
         .map(|_| Ok((get_str(r)?, get_len_bytes(r)?, get_len_bytes(r)?)))
         .collect::<Result<_, StateFileError>>()?;
-    Ok(ProcessRecord {
+    let mut result = ProcessRecord {
         wakeups,
         waiters,
         ready,
@@ -640,7 +719,15 @@ fn get_processes(r: &mut impl Read) -> Result<ProcessRecord, StateFileError> {
         host_writes,
         host_pending: get_flag(r)?,
         finished: get_flag(r)?,
-    })
+        ..ProcessRecord::default()
+    };
+    if version >= 3 {
+        get_extension(r, &mut result)?;
+    }
+    if version >= 4 {
+        result.observed = get_process_list(r, version)?;
+    }
+    Ok(result)
 }
 
 fn get_u16(r: &mut impl Read) -> io::Result<u16> {
@@ -750,6 +837,12 @@ mod tests {
                                 value: vec![1],
                                 mask: vec![0],
                             },
+                            BaselineRecord::Gated {
+                                gated: 3,
+                                all: 5,
+                                value: vec![1],
+                                mask: vec![],
+                            },
                         ],
                     }],
                     ready: vec!["$process[2].status".into()],
@@ -765,9 +858,11 @@ mod tests {
                     host_writes: vec![("go".into(), vec![1], vec![])],
                     host_pending: true,
                     finished: false,
+                    ..ProcessRecord::default()
                 },
             }),
             strings: Vec::new(),
+            next_object: None,
         }
     }
 
@@ -801,6 +896,70 @@ mod tests {
     #[test]
     fn round_trips() {
         let file = sample();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+    }
+
+    #[test]
+    fn legacy_processes_keep_v2_and_activation_records_use_v3() {
+        let mut file = sample();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 2u16.to_le_bytes());
+        let process = &mut file.schedule.as_mut().unwrap().processes;
+        process.activations.push(ActivationRecord {
+            id: 100,
+            root: true,
+            kernel: "kernel.status".into(),
+            parent: None,
+            live: true,
+            private: vec![(
+                "local".into(),
+                FrameValueRecord {
+                    width: 32,
+                    is_4state: false,
+                    kind: FrameValueKind::String,
+                    value: vec![1, 0, 0, 0],
+                    mask: vec![0; 4],
+                },
+            )],
+            locals: vec![("shared".into(), None)],
+            pending: vec![400],
+            join: Some((celox_design::ForkJoin::Any, vec![400])),
+        });
+        process.ready = vec![ProcessRef::Activation(100)];
+        process.reactive = vec![ProcessRef::Kernel("program.status".into())];
+        file.strings.push(b"off-backend".to_vec());
+        bytes.clear();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 3u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+    }
+
+    #[test]
+    fn observed_assertion_queue_round_trips_in_v4() {
+        let mut file = sample();
+        file.schedule.as_mut().unwrap().processes.observed = vec![
+            ProcessRef::Kernel("assertion.status".into()),
+            ProcessRef::Activation(12),
+        ];
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 4u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+    }
+
+    #[test]
+    fn heap_section_round_trips_in_v5() {
+        let mut file = sample();
+        file.next_object = Some(42);
+        file.schedule.as_mut().unwrap().processes = ProcessRecord::default();
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 5u16.to_le_bytes());
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+        file.schedule = None;
         let mut bytes = Vec::new();
         file.write_to(&mut bytes).unwrap();
         assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);

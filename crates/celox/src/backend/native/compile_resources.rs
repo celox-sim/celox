@@ -2,6 +2,62 @@
 
 const MAX_WORKERS: usize = 4;
 
+/// Dispatch in priority order, but return results in stable task-index order.
+/// Each worker owns at most one expanded process and its compilation state.
+pub(super) fn compile_tasks<T: Send>(
+    order: &[usize],
+    workers: usize,
+    compile: impl Fn(usize) -> T + Sync,
+) -> std::thread::Result<Vec<T>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut results = if workers <= 1 || order.len() <= 1 {
+        order
+            .iter()
+            .map(|&index| (index, compile(index)))
+            .collect::<Vec<_>>()
+    } else {
+        let next = AtomicUsize::new(0);
+        std::thread::scope(|scope| {
+            let handles = (0..workers.min(order.len()))
+                .map(|_| {
+                    let next = &next;
+                    let compile = &compile;
+                    scope.spawn(move || {
+                        let mut results = Vec::new();
+                        loop {
+                            let position = next.fetch_add(1, Ordering::Relaxed);
+                            let Some(&index) = order.get(position) else {
+                                break;
+                            };
+                            results.push((index, compile(index)));
+                        }
+                        results
+                    })
+                })
+                .collect::<Vec<_>>();
+            let mut results = Vec::new();
+            let mut panic = None;
+            for handle in handles {
+                match handle.join() {
+                    Ok(completed) => results.extend(completed),
+                    Err(error) => {
+                        if panic.is_none() {
+                            panic = Some(error);
+                        }
+                    }
+                }
+            }
+            if let Some(error) = panic {
+                Err(error)
+            } else {
+                Ok(results)
+            }
+        })?
+    };
+    results.sort_unstable_by_key(|(index, _)| *index);
+    Ok(results.into_iter().map(|(_, result)| result).collect())
+}
+
 pub(super) fn workers(blocks: usize, instructions: usize, tasks: usize) -> usize {
     choose_workers(
         blocks,
@@ -10,6 +66,52 @@ pub(super) fn workers(blocks: usize, instructions: usize, tasks: usize) -> usize
         std::thread::available_parallelism().map_or(1, usize::from),
         available_memory(),
     )
+}
+
+/// One primary circuit and a queue of smaller independent event functions.
+/// Reserve the primary once, rather than charging its size to every worker.
+pub(super) fn workers_with_primary(
+    primary: (usize, usize),
+    secondary: (usize, usize),
+    tasks: usize,
+) -> usize {
+    choose_workers_with_primary(
+        primary,
+        secondary,
+        tasks,
+        std::thread::available_parallelism().map_or(1, usize::from),
+        available_memory(),
+    )
+}
+
+fn choose_workers_with_primary(
+    primary: (usize, usize),
+    secondary: (usize, usize),
+    tasks: usize,
+    cpus: usize,
+    available: Option<u64>,
+) -> usize {
+    let maximum = MAX_WORKERS.min(cpus.max(1)).min(tasks.saturating_add(1));
+    let Some(available) = available else {
+        return choose_workers(
+            primary.0.max(secondary.0),
+            primary.1.max(secondary.1),
+            tasks.saturating_add(1),
+            cpus,
+            None,
+        );
+    };
+    let budget = available - available / 5;
+    let remaining = budget.saturating_sub(estimated_memory(primary.0, primary.1));
+    1 + (remaining / estimated_memory(secondary.0, secondary.1))
+        .min(maximum.saturating_sub(1) as u64) as usize
+}
+
+fn estimated_memory(blocks: usize, instructions: usize) -> u64 {
+    (blocks as u64)
+        .saturating_mul(24 * 1024)
+        .max((instructions as u64).saturating_mul(4096))
+        .max(128 * 1024 * 1024)
 }
 
 fn choose_workers(
@@ -30,10 +132,7 @@ fn choose_workers(
     // eight-hart functions peaked at 6.54 GiB for the entire process tree.
     // Account for straight-line designs too, not only CFG size.
     // These are conservative estimates, not reservations or memory limits.
-    let per_function = (blocks as u64)
-        .saturating_mul(24 * 1024)
-        .max((instructions as u64).saturating_mul(4096))
-        .max(128 * 1024 * 1024);
+    let per_function = estimated_memory(blocks, instructions);
     // Leave room for the running simulator and unrelated host activity.
     let budget = available - available / 5;
     (budget / per_function).min(maximum as u64).max(1) as usize
@@ -153,6 +252,93 @@ mod tests {
     use super::*;
 
     const GIB: u64 = 1024 * 1024 * 1024;
+
+    #[test]
+    fn primary_worker_budget_keeps_capacity_for_smaller_functions() {
+        let primary = (65_536, 1_000_000);
+        let small = (100, 1_000);
+        assert_eq!(
+            choose_workers_with_primary(primary, small, 10, 16, Some(8 * GIB)),
+            4
+        );
+        assert_eq!(
+            choose_workers_with_primary(primary, primary, 10, 16, Some(8 * GIB)),
+            1
+        );
+        assert_eq!(
+            choose_workers_with_primary(primary, small, 10, 16, Some(4 * GIB)),
+            1
+        );
+        assert_eq!(
+            choose_workers_with_primary(primary, small, 0, 16, Some(8 * GIB)),
+            1
+        );
+        assert_eq!(
+            choose_workers_with_primary(primary, small, 10, 2, Some(8 * GIB)),
+            2
+        );
+        assert_eq!(
+            choose_workers_with_primary((120_000, 1), small, 10, 16, None),
+            1
+        );
+        for available in [0, GIB, 4 * GIB, 5 * GIB, 8 * GIB, u64::MAX] {
+            for secondary in [small, primary, (usize::MAX, usize::MAX)] {
+                let workers =
+                    choose_workers_with_primary(primary, secondary, 10, 16, Some(available));
+                assert!((1..=MAX_WORKERS).contains(&workers));
+                if workers > 1 {
+                    let reserved = u128::from(estimated_memory(primary.0, primary.1))
+                        + (workers - 1) as u128
+                            * u128::from(estimated_memory(secondary.0, secondary.1));
+                    assert!(reserved <= u128::from(available - available / 5));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn indexed_tasks_keep_results_ordered_and_bound_active_work() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let order = (0..16).rev().collect::<Vec<_>>();
+        for workers in [1, 2, 4] {
+            let active = AtomicUsize::new(0);
+            let peak = AtomicUsize::new(0);
+            let seen = AtomicUsize::new(0);
+            let results = compile_tasks(&order, workers, |index| {
+                let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(count, Ordering::SeqCst);
+                seen.fetch_or(1 << index, Ordering::SeqCst);
+                std::thread::yield_now();
+                active.fetch_sub(1, Ordering::SeqCst);
+                index * 3
+            })
+            .unwrap();
+            assert_eq!(results, (0..16).map(|index| index * 3).collect::<Vec<_>>());
+            assert_eq!(seen.load(Ordering::SeqCst), (1 << 16) - 1);
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+            assert!(peak.load(Ordering::SeqCst) <= workers);
+        }
+    }
+
+    #[test]
+    fn indexed_tasks_preserve_errors_and_return_worker_panics() {
+        let results = compile_tasks(&[3, 2, 1, 0], 2, |index| {
+            if index == 1 || index == 3 {
+                Err(index)
+            } else {
+                Ok(index)
+            }
+        })
+        .unwrap();
+        assert_eq!(results.into_iter().collect::<Result<Vec<_>, _>>(), Err(1));
+        assert!(
+            compile_tasks(&[0, 1, 2], 2, |index| {
+                assert_ne!(index, 1, "worker panic probe");
+                index
+            })
+            .is_err()
+        );
+    }
 
     #[cfg(target_os = "linux")]
     #[test]

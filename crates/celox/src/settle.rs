@@ -89,7 +89,7 @@ pub(crate) fn run_checked<B, E>(
     let partial = memory(backend).to_vec();
     let state = memory(backend);
     state.copy_from_slice(&before);
-    state[flags.start..flags.end - 1].fill(1);
+    state[flags.start..flags.start + settle.partitions].fill(1);
     run(backend)?;
     let full = memory(backend);
     if let Some(offset) = (celox_state_layout::STATE_HEADER_SIZE..state_end)
@@ -146,6 +146,18 @@ pub(crate) fn instrument_processes_from(program: &mut LaidOutProgram, first: usi
         }
     }
     for unit in sir.processes.iter_mut().skip(first) {
+        marker.instrument(unit);
+    }
+}
+
+/// Apply the same process instrumentation after a deferred native kernel is
+/// expanded. Its reserved process entry contained no stores to instrument.
+#[cfg(feature = "host-runtime")]
+pub(crate) fn instrument_unit(
+    program: &LaidOutProgram,
+    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+) {
+    if let Some(marker) = Marker::new(program.layout(), program.runtime()) {
         marker.instrument(unit);
     }
 }

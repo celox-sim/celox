@@ -7,6 +7,16 @@ mod test_utils;
 // concatenation and does not model X for a missing return value.
 all_backends! {
 
+fn test_conditional_function_static_partial_not_four_state(sim) {
+    @case "function_bodies::test_conditional_function_static_partial_not_four_state";
+}
+
+
+fn test_conditional_function_static_partial_not(sim) {
+    @case "function_bodies::test_conditional_function_static_partial_not";
+}
+
+
 fn test_dynamic_index_write_to_function_local(sim) {
     @case "function_bodies::test_dynamic_index_write_to_function_local";
 }

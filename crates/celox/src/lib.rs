@@ -36,6 +36,8 @@ mod parser;
 pub(crate) mod portable;
 // Builds without the host runtime run every slot in the reference loop.
 #[cfg(feature = "host-runtime")]
+mod clock_aliases;
+#[cfg(feature = "host-runtime")]
 mod scheduler;
 mod settle;
 #[cfg(feature = "host-runtime")]
@@ -113,12 +115,14 @@ mod host_api {
     #[cfg(feature = "cranelift")]
     pub use crate::backend::{EventRef, JitBackend, SharedJitCode};
     pub use crate::backend::{
-        InterpBackend, TieredBackend, TieredExecutionStats, TieredExecutionTier,
-        TieredExecutionTiming, TieredPromotionStatus,
+        InterpBackend, TierTransition, TieredBackend, TieredCompileKind, TieredCompileStage,
+        TieredExecutionStats, TieredExecutionTier, TieredExecutionTiming, TieredPromotionStatus,
     };
     pub use crate::debug::CompilationTraceResult;
     pub use crate::diagnostics::DiagnosticsOptions;
-    pub use crate::simulation::{Simulation, SimulationCheckpoint, SlotObserver};
+    pub use crate::simulation::{
+        CheckpointFileError, Simulation, SimulationCheckpoint, SlotObserver, SourceWaveformState,
+    };
     #[cfg(any(
         target_arch = "x86_64",
         feature = "arm64-codegen",
@@ -195,6 +199,16 @@ mod host_api {
                 wrote: false,
                 finish_requested: false,
             }
+        }
+
+        /// Capture current HDL values without running any simulation regions.
+        /// Use the schema obtained from this simulation before entering the slot.
+        /// This diagnostic file has no schedule and is not a resumable checkpoint.
+        pub fn capture_state(
+            &self,
+            schema: &crate::StateSchema,
+        ) -> Result<crate::StateFile, crate::StateError> {
+            schema.capture(self.io.backend)
         }
 
         /// End the simulation when this observer callback returns, before
@@ -318,3 +332,6 @@ pub use signal_access::SignalAccessOptions;
 
 mod timescale;
 pub use timescale::SvTimescale;
+
+/// Host-injected file I/O and snapshot contracts.
+pub use celox_runtime::file_io_backend::{FileMode, FileSystem, FileSystemFactory, HostFileSystem};

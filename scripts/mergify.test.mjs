@@ -33,6 +33,7 @@ test("all queue categories preserve combined-tree validation and merge protectio
       /max_checks_retries: 0/,
       /checks_timeout: 3 hours/,
       /merge_conditions:\n\s+- check-success = Queue validation\n\s+- check-success = Conventional Commit title/,
+      /check-success = Verify workflow lockfile/,
       /merge_method: merge/,
       /update_method: merge/,
       /title: pr-title\n\s+body: empty\n\s+trailers: \[\]/,
@@ -123,7 +124,7 @@ test("Renovate preserves the manually reviewed compatibility group", () => {
   assert.deepEqual(compatibility.labels, ["dependencies"]);
   assert.equal(
     rules.filter((rule) => rule.labels?.includes("merge-ready")).length,
-    4,
+    3,
   );
   assert.ok(
     rules.indexOf(compatibility) >
@@ -180,7 +181,7 @@ test("PR-policy repairs are independent of Veryl while dependencies and features
 
 test("lightweight queue priority requires actual skipped product checks and successful lint", () => {
   const priority = queueConfig
-    .split("priority_rules:\n")[1]
+    .split("  - name: Lightweight validated changes first\n")[1]
     .split("queue_rules:\n")[0];
   const conditions = [...priority.matchAll(/^      - (.+)$/gm)].map(
     (m) => m[1],
@@ -193,4 +194,38 @@ test("lightweight queue priority requires actual skipped product checks and succ
   assert.match(priority, /priority: high/);
   assert.match(priority, /allow_checks_interruption: false/);
   assert.doesNotMatch(priority, /label =|head ~=|title ~=/);
+});
+
+
+test("emergency labels authorize normal admission and outrank lightweight checks", () => {
+  const priorities = queueConfig.split("priority_rules:\n")[1].split("queue_rules:\n")[0];
+  const emergency = priorities.split("  - name: Priority merges without interruption")[0];
+  assert.match(emergency, /name: Emergency merges first/);
+  assert.match(emergency, /conditions:\n      - label = merge-urgent/);
+  assert.match(emergency, /priority: 10000/);
+  assert.match(emergency, /allow_checks_interruption: true/);
+  const admission = queueConfig.split("pull_request_rules:\n")[1];
+  const authorize = admission.split("  - name: Queue explicitly requested merges")[0];
+  assert.match(authorize, /- or:\n          - label = merge-urgent\n          - label = merge-priority/);
+  assert.match(authorize, /actions:\n      label:\n        add:\n          - merge-ready/);
+  for (const guard of ["-label = release:hold", "-label = dequeued", "-draft", "-conflict"])
+    assert.ok(authorize.includes(`      - ${guard}`), guard);
+  assert.match(authorize, /base ~= \^\(master\|develop\)\$/);
+  assert.match(authorize, /base ~= \^stack\//);
+  assert.match(authorize, /Depends-On:/);
+  assert.doesNotMatch(authorize, /queue:|merge:|remove:/);
+});
+
+
+test("priority requests pass waiting work without interrupting running checks", () => {
+  const rules = queueConfig.split("priority_rules:\n")[1].split("queue_rules:\n")[0]
+    .split(/^  - name: /m).slice(1);
+  assert.equal(rules.length, 3);
+  assert.match(rules[0], /^Emergency merges first/);
+  assert.match(rules[1], /^Priority merges without interruption/);
+  assert.match(rules[1], /conditions:\n      - label = merge-priority/);
+  assert.match(rules[1], /priority: 9000/);
+  assert.match(rules[1], /allow_checks_interruption: false/);
+  assert.doesNotMatch(rules[1], /check-success|check-skipped/);
+  assert.match(rules[2], /^Lightweight validated changes first/);
 });

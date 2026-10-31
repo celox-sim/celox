@@ -88,6 +88,17 @@ pub enum ExprKind {
         expression: ExprId,
         arguments: Vec<Argument>,
     },
+    /// Array manipulation method plus its iterator predicate (IEEE 1800-2023 7.12).
+    /// The method expression retains optional iterator/index arguments.
+    ArrayMethodWith {
+        expression: ExprId,
+        predicate: ExprId,
+    },
+    /// Per-call class constraints (IEEE 1800-2023 18.7).
+    RandomizeWith {
+        expression: ExprId,
+        constraints: Option<Vec<ExprId>>,
+    },
     Parameterized {
         expression: ExprId,
         arguments: Vec<Argument>,
@@ -959,6 +970,14 @@ pub struct VariableDeclaration {
     pub tokens: TokenRange,
 }
 
+/// A named constraint block. Unsupported constraint forms retain their name
+/// but no executable expressions, so randomization cannot silently ignore them.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClassConstraint {
+    pub name: Name,
+    pub expressions: Option<Vec<ExprId>>,
+}
+
 /// A class declaration (IEEE 1800-2023 8.3). Its body also remains an
 /// unconverted body item covering the same tokens.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -975,6 +994,7 @@ pub struct ClassDeclaration {
     pub interfaces: Vec<TypeId>,
     /// Whether the class declares constraints, including prototypes.
     pub has_constraints: bool,
+    pub constraints: Vec<ClassConstraint>,
     /// The parameter port list `#(...)`, after which the parameters the
     /// body declares are local (8.25).
     pub parameter_ports: Option<ParameterDeclarationId>,
@@ -1091,6 +1111,13 @@ pub enum AssertionHeader {
         deferred: Option<AssertionDeferral>,
         tokens: TokenRange,
     },
+    Concurrent {
+        clock: TimingControlId,
+        disable: Option<ExprId>,
+        condition: ExprId,
+        module_item: bool,
+        tokens: TokenRange,
+    },
     /// Concurrent/property/sequence and expect headers retain an explicit
     /// grammar boundary; consumers must not treat them as immediate predicates.
     Unconverted(TokenRange),
@@ -1099,7 +1126,9 @@ pub enum AssertionHeader {
 impl AssertionHeader {
     pub fn tokens(&self) -> TokenRange {
         match self {
-            Self::Immediate { tokens, .. } | Self::Unconverted(tokens) => *tokens,
+            Self::Immediate { tokens, .. }
+            | Self::Concurrent { tokens, .. }
+            | Self::Unconverted(tokens) => *tokens,
         }
     }
 }
@@ -1175,7 +1204,12 @@ pub enum StatementKind {
         failure: Option<StatementId>,
     },
     Disable(TokenRange),
-    EventTrigger(TokenRange),
+    /// `-> e;` or `->> [control] e;` (IEEE 1800-2023 15.5.1).
+    EventTrigger {
+        nonblocking: bool,
+        control: Option<TimingControlId>,
+        target: ExprId,
+    },
     ProceduralRelease(TokenRange),
     Unconverted {
         category: String,

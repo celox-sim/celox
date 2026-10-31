@@ -3,6 +3,24 @@
 use super::*;
 
 sv_backends! {
+    fn class_imported_member_type_dimensions(sim) { @case "class::imported_member_type_dimensions"; }
+    fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
+    fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
+    fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
+    fn class_package_constant_type_arguments(sim) { @case "class::package_constant_type_arguments"; }
+    fn class_named_aggregate_type_arguments(sim) { @case "class::named_aggregate_type_arguments"; }
+    fn class_enumeration_constants_of_classes(sim) { @case "class::enumeration_constants_of_classes"; }
+    fn class_container_type_aliases_of_classes(sim) { @case "class::container_type_aliases_of_classes"; }
+    fn class_members_of_call_results(sim) { @case "class::members_of_call_results"; }
+    fn class_generate_scope_enum_type_arguments(sim) { @case "class::generate_scope_enum_type_arguments"; }
+    fn class_method_ranges_of_scope_declarations(sim) { @case "class::method_ranges_of_scope_declarations"; }
+    fn class_type_alias_members(sim) { @case "class::type_alias_members"; }
+    fn class_type_alias_lexical_scopes(sim) { @case "class::type_alias_lexical_scopes"; }
+    fn constraint_mode_ordinary_struct_members(sim) {
+        @case "class::constraint_mode_ordinary_struct_members";
+    }
+    fn class_type_parameter_imports(sim) { @case "class::type_parameter_imports"; }
+    fn class_type_parameter_shadowing(sim) { @case "class::type_parameter_shadowing"; }
     fn class_objects_properties_and_methods(sim) { @case "class::objects_properties_and_methods"; }
 }
 
@@ -30,6 +48,7 @@ sv_backends! {
     fn class_class_scoped_parameters_and_types(sim) { @case "class::class_scoped_parameters_and_types"; }
     fn class_specializations_of_interface_classes(sim) { @case "class::specializations_of_interface_classes"; }
     fn class_named_constructor_arguments(sim) { @case "class::named_constructor_arguments"; }
+    fn class_named_method_arguments(sim) { @case "class::named_method_arguments"; }
     fn class_typedefs_of_interface_classes(sim) { @case "class::typedefs_of_interface_classes"; }
     fn class_specializations_in_generate_blocks(sim) { @case "class::specializations_in_generate_blocks"; }
     fn class_specializations_keep_their_parameter_scopes(sim) { @case "class::specializations_keep_their_parameter_scopes"; }
@@ -75,6 +94,85 @@ sv_backends! {
         sim.run_until(0).unwrap();
         assert_eq!(sim.get(sim.signal("x")), 2u32.into());
         assert_eq!(sim.get(sim.signal("y")), 1u32.into());
+    }
+
+    fn named_method_arguments_are_evaluated_in_written_order(sim) {
+        @setup {
+            let source = r#"module Top(output int x, output int y);
+                class Point;
+                    int x;
+                    int y;
+                    function void set(int x = 0, int y = 0);
+                        this.x = x;
+                        this.y = y;
+                    endfunction
+                endclass
+                int count;
+                function int next();
+                    count++;
+                    return count;
+                endfunction
+                Point point;
+                initial begin
+                    point = new;
+                    point.set(.y(next()), .x(next()));
+                    x = point.x;
+                    y = point.y;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("order.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("x")), 2u32.into());
+        assert_eq!(sim.get(sim.signal("y")), 1u32.into());
+    }
+
+    // The shape of uvm_factory's `m_matches_type_pair` calls: an
+    // out-of-block method bound by name, with a `null` actual. Out of the
+    // shared cases because Icarus does not support out-of-block methods and
+    // xezim evaluates them wrongly in an instantiated module.
+    fn named_arguments_of_out_of_block_methods(sim) {
+        @setup {
+            let source = r#"module Top(output int hits);
+                class Pair;
+                    string name;
+                    function new(string name);
+                        this.name = name;
+                    endfunction
+                endclass
+                class Factory;
+                    extern protected function bit matches_type_pair(Pair match_type_pair,
+                        Pair requested_type, string requested_type_name);
+                    function int find(Pair pair, string name);
+                        int found = 0;
+                        if (matches_type_pair(.match_type_pair(pair),
+                                              .requested_type(null),
+                                              .requested_type_name(name)))
+                            found += 1;
+                        if (matches_type_pair(.requested_type_name("other"),
+                                              .requested_type(pair),
+                                              .match_type_pair(pair)))
+                            found += 10;
+                        return found;
+                    endfunction
+                endclass
+                function bit Factory::matches_type_pair(Pair match_type_pair,
+                    Pair requested_type, string requested_type_name);
+                    return match_type_pair == requested_type
+                        || match_type_pair.name == requested_type_name;
+                endfunction
+                Factory factory;
+                Pair pair;
+                initial begin
+                    factory = new;
+                    pair = new("x");
+                    hits = factory.find(pair, "x") * 100 + factory.find(pair, "y");
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("factory.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("hits")), 1110u32.into());
     }
 
     fn null_dereferences_are_runtime_errors(sim) {
@@ -167,24 +265,162 @@ sv_backends! {
     }
 }
 
+sv_backends! {
+    fn class_four_state_properties(sim) { @case "class::four_state_properties"; }
+
+    fn four_state_properties_are_two_state_in_two_state_mode(sim) {
+        @setup {
+            let source = r#"module Top(output longint t, output bit [3:0] l, output bit [3:0] k);
+                class C;
+                    time t;
+                    logic [3:0] l;
+                endclass
+                C c;
+                initial begin
+                    c = new;
+                    t = c.t;
+                    l = c.l;
+                    c.l = 4'b1z0x;
+                    k = c.l;
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top")
+            .four_state(false);
+        sim.run_until(0).unwrap();
+        for (name, value) in [("t", 0u8), ("l", 0), ("k", 0b1000)] {
+            let signal = sim.signal(name);
+            assert_eq!(sim.get(signal), BigUint::from(value), "{name}");
+        }
+    }
+}
+
+/// A write of a class property does not wake a process waiting on it, so a
+/// wait whose condition reads one is rejected instead of never waking. The
+/// condition reads it in a method through `this`, through a handle, through
+/// a queue held in a property and through a function.
 #[test]
-fn four_state_properties_are_rejected() {
-    let source = r#"
-        module Top;
-            class C;
-                logic [3:0] x;
+fn waits_on_class_properties_are_unsupported() {
+    let waits = [
+        "wait (m_state >= s);",
+        "wait (other.m_state >= s);",
+        "wait (q.size() != 0);",
+        "wait (reached(s));",
+    ];
+    for wait in waits {
+        let source = format!(
+            "class C;
+                int m_state;
+                int q[$];
+                C other;
+                function bit reached(int s); return m_state >= s; endfunction
+                task wait_for(int s); {wait} $display(\"reached %0d at %0d\", s, $time); endtask
             endclass
-            C c;
-            initial c = new;
-        endmodule
-    "#;
+            module Top;
+                initial begin
+                    automatic C c = new;
+                    c.other = c;
+                    fork
+                        c.wait_for(2);
+                        begin #1 c.m_state = 1; #1 c.m_state = 2; c.q.push_back(1); end
+                    join
+                end
+            endmodule"
+        );
+        for four_state in [false, true] {
+            let builder = || {
+                celox::Simulation::from_sv_sources(
+                    vec![(source.as_str(), Path::new("class.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let errors = [
+                builder().build_native().err(),
+                builder().build_cranelift().err(),
+                builder().build_wasm().err(),
+                builder().build_interpreter().err(),
+            ];
+            for error in errors {
+                let error = error
+                    .unwrap_or_else(|| panic!("{wait} must be rejected"))
+                    .to_string();
+                assert!(error.contains("in a wait condition"), "{wait}: {error}");
+            }
+        }
+    }
+}
+
+/// The default of an argument is read only where a call omits the argument,
+/// so a property-reading default does not reject a wait that supplies it.
+#[test]
+fn waits_read_property_defaults_only_when_omitted() {
+    let source = |call: &str| {
+        format!(
+            "`timescale 1ns/1ns
+            class C; int state; endclass
+            module Top(output int seen);
+                C c;
+                int signal;
+                function automatic bit ready(int x = c.state); return x != 0; endfunction
+                initial begin
+                    c = new;
+                    fork
+                        begin wait ({call}); seen = $time; end
+                        begin #2 signal = 1; end
+                    join
+                end
+            endmodule"
+        )
+    };
+    let supplied = source("ready(signal)");
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(supplied.as_str(), Path::new("class.sv"))], "Top")
+            .build_interpreter()
+            .unwrap();
+    sim.run_until(5).unwrap();
+    let seen = sim.signal("seen");
+    assert_eq!(sim.get(seen), BigUint::from(2u8));
+    let omitted = source("ready()");
     let Err(error) =
-        Simulator::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build_cranelift()
+        celox::Simulation::from_sv_sources(vec![(omitted.as_str(), Path::new("class.sv"))], "Top")
+            .build_interpreter()
     else {
-        panic!("a 4-state class property is unsupported");
+        panic!("a wait reading a property through a default is rejected");
     };
     let error = error.to_string();
-    assert!(error.contains("4-state class property"), "{error}");
+    assert!(error.contains("in a wait condition"), "{error}");
+}
+
+#[test]
+fn randomizing_four_state_properties_is_rejected() {
+    for (body, want) in [
+        (
+            "class C; rand logic [3:0] x; endclass C c; initial begin c = new; void'(c.randomize()); end",
+            "randomization of a 4-state class property",
+        ),
+        (
+            "class C; rand bit [3:0] x; logic [3:0] y; constraint k { x < y; } endclass C c; initial begin c = new; void'(c.randomize()); end",
+            "4-state class property in a constraint",
+        ),
+        (
+            "class C; logic [3:0] x; rand bit [3:0] y; constraint k { y < 5; } endclass C c; initial begin c = new; void'(c.randomize(x)); end",
+            "randomization of a 4-state class property",
+        ),
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        for four_state in [false, true] {
+            let Err(error) =
+                Simulator::from_sv_sources(vec![(&source, Path::new("class.sv"))], "Top")
+                    .four_state(four_state)
+                    .build_cranelift()
+            else {
+                panic!("{want} is unsupported");
+            };
+            let error = error.to_string();
+            assert!(error.contains(want), "{error}");
+        }
+    }
 }
 
 #[test]
@@ -265,8 +501,22 @@ fn incompatible_class_handle_assignments_are_rejected() {
     }
 }
 
+/// The SV frontend is recursive, and one case nests class specializations
+/// 64 deep, so the cases build on a thread with room on its stack (like
+/// suite cases in `suite::run_case`).
 #[test]
 fn misused_parameterized_classes_are_rejected() {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn_scoped(scope, misused_parameterized_classes)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    });
+}
+
+fn misused_parameterized_classes() {
     for (items, want) in [
         (
             "Box #(2) two; Box #(3) three; initial begin three = new; two = three; end",
@@ -301,7 +551,7 @@ fn misused_parameterized_classes_are_rejected() {
         (
             "class Point; function new(int x = 0); endfunction endclass Point p;
              initial p = new(.x(), .x(1));",
-            ["constructor argument passed twice", ""],
+            ["formal `x` is bound twice", "13.5.4"],
         ),
         (
             "Box #(.N(), .N(2)) twice;",
@@ -312,11 +562,11 @@ fn misused_parameterized_classes_are_rejected() {
             ["class `Plain`, which has no parameters", ""],
         ),
         (
-            "typedef enum {A, B} e_t; class Typed #(type T = int); endclass Typed#(e_t) typed;",
+            "class Typed #(type T = int); endclass Typed#(enum {A, B}) typed;",
             ["enumeration type as a class type parameter value", ""],
         ),
         (
-            "typedef struct packed { int x; } s_t; class Typed #(type T = int); endclass Typed#(s_t) typed;",
+            "class Typed #(type T = int); endclass Typed#(struct packed { int x; }) typed;",
             ["struct or union type as a class type parameter value", ""],
         ),
         (
@@ -329,11 +579,10 @@ fn misused_parameterized_classes_are_rejected() {
             ["class `C` declared in a loop generate block", ""],
         ),
         (
-            // The class parameter hides the module's `N`, whose value must
-            // not name `Four#(1)` (#1964 tracks four-state actuals).
-            "localparam int N = 1; class Four #(logic [1:0] N = 0); endclass
-             class Shadow #(logic [1:0] N = 2'bxx); function void make(); Four#(N) four; endfunction endclass
-             Shadow#() shadow;",
+            // A named four-state constant of the module is not yet an
+            // actual (#1964); a class passes its own such parameters on.
+            "localparam logic [1:0] X = 2'bxx; class Four #(logic [1:0] N = 0); endclass
+             Four#(X) four;",
             ["class parameter value that is not constant", ""],
         ),
     ] {
@@ -351,6 +600,48 @@ fn misused_parameterized_classes_are_rejected() {
         };
         let error = error.to_string();
         assert!(want.iter().all(|want| error.contains(want)), "{error}");
+    }
+}
+
+/// Calls whose actuals cannot be bound to the formals are compile errors
+/// (IEEE 1800-2023 13.5.3, 13.5.4), for methods as for other subroutines.
+#[test]
+fn unbindable_call_arguments_are_rejected() {
+    for (call, want) in [
+        ("c.f(.a(1), .a(2))", "formal `a` is bound twice"),
+        ("c.f(1, .a(2))", "formal `a` is bound twice"),
+        ("c.f(.q(1))", "no formal named `q`"),
+        ("c.f(.b(1), 3)", "a positional actual after a named one"),
+        ("c.f(1, 2, 3)", "3 actuals for 2 formals"),
+        ("c.f(.b(1))", "formal `a` has no default"),
+        ("c.f(, 1)", "formal `a` has no default"),
+        ("c.f(.a(), .b(1))", "formal `a` has no default"),
+        ("C::s(.z(1))", "no formal named `z`"),
+        ("f(.a(1), .a(2))", "formal `a` is bound twice"),
+        ("f(.z(1))", "no formal named `z`"),
+        ("f(.b(1), 2)", "a positional actual after a named one"),
+        ("f(.b(1))", "formal `a` has no default"),
+        ("f(1, 2, 3)", "3 actuals for 2 formals"),
+    ] {
+        let source = format!(
+            "module Top;
+                class C;
+                    function int f(int a, int b = 2); return a + b; endfunction
+                    static function int s(int a = 1); return a; endfunction
+                endclass
+                function automatic int f(int a, int b = 2); return a + b; endfunction
+                C c = new;
+                initial $display(\"%0d\", {call});
+            endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(source.as_str(), Path::new("call.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("`{call}` is accepted");
+        };
+        let error = error.to_string();
+        assert!(error.contains(want), "{call}: {error}");
     }
 }
 
@@ -381,7 +672,7 @@ sv_backends! {
 }
 
 sv_backends! {
-    fn class_randomize_rejects_dynamic_base_handle(sim) {
+    fn class_randomize_rejects_unsupported_dynamic_constraints(sim) {
         @setup {
             let source = r#"module Top(output int value, hooks, result);
                 class Base;
@@ -391,7 +682,7 @@ sv_backends! {
                     function void post_randomize(); calls++; endfunction
                 endclass
                 class Derived extends Base;
-                    constraint c { x == 1; }
+                    constraint c { x dist {1 := 2}; }
                 endclass
                 Base b;
                 Derived d;
@@ -580,19 +871,53 @@ fn classes_of_packages_in_other_sources_are_used_through_their_layouts() {
 }
 
 #[test]
-fn specializations_of_classes_of_other_scopes_are_rejected() {
-    let source = "package p; class Box #(int N = 2); endclass endpackage
-        module Top; import p::*; Box #(3) box; endmodule";
-    let Err(error) =
-        celox::Simulation::from_sv_sources(vec![(source, Path::new("class.sv"))], "Top").build()
-    else {
-        panic!("`{source}` is rejected");
-    };
-    let error = error.to_string();
-    assert!(
-        error.contains("outside the scope that declares it"),
-        "{error}"
-    );
+fn compilation_unit_types_of_separate_files_specialize_package_classes_separately() {
+    // Celox makes each source file a compilation unit of its own (IEEE
+    // 1800-2023 3.12.1 lets a tool choose this), so the same typedef in two
+    // files names two types and two specializations of `p::Counter`.
+    let package = "`timescale 1ns/1ns
+    package p;
+        class Counter #(type T = int);
+            static int count;
+            function new(); count++; endfunction
+        endclass
+    endpackage";
+    let a = "`timescale 1ns/1ns
+    typedef enum {A0, A1} E;
+    module A(output int n);
+        initial begin
+            automatic p::Counter#(E) c = new();
+            #1 n = p::Counter#(E)::count;
+        end
+    endmodule";
+    let b = "`timescale 1ns/1ns
+    typedef enum {B0, B1} E;
+    module B(output int n);
+        initial begin
+            automatic p::Counter#(E) c = new();
+            automatic p::Counter#(E) d = new();
+            #1 n = p::Counter#(E)::count;
+        end
+    endmodule";
+    let top = "`timescale 1ns/1ns
+    module Top(output int a, output int b);
+        A ua(.n(a));
+        B ub(.n(b));
+    endmodule";
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![
+            (package, Path::new("package.sv")),
+            (a, Path::new("a.sv")),
+            (b, Path::new("b.sv")),
+            (top, Path::new("top.sv")),
+        ],
+        "Top",
+    )
+    .build()
+    .unwrap();
+    sim.run_until(1).unwrap();
+    assert_eq!(sim.get(sim.signal("a")), 1u32.into());
+    assert_eq!(sim.get(sim.signal("b")), 2u32.into());
 }
 
 #[test]
@@ -921,5 +1246,291 @@ sv_backends! {
         sim.restore(&saved).unwrap();
         sim.run_until(15).unwrap();
         assert_eq!(sim.get_four_state(value), expected);
+    }
+}
+
+sv_backends! {
+    fn constrained_randomize_scalar(sim) { @case "class::constrained_randomize_scalar"; }
+    fn constrained_randomize_width_and_inheritance(sim) { @case "class::constrained_randomize_width_and_inheritance"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_hooks(sim) { @case "class::constrained_randomize_hooks"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inside(sim) { @case "class::constrained_randomize_inside"; }
+    fn constrained_randomize_inside_widths(sim) { @case "class::constrained_randomize_inside_widths"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_conditionals(sim) { @case "class::constrained_randomize_conditionals"; }
+    fn constrained_randomize_nested_guards(sim) { @case "class::constrained_randomize_nested_guards"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline(sim) { @case "class::constrained_randomize_inline"; }
+    fn constrained_randomize_inline_inheritance(sim) { @case "class::constrained_randomize_inline_inheritance"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_basic(sim) { @case "class::constrained_randomize_inline_basic"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_package_instances(sim) { @case "class::constrained_randomize_inline_package_instances"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_inputs(sim) { @case "class::constrained_randomize_inline_inputs"; }
+    fn constrained_randomize_inline_input_methods(sim) { @case "class::constrained_randomize_inline_input_methods"; }
+}
+
+sv_backends! {
+    fn constrained_randomize_inline_input_hooks(sim) { @case "class::constrained_randomize_inline_input_hooks"; }
+}
+
+sv_backends! {
+    fn constraint_mode_basic(sim) { @case "class::constraint_mode_basic"; }
+    fn constraint_mode_inheritance(sim) { @case "class::constraint_mode_inheritance"; }
+    fn constraint_mode_hooks(sim) { @case "class::constraint_mode_hooks"; }
+}
+
+sv_backends! {
+    fn constraint_mode_checkpoint(sim) {
+        @setup { let source = r#"
+            module Top(input bit enable, output int mode, output bit [3:0] value);
+                timeunit 1ps / 1ps;
+                class C;
+                    rand bit [3:0] x;
+                    constraint c { x == 2; }
+                endclass
+                C p;
+                initial begin
+                    p = new;
+                    p.constraint_mode(0);
+                    #10 if (enable) p.c.constraint_mode(1);
+                    #10;
+                    mode = p.c.constraint_mode();
+                    if (mode) begin
+                        if (!p.randomize()) $fatal(1, "enabled solve");
+                    end else begin
+                        if (!(p.randomize() with { x == 7; })) $fatal(1, "restored solve");
+                    end
+                    value = p.x;
+                end
+            endmodule
+        "#; }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("constraint_mode_checkpoint.sv"))], "Top").four_state(true);
+        sim.run_until(5).unwrap();
+        let saved = sim.checkpoint().unwrap();
+        let enable = sim.signal("enable");
+        sim.modify(|io| io.set(enable, 1u8)).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(sim.signal("mode")), 1u8.into());
+        assert_eq!(sim.get(sim.signal("value")), 2u8.into());
+        sim.restore(&saved).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(sim.signal("mode")), 0u8.into());
+        assert_eq!(sim.get(sim.signal("value")), 7u8.into());
+    }
+}
+
+sv_backends! {
+    fn constraint_mode_base_dispatch(sim) { @case "class::constraint_mode_base_dispatch"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_static_state_across_modules(sim) { @case "class::foreign_generic_static_state_across_modules"; }
+    fn class_foreign_generic_unit_type_constructor(sim) { @case "class::foreign_generic_unit_type_constructor"; }
+    fn class_foreign_generic_static_handle_identity(sim) { @case "class::foreign_generic_static_handle_identity"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_declaration_scope_and_equivalent_defaults(sim) { @case "class::foreign_generic_declaration_scope_and_equivalent_defaults"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_multiple_user_classes(sim) { @case "class::foreign_generic_multiple_user_classes"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_nominal_and_nested_types(sim) { @case "class::foreign_generic_nominal_and_nested_types"; }
+}
+
+#[test]
+fn foreign_generic_native_images_and_checkpoints_preserve_shared_handles() {
+    let source = r#"`timescale 1ps/1ps
+        package p;
+            class Slot #(type T);
+                static T saved;
+                static function void put(T object); saved=object; endfunction
+            endclass
+        endpackage
+        class Item;
+            int value;
+            function new(); value=7; endfunction
+        endclass
+        module Writer;
+            Item object;
+            initial begin
+                object=new(); p::Slot#(Item)::put(object);
+                #10; object.value=21;
+                #10; object.value++;
+            end
+        endmodule
+        module Reader(output int value);
+            initial begin
+                #15; value=p::Slot#(Item)::saved.value;
+                #10; value=p::Slot#(Item)::saved.value;
+            end
+        endmodule
+        module Top(output int value);
+            Writer writer(); Reader reader(value);
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let builder = || {
+            celox::Simulation::from_sv_sources(
+                vec![(source, Path::new("foreign_checkpoint.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+        };
+        let mut interpreted = builder().build_interpreter().unwrap();
+        interpreted.run_until(30).unwrap();
+        assert_eq!(
+            interpreted.get(interpreted.signal("value")),
+            BigUint::from(22u8)
+        );
+        let image = builder().compile_native().unwrap().into_program_image();
+        let image =
+            celox::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let mut sim = celox::Simulation::from_sv_sources(Vec::new(), "Top")
+            .build_native_from_image(image)
+            .unwrap();
+        sim.run_until(15).unwrap();
+        let value = sim.signal("value");
+        assert_eq!(sim.get(value), BigUint::from(21u8));
+        let bytes = sim.checkpoint().unwrap().to_bytes().unwrap();
+        // SAFETY: bytes were created by this simulator.
+        let checkpoint = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
+        sim.run_until(30).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(22u8));
+        sim.restore(&checkpoint).unwrap();
+        sim.run_until(30).unwrap();
+        assert_eq!(sim.get(value), BigUint::from(22u8));
+    }
+}
+
+// This API chooses one compilation unit per source file (3.12.1).
+sv_backends! {
+    fn foreign_generic_distinct_unit_classes(sim) {
+        @setup { let sources = vec![
+            (r#"
+package p;
+ class Registry #(type T);
+  static int count=0;
+  static function T create(); T object; object=new(); count++; return object; endfunction
+ endclass
+endpackage"#, Path::new("registry.sv")),
+            (r#"
+import p::*;
+class User;
+ int value;
+ function new(); value=42; endfunction
+ typedef Registry#(User) type_id;
+endclass
+module First(output int result, count);
+ User object;
+ initial begin object=User::type_id::create(); result=object.value; count=User::type_id::count; end
+endmodule"#, Path::new("first.sv")),
+            (r#"
+import p::*;
+class User;
+ int padding;
+ int value;
+ function new(); padding=99; value=73; endfunction
+ typedef Registry#(User) type_id;
+endclass
+module Second(output int result, count);
+ User object;
+ initial begin object=User::type_id::create(); result=object.value; count=User::type_id::count; end
+endmodule"#, Path::new("second.sv")),
+            (r#"
+module Top(output int first, second, first_count, second_count);
+ First a(first, first_count); Second b(second, second_count);
+endmodule"#, Path::new("top.sv")),
+        ]; }
+        @build celox::Simulation::from_sv_sources(sources, "Top");
+        sim.run_until(0).unwrap();
+        for (name, expected) in [("first", 42u32), ("second", 73), ("first_count", 1), ("second_count", 1)] {
+            assert_eq!(sim.get(sim.signal(name)), BigUint::from(expected), "{name}");
+        }
+    }
+}
+
+sv_backends! {
+    fn class_foreign_generic_inherited_constants(sim) { @case "class::foreign_generic_inherited_constants"; }
+}
+
+sv_backends! {
+    fn class_foreign_generic_constructor_lexical_scope(sim) { @case "class::foreign_generic_constructor_lexical_scope"; }
+    fn class_foreign_generic_package_type_static_storage(sim) { @case "class::foreign_generic_package_type_static_storage"; }
+    fn class_foreign_generic_template_of_the_named_package(sim) { @case "class::foreign_generic_template_of_the_named_package"; }
+    fn class_foreign_generic_in_a_module_with_interface_instances(sim) { @case "class::foreign_generic_in_a_module_with_interface_instances"; }
+}
+
+sv_backends! {
+    fn class_scoped_typedef_handles(sim) { @case "class::scoped_typedef_handles"; }
+    fn class_parameter_strings_wider_than_a_constant(sim) { @case "class::parameter_strings_wider_than_a_constant"; }
+    fn class_new_initializers_of_scoped_and_alias_types(sim) { @case "class::new_initializers_of_scoped_and_alias_types"; }
+    fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
+}
+
+sv_backends! {
+    // A class parameter hides the module's constant of its name also in a
+    // static call that passes it on by name (8.25).
+    fn class_parameter_literals_hide_module_constants_in_static_calls(sim) {
+        @setup {
+            let source = r#"module Top(output int ok);
+                localparam string S = "module";
+                class Name #(string S = "x");
+                    static function string get(); return S; endfunction
+                endclass
+                class Shadow #(string S = "x");
+                    function string s(); return Name#(S)::get(); endfunction
+                endclass
+                Shadow #("a_name_longer_than_sixteen") shadow = new;
+                initial ok = shadow.s() == "a_name_longer_than_sixteen";
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("shadow.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("ok")), 1u32.into());
+    }
+
+    // A method's return type may name a method of a class declared after it,
+    // which declaration-time queries see (8.25).
+    fn class_signatures_naming_later_classes(sim) {
+        @setup {
+            let source = r#"package p;
+                class A;
+                    static function bit [$bits(B::g())-1:0] f(); return 0; endfunction
+                endclass
+                class B;
+                    static function bit [11:0] g(); return 0; endfunction
+                endclass
+                localparam int W = $bits(A::f());
+            endpackage
+            module Top(output int width);
+                import p::*;
+                assign width = W;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("signatures.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("width")), 12u32.into());
     }
 }

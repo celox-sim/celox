@@ -4,6 +4,7 @@ import { readFileSync, mkdtempSync, writeFileSync, chmodSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { workspaceFeatures } from "./run-vtest.mjs";
 
 const workflow = readFileSync(
   new URL("../.github/workflows/ci.yml", import.meta.url),
@@ -23,7 +24,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   assert.match(gate, /if: \$\{\{ !cancelled\(\)/);
   assert.match(
     gate,
-    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, arm64-backend, napi-linux, napi-wasm, external-suites\]/,
+    /needs: \[changes, rust-tests, rust-default-tests, sv-tests, sv-tests-shard, arm64-backend, napi-linux, napi-wasm\]/,
   );
   assert.match(
     gate,
@@ -31,7 +32,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   );
   assert.match(
     gate,
-    /ARM64_REQUIRED: \$\{\{ needs\.changes\.outputs\.queue != 'false' && needs\.changes\.outputs\.rust != 'false' \}\}/,
+    /ARM64_REQUIRED: \$\{\{ needs\.changes\.outputs\.full_validation != 'false' && needs\.changes\.outputs\.rust != 'false' \}\}/,
   );
   assert.match(gate, /ARM64_RESULT: \$\{\{ needs\.arm64-backend\.result \}\}/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
@@ -43,13 +44,13 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     DEFAULT_RESULT: "success",
     SV_TESTS_REQUIRED: "true",
     SV_TESTS_RESULT: "success",
+    SV_TESTS_SHARDS_RESULT: "success",
     ARM64_REQUIRED: "true",
     ARM64_RESULT: "success",
     NAPI_REQUIRED: "true",
     NATIVE_RESULT: "success",
+    WASM_REQUIRED: "true",
     WASM_RESULT: "success",
-    RELEASE_REQUIRED: "false",
-    EXTERNAL_RESULT: "skipped",
   };
   const cases = [
     { env: { ...success, DEFAULT_REQUIRED: "false", DEFAULT_RESULT: "skipped" }, passes: true },
@@ -76,6 +77,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
     "RUST_RESULT",
     "DEFAULT_RESULT",
     "SV_TESTS_RESULT",
+    "SV_TESTS_SHARDS_RESULT",
     "ARM64_RESULT",
     "NATIVE_RESULT",
     "WASM_RESULT",
@@ -109,6 +111,13 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   });
   assert.match(gate, /SV_TESTS_REQUIRED: .*outputs\.rust != 'false' && needs\.changes\.outputs\.rust_sv_tests != 'false'/);
   assert.match(job("sv-tests"), /outputs\.rust == 'true' && needs\.changes\.outputs\.rust_sv_tests != 'false'/);
+  // A shard that fails fails the gate even when the driver job succeeded.
+  for (const status of ["failure", "cancelled", "skipped", ""]) {
+    cases.push({
+      env: { ...success, SV_TESTS_REQUIRED: "false", SV_TESTS_SHARDS_RESULT: status },
+      passes: false,
+    });
+  }
   // Only non-Rust changes may skip ARM64; other results fail closed.
   for (const status of ["success", "skipped", "failure", "cancelled", ""]) {
     cases.push({
@@ -123,6 +132,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   const rustOnly = {
     ...success,
     NAPI_REQUIRED: "false",
+    WASM_REQUIRED: "false",
     NATIVE_RESULT: "skipped",
     WASM_RESULT: "skipped",
   };
@@ -144,21 +154,6 @@ test("the required gate rejects failures and only accepts explicitly optional sk
       passes: false,
     });
   }
-  // A merge group that cuts a release must pass every external comparison.
-  const release = {
-    ...success,
-    RELEASE_REQUIRED: "true",
-    EXTERNAL_RESULT: "success",
-  };
-  cases.push({ env: release, passes: true });
-  for (const status of ["failure", "cancelled", "skipped", ""]) {
-    cases.push({ env: { ...release, EXTERNAL_RESULT: status }, passes: false });
-  }
-  // Full runs report comparison failures through an issue, not this gate.
-  for (const status of ["success", "failure", "cancelled", ""]) {
-    cases.push({ env: { ...success, EXTERNAL_RESULT: status }, passes: true });
-  }
-  cases.push({ env: { ...success, RELEASE_REQUIRED: "" }, passes: false });
   for (const { env, passes } of cases) {
     const result = spawnSync("bash", ["-e", "-c", script], {
       env: { ...process.env, ...env },
@@ -169,7 +164,7 @@ test("the required gate rejects failures and only accepts explicitly optional sk
   }
 });
 
-test("scheduled and manual validation run all paths and external suites", () => {
+test("external comparisons run independently of product validation", () => {
   assert.match(
     workflow,
     /schedule:\n    - cron: "17 1 \* \* \*"\n  workflow_dispatch:/,
@@ -180,20 +175,12 @@ test("scheduled and manual validation run all paths and external suites", () => 
   );
   assert.match(job("changes"), /STABLE_LANE: .*github\.ref_name == 'master'/);
   assert.match(job("lint"), /VERYL_LANE: .*github\.ref_name == 'develop'/);
-  const external = job("external-suites");
-  assert.match(external, /needs: changes\n/);
-  assert.match(
-    external,
-    /if: \$\{\{ !cancelled\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch' \|\| needs\.changes\.outputs\.release == 'true'\)/,
-  );
-  assert.match(
-    job("changes"),
-    /release: \$\{\{ steps\.classify\.outputs\.release \}\}/,
-  );
-  assert.match(
-    job("changes"),
-    /MERGE_GROUP_BASE_REF: .*github\.event\.merge_group\.base_ref.*github\.base_ref/,
-  );
+  const external = readFileSync(new URL("../.github/workflows/external-comparisons.yml", import.meta.url), "utf8");
+  assert.doesNotMatch(workflow, /external-suites|EXTERNAL_RESULT|RELEASE_REQUIRED/);
+  assert.match(external, /schedule:/);
+  assert.match(external, /workflow_dispatch:/);
+  assert.doesNotMatch(external, /workflow_call:|pull_request:|push:/);
+  assert.match(external, /REPORT_NAME: External simulator comparisons/);
   assert.match(job("changes"), /RELEASE_PLEASE_PR: .*github\.event\.pull_request\.head\.repo\.full_name == github\.repository/);
   assert.match(job("changes"), /QUEUE_VALIDATION: .*startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\)/);
   assert.match(external, /fail-fast: false/);
@@ -254,17 +241,17 @@ test("Rust changes validate dependency exclusions even when script jobs are omit
   );
 });
 
-test("queue CI retains the whole workspace and ordinary PRs use scoped tests", () => {
+test("full validation retains the whole workspace; the queue uses bounded integration tests", () => {
   const rust = job("rust-tests");
   assert.match(job("changes"), /QUEUE_VALIDATION: .*startsWith\(github\.head_ref, 'mergify\/merge-queue\/'\)/);
   // Anything but an explicit scope, including a failed detection, runs all.
   assert.match(
     rust,
-    /name: Run workspace tests with CI features\n        id: workspace-tests\n        if: needs\.changes\.outputs\.rust_full != 'false'\n/,
+    /name: Run workspace tests with CI features\n        id: workspace-tests\n        if: needs\.changes\.outputs\.fast_queue != 'true' && \(needs\.changes\.outputs\.rust_full != 'false'\)\n/,
   );
   assert.match(
     rust,
-    /name: Run the tests this pull request can affect\n        id: scoped-tests\n        if: needs\.changes\.outputs\.rust_full == 'false' && /,
+    /name: Run the tests this pull request can affect\n        id: scoped-tests\n        if: needs\.changes\.outputs\.fast_queue != 'true' && \(needs\.changes\.outputs\.rust_full == 'false' && /,
   );
   assert.match(
     job("changes"),
@@ -287,14 +274,14 @@ test("artifact consumers wait for their producer rather than the Rust test gate"
   assert.match(browser, /name: napi-wasm32-wasi/);
 });
 
-test("landed commits are not re-validated by a push run", () => {
+test("master pushes do not compete with the queue for full-matrix runners", () => {
   const triggers = workflow.match(/^on:\n([\s\S]*?)\n\S/m)[1];
   assert.doesNotMatch(triggers, /^\s+push:/m);
   assert.match(triggers, /^\s+merge_group:/m);
   assert.match(triggers, /^\s+schedule:/m);
 });
 
-test("platform jobs are deferred to queue validation", () => {
+test("platform jobs are deferred to full validation", () => {
   const platform = [
     "arm64-backend",
     "napi-windows",
@@ -302,7 +289,7 @@ test("platform jobs are deferred to queue validation", () => {
     "js-windows",
   ];
   for (const name of platform) {
-    assert.match(job(name), /\n    if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.queue != 'false' && \(/, name);
+    assert.match(job(name), /\n    if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.full_validation != 'false' && \(/, name);
   }
   // Linux jobs still give pull requests their feedback.
   for (const name of [
@@ -333,7 +320,7 @@ test("full runs on long-lived branches report every job's result", () => {
   assert.deepEqual([...needs].sort(), [...jobs].sort());
   assert.match(
     report,
-    /if: \$\{\{ !cancelled\(\) && \(github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\) && \(github\.ref_name == 'master' \|\| github\.ref_name == 'develop'\)/,
+    /if: \$\{\{ !cancelled\(\) && inputs\.validation_ref == '' && \(github\.event_name == 'push' \|\| github\.event_name == 'schedule' \|\| github\.event_name == 'workflow_dispatch'\) && \(github\.ref_name == 'master' \|\| github\.ref_name == 'develop'\)/,
   );
   assert.match(report, /issues: write/);
   assert.match(report, /NEEDS: \$\{\{ toJSON\(needs\) \}\}/);
@@ -341,11 +328,13 @@ test("full runs on long-lived branches report every job's result", () => {
 });
 
 test("queue validation rejects missing coverage, producer failures and detection failure", () => {
+  assert.match(job("workflow-lockfile"), /uses: \.\/\.github\/workflows\/verify-lockfile\.yml/);
   const gate = job("queue-validation");
+  assert.match(gate, /needs: \[changes, workflow-lockfile,/);
   assert.match(gate, /if: \$\{\{ !cancelled\(\) && needs\.changes\.outputs\.queue != 'false'/);
   const script = gate.match(/        run: \|\n([\s\S]*)/)[1];
-  const needs = Object.fromEntries(["lint", "rust", "napi-windows", "napi-linux-arm64", "js-ubuntu", "js-windows", "playground-browser", "docs"].map(name => [name, { result: "success" }]));
-  needs.changes = { result: "success", outputs: { queue: "true", rust: "true", napi: "true", napi_arm64: "true", javascript: "true", scripts: "true", docs: "true" } };
+  const needs = Object.fromEntries(["workflow-lockfile", "lint", "rust", "napi-windows", "napi-linux-arm64", "js-ubuntu", "js-windows", "playground-browser", "docs"].map(name => [name, { result: "success" }]));
+  needs.changes = { result: "success", outputs: { queue: "true", full_validation: "true", fast_queue: "false", rust: "true", napi: "true", napi_arm64: "true", javascript: "true", scripts: "true", docs: "true" } };
   const passes = (value) => spawnSync("bash", ["-e", "-c", script], { env: { ...process.env, NEEDS: JSON.stringify(value) } }).status === 0;
   assert.equal(passes(needs), true);
   for (const name of Object.keys(needs)) {
@@ -359,9 +348,14 @@ test("queue validation rejects missing coverage, producer failures and detection
     assert.equal(passes(light), false);
   }
   const docs = structuredClone(needs);
-  for (const name of Object.keys(docs)) if (!["changes", "docs"].includes(name)) docs[name].result = "skipped";
+  for (const name of Object.keys(docs)) if (!["changes", "workflow-lockfile", "docs"].includes(name)) docs[name].result = "skipped";
   for (const flag of ["rust", "napi", "napi_arm64", "javascript", "scripts"]) docs.changes.outputs[flag] = "false";
   assert.equal(passes(docs), true);
+  const missingLockfile = structuredClone(docs);
+  delete missingLockfile["workflow-lockfile"];
+  assert.equal(passes(missingLockfile), false);
+  docs["workflow-lockfile"].result = "skipped";
+  assert.equal(passes(docs), false);
 });
 
 test("PR caches cannot evict the shared default-branch Rust caches", () => {
@@ -390,18 +384,18 @@ test("cache warming shares the Rust Tests key and builds without running tests",
   assert.match(warm, /cancel-in-progress: false/);
   assert.doesNotMatch(
     warm,
-    /pull_request:|cargo nextest run|shared-key:/,
+    /pull_request:|cargo nextest run/,
   );
   assert.match(warm, /steps.cache.outputs.cache-hit != 'true'/);
   for (const text of [warm, job("rust-tests")]) {
-    assert.match(text, /key: vtest-v1/);
+    assert.match(text, /key: vtest-\$\{\{ hashFiles\('scripts\/run-vtest\.mjs'\) \}\}/);
     assert.match(text, /run: node scripts\/run-vtest.mjs --prepare-ci/);
   }
   assert.match(warm, /name: Build the optimized vtest executor to populate dependencies\n        if: steps.cache.outputs.cache-hit != 'true'/);
   assert.match(warm, /"scripts\/run-vtest.mjs"/);
   assert.match(
     warm,
-    /cargo nextest list --locked --workspace --exclude 'lydite\*' --message-format json/,
+    /cargo nextest list --locked --workspace --exclude 'lydite\*' --cargo-profile vtest --message-format json/,
   );
   const features = job("rust-tests").match(/--features (\S+)/)[1];
   assert.ok(warm.includes(`--features ${features}`));
@@ -442,7 +436,7 @@ test("scoped Cargo commands build only the selected integration targets", () => 
     TARGETS: "flip_flop systemverilog", FILTER: "binary_id(celox::flip_flop) | binary_id(celox::systemverilog)",
   };
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", env), [
-    "nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
+    "nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
     "-p", "celox", "--features", "celox/systemverilog,celox-test-suite/runtime-cases",
     "--test", "flip_flop", "--test", "systemverilog", "-E", env.FILTER,
   ]);
@@ -462,14 +456,14 @@ test("CI prepares one executor for full runs and scopes containing Celox", () =>
   const rust = job("rust-tests");
   const step = rust.split("      - name: Build the optimized vtest executor\n")[1]
     .split("\n      #")[0];
-  assert.match(step, /if: needs.changes.outputs.rust_full != 'false' \|\| contains\(format\(' \{0\} ', needs.changes.outputs.rust_packages\), ' celox '\)/);
+  assert.match(step, /if: needs.changes.outputs.fast_queue != 'true' && \(needs.changes.outputs.rust_full != 'false' \|\| contains\(format\(' \{0\} ', needs.changes.outputs.rust_packages\), ' celox '\)/);
   assert.match(step, /run: node scripts\/run-vtest.mjs --prepare-ci/);
   assert.ok(rust.indexOf("Build the optimized vtest executor") < rust.indexOf("Run workspace tests"));
   assert.match(rust, /cargo nextest run[^\n]*\n[^\n]*celox-test-suite\/runtime-cases/);
   assert.deepEqual(cargoArguments("rust-tests", "Run the tests this pull request can affect", {
     PACKAGES: "celox-heap", FEATURES: "", TARGETS: "", FILTER: "package(celox-heap)",
     CELOX_VTEST_RUNNER: "",
-  }), ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass",
+  }), ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest", "--no-tests=pass",
     "-p", "celox-heap", "-E", "package(celox-heap)"]);
 });
 
@@ -510,7 +504,7 @@ test("cocotb reuses the original scoped Cargo build", () => {
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", {
     RUST_FULL: "false", BUILDS: JSON.stringify(builds),
   });
-  assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci",
+  assert.deepEqual(args, ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", "vtest",
     "-p", "celox", "-p", "celox-vpi", "-p", "celox-test-suite", "--features",
     "celox/systemverilog,celox-test-suite/icarus,celox-test-suite/runtime-cases",
     "-E", 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)', "--run-ignored", "only"]);
@@ -520,7 +514,7 @@ test("full cocotb runs reuse the workspace build and report failures before uplo
   const rust = job("rust-tests");
   const full = rust.match(/run: >-\n\s+(cargo nextest run[^\n]*)\n\s+(--features [^\n]*)/);
   assert.ok(full);
-  const original = `${full[1]} ${full[2]}`.replaceAll("'", "").split(/\s+/).slice(1);
+  const original = `${full[1]} ${full[2]}`.replace(' -E "$CELOX_BACKEND_FILTER"', "").replaceAll("'", "").split(/\s+/).slice(1);
   const args = cargoArguments("rust-tests", "Run cocotb VPI end-to-end test", { RUST_FULL: "true" });
   assert.deepEqual(args.slice(0, -4), original);
   assert.ok(rust.indexOf("Collect Rust test reports") < rust.indexOf("Run cocotb VPI end-to-end test"));
@@ -542,9 +536,17 @@ test("default-feature validation is parallel and mandatory when selected", () =>
   assert.match(job("report-full-validation"), /rust-default-tests,/);
 });
 
-test("CI retains the normal test profile and warms each platform's cache", () => {
+test("CI builds tests with the executor's profile and warms each platform's cache", () => {
   const rust = job("rust-tests");
-  assert.doesNotMatch(rust, /--cargo-profile/);
+  assert.match(rust, /--profile ci --cargo-profile vtest -E "\$CELOX_BACKEND_FILTER"/);
+  // The executor build shares the test build's packages and features.
+  assert.match(rust, /CELOX_RUST_FULL: \$\{\{ needs\.changes\.outputs\.rust_full \}\}\n          BUILDS: \$\{\{ needs\.changes\.outputs\.rust_builds \}\}\n        run: node scripts\/run-vtest\.mjs --prepare-ci/);
+  const full = rust.match(/--cargo-profile vtest -E "\$CELOX_BACKEND_FILTER"\n          --features (\S+)/);
+  assert.equal(full?.[1], workspaceFeatures);
+  // Documentation tests reuse the libraries of that build.
+  assert.match(rust, /cargo test --locked --workspace --exclude 'lydite\*' --doc --profile vtest\n          --features (\S+)/);
+  assert.equal(rust.match(/--doc --profile vtest\n          --features (\S+)/)?.[1], workspaceFeatures);
+  assert.match(rust, /cargo test --locked --doc --profile vtest "\$\{args\[@\]\}"/);
   assert.match(rust, /cargo test --locked --workspace/);
   const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
   const windows = warm.split("  napi-windows:")[1];
@@ -561,7 +563,7 @@ test("full Clippy validation excludes the disabled bridge", () => {
 
 test("upstream SV TB runs on full CI and feeds failure reporting", () => {
   const upstream = job("common-cells");
-  assert.match(upstream, /github.event_name == 'schedule' \|\| github.event_name == 'workflow_dispatch'/);
+  assert.match(upstream, /needs.changes.outputs.full_validation == 'true'/);
   assert.doesNotMatch(upstream, /continue-on-error/);
   assert.match(upstream, /conformance\/common-cells\/revision/);
   assert.match(upstream, /cargo build --locked -p celox-vpi --features systemverilog --bin celox/);
@@ -572,9 +574,127 @@ test("upstream SV TB runs on full CI and feeds failure reporting", () => {
 });
 
 
+test("sv-tests shards reuse one driver and together cover every case", () => {
+  const driver = job("sv-tests");
+  assert.match(driver, /cargo build --locked --release -p celox --features systemverilog --example sv_tests/);
+  assert.match(driver, /name: sv-tests-driver/);
+  const shard = job("sv-tests-shard");
+  assert.match(shard, /needs: \[changes, sv-tests\]/);
+  assert.match(shard, /if: \$\{\{ !cancelled\(\) && needs\.sv-tests\.result == 'success' \}\}/);
+  assert.doesNotMatch(shard, /cargo |rust-cache/);
+  const count = shard.match(/shard: \[([\d, ]+)\]/)[1].split(",").map(Number);
+  assert.deepEqual(count, count.map((_, index) => index + 1));
+  assert.match(shard, new RegExp(`--shard \\$\\{\\{ matrix\\.shard \\}\\}/${count.length}\n`));
+  assert.match(shard, /fail-fast: false/);
+  assert.match(shard, /name: sv-tests-report-\$\{\{ matrix\.shard \}\}/);
+});
+
 test("sv-tests generates the pinned main corpus before running and retains its summary", () => {
-  const sv = job("sv-tests");
+  const sv = job("sv-tests-shard");
   assert.match(sv, /third_party\/tests\/easyUVM third_party\/tests\/uvm-examples/);
   assert.ok(sv.indexOf("conformance/sv-tests/prepare.py") < sv.indexOf("conformance/sv-tests/run.py"));
   assert.match(sv, /sv-tests-report\.summary\.json/);
+});
+
+
+test("release builds share download-only caches and cannot retain target matrices", () => {
+  const release = readFileSync(new URL("../.github/workflows/ci-napi.yml", import.meta.url), "utf8");
+  const caches = [...release.matchAll(/      - uses: Swatinem\/rust-cache@v2\n([\s\S]*?)(?=\n      -|$)/g)];
+  assert.equal(caches.length, 1);
+  const cache = caches[0][1];
+  assert.match(cache, /prefix-key: celox-napi-downloads-v1/);
+  assert.match(cache, /shared-key: napi-downloads/);
+  assert.match(cache, /cache-targets: false/);
+  assert.match(cache, /cache-bin: false/);
+  assert.match(cache, /save-if: \$\{\{ github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\) \}\}/);
+  assert.doesNotMatch(cache, /matrix.target|refs\/heads\/develop/);
+});
+
+test("evicted default-branch dependency caches recover without dependency changes", () => {
+  const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
+  assert.match(warm, /schedule:\n    - cron: "17 \* \* \* \*"/);
+  assert.match(warm, /workflow_dispatch:/);
+  for (const id of cacheJobs(workflow)) {
+    const block = warm.split(`  ${id}:\n`)[1].split(/\n  [a-z][a-z-]*:/)[0];
+    assert.match(block, /if: github.ref == format\('refs\/heads\/\{0\}', github.event.repository.default_branch\)/);
+    assert.match(block, /if: steps.cache.outputs.cache-hit != 'true'/);
+  }
+  assert.doesNotMatch(warm, /pull_request_target:|workflow_run:/);
+});
+
+
+test("PR backend policy reaches scoped, workspace fallback and queue execution", () => {
+  assert.match(job("changes"), /rust_backend_filter: \$\{\{ steps\.classify\.outputs\.rust_backend_filter \}\}/);
+  const rust = job("rust-tests");
+  assert.match(rust, /CELOX_BACKEND_FILTER: \$\{\{ needs\.changes\.outputs\.rust_backend_filter \|\| 'all\(\)' \}\}/);
+  assert.equal((rust.match(/-E "\$CELOX_BACKEND_FILTER"/g) ?? []).length, 2);
+  const args = cargoArguments("rust-tests", "Run the tests this pull request can affect", {
+    BUILDS: JSON.stringify([{ packages: ["celox"], targets: ["counter"], features: [] }]),
+    FILTER: "binary_id(celox::counter)", CELOX_BACKEND_FILTER: "not test(parallel)",
+    CELOX_VTEST_RUNNER: "/executor",
+  });
+  assert.equal(args.at(-1), "(binary_id(celox::counter)) & (not test(parallel))");
+});
+
+
+// rust-cache keys hash the job ID (or `shared-key`), the runner, the toolchain
+// and every environment variable with these prefixes, so a job-level variable
+// that varies between pull requests gives each of them a key no warm run saved.
+const CACHE_KEY_ENV = /^(CARGO|CC|CFLAGS|CXX|CMAKE|RUST)/;
+
+function jobBlocks(text) {
+  const jobs = text.split(/^jobs:\n/m)[1];
+  const parts = jobs.split(/^  ([\w-]+):\n/m);
+  const blocks = new Map();
+  for (let i = 1; i < parts.length; i += 2) blocks.set(parts[i], parts[i + 1]);
+  return blocks;
+}
+
+function cacheJobs(text) {
+  return [...jobBlocks(text)]
+    .filter(([, block]) => block.includes("uses: Swatinem/rust-cache@v2"))
+    .map(([id]) => id);
+}
+
+function stepWith(block, uses) {
+  const step = block.match(new RegExp(`      - uses: ${uses.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&")}\n((?:        .*\n?)*)`));
+  if (!step) return null;
+  const inputs = step[1].match(/        with:\n((?:          .*\n?)*)/);
+  return (inputs ? inputs[1] : "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith("save-if:"))
+    .sort();
+}
+
+function keyEnv(block) {
+  const env = block.match(/^    env:\n((?:      .*\n)*)/m);
+  return (env ? env[1] : "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => CACHE_KEY_ENV.test(line));
+}
+
+function workflowKeyEnv(text) {
+  const env = text.match(/^env:\n((?:  .*\n)*)/m);
+  return (env ? env[1] : "").split("\n").map((line) => line.trim()).filter((line) => CACHE_KEY_ENV.test(line));
+}
+
+test("every rust-cache job of CI has a warm job that computes the same key", () => {
+  const warm = readFileSync(new URL("../.github/workflows/rust-cache.yml", import.meta.url), "utf8");
+  const ci = jobBlocks(workflow);
+  const warming = jobBlocks(warm);
+  assert.deepEqual(workflowKeyEnv(warm), workflowKeyEnv(workflow));
+  const ids = cacheJobs(workflow);
+  assert.ok(ids.length >= 10, ids.join(","));
+  for (const id of ids) {
+    const job = ci.get(id);
+    const twin = warming.get(id);
+    assert.ok(twin, `rust-cache.yml warms no cache for CI job ${id}`);
+    assert.equal(twin.match(/^    runs-on: (.*)$/m)?.[1], job.match(/^    runs-on: (.*)$/m)?.[1], id);
+    assert.deepEqual(stepWith(twin, "$/.github/actions/setup-rust"), stepWith(job, "$/.github/actions/setup-rust"), id);
+    assert.deepEqual(stepWith(twin, "Swatinem/rust-cache@v2"), stepWith(job, "Swatinem/rust-cache@v2"), id);
+    assert.deepEqual(keyEnv(job), [], `${id} sets a job-level variable that enters its cache key`);
+    assert.deepEqual(keyEnv(twin), [], id);
+  }
 });

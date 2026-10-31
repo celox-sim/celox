@@ -171,7 +171,7 @@ mod verilator {
             assert!(!is_source_rejection(None, log, &sources));
             checked += 1;
         }
-        assert_eq!(checked, 6);
+        assert_eq!(checked, 15);
     }
 }
 

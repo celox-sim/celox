@@ -173,7 +173,15 @@ fn tick<B: celox::SimBackend>(mut sim: celox::Simulator<B>, cycles: u64) -> celo
 struct Changes {
     signal: celox::SignalRef,
     last: Option<celox::BigUint>,
-    count: std::rc::Rc<std::cell::Cell<u64>>,
+    count: u64,
+    /// Receives `count` when the simulation drops the observer.
+    report: std::sync::mpsc::Sender<u64>,
+}
+
+impl Drop for Changes {
+    fn drop(&mut self) {
+        let _ = self.report.send(self.count);
+    }
 }
 
 impl<B: celox::SimBackend> celox::SlotObserver<B> for Changes {
@@ -182,7 +190,7 @@ impl<B: celox::SimBackend> celox::SlotObserver<B> for Changes {
     fn end_of_slot(&mut self, io: &mut celox::SlotIo<'_, B>, _: u64) {
         let value = io.get(self.signal);
         if self.last.as_ref() != Some(&value) {
-            self.count.set(self.count.get() + 1);
+            self.count += 1;
             self.last = Some(value);
         }
     }
@@ -195,13 +203,14 @@ fn run<B: celox::SimBackend>(
     cycles: u64,
     observed: Option<&str>,
 ) -> celox::BigUint {
-    let changes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let (report, changes) = std::sync::mpsc::channel();
     if let Some(path) = observed {
         let signal = sim.signal(path);
         let observer = Changes {
             signal,
             last: None,
-            count: std::rc::Rc::clone(&changes),
+            count: 0,
+            report,
         };
         sim.observe_slots(Box::new(observer), &[signal]);
     }
@@ -218,11 +227,11 @@ fn run<B: celox::SimBackend>(
     }
     sim.run_until(cycles * 10).unwrap();
     let stats = sim.scheduler_stats();
+    drop(sim.stop_observing_slots());
+    let changes = changes.try_recv().unwrap_or(0);
     println!(
         "compiled slots {}, kernels {:?}, observed changes {}",
-        stats.compiled_slots,
-        stats.kernels,
-        changes.get()
+        stats.compiled_slots, stats.kernels, changes
     );
     let out = sim.signal("out");
     sim.get(out)

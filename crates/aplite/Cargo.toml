@@ -1,0 +1,17 @@
+[package]
+name = "aplite"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Bounded in-process Boolean, bit-vector and array constraint solver"
+repository = "https://github.com/celox-sim/celox"
+readme = "README.md"
+keywords = ["solver", "sat", "bitvector", "constraints"]
+categories = ["algorithms"]
+include = ["src/**", "README.md", "RELEASING.md", "CHANGELOG.md", "Cargo.toml", "clippy.toml", "LICENSE-*"]
+
+[dependencies]
+serde_json = "1.0"
+
+[lints]
+workspace = true

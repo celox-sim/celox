@@ -30,7 +30,7 @@ def run(name, command, expected=0):
     return p
 
 lean_source = (HERE / 'MemoryRules.lean').read_text()
-TERM_RS = ROOT.parent / 'crates/lydite-ir/src/term.rs'
+TERM_RS = ROOT.parent / 'crates/aplite/src/term.rs'
 rust_source = TERM_RS.read_text()
 with tempfile.TemporaryDirectory(prefix='lydite-memory-proof-') as td:
     td = Path(td)
@@ -48,7 +48,7 @@ with tempfile.TemporaryDirectory(prefix='lydite-memory-proof-') as td:
         p = run('reject_lean_' + label, [args.lean, str(f)], expected=1)
         assert 'unsolved goals' in p.stdout or 'error:' in p.stdout
     # Mirror the repository layout so check_rust_rules.rs's #[path] resolves.
-    (td / 'crates/lydite-ir/src').mkdir(parents=True)
+    (td / 'crates/aplite/src').mkdir(parents=True)
     (td / 'lydite/proof').mkdir(parents=True)
     shutil.copyfile(HERE / 'check_rust_rules.rs', td / 'lydite/proof/check_rust_rules.rs')
     for label, source in [
@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix='lydite-memory-proof-') as td:
     ]:
         if label != 'actual':
             assert source != rust_source, 'Rust shape changed: update mutation deliberately'
-        (td / 'crates/lydite-ir/src/term.rs').write_text(source)
+        (td / 'crates/aplite/src/term.rs').write_text(source)
         binary = td / ('check_' + label)
         run('compile_rust_' + label, [args.rustc, '--edition=2021', '-O', str(td / 'lydite/proof/check_rust_rules.rs'), '-o', str(binary)])
         p = run('rust_' + label, [str(binary)], expected=0 if label == 'actual' else 1)

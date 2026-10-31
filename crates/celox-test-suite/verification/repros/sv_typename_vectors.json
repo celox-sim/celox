@@ -1,0 +1,29 @@
+{
+  "case": "system_functions::typename_vectors_and_arrays",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 20.6.1: the default signing is removed but another signing is written (b), simple bit vector types with predefined widths are told apart from others, so `integer unsigned`, `int unsigned` and `shortreal` keep their spelling, packed dimensions keep their declared order, ranges are decimal numbers (g), and `$` stands for the name of an unpacked array (d); a bounded queue keeps its bound (7.10).",
+  "method": "The reduced source runs without the suite adapters: verilator --binary -Wno-fatal --top Top and the built model, iverilog -g2012 -s Top and vvp -n, xezim -s Top, and the Celox sv_tests driver in simulation mode. The output of each tool is compared with the 20.6.1 spelling, which Celox prints.",
+  "reduced_source": "module Top;\n    logic signed [0:7] ls;\n    bit [3:0][1:0] pp;\n    integer unsigned iu;\n    int unsigned ui;\n    shortreal sr;\n    int qb[$:5];\n    initial begin\n        $display(\"%s|%s|%s|%s|%s|%s\", $typename(ls), $typename(pp), $typename(iu), $typename(ui), $typename(sr), $typename(qb));\n        $display(\"%s|%s\", $typename(logic), $typename(bit [3:0]));\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "logic[0:7]|bit[1:0][3:0]|integer|int|real|int$[$:5]\nlogic|bit[3:0]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "vectors.sv:10: error: Type names are not valid expressions here.\nvectors.sv:10: internal error: I do not know how to elaborate this expression. \nvectors.sv:10:               : Expression is: <type>\nvectors.sv:10:               : Expression type: 10PETypename\nvectors.sv:10: error: Type names are not valid expressions here.\nvectors.sv:10: internal error: I do not know how to elaborate this expression. \nvectors.sv:10:               : Expression is: <type>\nvectors.sv:10:               : Expression type: 10PETypename\n4 error(s) during elaboration.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "reg signed[0:7]|bit[1:0][3:0]|integer|int|shortreal|int$[]\nlogic|logic\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "logic signed[0:7]|bit[3:0][1:0]|integer unsigned|int unsigned|shortreal|int$[$:5]\nlogic|bit[3:0]\n"
+    }
+  ]
+}

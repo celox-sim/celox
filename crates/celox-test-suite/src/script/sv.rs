@@ -95,6 +95,8 @@ pub const TESTBENCH_TOP: &str = "celox_suite_tb";
 /// Starts the line a generated testbench prints for `expect_output`, after a
 /// newline of its own: the hex-encoded expected text, then its location.
 const OUTPUT_MARKER: &str = "@suite output ";
+/// Checked against the complete log, after all design final procedures run.
+const FINAL_OUTPUT_MARKER: &str = "@suite final_output ";
 
 /// The line a generated testbench prints, after a newline of its own, once
 /// the whole script has run.
@@ -185,15 +187,34 @@ pub fn check_run(directory: &std::path::Path) -> Result<(), String> {
     check_output(&log, &sources)
 }
 
+/// Locate a simulator notice even when a partial `$write` precedes it.
+fn source_finish_notice_start(line: &[u8], sources: &[String]) -> Option<usize> {
+    sources
+        .iter()
+        .flat_map(|source| [source.clone(), format!("- {source}")])
+        .filter(|prefix| !prefix.is_empty())
+        .filter_map(|prefix| {
+            line.windows(prefix.len())
+                .enumerate()
+                .filter(|(_, window)| *window == prefix.as_bytes())
+                .map(|(at, _)| at)
+                .find(|&at| {
+                    std::str::from_utf8(&line[at..])
+                        .ok()
+                        .is_some_and(|suffix| is_source_finish_notice(suffix, sources))
+                })
+        })
+        .min()
+}
+
 /// `text` without the simulators' `$finish` notices for `sources`.
 fn design_output(text: &[u8], sources: &[String]) -> Vec<u8> {
     let mut output = Vec::new();
     for chunk in text.split_inclusive(|byte| *byte == b'\n') {
         let line = chunk.strip_suffix(b"\n").unwrap_or(chunk);
-        let notice = std::str::from_utf8(line)
-            .ok()
-            .is_some_and(|line| is_source_finish_notice(line, sources));
-        if !notice {
+        if let Some(at) = source_finish_notice_start(line, sources) {
+            output.extend_from_slice(&line[..at]);
+        } else {
             output.extend_from_slice(chunk);
         }
     }
@@ -213,6 +234,35 @@ pub fn check_output(log: &[u8], sources: &[String]) -> Result<(), String> {
             .windows(needle.len())
             .position(|window| window == needle)
     }
+    // Final procedures have no defined order (9.2.3). Defer final output
+    // expectations until the subprocess has returned, independent of where
+    // its generated final block printed the expectation and end markers.
+    let final_separator = format!("\n{FINAL_OUTPUT_MARKER}");
+    let mut complete = log.to_vec();
+    let mut final_markers = Vec::new();
+    while let Some(at) = find(&complete, final_separator.as_bytes()) {
+        let start = at + final_separator.len();
+        let end = complete[start..]
+            .iter()
+            .position(|&b| b == b'\n')
+            .map(|offset| start + offset)
+            .ok_or("unterminated final output marker")?;
+        final_markers.push(complete[start..end].to_vec());
+        complete.drain(at..=end);
+    }
+    if !final_markers.is_empty() {
+        let end_marker = format!("\n{END_MARKER}\n");
+        let end = find(&complete, end_marker.as_bytes())
+            .ok_or("the simulation ended before the script did")?;
+        complete.drain(end..end + end_marker.len());
+        for marker in final_markers {
+            complete.extend_from_slice(format!("\n{OUTPUT_MARKER}").as_bytes());
+            complete.extend_from_slice(&marker);
+            complete.push(b'\n');
+        }
+        complete.extend_from_slice(end_marker.as_bytes());
+    }
+    let log = complete.as_slice();
     let finishing = format!("\n{FINISHING_MARKER}\n");
     let (log, finishing_at) = match find(log, finishing.as_bytes()) {
         // The simulator's notice follows the marker on a line of its own;
@@ -233,8 +283,7 @@ pub fn check_output(log: &[u8], sources: &[String]) -> Result<(), String> {
     };
     let early_finish = log[..finishing_at.min(end)]
         .split(|byte| *byte == b'\n')
-        .filter_map(|line| std::str::from_utf8(line).ok())
-        .any(|line| is_source_finish_notice(line, sources));
+        .any(|line| source_finish_notice_start(line, sources).is_some());
     if early_finish {
         return Err("the design called $finish before the script reached run_to_finish".into());
     }
@@ -399,6 +448,114 @@ fn reads(exprs: &[&Expr]) -> bool {
         walk_expr(expr, &mut |e| found |= matches!(e, Expr::Get(_)));
     }
     found
+}
+
+/// Signal checks execute in the adapter's final block, whose order relative to
+/// design finals is unspecified (9.2.3). Only a small, demonstrably read-only
+/// subset of design finals is safe alongside them. Output expectations instead
+/// run against the complete subprocess log and need no such restriction.
+#[cfg(feature = "external")]
+pub(crate) fn validate_final_signal_reads(
+    case: &ScriptCase,
+    sources: &[String],
+) -> Result<(), Unsupported> {
+    let Some(after) = case.split_at_finish().1 else {
+        return Ok(());
+    };
+    let signal_checks = after.iter().any(|stmt| {
+        let mut reads = matches!(stmt.kind, StmtKind::AssertEq(Actual::Signal(_), ..));
+        walk_stmt(stmt, &mut |expr| reads |= matches!(expr, Expr::Get(_)));
+        reads
+    });
+    if !signal_checks {
+        return Ok(());
+    }
+    let unsafe_final = || {
+        Unsupported(format!(
+            "{}: signal reads after run_to_finish require design finals to only print \
+             literals or simulation time; final ordering is unspecified (IEEE 1800-2023 9.2.3). \
+             Use expect_output to check results after all finals complete",
+            case.name
+        ))
+    };
+    // Inspect the emitted SV, including macros shared across source files. This
+    // also covers finals in sources translated from another frontend.
+    let mut pp = celox_sv_syntax::Preprocessor::new(celox_sv_syntax::Options {
+        includes: celox_sv_syntax::IncludePolicy::Ignore,
+        ..Default::default()
+    });
+    let mut tokens = Vec::new();
+    for (index, source) in sources.iter().enumerate() {
+        tokens.extend(
+            pp.preprocess(source, format!("source_{index}.sv"))
+                .map_err(|_| unsafe_final())?
+                .tokens,
+        );
+    }
+    if !tokens
+        .iter()
+        .any(|token| token.kind == celox_sv_syntax::TokenKind::Identifier && token.text == "final")
+    {
+        return Ok(());
+    }
+    let syntax = celox_sv_syntax::Declarations::from_tokens(pp.sources, tokens)
+        .map_err(|_| unsafe_final())?;
+    use celox_sv_syntax::{ExprKind, ProcedureKind, StatementKind};
+    let literal_or_time = |id| {
+        let mut expr = syntax.expression(id);
+        while let ExprKind::Group(inner) = expr.kind {
+            expr = syntax.expression(inner);
+        }
+        match &expr.kind {
+            ExprKind::Literal(_) => true,
+            // Bare function names may call functions without parentheses, so
+            // even an ordinary identifier is not proven read-only here.
+            ExprKind::Name(name) => {
+                matches!(name.spelling.as_str(), "$time" | "$stime" | "$realtime")
+            }
+            ExprKind::Call {
+                expression,
+                arguments,
+            } if arguments.is_empty() => {
+                matches!(&syntax.expression(*expression).kind, ExprKind::Name(name)
+                    if matches!(name.spelling.as_str(), "$time" | "$stime" | "$realtime"))
+            }
+            _ => false,
+        }
+    };
+    let mut pending: Vec<_> = syntax
+        .procedures
+        .iter()
+        .filter(|procedure| procedure.kind == ProcedureKind::Final)
+        .map(|procedure| procedure.body)
+        .collect();
+    while let Some(id) = pending.pop() {
+        match &syntax.statement(id).kind {
+            StatementKind::Empty => {}
+            StatementKind::Block { items, .. } => pending.extend(items),
+            StatementKind::Expression(id) => {
+                let ExprKind::Call {
+                    expression,
+                    arguments,
+                } = &syntax.expression(*id).kind
+                else {
+                    return Err(unsafe_final());
+                };
+                let ExprKind::Name(name) = &syntax.expression(*expression).kind else {
+                    return Err(unsafe_final());
+                };
+                if !matches!(name.spelling.as_str(), "$display" | "$write")
+                    || !arguments
+                        .iter()
+                        .all(|arg| arg.value.is_some_and(literal_or_time))
+                {
+                    return Err(unsafe_final());
+                }
+            }
+            _ => return Err(unsafe_final()),
+        }
+    }
+    Ok(())
 }
 
 /// The widest testbench value: Verilator multiplies signed values of at
@@ -1017,8 +1174,13 @@ impl Generator<'_> {
                 if self.timed && !self.in_final {
                     self.line("settle();");
                 }
+                let marker = if self.in_final {
+                    FINAL_OUTPUT_MARKER
+                } else {
+                    OUTPUT_MARKER
+                };
                 self.line(format!(
-                    "$write(\"\\n{OUTPUT_MARKER}{} {}\\n\");",
+                    "$write(\"\\n{marker}{} {}\\n\");",
                     hex_encode(text),
                     sv_string(&literal_text(&self.where_(pos))).trim_matches('"')
                 ));
@@ -1067,16 +1229,20 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
         in_final: false,
         declarations: Vec::new(),
     };
+    let mut needs_settler = generator.timed;
     let (body, final_checks) = if generator.timed {
         let (before_finish, after_finish) = case.split_at_finish();
         generator.block_at(before_finish, true)?;
+        needs_settler = after_finish.is_none() || !before_finish.is_empty();
         if after_finish.is_some() {
             // Only the design's `$finish` may end the run from here; the
             // delay keeps an idle design from ending it by running out of
             // events, which would also run the final checks.
             generator.line(format!("$write(\"\\n{FINISHING_MARKER}\\n\");"));
             generator.line("suite_reached_finish = 1;");
-            generator.line("settle_now();");
+            if needs_settler {
+                generator.line("settle_now();");
+            }
             // One picosecond past the limit, so a `$finish` due exactly at
             // the limit runs first rather than in the same time slot.
             generator.line(format!("#(64'd{});", RUN_UNTIL_LIMIT * 1000 + 1));
@@ -1106,7 +1272,7 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
     let _ = writeln!(out, "// Generated from {} by celox-test-suite.", case.name);
     // Script values are deliberately wider than the signals they meet.
     let _ = writeln!(out, "/* verilator lint_off WIDTH */");
-    if timed {
+    if needs_settler {
         out.push_str(XEZIM_SETTLER);
     }
     let _ = writeln!(out, "module {TESTBENCH_TOP};");
@@ -1273,6 +1439,15 @@ pub fn testbench(case: &ScriptCase, design: &DesignInfo) -> Result<String, Unsup
   endtask"#,
         );
     }
+    if !needs_settler {
+        // A script that only waits for finish drives no stimulus. Do not
+        // introduce a live auxiliary program: it would prevent implicit
+        // completion of the design's program initial procedures (24.3).
+        out = out.replace(
+            "  celox_suite_settler suite_settler (suite_request, suite_ack);\n",
+            "",
+        );
+    }
     Ok(out)
 }
 
@@ -1319,6 +1494,44 @@ mod tests {
             "partial\n@suite finishing\n{notice}\n@suite output 7061727469616c here\n\n@suite end\n"
         );
         assert_eq!(check_output(log.as_bytes(), &sources), Ok(()));
+    }
+
+    #[test]
+    fn final_output_is_checked_after_all_final_procedures() {
+        for (prefix, middle, suffix) in [
+            ("before:", "final", ""),
+            ("before:", "", "final"),
+            ("before:", "fi", "nal"),
+        ] {
+            let log = format!(
+                "{prefix}\n@suite finishing\n{middle}\n@suite final_output 6265666f72653a66696e616c here\n\n@suite end\n{suffix}"
+            );
+            assert_eq!(check_output(log.as_bytes(), &[]), Ok(()), "{log}");
+            let wrong = log.replace("6265666f72653a66696e616c", "77726f6e67");
+            assert!(check_output(wrong.as_bytes(), &[]).is_err());
+        }
+        for notice in [
+            "- /stage/source.sv:3: Verilog $finish\n",
+            "/stage/source.sv:3: $finish called at 5 (1ns)\n",
+        ] {
+            let log = format!(
+                "\n@suite finishing\nbefore:{notice}\n@suite final_output 6265666f72653a66696e616c here\n\n@suite end\nfinal"
+            );
+            assert_eq!(
+                check_output(log.as_bytes(), &["/stage/source.sv".into()]),
+                Ok(())
+            );
+        }
+        let log = b"\n@suite finishing\n\n@suite final_output 66696e616c here\nfinal";
+        assert!(check_output(log, &[]).is_err());
+        let text = testbench(
+            &case("(run_to_finish) (expect_output \"final\")"),
+            &design(),
+        )
+        .unwrap();
+        assert!(text.contains("@suite final_output 66696e616c "));
+        assert!(!text.contains("program celox_suite_settler"));
+        assert!(!text.contains("celox_suite_settler suite_settler"));
     }
 
     #[test]

@@ -10,6 +10,12 @@ pub enum AnalyzerWarning {
     MixedTimescale,
     /// `$size` on an interface array is a compatibility extension to 20.7.
     InterfaceArrayQuery { site: Option<SourceSpan> },
+    /// Omitted interface array selections are an extension to 23.6.
+    InterfaceArrayParameter {
+        path: String,
+        element: String,
+        site: Option<SourceSpan>,
+    },
     /// An ignored `$exit` in a function outside a program (IEEE 1800-2023 24.7).
     ExitOutsideProgram { site: Option<SourceSpan> },
 }

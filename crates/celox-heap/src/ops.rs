@@ -52,6 +52,9 @@ pub const FREEZE: u64 = 32;
 /// `new_object(size)`: a new object of the class in the parameter, with
 /// `size` zeroed bytes.
 pub const OBJECT_NEW: u64 = 48;
+/// `new_event()`: the handle of a new named event (IEEE 1800-2023 15.5). The
+/// scheduler keeps the event's state; the heap only names it.
+pub const EVENT_NEW: u64 = 47;
 /// `declare_handle(object, offset, kind)`: the property at byte `offset`
 /// holds a handle; `kind` is 0 for a string and 1 for an object.
 pub const OBJECT_HANDLE: u64 = 49;
@@ -83,6 +86,20 @@ pub const OBJECT_MODE_SELECTED: u64 = 61;
 pub const OBJECT_RANDOM_CYCLIC: u64 = 62;
 /// `copy(object)`: a new object with a copy of the properties of `object`.
 pub const OBJECT_COPY: u64 = 63;
+/// Solve the scalar constraint program in string b for object a; c selects check-only.
+pub const OBJECT_RANDOMIZE: u64 = 64;
+/// Program b for object a; c is an input buffer (check-only byte followed by
+/// big-endian u64 values). The buffer is consumed, including on failure.
+pub const OBJECT_RANDOMIZE_INPUTS: u64 = 65;
+/// Constraint index is encoded in the parameter; set-all uses u32::MAX.
+pub const OBJECT_CONSTRAINT_MODE_GET: u64 = 66;
+pub const OBJECT_CONSTRAINT_MODE_SET: u64 = 67;
+/// `load(record, offset, count)` of a structure record: `null` reads as
+/// zero bytes without a fault.
+pub const OBJECT_LOAD_NULLABLE: u64 = 68;
+/// `finish(record)` of a structure record whose fields are all stored: the
+/// handle of the one record with its contents, which may replace `record`.
+pub const OBJECT_FINISH_RECORD: u64 = 69;
 
 /// The opcode word of `op` with parameter `parameter`.
 pub const fn encode(op: u64, parameter: u64) -> u64 {
@@ -104,6 +121,20 @@ impl Heap {
     pub fn call(&mut self, code: u64, a: u64, b: u64, c: u64) -> u64 {
         let parameter = code >> 8;
         match code & 0xff {
+            op
+            @ (crate::containers::NEW..=crate::containers::RSORT | crate::containers::CONCAT) => {
+                self.container_call(op, parameter, a, b, c)
+            }
+            op @ crate::streams::NEW..=crate::streams::TRUNCATE => {
+                self.stream_call(op, parameter, a, b, c)
+            }
+            crate::containers::PATTERN => {
+                let bytes = self.container_pattern(a as Handle, parameter);
+                self.new_buffer(bytes)
+            }
+            crate::containers::HANDLE_PATTERN => {
+                self.new_buffer(crate::containers::handle_pattern(a as u32 as u64))
+            }
             COMPARE => ordering(self.string(a as Handle).cmp(self.string(b as Handle))),
             ICOMPARE => {
                 let lower = |handle| {
@@ -174,6 +205,7 @@ impl Heap {
                 let bytes = self.take_buffer(a);
                 self.intern(&bytes).into()
             }
+            EVENT_NEW => self.new_event().into(),
             OBJECT_NEW => self.new_object(parameter as u32, a as usize).into(),
             OBJECT_HANDLE => {
                 let kind = if c == 0 {
@@ -185,11 +217,57 @@ impl Heap {
                 0
             }
             OBJECT_LOAD => self.load(a as Handle, b as usize, c as usize),
+            OBJECT_LOAD_NULLABLE if a as Handle == crate::objects::NULL => 0,
+            OBJECT_LOAD_NULLABLE => self.load(a as Handle, b as usize, c as usize),
+            OBJECT_FINISH_RECORD => self.finish_record(a as Handle).into(),
             OBJECT_STORE => {
                 self.store(a as Handle, b as u32 as usize, (b >> 32) as usize, c);
                 0
             }
             OBJECT_CLASS => self.class_of(a as Handle).into(),
+            op @ (OBJECT_RANDOMIZE | OBJECT_RANDOMIZE_INPUTS) => {
+                let input_bytes = (op == OBJECT_RANDOMIZE_INPUTS).then(|| self.take_buffer(c));
+                let result = (|| -> Result<_, String> {
+                    let program = serde_json::from_slice::<crate::randomization::Program>(
+                        self.string(b as Handle),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let (check_only, inputs) = if op == OBJECT_RANDOMIZE_INPUTS {
+                        let bytes = input_bytes.as_ref().unwrap();
+                        let (&check, values) = bytes
+                            .split_first()
+                            .ok_or("missing constraint input buffer")?;
+                        if check > 1 || values.len() % 8 != 0 {
+                            return Err("invalid constraint input buffer".into());
+                        }
+                        (
+                            check != 0,
+                            values
+                                .as_chunks::<8>()
+                                .0
+                                .iter()
+                                .map(|chunk| u64::from_be_bytes(*chunk))
+                                .collect::<Vec<_>>(),
+                        )
+                    } else {
+                        (c != 0, Vec::new())
+                    };
+                    Ok(self.randomize_object_with_inputs(
+                        a as Handle,
+                        &program,
+                        check_only,
+                        &inputs,
+                    ))
+                })();
+                match result {
+                    Ok(success) => u64::from(success),
+                    Err(error) => {
+                        self.fault
+                            .get_or_insert(crate::Fault::ConstraintRandomization(error));
+                        0
+                    }
+                }
+            }
             OBJECT_RANDOM => self.random_object(a as Handle),
             OBJECT_RANDOM_CYCLIC => self.random_cyclic_object(a as Handle, parameter as u32, b),
             OBJECT_SEED => {
@@ -197,6 +275,17 @@ impl Heap {
                 0
             }
             OBJECT_CHECK => u64::from(self.check_object(a as Handle, parameter as u32)),
+            OBJECT_CONSTRAINT_MODE_GET => {
+                self.constraint_mode(a as Handle, parameter as u32) as u64
+            }
+            OBJECT_CONSTRAINT_MODE_SET => {
+                self.set_constraint_mode(
+                    a as Handle,
+                    (parameter != u64::from(u32::MAX)).then_some(parameter as u32),
+                    b & 1 != 0,
+                );
+                0
+            }
             OBJECT_MODE_GET => {
                 u64::from(self.random_mode(a as Handle, parameter as u32, parameter >> 32 != 0))
             }

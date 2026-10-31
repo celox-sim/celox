@@ -103,6 +103,165 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inline_constraints.json"
+        ],
+        "id": "sv_verilator_post_randomize_unsat",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_hooks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_scalar_constraints.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_inline_constraints.json"
+        ],
+        "id": "sv_verilator_post_randomize_unsat",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Through a Base handle containing a Derived object that hides Base.x, Verilator binds inline x == 2 to Derived.x, conflicting with its x == 9 block. IEEE 1800-2023 18.7 starts inline name lookup in the class of the object handle used at the call. Base.x must be 2 and Derived.x must be 9. The standalone source reproduces UNSAT without the suite adapter. Assertions are retained.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_inline_constraint_scope.sv",
+          "verification/repros/sv_inline_constraints.json"
+        ],
+        "id": "sv_verilator_inline_constraint_static_scope",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Through a Base handle containing a Derived object that hides Base.x, Verilator binds inline x == 2 to Derived.x, conflicting with its x == 9 block. IEEE 1800-2023 18.7 starts inline name lookup in the class of the object handle used at the call. Base.x must be 2 and Derived.x must be 9. The standalone source reproduces UNSAT without the suite adapter. Assertions are retained.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_inheritance",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator copies caller-scope inline inputs into its generated helper before pre_randomize. When the hook changes wanted from 2 to 5, the solve still assigns x = 2. IEEE 1800-2023 18.6.2 invokes the pre-hook before randomization, and 18.7 permits references to caller-scope state variables. The regression retains the post-hook value and single-invocation assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_inline_input_hooks.json"
+        ],
+        "id": "sv_verilator_inline_inputs_before_pre_hook",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator copies caller-scope inline inputs into its generated helper before pre_randomize. When the hook changes wanted from 2 to 5, the solve still assigns x = 2. IEEE 1800-2023 18.6.2 invokes the pre-hook before randomization, and 18.7 permits references to caller-scope state variables. The regression retains the post-hook value and single-invocation assertions.",
+        "upstream": []
+      },
+      "name": "class::constrained_randomize_inline_input_hooks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_override",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_base_dispatch",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_bit_argument",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_basic",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_constraint_mode_override",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_constraint_modes.json"
+        ]
+      },
+      "name": "class::constraint_mode_inheritance",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::constructors_chain_to_base",
@@ -141,6 +300,116 @@
       "name": "class::extern_methods_and_tasks",
       "phase": "execute",
       "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:14:11: ../V3Task.cpp:2179: FuncRef without fvar\n                                                : ... note: In instance 'celox_suite_tb'\n   14 |  function new(int n=initial_value()); value=n; endfunction\n      |           ^~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_constructor_lexical_scope",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::foreign_generic_declaration_scope_and_equivalent_defaults at 2974:26: assert_eq checks: expected 0x7f, got 0x5f",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_declaration_scope_and_equivalent_defaults",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::foreign_generic_inherited_constants at 3080:26: assert_eq checks: expected 0x1f, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_inherited_constants",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_multiple_user_classes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error-UNSUPPORTED: <case>/source_0.sv:15:13: Unsupported: Multiple '::' package/class reference\n   15 |  typedef p::Wrap#(byte)::T element_t;\n      |             ^~~~\n                    ... For error description see https://verilator.org/warn/UNSUPPORTED?v=5.052\n%Error: <case>/source_0.sv:15:26: Can't find typedef/interface: 'T'\n   15 |  typedef p::Wrap#(byte)::T element_t;\n      |                          ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_nominal_and_nested_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_package_type_static_storage",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_static_handle_identity",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_static_state_across_modules",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::foreign_generic_unit_type_constructor",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "class::generate_scope_enum_type_arguments at 2759:27: assert_eq sum: expected 0x4bc, got 0x8ae",
+      "expectation": "Simulation",
+      "name": "class::generate_scope_enum_type_arguments",
+      "phase": "execute",
+      "status": "mismatch",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -656,6 +925,17 @@
       "detail": "",
       "expectation": "Simulation",
       "name": "class::virtual_methods_dispatch_on_object_class",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "class::waits_on_static_properties",
       "phase": "execute",
       "status": "passed",
       "stronger_than_sv": false,

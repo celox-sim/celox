@@ -710,7 +710,9 @@ fn rejects_dropped_unrepresentable_function_call_actuals() {
         "#,
     );
     assert!(
-        error.contains("combinational expression") || error.contains("function call"),
+        error.contains("combinational expression")
+            || error.contains("function call")
+            || error.contains("2 actuals for 1 formals"),
         "unexpected error: {error}"
     );
 }
@@ -838,11 +840,20 @@ fn initializes_partially_driven_internal_nets_to_z() {
             assign undriven_bits_are_z = (w[7:1] === 7'bzzzzzzz);
         endmodule
     "#;
-    let mut sim =
-        Simulator::from_sv_sources(vec![(source, Path::new("partial_internal_net.sv"))], "Top")
-            .build_cranelift()
-            .unwrap();
-    assert_eq!(sim.get(sim.signal("undriven_bits_are_z")), 1u8.into());
+    // Runtime storage retains X/Z only in four-state mode. Literal X/Z
+    // in exact comparisons remain distinct from zero in both modes.
+    for four_state in [false, true] {
+        let mut sim =
+            Simulator::from_sv_sources(vec![(source, Path::new("partial_internal_net.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        assert_eq!(
+            sim.get_four_state(sim.signal("undriven_bits_are_z")),
+            (u8::from(four_state).into(), BigUint::default()),
+            "four_state={four_state}",
+        );
+    }
 }
 
 #[test]
@@ -893,11 +904,22 @@ fn initializes_shadowing_function_locals_to_unknown() {
             assign local_is_unknown = (f() === 1'bx);
         endmodule
     "#;
-    let mut sim =
-        Simulator::from_sv_sources(vec![(source, Path::new("function_local_shadow.sv"))], "Top")
-            .build_cranelift()
-            .unwrap();
-    assert_eq!(sim.get(sim.signal("local_is_unknown")), 1u8.into());
+    // Runtime storage retains X/Z only in four-state mode. Literal X/Z
+    // in exact comparisons remain distinct from zero in both modes.
+    for four_state in [false, true] {
+        let mut sim = Simulator::from_sv_sources(
+            vec![(source, Path::new("function_local_shadow.sv"))],
+            "Top",
+        )
+        .four_state(four_state)
+        .build_cranelift()
+        .unwrap();
+        assert_eq!(
+            sim.get_four_state(sim.signal("local_is_unknown")),
+            (u8::from(four_state).into(), BigUint::default()),
+            "four_state={four_state}",
+        );
+    }
 }
 
 #[test]
@@ -5376,6 +5398,35 @@ fn writes_reversed_unpacked_array_lvalue_ranges() {
 }
 
 #[test]
+fn streams_fill_targets_selected_at_run_time() {
+    // IEEE 1800-2023 11.4.14: a stream fills the selected type, wherever
+    // the selection is.
+    let source = r#"
+        module Top(input logic [1:0] k, output logic [7:0] y, output logic [7:0] w);
+            logic [7:0] el [0:3];
+            always_comb begin
+                foreach (el[i]) el[i] = '0;
+                el[k] = {<<{8'h12}};
+                y = el[2];
+                w = '0;
+                w[k * 2 +: 4] = {<<{4'b0001}};
+            end
+        endmodule
+    "#;
+    let mut sim =
+        Simulator::from_sv_sources(vec![(source, Path::new("selected_streams.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    let (k, y, w) = (sim.signal("k"), sim.signal("y"), sim.signal("w"));
+    sim.modify(|io| io.set(k, 2u8)).unwrap();
+    assert_eq!(sim.get(y), 0x48u8.into());
+    assert_eq!(sim.get(w), 0x80u8.into());
+    sim.modify(|io| io.set(k, 1u8)).unwrap();
+    assert_eq!(sim.get(y), 0u8.into());
+    assert_eq!(sim.get(w), 0x20u8.into());
+}
+
+#[test]
 fn reads_bit_selects_of_scalar_array_elements() {
     let source = r#"
         module Top(
@@ -5471,18 +5522,10 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         "#,
         ),
         (
-            "streaming concatenation",
-            r#"
-            module Top(input logic clk, input logic [3:0] a, b, output logic [3:0] q);
-                always_ff @(posedge clk) q <= {<<{a}};
-            endmodule
-        "#,
-        ),
-        (
             "concurrent assertion",
             r#"
             module Top(input logic clk, valid);
-                assert property (@(posedge clk) valid);
+                assert property (@(posedge clk) valid |=> valid);
             endmodule
         "#,
         ),
@@ -5567,33 +5610,12 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "streaming concatenation",
             r#"
-            module Top(input logic [7:0] a, output logic [7:0] y);
-                assign y = {<<{a}};
-            endmodule
-        "#,
-        ),
-        (
-            "streaming concatenation",
-            r#"
             module Top(input logic [3:0] a, output logic y);
                 function automatic logic choose(input logic [3:0] value);
                     if ({<<{value}}) return 1'b1;
                     else return 1'b0;
                 endfunction
                 assign y = choose(a);
-            endmodule
-        "#,
-        ),
-        (
-            "streaming concatenation",
-            r#"
-            module Top(input logic [3:0] a, output logic [3:0] y);
-                function automatic logic [3:0] square(input logic [3:0] value);
-                    logic [3:0] tmp;
-                    tmp = {<<{value}};
-                    return tmp;
-                endfunction
-                assign y = square(a);
             endmodule
         "#,
         ),
@@ -5768,14 +5790,6 @@ fn rejects_constructs_that_are_not_yet_lowered() {
                 parameter FLAG = (~P == 0)
             ) (output logic y);
                 assign y = FLAG;
-            endmodule
-        "#,
-        ),
-        (
-            "streaming concatenation",
-            r#"
-            module Top(input logic [3:0] a, b, output logic [7:0] y);
-                always_comb y = {<<{a}};
             endmodule
         "#,
         ),
@@ -8758,6 +8772,7 @@ mod aggregate_regressions {
         fn parameter_element_forwarding(sim) { @case "aggregate_regressions::parameter_element_forwarding"; }
         fn parameter_runtime_element_bit(sim) { @case "aggregate_regressions::parameter_runtime_element_bit"; }
         fn independent_clock_memory_writers(sim) { @case "aggregate_regressions::independent_clock_memory_writers"; }
+        fn wide_concatenated_procedural_targets(sim) { @case "aggregate_regressions::wide_concatenated_procedural_targets"; }
     }
 }
 
@@ -8936,4 +8951,133 @@ fn masked_reads_preserve_observer_sensitivity_and_real_self_dependencies() {
             }]
         );
     }
+}
+
+#[test]
+fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
+    for (source, diagnostic) in [
+        (
+            "module Top(input logic a, output uwire y); assign y=a; assign y=a; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output wire y); uwire n; assign n=a; assign n=a; assign y=n; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output uwire first, y); assign first=a; assign y=a; assign y=a; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output logic y); assign y=a; assign y=a; endmodule",
+            "multiple variable drivers",
+        ),
+        (
+            "module Top(input logic a,b, output wire y); assign y=a; assign y=a; assign y=b; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(output wire [31:0] y); assign y=$random; assign y=$random; endmodule",
+            "multiple net drivers",
+        ),
+    ] {
+        let error =
+            Simulator::from_sv_sources(vec![(source, Path::new("alias_drivers.sv"))], "Top")
+                .build_native()
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains(diagnostic), "{error}");
+    }
+}
+
+#[test]
+fn single_bit_array_driver_windows_still_reject_overlaps() {
+    for source in [
+        "module Top(input logic index, input logic a, b, output logic [0:0] q[2]);
+          always_comb begin q[0]='0; q[0][index]=a; end
+          always_comb begin q[0]='0; q[0][index]=b; end endmodule",
+        "module Top(input logic index, input logic a, b, output logic [0:0] q[2]);
+          always_comb q[index]=a;
+          always_comb q[0]=b; endmodule",
+    ] {
+        let error = cranelift_build_error(source);
+        assert!(error.contains("multiple variable drivers"), "{error}");
+    }
+}
+
+#[test]
+fn mixed_hierarchies_accept_many_sibling_specializations() {
+    let veryl = "module Top(x: input logic<8>, y: output logic<8>) { inst tree: $sv::Root(x, y); }";
+    let sv = "module Leaf #(parameter ID=0)(input wire [7:0] x, output wire [7:0] y);
+        assign y=x ^ 8'(ID); endmodule
+        module Root(input wire [7:0] x, output wire [7:0] y);
+        wire [7:0] lanes[65];
+        for(genvar n=0;n<65;n=n+1) begin: g
+            Leaf #(.ID(n)) u(.x(x),.y(lanes[n]));
+        end
+        assign y=lanes[64]; endmodule";
+    let mut sim = Simulator::from_mixed_sources(
+        vec![(veryl, Path::new("top.veryl"))],
+        vec![(sv, Path::new("siblings.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    let x = sim.signal("x");
+    let y = sim.signal("y");
+    sim.modify(|io| io.set(x, 60u8)).unwrap();
+    assert_eq!(sim.get(y), BigUint::from(124u8));
+}
+
+#[test]
+fn exhaustive_case_preserves_fixed_unknown_selector_bits() {
+    let source = r#"
+        module Top(input bit b, output logic y);
+            always_comb case ({b, 1'bx})
+                2'b0x: y = 0;
+                2'b1x: y = 1;
+            endcase
+        endmodule
+    "#;
+    for (kind, four_state) in [("bit", false), ("bit", true), ("logic", false)] {
+        let source = source.replace("input bit b", &format!("input {kind} b"));
+        let mut sim =
+            Simulator::from_sv_sources(vec![(&source, Path::new("fixed_unknown_case.sv"))], "Top")
+                .four_state(four_state)
+                .build_cranelift()
+                .unwrap();
+        let b = sim.signal("b");
+        let y = sim.signal("y");
+        for value in [0u8, 1, 0] {
+            sim.modify(|io| io.set(b, value)).unwrap();
+            assert_eq!(sim.get(y), BigUint::from(value));
+        }
+    }
+}
+
+sv_backends! {
+    fn exhaustive_case_preserves_fixed_selector_bits(sim) { @case "review_regressions::exhaustive_case_preserves_fixed_selector_bits"; }
+    fn fixed_case_bits_preserve_unknown_input_fallback(sim) { @case "review_regressions::fixed_case_bits_preserve_unknown_input_fallback"; }
+}
+
+#[test]
+fn fixed_selector_bits_do_not_hide_incomplete_cases() {
+    for source in [
+        "module Top(input logic b, output logic y); always_comb case ({b,1'bx}) 2'b0x:y=0; 2'b1x:y=1; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bx}) 2'b0x:y=0; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bx}) 2'b0z:y=0; 2'b1z:y=1; endcase endmodule",
+        "module Top(input bit b, output logic y); always_comb case ({b,1'bz}) 2'b0x:y=0; 2'b1x:y=1; endcase endmodule",
+    ] {
+        let error = four_state_cranelift_build_error(source);
+        assert!(error.contains("latch inference"), "{error}");
+    }
+}
+
+#[test]
+fn rejects_hierarchical_unpacked_arrays_of_nonequivalent_elements() {
+    // A hierarchical array is assigned like any other (IEEE 1800-2023 7.6).
+    let error = cranelift_build_error(
+        "module Sub; byte b[2]; endmodule module Top; Sub u(); int a[2]; initial a = u.b; endmodule",
+    );
+    assert!(error.contains("is not assignment compatible"), "{error}");
 }

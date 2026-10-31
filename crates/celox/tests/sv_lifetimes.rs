@@ -151,13 +151,79 @@ fn static_locals_written_before_they_are_read_are_temporaries() {
 }
 
 #[test]
-fn static_task_locals_that_keep_their_value_remain_unsupported() {
-    let detail = error(
-        "module Top(input logic clk, output int y);
-        task count(output int result); static int saved=0; saved++; result=saved; endtask
-        always @(posedge clk) count(y); endmodule",
+fn static_task_locals_keep_their_value() {
+    assert_eq!(
+        ticks(
+            "module Top(input logic clk, output int y);
+               task count(output int result); static int saved=0; saved++; result=saved; endtask
+               always @(posedge clk) count(y);
+             endmodule",
+            3
+        ),
+        [1, 2, 3]
     );
-    assert!(detail.contains("static variable `saved`"), "{detail}");
+}
+
+/// A task that blocks in a scheduler operation suspends like one that waits:
+/// the call at time 1 writes the static local while the first call is
+/// blocked (IEEE 1800-2023 6.21, 15.3).
+#[test]
+fn static_task_locals_are_shared_across_blocking_operations() {
+    let source = "`timescale 1ns/1ns
+        module Top(output int a, b);
+          semaphore sem = new(0);
+          int n = 0;
+          task take(output int r);
+            static int seen;
+            n++;
+            seen = n;
+            sem.get(1);
+            r = seen;
+          endtask
+          initial begin a = 0; take(a); end
+          initial begin b = 0; #1; take(b); end
+          initial begin #2; sem.put(2); end
+        endmodule";
+    let mut simulation =
+        Simulation::from_sv_sources(vec![(source, std::path::Path::new("lifetimes.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    simulation.run_until(3).unwrap();
+    let a = simulation.signal("a");
+    let b = simulation.signal("b");
+    assert_eq!(u64::try_from(simulation.get(a)).unwrap(), 2);
+    assert_eq!(u64::try_from(simulation.get(b)).unwrap(), 2);
+}
+
+/// A static output formal of a task that a call leaves unassigned copies
+/// out the value of an earlier call (IEEE 1800-2023 6.21, 13.5).
+#[test]
+fn static_task_outputs_keep_their_value() {
+    assert_eq!(
+        ticks(
+            "module Top(input logic clk, output int y);
+               task maybe(input bit set, output int r); if (set) r = 5; endtask
+               int v; bit s = 1;
+               always @(posedge clk) begin maybe(s, v); s = 0; y <= v; end
+             endmodule",
+            3
+        ),
+        [5, 5, 5]
+    );
+}
+
+#[test]
+fn static_initializers_of_timed_tasks_must_be_constant() {
+    let detail = error(
+        "module Top(input int a, output int y);
+           task t; static int x = a; #1 y = x; endtask
+           initial t();
+         endmodule",
+    );
+    assert!(
+        detail.contains("initializer that is not constant"),
+        "{detail}"
+    );
 }
 
 #[test]
@@ -221,10 +287,11 @@ fn static_initializers_must_be_constant() {
 
 #[test]
 fn output_arguments_and_loop_exits_write_static_locals() {
+    // IEEE 1800-2023 13.4(b): even a zero-time task cannot be called by a function.
     assert_eq!(
         output(
             "module Top(output logic [7:0] y);
-               task set(output int v, input int a); v = a; endtask
+               function void set(output int v, input int a); v = a; endfunction
                function int f(input int a);
                  int t, u;
                  set(t, a);
@@ -308,6 +375,111 @@ fn static_initializers_run_before_initial_blocks() {
         ),
         3
     );
+}
+
+/// A static initializer may be any run-time expression; it runs once,
+/// before any procedure starts (IEEE 1800-2023 6.8, 6.21).
+#[test]
+fn run_time_static_initializers_run_once_before_any_procedure() {
+    // The initializers read the module variable before the other `initial`
+    // procedure writes it, and in declaration order. Without the `static`
+    // keyword that 6.21 requires, an `initial` procedure's locals still
+    // follow this rule.
+    assert_eq!(
+        settled(
+            "module Top(output logic [31:0] y);
+               typedef enum {a, b, c} e;
+               int m = 1;
+               initial m = 5;
+               initial begin
+                 e v = b;
+                 string s = v.name();
+                 int k = m + 1;
+                 static int j = k * 10 + v;
+                 v = c;
+                 y = {s.len() == 1 && s == \"b\", 7'(k), 8'(j), 8'(m)};
+               end
+             endmodule"
+        ),
+        0x82_1505
+    );
+    // Also when an edge process that makes a host request reorders the
+    // processes by creation.
+    assert_eq!(
+        settled(
+            "module Top(input logic clk, output logic [7:0] y);
+               int dummy;
+               int m = dummy + 4;
+               always @(posedge clk) $fflush;
+               initial begin static int k = m + 1; y = k; end
+             endmodule"
+        ),
+        5
+    );
+    // A static in a loop is initialized once, not on each iteration.
+    assert_eq!(
+        settled(
+            "module Top(output logic [7:0] y);
+               int m = 1;
+               initial for (int i = 0; i < 3; i++) begin
+                 static int once = m;
+                 once++;
+                 y = once;
+               end
+             endmodule"
+        ),
+        4
+    );
+    // An explicitly static local of an `always` procedure as well.
+    assert_eq!(
+        ticks(
+            "module Top(input logic clk, output logic [7:0] y);
+               int m = 4;
+               always_ff @(posedge clk) begin static int c = m + 1; c++; y <= c; end
+             endmodule",
+            2
+        ),
+        [6, 7]
+    );
+    // The statics of a function it calls are initialized before it.
+    assert_eq!(
+        settled(
+            "module Top(output logic [7:0] y);
+               int m = 1;
+               function int f(input int a);
+                 static int c = 7;
+                 c++;
+                 return c + a;
+               endfunction
+               initial begin static int k = f(m); y = k + f(0); end
+             endmodule"
+        ),
+        18
+    );
+}
+
+/// An initializer that reads an automatic variable, or a keyword-less one
+/// of a procedure that repeats, could only run on each entry.
+#[test]
+fn run_time_static_initializers_that_could_repeat_remain_unsupported() {
+    for source in [
+        "module Top(output logic [7:0] y);
+           initial begin automatic int x = 3; int t = x + 1; y = t; end
+         endmodule",
+        "module Top(output logic [7:0] y);
+           initial begin automatic int x = 3; static int t = x + 1; y = t; end
+         endmodule",
+        "module Top(input logic clk, output logic [7:0] y);
+           int m = 4;
+           always_ff @(posedge clk) begin int c = m + 1; c++; y <= c; end
+         endmodule",
+    ] {
+        let detail = error(source);
+        assert!(
+            detail.contains("initializer that is not constant"),
+            "{detail}"
+        );
+    }
 }
 
 #[test]

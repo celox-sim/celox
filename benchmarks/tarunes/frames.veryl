@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: MIT
+// Qualification probe: checks the same golden outputs as frames.sv.
+#[test(benchmark_frames)]
+module benchmark_frames {
+    inst clk: $tb::clock_gen;
+    inst rst: $tb::reset_gen(clk);
+    var frame_sync: logic;
+    var sfc_data: logic;
+    var scanline: logic<9>;
+    var cycle: logic<9>;
+    var pixel_index: logic<6>;
+    var debug_cpu_pc: logic<16>;
+    var audio_sample: logic<8>;
+    var hdmi_r: logic<8>;
+    var hdmi_g: logic<8>;
+    var hdmi_b: logic<8>;
+    var hdmi_de: logic;
+    var i2s_dout: logic;
+    var frames: u32;
+    var previous_scanline: logic<9>;
+    var pixel_hash: logic<32>;
+    var output_hash: logic<32>;
+    var hh: logic<32>;
+    var ha: logic<32>;
+    var hi: logic<32>;
+    inst dut: top #(ENABLE_APU: true, PROM_PATH: "benchmark_prg.hex", CROM_PATH: "benchmark_chr.hex") (clk, rst, frame_sync, sfc_data, scanline, cycle, pixel_index, debug_cpu_pc, audio_sample, hdmi_r, hdmi_g, hdmi_b, hdmi_de, i2s_dout);
+    initial {
+        frame_sync = 1'b1;
+        sfc_data = 1'b1;
+        rst.assert(4);
+        frames = 0;
+        previous_scanline = 0;
+        pixel_hash = 0;
+        output_hash = 0; hh = 0; ha = 0; hi = 0;
+        for _step in 0..300000 {
+            frame_sync = scanline == 261 && cycle == 340;
+            clk.next();
+            pixel_hash = {pixel_hash[26:0], pixel_hash[31:27]} ^ (pixel_index as 32);
+            output_hash = {output_hash[28:0], output_hash[31:29]} ^ {hdmi_r, hdmi_g, hdmi_b, audio_sample} ^ (i2s_dout as 32) ^ (hdmi_de as 32);
+            hh = {hh[28:0], hh[31:29]} ^ {8'b0, hdmi_r, hdmi_g, hdmi_b};
+            ha = {ha[28:0], ha[31:29]} ^ (audio_sample as 32);
+            hi = {hi[28:0], hi[31:29]} ^ (i2s_dout as 32) ^ (hdmi_de as 32);
+            if previous_scanline == 261 && scanline == 0 { frames += 1; }
+            previous_scanline = scanline;
+            if frames == 3 { break; }
+        }
+        $assert(frames == 3);
+        $display("hh=%h ha=%h hi=%h", hh, ha, hi);
+        $display("frames=%0d pixel_hash=%h output_hash=%h", frames, pixel_hash, output_hash);
+        $display("pc=%0d line=%0d cycle=%0d pixel=%0d", debug_cpu_pc, scanline, cycle, pixel_index);
+        $assert(pixel_hash == 32'h745d1730);
+        $assert(hh == 32'hf11b12d6);
+        $assert(ha == 32'h76363624);
+        $assert(hi == 32'h85e85e85);
+        $assert(output_hash == 32'he8ccbe50);
+        $assert(debug_cpu_pc == 32867);
+        $finish();
+    }
+}

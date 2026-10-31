@@ -29,6 +29,21 @@ macro_rules! on_every_backend {
         ))]
         run($builder.build_native().unwrap());
     }};
+    // `$body` also sees `$name`, which every run is passed as `$arg`.
+    ($builder:expr, $arg:expr, |$sim:ident, $name:ident: $ty:ty| $body:block) => {{
+        fn run<B: SimBackend>(mut $sim: Simulation<B>, $name: $ty) $body
+        run($builder.build_interpreter().unwrap(), $arg);
+        #[cfg(feature = "cranelift")]
+        run($builder.build_cranelift().unwrap(), $arg);
+        #[cfg(feature = "wasm-runtime")]
+        run($builder.build_wasm().unwrap(), $arg);
+        run($builder.build_tiered().unwrap(), $arg);
+        #[cfg(any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        ))]
+        run($builder.build_native().unwrap(), $arg);
+    }};
 }
 
 /// A flat SDK module under construction.
@@ -625,28 +640,25 @@ fn state_files_carry_waiting_processes_across_backends() {
     let mut bytes = Vec::new();
     file.write_to(&mut bytes).unwrap();
     let file = celox_runtime::StateFile::read_from(bytes.as_slice()).unwrap();
-    STATE.with(|state| *state.borrow_mut() = Some(file));
-    on_every_backend!(builder(&artifact, true), |sim| {
-        let file = STATE.with(|state| state.borrow().clone().unwrap());
-        sim.load_state(&file).unwrap();
-        assert_eq!(sim.time(), 3);
-        assert_eq!(value(&mut sim, "wakes"), 1);
-        sim.run_until(4).unwrap();
-        assert_eq!(value(&mut sim, "wakes"), 1);
-        let go = sim.signal("go");
-        sim.modify(|io| io.set(go, 1u8)).unwrap();
-        sim.run_until(5).unwrap();
-        assert_eq!(
-            value(&mut sim, "wakes"),
-            2,
-            "the loaded process still waits"
-        );
-    });
-}
-
-thread_local! {
-    static STATE: std::cell::RefCell<Option<celox_runtime::StateFile>> =
-        const { std::cell::RefCell::new(None) };
+    on_every_backend!(
+        builder(&artifact, true),
+        &file,
+        |sim, file: &celox_runtime::StateFile| {
+            sim.load_state(file).unwrap();
+            assert_eq!(sim.time(), 3);
+            assert_eq!(value(&mut sim, "wakes"), 1);
+            sim.run_until(4).unwrap();
+            assert_eq!(value(&mut sim, "wakes"), 1);
+            let go = sim.signal("go");
+            sim.modify(|io| io.set(go, 1u8)).unwrap();
+            sim.run_until(5).unwrap();
+            assert_eq!(
+                value(&mut sim, "wakes"),
+                2,
+                "the loaded process still waits"
+            );
+        }
+    );
 }
 
 /// IEEE 1800-2023 4.5: a process woken by `@(posedge clk)` runs in the
@@ -2592,4 +2604,144 @@ fn public_time_setter_publishes_time_before_design_evaluation() {
             assert_eq!(sim.get(y), 12u64.into());
         });
     }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn portable_fork_strings_include_roots_absent_from_backend_memory() {
+    // Explicitly erase stale backend scratch references: the portable table
+    // must discover the child's value through its shared lexical cell alone.
+    let source = r#"`timescale 1ns/1ns
+module Top(output int q);
+ initial begin
+   automatic string kept;
+   kept.itoa(12345);
+   fork begin #3; q=kept.atoi(); end join_none
+   #1;
+ end
+ initial begin
+   string garbage;
+   #2;
+   for (int i=0; i<1100; i++) garbage.itoa(i);
+ end
+endmodule"#;
+    let mut sim =
+        Simulation::from_sv_sources(vec![(source, std::path::Path::new("roots.sv"))], "Top")
+            .build_native()
+            .unwrap();
+    sim.run_until(1).unwrap();
+    let slots: Vec<_> = sim
+        .simulator
+        .program
+        .design
+        .state_objects
+        .iter()
+        .filter(|(_, metadata)| metadata.value_kind == celox_design::ValueKind::StrRef)
+        .map(|(address, _)| sim.simulator.backend.resolve_signal(address))
+        .collect();
+    for slot in slots {
+        sim.simulator.backend.set(slot, 0u8);
+    }
+    assert!(
+        !sim.capture_state()
+            .unwrap()
+            .strings
+            .iter()
+            .any(|s| s == b"12345")
+    );
+    let file = sim.save_state().unwrap();
+    assert!(file.strings.iter().any(|s| s == b"12345"));
+    let mut target =
+        Simulation::from_sv_sources(vec![(source, std::path::Path::new("roots.sv"))], "Top")
+            .build_interpreter()
+            .unwrap();
+    target.load_state(&file).unwrap();
+    target.run_until(4).unwrap();
+    assert_eq!(target.get(target.signal("q")), 12345u32.into());
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn portable_fork_state_roundtrips_each_region_queue() {
+    let source = r#"`timescale 1ns/1ns
+module Top(output int q);
+ initial fork begin #10; end begin #10; end join
+ P p();
+endmodule
+program P;
+ initial fork begin #10; end begin #10; end join
+endprogram"#;
+    let mut sim =
+        Simulation::from_sv_sources(vec![(source, std::path::Path::new("regions.sv"))], "Top")
+            .build_interpreter()
+            .unwrap();
+    sim.run_until(1).unwrap();
+    // Capture a legal in-progress scheduler boundary, before these queues
+    // drain. Public run_until deliberately settles them before returning.
+    let mut parts = sim.state.export_schedule(&sim.simulator.backend);
+    let mut module = 0;
+    let mut program = 0;
+    for (id, _) in std::mem::take(&mut parts.process_wakeups) {
+        let activation = &mut parts.process_state.activations[id];
+        let slots = &sim.simulator.program.runtime_schema.processes[activation.kernel];
+        let frame = sim.simulator.program.runtime_schema.process_frames[activation.kernel]
+            .as_ref()
+            .unwrap();
+        let inactive = if slots.program.is_some() {
+            program += 1;
+            if program == 1 {
+                parts.process_state.reactive.insert(id);
+                false
+            } else {
+                parts.process_state.re_inactive.insert(id);
+                true
+            }
+        } else {
+            module += 1;
+            if module == 1 {
+                parts.process_state.ready.insert(id);
+                false
+            } else {
+                parts.process_state.inactive.insert(id);
+                true
+            }
+        };
+        if inactive {
+            let status = frame
+                .private
+                .iter()
+                .position(|slot| *slot == slots.status)
+                .unwrap();
+            let delay = frame
+                .private
+                .iter()
+                .position(|slot| *slot == slots.delay)
+                .unwrap();
+            activation.private[status] = (
+                celox_design::ProcessStatus::InactiveDelay.code().into(),
+                0u8.into(),
+            );
+            activation.private[delay] = (0u8.into(), 0u8.into());
+        }
+    }
+    assert_eq!((module, program), (2, 2));
+    let update = |value: u8| celox_runtime::NbaUpdate {
+        target: sim.signal("q"),
+        lsb: 0,
+        width: 32,
+        value: (value.into(), 0u8.into()),
+    };
+    parts.process_state.nba_queue.push(update(7));
+    parts.process_state.re_nba_queue.push(update(11));
+    sim.state.import_schedule(parts);
+    let file = sim.save_state().unwrap();
+    let mut encoded = Vec::new();
+    file.write_to(&mut encoded).unwrap();
+    let file = celox_runtime::StateFile::read_from(encoded.as_slice()).unwrap();
+    let mut target =
+        Simulation::from_sv_sources(vec![(source, std::path::Path::new("regions.sv"))], "Top")
+            .build_native()
+            .unwrap();
+    target.load_state(&file).unwrap();
+    assert_eq!(target.save_state().unwrap().schedule, file.schedule);
 }

@@ -8,8 +8,10 @@ pub use crate::procedural::{
     SystemTaskArg,
 };
 pub use crate::system_functions::{
-    ArrayQuery, Callee, HandleProperty, MemoryFormat, ObjectField, ObjectOp, Radix, Severity,
-    StringOp, SystemFunction, SystemTask, VcdTask,
+    AccessCheck, ArrayQuery, Callee, ContainerConcat, ContainerKind, ContainerLayout, ContainerOp,
+    HandleProperty, Locator, LocatorKey, LocatorMethod, LocatorSource, MemoryFormat, ObjectField,
+    ObjectOp, Radix, Record, Severity, Stream, StreamArg, StreamItem, StreamOp, StreamPack,
+    StreamRange, StringOp, SystemFunction, SystemTask, VcdTask,
 };
 
 /// A procedural statement of the analyzed IR.
@@ -72,7 +74,22 @@ pub struct Module {
     declaration_subroutines: Vec<Subroutine>,
     dpi_imports: Vec<DpiImport>,
     imported_parameters: Vec<Parameter>,
+    interface_scope_names: Vec<String>,
+    interface_handles: Vec<InterfaceHandle>,
     program: bool,
+}
+
+/// An interface instance or interface port of a module that a virtual
+/// interface may denote (IEEE 1800-2023 25.9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceHandle {
+    /// The instance or port, as the module's flattened names spell it.
+    pub handle: String,
+    pub interface: String,
+    /// A port of the module, which denotes the instance connected to it.
+    pub port: bool,
+    /// The signal or port of the module that holds each member.
+    pub members: Vec<(String, String)>,
 }
 
 impl Module {
@@ -109,6 +126,7 @@ impl Module {
                             FfEdge::Neg => EventEdge::Neg,
                         },
                         expr: Expr::Ident(event.signal.clone()),
+                        iff: None,
                     })
                     .collect(),
             )];
@@ -196,7 +214,29 @@ impl Module {
             dpi_imports: Vec::new(),
             imported_parameters: Vec::new(),
             program: false,
+            interface_scope_names: Vec::new(),
+            interface_handles: Vec::new(),
         }
+    }
+
+    /// Elaborated interface instance and port scopes, including empty interfaces.
+    pub fn interface_scope_names(&self) -> &[String] {
+        &self.interface_scope_names
+    }
+
+    pub(crate) fn with_interface_scope_names(mut self, names: Vec<String>) -> Self {
+        self.interface_scope_names = names;
+        self
+    }
+
+    /// The interface instances and ports a virtual interface may denote.
+    pub fn interface_handles(&self) -> &[InterfaceHandle] {
+        &self.interface_handles
+    }
+
+    pub(crate) fn with_interface_handles(mut self, handles: Vec<InterfaceHandle>) -> Self {
+        self.interface_handles = handles;
+        self
     }
 
     pub(crate) fn with_program(mut self, program: bool) -> Self {
@@ -386,6 +426,7 @@ pub struct Port {
     direction: PortDirection,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     default: Option<ConstExpr>,
     pattern_target: Option<crate::ast::Type>,
 }
@@ -395,6 +436,7 @@ pub struct Signal {
     name: String,
     r#type: Type,
     is_net: bool,
+    unresolved_net: bool,
     package_variable: Option<(String, String)>,
     hierarchical: Option<String>,
 }
@@ -405,6 +447,7 @@ impl Signal {
             name,
             r#type,
             is_net,
+            unresolved_net: false,
             package_variable: None,
             hierarchical: None,
         }
@@ -450,6 +493,16 @@ impl Signal {
     pub fn is_net(&self) -> bool {
         self.is_net
     }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
+    }
 }
 
 impl Port {
@@ -459,6 +512,7 @@ impl Port {
             direction,
             r#type,
             is_net,
+            unresolved_net: false,
             default: None,
             pattern_target: None,
         }
@@ -467,6 +521,17 @@ impl Port {
     pub(crate) fn with_pattern_target(mut self, target: Option<crate::ast::Type>) -> Self {
         self.pattern_target = target;
         self
+    }
+
+    /// Bind an aggregate pattern as independently typed values for the leaf ports.
+    pub fn bind_structure_pattern(
+        &self,
+        pattern: &crate::ast::BoundPattern,
+    ) -> Result<Vec<Expr>, crate::AnalyzerError> {
+        let target = self.pattern_target.as_ref().ok_or_else(|| {
+            crate::AnalyzerError::Unsupported("unpacked structure port pattern type".into())
+        })?;
+        pattern.bind_structure_port(target)
     }
 
     /// Bind caller-owned pattern values in this specialized port's type.
@@ -494,6 +559,16 @@ impl Port {
 
     pub fn is_net(&self) -> bool {
         self.is_net
+    }
+
+    /// Whether this is an unresolved, single-driver `uwire` net (6.6.2).
+    pub fn is_unresolved_net(&self) -> bool {
+        self.unresolved_net
+    }
+
+    pub(crate) fn with_unresolved_net(mut self, unresolved: bool) -> Self {
+        self.unresolved_net = unresolved;
+        self
     }
 
     pub(crate) fn with_default(mut self, default: Option<ConstExpr>) -> Self {
@@ -689,6 +764,7 @@ impl From<ast::PortDirection> for PortDirection {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Type {
+    structure: Option<std::sync::Arc<StructureType>>,
     tagged_identity: Option<String>,
     kind: TypeKind,
     is_signed: bool,
@@ -699,7 +775,29 @@ pub struct Type {
     class: Option<String>,
 }
 
+/// Shared metadata, allocated only for unpacked structure types. Ordinary
+/// scalar types and cloning their declarations do not copy a member layout.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StructureType {
+    identity: String,
+    leaves: Vec<(String, Type)>,
+}
+
 impl Type {
+    /// Nominal identity of a non-storage unpacked structure declaration.
+    pub fn structure_identity(&self) -> Option<&str> {
+        self.structure
+            .as_ref()
+            .map(|structure| structure.identity.as_str())
+    }
+
+    /// Leaf member paths and types in declaration order. Each leaf has its own storage.
+    pub fn structure_leaves(&self) -> &[(String, Type)] {
+        self.structure
+            .as_ref()
+            .map_or(&[], |structure| structure.leaves.as_slice())
+    }
+
     /// How many leading packed dimensions select an element of a signed
     /// named type (IEEE 1800-2023 7.4.1).
     pub fn signed_element_depth(&self) -> Option<usize> {
@@ -754,7 +852,7 @@ impl Type {
 
     pub(crate) fn has_symbolic_ranges(
         &self,
-        functions: &crate::ast::const_functions::State,
+        functions: &crate::ast::const_functions::ConstantFunctions,
     ) -> bool {
         let values = fxhash::FxHashMap::default();
         let constants = crate::ast::const_functions::Environment {
@@ -779,6 +877,11 @@ pub enum TypeKind {
     String,
     /// IEEE 1800-2023 8.4: a handle of a class object.
     Object,
+    /// A scheduler-owned process reference (9.7), independent of the heap.
+    Process,
+    /// A handle of the synchronization object of a named event (15.5), or
+    /// `null`.
+    Event,
     Bit,
     Logic,
     Reg,
@@ -790,6 +893,16 @@ impl Type {
         r#type: ast::Type,
         constants: &dyn typecheck::ConstantEnvironment,
     ) -> Self {
+        let structure = r#type.structure_identity().map(|identity| {
+            std::sync::Arc::new(StructureType {
+                identity: identity.to_owned(),
+                leaves: r#type
+                    .structure_leaves()
+                    .into_iter()
+                    .map(|(name, ty)| (name, Self::from_ast(ty, constants)))
+                    .collect(),
+            })
+        });
         let tagged_identity = r#type.tagged_identity().map(str::to_owned);
         let kind = r#type.kind().into();
         let is_signed = r#type.is_signed();
@@ -797,6 +910,7 @@ impl Type {
         let signed_element_depth = r#type.signed_element_depth();
         let (packed_ranges, unpacked_ranges, resolved_width) = convert_type(r#type, constants);
         Self {
+            structure,
             tagged_identity,
             kind,
             is_signed,
@@ -850,6 +964,8 @@ impl From<ast::TypeKind> for TypeKind {
             ast::TypeKind::Shortreal => TypeKind::Shortreal,
             ast::TypeKind::String => TypeKind::String,
             ast::TypeKind::Object => TypeKind::Object,
+            ast::TypeKind::Process => TypeKind::Process,
+            ast::TypeKind::Event => TypeKind::Event,
             ast::TypeKind::Bit => TypeKind::Bit,
             ast::TypeKind::Logic => TypeKind::Logic,
             ast::TypeKind::Reg => TypeKind::Reg,
@@ -1243,7 +1359,9 @@ impl InitialProcess {
         };
         (init.is_empty()
             && step.is_empty()
-            && items.iter().all(|item| item.edge == EventEdge::Any)
+            && items
+                .iter()
+                .all(|item| item.edge == EventEdge::Any && item.iff.is_none())
             && !leaves_the_process_loop(body))
         .then_some((items.as_slice(), body))
     }

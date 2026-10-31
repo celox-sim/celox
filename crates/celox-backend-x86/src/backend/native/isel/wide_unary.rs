@@ -2,6 +2,58 @@
 
 use super::*;
 
+/// Lower `ToPlanes` or `FromPlanes`: whole 64-bit words move between the
+/// value and mask chunks of a four-state register and a two-state one.
+pub(super) fn lower_planes(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    dst: RegisterId,
+    op: &UnaryOp,
+    src: RegisterId,
+) {
+    let words = ISelContext::num_chunks(ctx.sir_width(&src));
+    let mut values: Vec<VReg> = ctx
+        .get_wide_chunks(&src, block)
+        .into_iter()
+        .map(|(vreg, _)| vreg)
+        .collect();
+    let zeros = |ctx: &mut ISelContext, block: &mut MBlock, count: usize| -> Vec<VReg> {
+        (0..count)
+            .map(|_| {
+                let zero = ctx.alloc_vreg(SpillDesc::remat(0));
+                block.push(MInst::LoadImm {
+                    dst: zero,
+                    value: 0,
+                });
+                zero
+            })
+            .collect()
+    };
+    let (values, masks) = if *op == UnaryOp::ToPlanes {
+        let masks = if ctx.four_state {
+            get_wide_mask_chunks(ctx, block, &src, words)
+        } else {
+            zeros(ctx, block, words)
+        };
+        values.extend(masks);
+        let masks = zeros(ctx, block, values.len());
+        (values, masks)
+    } else {
+        let masks = values.split_off(words / 2);
+        (values, masks)
+    };
+    if values.len() == 1 {
+        ctx.reg_map.set(dst, values[0]);
+        ctx.set_mask(dst, masks[0]);
+        return;
+    }
+    ctx.set_wide_chunks(dst, values.into_iter().map(|vreg| (vreg, 64)).collect());
+    if ctx.four_state {
+        ctx.wide_masks
+            .insert(dst, masks.into_iter().map(|vreg| (vreg, 64)).collect());
+    }
+}
+
 /// Lower a unary operation on wide (>64-bit) values.
 pub(super) fn lower_wide_unary(
     ctx: &mut ISelContext,
@@ -15,8 +67,8 @@ pub(super) fn lower_wide_unary(
     let n_chunks = ISelContext::num_chunks(d_width.max(src_width));
 
     match op {
-        UnaryOp::Float { .. } => {
-            unreachable!("float operations are lowered before integer operations")
+        UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+            unreachable!("float and plane operations are lowered before integer operations")
         }
         UnaryOp::BitNot => {
             let src_chunks = ctx.get_wide_chunks(&src, block);
@@ -237,24 +289,35 @@ pub(super) fn lower_wide_unary(
                 });
                 acc = next;
             }
-            // Now acc has XOR of all chunks. Need popcount parity (odd # of 1-bits → 1)
-            // Fold 64-bit value to 1 bit by cascading XOR
-            let mut val = acc;
-            for shift in [32u8, 16, 8, 4, 2, 1] {
-                let shifted = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::ShrImm {
-                    dst: shifted,
-                    src: val,
-                    imm: shift,
+            // XORing the chunks preserves total parity. Use the same scalar
+            // POPCNT operation as narrow reductions when the target supports it.
+            let val = if ctx.use_popcnt {
+                let count = ctx.alloc_vreg(SpillDesc::transient());
+                block.push(MInst::Popcnt {
+                    dst: count,
+                    src: acc,
                 });
-                let folded = ctx.alloc_vreg(SpillDesc::transient());
-                block.push(MInst::Xor {
-                    dst: folded,
-                    lhs: val,
-                    rhs: shifted,
-                });
-                val = folded;
-            }
+                count
+            } else {
+                // Keep the software fold for targets without POPCNT.
+                let mut val = acc;
+                for shift in [32u8, 16, 8, 4, 2, 1] {
+                    let shifted = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::ShrImm {
+                        dst: shifted,
+                        src: val,
+                        imm: shift,
+                    });
+                    let folded = ctx.alloc_vreg(SpillDesc::transient());
+                    block.push(MInst::Xor {
+                        dst: folded,
+                        lhs: val,
+                        rhs: shifted,
+                    });
+                    val = folded;
+                }
+                val
+            };
             let result = ctx.alloc_vreg(SpillDesc::transient());
             ctx.emit_and_imm(block, result, val, 1);
             let mut dst_chunks = Vec::with_capacity(n_chunks);

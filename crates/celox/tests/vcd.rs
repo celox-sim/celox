@@ -345,12 +345,12 @@ mod activity {
         #[derive(Default)]
         struct FailWrites {
             bytes: Vec<u8>,
-            failures: std::cell::Cell<usize>,
+            failures: usize,
         }
         impl std::io::Write for FailWrites {
             fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-                if let Some(remaining) = self.failures.get().checked_sub(1) {
-                    self.failures.set(remaining);
+                if let Some(remaining) = self.failures.checked_sub(1) {
+                    self.failures = remaining;
                     return Err(std::io::ErrorKind::Other.into());
                 }
                 self.bytes.extend_from_slice(bytes);
@@ -407,7 +407,7 @@ mod activity {
                 }
 
                 backend.set_wide(a, BigUint::from(11u8));
-                writer.get_ref().failures.set(failures);
+                writer.get_mut().failures = failures;
                 let before = writer.statistics().comparisons;
                 for attempt in 0..failures {
                     let error = writer.dump_backend(200_000, &mut backend, &[]).unwrap_err();

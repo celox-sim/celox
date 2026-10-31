@@ -1,0 +1,19 @@
+{
+  "specification": "IEEE 1800-2023 18.7, 18.7.1",
+  "observations": [
+    {
+      "tool": "icarus",
+      "version": "Icarus 13.0",
+      "case": "class::constrained_randomize_inline_inputs",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:6: sorry: Constraint declarations not supported.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:15: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:15: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:15: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:15: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:17: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:17: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:17: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:17: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:20: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:20: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:20: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:20: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:23: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:23: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:23: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:23: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:25: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_inputs/source_0.sv:25: error: Malformed conditional expression.\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus 13.0",
+      "case": "class::constrained_randomize_inline_input_methods",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inline_input_methods/source_0.sv:6: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_input_methods/source_0.sv:6: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_input_methods/source_0.sv:6: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_input_methods/source_0.sv:6: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_input_methods/source_0.sv:13: sorry: Constraint declarations not supported.\n"
+    }
+  ]
+}

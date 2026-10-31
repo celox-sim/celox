@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use celox_design::SchedulerExit;
+use celox_design::{SchedulerExit, edges::LEVEL_UNKNOWN};
 
 use super::{Baseline, CompiledSlots, SchedulerMode, SimulationExecutor, SimulationState};
 use crate::{
@@ -72,9 +72,11 @@ impl<B: SimBackend> SimulationState<B> {
             || self.suspended.is_some()
             || self.declarations_pending
             || self.host_pending
+            || !pending.observed.is_empty()
             || !pending.ready.is_empty()
             || !pending.inactive.is_empty()
             || !pending.nba_queue.is_empty()
+            || !pending.nba_events.is_empty()
             // A derived clock changes with the slots of its sources, which
             // the scheduler does not tell apart.
             || self.observed_events & scheduler.derived_events != 0
@@ -124,7 +126,7 @@ impl<B: SimBackend> SimulationState<B> {
         let one_slot = match executor.compiled_slots() {
             CompiledSlots::None => return None,
             CompiledSlots::One => true,
-            CompiledSlots::Any => one_slot,
+            CompiledSlots::Any => one_slot || self.one_slot_runs(),
         };
         Some(if one_slot {
             first
@@ -176,6 +178,11 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        // Designs with sampled values are limited to one slot, so `limit`
+        // is that slot's timestamp. Keep its baseline on same-time reentry.
+        if self.one_slot_runs() && limit > self.scheduler.time {
+            self.sample_values(executor.backend_mut());
+        }
         let scheduler = self
             .model
             .scheduler
@@ -185,6 +192,9 @@ impl<B: SimBackend> SimulationState<B> {
         backend.set(scheduler.limit, limit);
         backend.set(scheduler.exit, 0u8);
         backend.set(scheduler.finish, 0u8);
+        // State may have been restored or a prior slot may have exited early.
+        // Only hosts that prove their input state settled may enter clean.
+        backend.set(scheduler.dirty, 1u8);
         backend.set(scheduler.count, 0u64);
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);
@@ -196,10 +206,17 @@ impl<B: SimBackend> SimulationState<B> {
             let Some((waiting, baseline)) = *slots else {
                 continue;
             };
+            // The edge level of the one-bit signal: its value bit, and its
+            // mask bit, which a two-state image lacks.
             let level = match self.process_state.waiters.get(process) {
                 Some(waiter) => match waiter.baselines.first() {
-                    Some(Baseline::Raw(raw)) => raw.first().is_some_and(|byte| byte & 1 != 0),
-                    Some(Baseline::Value((value, _))) => value.bit(0),
+                    Some(Baseline::Raw(raw)) => {
+                        let bit = |index: usize| raw.get(index).is_some_and(|byte| byte & 1 != 0);
+                        u8::from(bit(0)) | (u8::from(bit(1)) * LEVEL_UNKNOWN)
+                    }
+                    Some(Baseline::Value((value, mask))) => {
+                        u8::from(value.bit(0)) | (u8::from(mask.bit(0)) * LEVEL_UNKNOWN)
+                    }
                     _ => return Err(SimulatorErrorCode::InternalError.into()),
                 },
                 None => {
@@ -208,7 +225,7 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             };
             backend.set(waiting, 1u8);
-            backend.set(baseline, u8::from(level));
+            backend.set(baseline, level);
             self.process_state.waiters.remove(process);
         }
         // The scheduler's kernels wait in its wake slots during the run.
@@ -326,12 +343,20 @@ impl<B: SimBackend> SimulationState<B> {
             if pending(process) || backend.get_as::<u8>(waiting) == 0 {
                 continue;
             }
-            let site = backend.get_as::<u64>(self.model.processes[process].delay) as usize;
+            let site = (backend.get_as::<u64>(self.model.processes[process].delay)
+                & !celox_design::PROCESS_LEVEL_WAIT) as usize;
             let terms = self.model.processes[process]
                 .wait_sites
                 .get(site)
                 .ok_or_else(|| Self::site_error(process, site))?;
-            let level = [backend.get_as::<u8>(baseline)];
+            let level = backend.get_as::<u8>(baseline);
+            // A four-state signal's image holds its mask plane after its value.
+            let planes = [level & 1, u8::from(level & LEVEL_UNKNOWN != 0)];
+            let level = if self.four_state && terms.iter().any(|term| term.signal.is_4state) {
+                &planes[..]
+            } else {
+                &planes[..1]
+            };
             // The slot keeps its storage, as `register_waiter` reuses it.
             self.process_state.waiters.register(
                 process,
@@ -340,10 +365,10 @@ impl<B: SimBackend> SimulationState<B> {
                     waiter.site = site;
                     waiter.baselines.truncate(1);
                     match waiter.baselines.first_mut() {
-                        Some(Baseline::Raw(raw)) => copy_planes(raw, &level, 1),
+                        Some(Baseline::Raw(raw)) => copy_planes(raw, level, 1),
                         _ => {
-                            let mut raw = Vec::with_capacity(1);
-                            copy_planes(&mut raw, &level, 1);
+                            let mut raw = Vec::with_capacity(level.len());
+                            copy_planes(&mut raw, level, 1);
                             waiter.baselines.clear();
                             waiter.baselines.push(Baseline::Raw(raw));
                         }
@@ -369,6 +394,11 @@ impl<B: SimBackend> SimulationState<B> {
             // The baseline is the levels slot `now` started from; events the
             // kernels do not write kept theirs.
             let levels: u64 = executor.backend().get_as(scheduler.levels);
+            let unknown: u64 = if self.four_state {
+                executor.backend().get_as(scheduler.unknown_levels)
+            } else {
+                0
+            };
             // A run without clocks records no level of their events, which
             // only the clocks change.
             let scheduler = self
@@ -376,17 +406,20 @@ impl<B: SimBackend> SimulationState<B> {
                 .scheduler
                 .as_ref()
                 .ok_or(SimulatorErrorCode::InternalError)?;
-            let recorded: Vec<(usize, bool)> = scheduler
+            let recorded: Vec<(usize, u8)> = scheduler
                 .events
                 .iter()
                 .enumerate()
                 .filter(|&(_, &id)| {
                     clocked || scheduler.clocks.iter().all(|&(clock, _)| clock != id)
                 })
-                .map(|(bit, &id)| (id, levels >> bit & 1 != 0))
+                .map(|(bit, &id)| {
+                    let level = (levels >> bit & 1) as u8;
+                    (id, level | ((unknown >> bit & 1) as u8 * LEVEL_UNKNOWN))
+                })
                 .collect();
             for (id, level) in recorded {
-                self.record_level(id, u8::from(level));
+                self.record_level(id, level);
             }
         }
         // Domains mark trigger bits as they run; between slots none is set.
@@ -418,6 +451,19 @@ impl<B: SimBackend> SimulationState<B> {
         if executor.take_slot_writes() {
             self.host_pending = true;
         }
+        // A run of one slot ends it unless work is left at its time.
+        if (self.one_slot_runs() || executor.compiled_slots() == CompiledSlots::One)
+            && !self.host_pending
+            && self.next_work_time() != Some(now)
+        {
+            self.end_time_slot(executor, now)?;
+        }
         Ok(now)
+    }
+
+    /// Whether every run of the compiled scheduler takes one slot: the
+    /// sampled copies are made before entering each later timestamp.
+    fn one_slot_runs(&self) -> bool {
+        !self.model.sample_shadows.is_empty()
     }
 }

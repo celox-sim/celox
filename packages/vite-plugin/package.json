@@ -1,6 +1,6 @@
 {
   "name": "@celox-sim/vite-plugin",
-  "version": "0.11.0",
+  "version": "0.12.0",
   "description": "Vite plugin for importing .veryl files as typed ModuleDefinition objects",
   "type": "module",
   "main": "./dist/index.js",
@@ -41,7 +41,7 @@
     "@celox-sim/celox": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^25.3.2",
+    "@types/node": "^26.0.0",
     "typescript": "^7.0.0",
     "vite": "^8.0.0"
   }

@@ -5,7 +5,7 @@ use super::*;
 /// Collapse an interface handle/member prefix using its bound symbols. Any
 /// remaining path selects a packed-structure member of the interface signal.
 pub(super) fn bind_interface_path(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     path: &mut Vec<String>,
     dimensions: &PackedDimensions,
 ) -> bool {
@@ -17,7 +17,7 @@ pub(super) fn bind_interface_path(
     {
         return false;
     }
-    let imported = scope::imported(state);
+    let imported = scope::imported(tree);
     for length in (2..=path.len()).rev() {
         if let Some(name) = imported.interface_members.get(&path[..length].join(".")) {
             path.splice(..length, [name.clone()]);
@@ -74,38 +74,44 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
     result.insert(
         name.to_string(),
         VariableDimensions {
+            declared: type_names::Declared::default(),
+            container: None,
             randomizable: true,
-            enum_values: None,
+            enum_domain: None,
+            packed_enum: false,
             real: false,
             string: false,
             class: None,
+            virtual_interface: None,
             packed: function_packed_dimension_widths(&r#type.packed_ranges),
             unpacked: Vec::new(),
             signed: r#type.is_signed,
             is_2state: r#type.kind == TypeKind::Bit,
             members: r#type.members.clone(),
             signed_element_depth: r#type.signed_element_depth,
+            unpacked_struct: None,
         },
     );
     result
 }
 
 fn finish_lvalue(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     path: &[String],
     offset: usize,
     r#type: &Type,
     relative: LValue,
     dimensions: &PackedDimensions,
 ) -> Option<LValue> {
-    let width = expr_type_from_type(state, r#type, &dimensions.const_env)?.width;
+    let functions = &tree.functions;
+    let width = expr_type_from_type(&tree.functions, r#type, &dimensions.const_env)?.width;
     let (msb, lsb, signed) = match relative {
         LValue::Ident(_) => (width.checked_sub(1)? as i128, 0, r#type.is_signed),
         LValue::Select {
             msb, lsb, signed, ..
         } => (
-            eval_ast_const_expr(state, &msb, &dimensions.const_env)?,
-            eval_ast_const_expr(state, &lsb, &dimensions.const_env)?,
+            eval_ast_const_expr(functions, &msb, &dimensions.const_env)?,
+            eval_ast_const_expr(functions, &lsb, &dimensions.const_env)?,
             signed,
         ),
     };
@@ -127,12 +133,12 @@ fn finish_lvalue(
 /// A whole native member path uses the same interface shadowing, type/offset
 /// lookup and bounds kernel as the remaining authored-select adapters.
 pub(in crate::ast) fn whole_member(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     mut path: Vec<String>,
     base: Option<String>,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
-    let bound_interface = bind_interface_path(state, &mut path, dimensions);
+    let bound_interface = bind_interface_path(tree, &mut path, dimensions);
     if !bound_interface && let Some(base) = base {
         path[0] = base;
     }
@@ -142,7 +148,7 @@ pub(in crate::ast) fn whole_member(
     let (offset, ty) = selected_member(&path, dimensions)
         .ok_or_else(|| unknown_member(&path, bound_interface, dimensions))?;
     finish_lvalue(
-        state,
+        tree,
         &path,
         offset,
         ty,
@@ -160,13 +166,13 @@ pub(in crate::ast) fn whole_member(
 /// Select already-bound native member coordinates in the member's own type
 /// context. Interface members retain ordinary target coordinate rules.
 pub(in crate::ast) fn select_member(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     mut path: Vec<String>,
     base: Option<String>,
     dimensions: &PackedDimensions,
     select: impl FnOnce(String, &PackedDimensions, bool) -> Converted<LValue>,
 ) -> Converted<LValue> {
-    let bound_interface = bind_interface_path(state, &mut path, dimensions);
+    let bound_interface = bind_interface_path(tree, &mut path, dimensions);
     if !bound_interface && let Some(base) = base {
         path[0] = base;
     }
@@ -180,7 +186,7 @@ pub(in crate::ast) fn select_member(
         &member_dimensions(&path[0], ty, dimensions),
         true,
     )?;
-    finish_lvalue(state, &path, offset, ty, relative, dimensions).ok_or_else(|| {
+    finish_lvalue(tree, &path, offset, ty, relative, dimensions).ok_or_else(|| {
         unsupported(format!(
             "select of structure member `{}` outside the member",
             path.join(".")

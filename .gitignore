@@ -63,3 +63,6 @@ crates/celox/examples/bench_scaling.rs
 .direnv/
 /result
 /result-*
+
+# Local validation reports and pinned external benchmark checkouts
+/work/

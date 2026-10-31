@@ -263,3 +263,41 @@
     (assert_eq y (<< 1 position)))
   (modify (set index (fourstate 7 7)))
   (assert_eq y 0))
+
+(case wide_concatenated_procedural_targets
+  (four_state)
+  (source "wide_concat_targets.sv" #"
+    module Top;
+      int mx, my, mz;
+      logic [31:0] ma, mb, mc;
+      function automatic int split(input bit [95:0] value);
+        int p, q, r;
+        {p, q, r} = value;
+        return p * 100 + q * 10 + r;
+      endfunction
+      initial begin
+        bit [95:0] w;
+        logic [95:0] l;
+        int x, y, z;
+        logic [31:0] a, b, c;
+        w = {32'd1, 32'd2, 32'd3};
+        {x, y, z} = w;
+        {mx, my, mz} = w;
+        {a, b, c} = w;
+        {ma, mb, mc} = w;
+        $display("%0d %0d %0d %0d %0d %0d %h %h %h %h %h %h",
+                 x, y, z, mx, my, mz, a, b, c, ma, mb, mc);
+        l = {32'd4, 32'd5, 28'd6, 4'bx01z};
+        {x, y, z} = l;
+        {mx, my, mz} = l;
+        {a, b, c} = l;
+        {ma, mb, mc} = l;
+        $display("%0d %0d %0d %0d %0d %0d %h %h %h %h %h %h",
+                 x, y, z, mx, my, mz, a, b, c, ma, mb, mc);
+        $display("%0d", split({32'd7, 32'd8, 32'd9}));
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (expect_output "1 2 3 1 2 3 00000001 00000002 00000003 00000001 00000002 00000003\n4 5 98 4 5 98 00000004 00000005 0000006X 00000004 00000005 0000006X\n789\n"))

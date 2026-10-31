@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onBeforeUnmount, onMounted } from "vue";
 import { Line } from "vue-chartjs";
+import { withBase } from "vitepress";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -53,6 +54,11 @@ interface Series {
   key: string;
   benchName: string;
   runtime:
+    | "collection-celox-veryl-native"
+    | "collection-celox-tiered"
+    | "collection-veryl-tiered"
+    | "taxi-celox"
+    | "taxi-verilator"
     | "rust"
     | "rust-dse"
     | "native-tb"
@@ -182,25 +188,25 @@ function heliodorSections(cards: ChartCard[]): TabSection[] {
     .filter((section) => section.cards.length > 0);
 }
 
+const microbenchmarkTabs: TabDef[] = [
+  { key: "counter", label: "Counter", match: (n) => n.includes("top_n1000"), sections: singleSection },
+  { key: "stdlib", label: "Std Library", match: (n) => /linear_sec|countones|std_counter|fifo|onehot/.test(n), sections: stdlibSections },
+];
+
 const overviewTabs: TabDef[] = [
-  {
-    key: "counter",
-    label: "Counter",
-    match: (n) => n.includes("top_n1000"),
-    sections: singleSection,
-  },
-  {
-    key: "stdlib",
-    label: "Std Library",
-    match: (n) => /linear_sec|countones|std_counter|fifo|onehot/.test(n),
-    sections: stdlibSections,
-  },
+  { key: "taxi", label: "Taxi / cocotb", match: (n) => n.startsWith("taxi_"), sections: singleSection },
   {
     key: "heliodor",
     label: "Heliodor Linux",
-    match: (n) =>
-      n.startsWith("heliodor_linux_boot_") || n.startsWith("heliodor_suite_"),
+    match: (n) => n.startsWith("heliodor_linux_boot_") || n.startsWith("heliodor_suite_"),
     sections: heliodorSections,
+  },
+  { key: "rica", label: "rica", match: (n) => n.startsWith("collection_rica_"), sections: singleSection },
+  {
+    key: "circuits",
+    label: "Representative Circuits",
+    match: (n) => n.startsWith("collection_") && !n.startsWith("collection_rica_"),
+    sections: singleSection,
   },
 ];
 
@@ -228,6 +234,7 @@ function apiSections(cards: ChartCard[]): TabSection[] {
 
 const diagnosticTabs: TabDef[] = [
   ...overviewTabs,
+  ...microbenchmarkTabs,
   {
     key: "api",
     label: "API",
@@ -255,6 +262,11 @@ function classifySeries(benchName: string): string {
 // --- Color palette ---
 
 const RUNTIME_COLORS: Record<string, string> = {
+  "taxi-celox": "#2563eb",
+  "taxi-verilator": "#f97316",
+  "collection-celox-veryl-native": "#2563eb",
+  "collection-celox-tiered": "#2563eb",
+  "collection-veryl-tiered": "#e87924",
   rust: "#3b82f6",
   "rust-dse": "#a855f7",
   "native-tb": "#f43f5e",
@@ -274,6 +286,11 @@ const RUNTIME_COLORS: Record<string, string> = {
 };
 
 const RUNTIME_LABELS: Record<string, string> = {
+  "taxi-celox": "Celox native O1 · SV / cocotb",
+  "taxi-verilator": "Verilator · SV / cocotb",
+  "collection-celox-veryl-native": "Celox native · Veryl frontend / Veryl TB",
+  "collection-celox-tiered": "Celox tiered · Veryl TB",
+  "collection-veryl-tiered": "Veryl simulator tiered · Veryl TB",
   rust: "Celox (rust)",
   "rust-dse": "Celox (rust-dse)",
   "native-tb": "Celox (native-tb)",
@@ -297,13 +314,13 @@ const RUNTIME_LABELS: Record<string, string> = {
 const loading = ref(true);
 const error = ref("");
 const rawData = ref<BenchData | null>(null);
-const activeTab = ref("counter");
+const activeTab = ref("heliodor");
 
 // --- Helpers ---
 
 function stripPrefix(name: string): string {
   return name.replace(
-    /^(rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
+    /^(taxi-celox|taxi-verilator|collection-celox-tiered|collection-veryl-tiered|collection-celox-veryl-native|rust-dse|rust|ts|verilator|heliodor-celox-jit|heliodor-celox-total|heliodor-celox-compile|heliodor-celox-tiered|heliodor-celox-tiered-aarch64|heliodor-veryl-tiered-x86_64|heliodor-veryl-tiered-aarch64|heliodor-veryl|heliodor-veryl-compile|heliodor-native-x86_64|heliodor-native-parallel-x86_64|heliodor-veryl-cc-x86_64|heliodor-native-aarch64|heliodor-native-parallel-aarch64|heliodor-veryl-cc-aarch64)\//,
     "",
   );
 }
@@ -336,6 +353,11 @@ function normalizeBenchName(benchName: string): string {
 }
 
 function runtime(name: string): Series["runtime"] | null {
+  if (name.startsWith("taxi-celox/")) return "taxi-celox";
+  if (name.startsWith("taxi-verilator/")) return "taxi-verilator";
+  if (name.startsWith("collection-celox-tiered/")) return "collection-celox-tiered";
+  if (name.startsWith("collection-veryl-tiered/")) return "collection-veryl-tiered";
+  if (name.startsWith("collection-celox-veryl-native/")) return "collection-celox-veryl-native";
   if (name.startsWith("heliodor-celox-jit/")) return "heliodor-native-x86_64-jit";
   if (name.startsWith("heliodor-celox-total/")) return "heliodor-native-x86_64";
   if (name.startsWith("heliodor-celox-compile/")) return "heliodor-native-x86_64";
@@ -381,6 +403,16 @@ function shortDate(epoch: number): string {
 /** Format chart title from benchName */
 function formatChartTitle(benchName: string): string {
   let s = benchName;
+  const rica = s.match(/^collection_rica_(kernel-[a-z-]+)_([a-f0-9]+)_(x64|arm64)_total$/);
+  if (rica) return `rica ${rica[1]} · total · ${rica[3]} · workload ${rica[2]}`;
+  const taxi = s.match(/^taxi_(lfsr64|phy64|rx16|rx8|rx32)_v1_x64_(body|process|compilation)$/);
+  if (taxi) {
+    const phases: Record<string, string> = {
+      body: "test body (median of 3)", process: "whole process (median of 3)",
+      compilation: "HDL compilation (single cold build)",
+    };
+    return `Taxi ${taxi[1]} · ${phases[taxi[2]]} · x86-64 · v1`;
+  }
 
   // Strip module identifiers for stdlib
   s = s.replace(/^linear_sec_p6_/, "");
@@ -396,6 +428,10 @@ function formatChartTitle(benchName: string): string {
   s = s.replace(/_top_n1000/, "");
   // Strip optimize prefix patterns
   s = s.replace(/^optimize_/, "");
+  s = s.replace(
+    /^collection_(sha256|fft|lz77)_([a-f0-9]+)_(x64|arm64)_(compilation|execution|total)$/,
+    (_match, circuit, contract, arch, phase) => `${circuit.toUpperCase()} · ${phase} · ${arch} · workload ${contract}`,
+  );
   s = s.replace(
     /^heliodor_suite_(?:(66|71|71v)_)?(smp_)?linux_boot(?:_([248])hart)?_(.+)$/,
     (_match, version, _smp, harts, metric) => {
@@ -470,15 +506,11 @@ const allSeries = computed<Series[]>(() => {
         if (isRetiredBenchmark(b.name)) continue;
         const seriesRuntime = runtime(b.name);
         if (!seriesRuntime) continue;
-        let benchName = normalizeBenchName(stripPrefix(b.name));
-        // Historical Celox tiered points also include background compilation.
-        // Keep their history, but do not mix them with post-compile throughput.
-        if (
-          seriesRuntime.includes("tiered") &&
-          /^heliodor_(?:linux_boot|suite_.+)_execution$/.test(benchName)
-        ) {
-          benchName = benchName.replace(/_execution$/, "_tiered_execution");
-        }
+        const benchName = normalizeBenchName(stripPrefix(b.name));
+        // Keep historical phase samples in the archive, but compare tiered
+        // implementations only by complete workload time.
+        if (seriesRuntime.includes("tiered") &&
+            !benchName.endsWith("_total") && !benchName.endsWith("_end_to_end")) continue;
         // Hosted runners hand out different CPU models between runs, so one
         // backend is one series per CPU. Merging them would read as a
         // regression whenever the runner happens to change model.
@@ -547,7 +579,9 @@ function isPrimaryBench(benchName: string): boolean {
   return PRIMARY_COUNTER_BENCHES.has(benchName)
     || PRIMARY_STDLIB_BENCHES.has(benchName)
     || benchName.startsWith("heliodor_linux_boot_")
-    || benchName.startsWith("heliodor_suite_");
+    || benchName.startsWith("heliodor_suite_")
+    || benchName.startsWith("collection_")
+    || benchName.startsWith("taxi_");
 }
 
 // --- Computed: tabs with chart cards ---
@@ -584,9 +618,13 @@ const tabData = computed(() => {
       byBenchName.get(s.benchName)!.push(s);
     }
 
-    // Create chart cards sorted alphabetically
+    // Lead circuit comparisons with cold-process total time.
     const cards: ChartCard[] = [...byBenchName.entries()]
-      .sort(([a], [b]) => a.localeCompare(b))
+      .sort(([a], [b]) => {
+        const rank = (name: string) => name.startsWith("collection_")
+          ? (name.endsWith("_total") ? 0 : 1) : 0;
+        return rank(a) - rank(b) || a.localeCompare(b);
+      })
       .map(([benchName, series]) => ({
         benchName,
         title: formatChartTitle(benchName),
@@ -804,11 +842,29 @@ onBeforeUnmount(() => {
       <p v-if="activeTab === 'heliodor'" class="bench-methodology">
         Synchronous runs finish compilation before simulation begins. Tiered runs
         start on the interpreter (Celox) or Cranelift (Veryl-CC), then switch to
-        compiled code when it is ready. Startup measures time until simulation
-        begins; end-to-end measures time through Linux boot completion. Both
-        start before design analysis. Each Veryl-CC run uses an empty C compilation
+        compiled code when it is ready. Tiered charts show the complete interval
+        from before design analysis through Linux boot completion, including
+        compilation while simulation is running. Each Veryl-CC run uses an empty C compilation
         cache. Building the benchmark executables is excluded.
         Execution time includes the testbench for both simulators.
+      </p>
+
+      <p v-if="activeTab === 'taxi'" class="bench-methodology">
+        Unmodified pinned Taxi tests, paired on one VM and CPU with the same seed.
+        Each runtime point is the median of three fresh processes in alternating
+        simulator order. Test body includes Python stimulus and assertions; whole
+        process includes startup. HDL compilation is a separate single cold build.
+        Celox uses native O1, two-state; Verilator uses the standard cocotb VPI
+        adapter and default C++ -Os. Failed, skipped or incomplete tests are excluded
+        from publication. <a :href="withBase('/benchmarks/taxi.html')">Measurement details</a>.
+      </p>
+
+      <p v-if="activeTab === 'circuits' || activeTab === 'rica'" class="bench-methodology">
+        Fixed self-checking workloads, compared by total process time including
+        compilation, resets, stimulus and assertions. Each point is the median
+        of three fresh processes. Different workload
+        contracts and host architectures have separate charts. No SV frontend
+        comparison is implied by the Veryl results.
       </p>
 
       <div v-if="activeSeries.length" class="bench-legend">

@@ -45,9 +45,10 @@ pub(super) enum Value {
 pub(super) fn from_param(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<BoundPattern> {
-    match binding::value(root, tree, dims)? {
+    match binding::value(root, tree, session, dims)? {
         Value::Pattern(pattern) => Ok(pattern),
         Value::Expression { expr, .. } => Ok(BoundPattern {
             items: Items::Value(expr),
@@ -58,23 +59,30 @@ pub(super) fn from_param(
 pub(super) fn from_array_parameter(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     shape: &VariableDimensions,
 ) -> Converted<BoundPattern> {
-    let ty = array_compatibility::unpacked_array_type(&tree.state, shape, dims)
+    let ty = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
         .ok_or_else(|| unsupported("array parameter argument type"))?;
     let value = substitute_expr_idents(
-        expression_binding::bind(root, tree, dims)?,
+        expression_binding::bind(root, tree, session, dims)?,
         &dims.array_parameter_values,
     );
-    let value = frozen(&tree.state, value, dims)?;
+    let value = frozen(tree, session, value, dims)?;
     Ok(BoundPattern {
         items: Items::ArrayValue { value, ty },
     })
 }
 
-fn frozen(state: &AnalysisState, expr: Expr, dims: &PackedDimensions) -> Converted<Expr> {
-    let freeze = |expr| frozen(state, expr, dims).map(Box::new);
+fn frozen(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expr: Expr,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
+    let functions = &tree.functions;
+    let mut freeze = |expr| frozen(tree, session, expr, dims).map(Box::new);
     Ok(match expr {
         Expr::Literal(_) => expr,
         Expr::Unary { op, expr } => Expr::Unary {
@@ -104,24 +112,21 @@ fn frozen(state: &AnalysisState, expr: Expr, dims: &PackedDimensions) -> Convert
                 .into_iter()
                 .map(|arg| {
                     let expr = frozen(
-                        state,
+                        tree,
+                        session,
                         arg.ok_or_else(|| {
                             unsupported("default constant function argument in pattern")
                         })?,
                         dims,
                     )?;
-                    expr_to_const(state, expr)
+                    expr_to_const(session, expr)
                         .map(Into::into)
                         .ok_or_else(|| unsupported("constant pattern function argument"))
                 })
                 .collect::<Converted<Vec<crate::ir::ConstExpr>>>()?;
-            let literal = const_functions::eval_call_literal(
-                &state.const_functions,
-                &name,
-                &args,
-                &dims.const_env,
-            )
-            .ok_or_else(|| unsupported("constant parameter pattern function"))?;
+            let literal =
+                const_functions::eval_call_literal(functions, &name, &args, &dims.const_env)
+                    .ok_or_else(|| unsupported("constant parameter pattern function"))?;
             Expr::Literal(typecheck::format_integral_literal_binary(&literal))
         }
         value => {
@@ -132,12 +137,14 @@ fn frozen(state: &AnalysisState, expr: Expr, dims: &PackedDimensions) -> Convert
                 .map(|(n, v)| (n.clone(), v.clone()))
                 .collect();
             let value = substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
+                session,
                 value,
                 &dims.const_env,
                 &values,
             );
-            let folded = fold_const_integral_expr_preserving_mask(state, value, &dims.const_env);
+            let folded =
+                fold_const_integral_expr_preserving_mask(tree, session, value, &dims.const_env);
             if !matches!(folded, Expr::Literal(_)) {
                 return Err(unsupported("nonconstant parameter pattern element"));
             }
@@ -154,13 +161,14 @@ impl Value {
     }
     fn lower(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
         shape: &VariableDimensions,
         dims: &PackedDimensions,
         default: bool,
     ) -> Converted<Expr> {
         if let Self::Pattern(pattern) = self {
-            return pattern.lower(state, shape, dims);
+            return pattern.lower(tree, session, shape, dims);
         }
         let (value, signed, value_type) = match self {
             Self::Expression {
@@ -174,25 +182,29 @@ impl Value {
             ),
             Self::Pattern(_) => unreachable!(),
         };
-        patterns::assignment_value(state, value, signed, value_type, shape, dims, default)
+        patterns::assignment_value(
+            tree, session, value, signed, value_type, shape, dims, default,
+        )
     }
 }
 
 impl BoundPattern {
     pub(super) fn lower(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
         shape: &VariableDimensions,
         dims: &PackedDimensions,
     ) -> Converted<Expr> {
+        let functions = &tree.functions;
         if let Items::ArrayValue { value, ty } = &self.items {
-            let target = array_compatibility::unpacked_array_type(state, shape, dims)
+            let target = array_compatibility::unpacked_array_type(&tree.functions, shape, dims)
                 .ok_or_else(|| unsupported("unpacked array parameter supplied to a scalar"))?;
             if !ty.is_assignment_compatible_with(&target) {
                 return Err(AnalyzerError::IncompatibleUnpackedArray {
                     context: "module parameter override".into(),
-                    actual: ty.clone(),
-                    target,
+                    actual: ty.to_string(),
+                    target: target.to_string(),
                 });
             }
             return Ok(value.clone());
@@ -201,7 +213,7 @@ impl BoundPattern {
             return Ok(value.clone());
         }
         let eval = |expr| {
-            eval_ast_const_expr(state, expr, &dims.const_env)
+            eval_ast_const_expr(functions, expr, &dims.const_env)
                 .ok_or_else(|| unsupported("assignment pattern target bounds"))
         };
         let unpacked = !shape.unpacked.is_empty();
@@ -214,6 +226,8 @@ impl BoundPattern {
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
                 VariableDimensions {
+                    declared: type_names::Declared::default(),
+                    container: None,
                     real: false,
                     string: false,
                     class: None,
@@ -240,6 +254,8 @@ impl BoundPattern {
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
                 VariableDimensions {
+                    declared: type_names::Declared::default(),
+                    container: None,
                     real: false,
                     string: false,
                     class: None,
@@ -262,6 +278,18 @@ impl BoundPattern {
                     })
                 })
                 .collect();
+        } else if let Some(aggregate) = &shape.unpacked_struct {
+            keys = aggregate
+                .members()
+                .iter()
+                .map(|member| Key::Member(member.name.clone()))
+                .collect();
+            shapes.extend(
+                aggregate
+                    .members()
+                    .iter()
+                    .map(|member| procedural::dimensions_from_type(&member.r#type)),
+            );
         } else if !shape.members.is_empty() {
             if shape
                 .members
@@ -283,16 +311,19 @@ impl BoundPattern {
                     .map(|m| procedural::dimensions_from_type(m.r#type())),
             );
         } else {
-            let width = patterns::shape_width(state, shape, dims)
+            let width = patterns::shape_width(&tree.functions, shape, dims)
                 .ok_or_else(|| unsupported("pattern target width"))?;
             shapes = vec![
                 VariableDimensions {
+                    declared: type_names::Declared::default(),
+                    container: None,
                     real: false,
                     string: false,
                     class: None,
                     packed: Vec::new(),
                     signed: false,
                     signed_element_depth: None,
+                    unpacked_struct: None,
                     ..shape.clone()
                 };
                 width
@@ -324,7 +355,7 @@ impl BoundPattern {
             Items::Keyed(items) => {
                 let structure = shape.unpacked.is_empty()
                     && shape.packed.len() <= 1
-                    && !shape.members.is_empty();
+                    && (!shape.members.is_empty() || shape.unpacked_struct.is_some());
                 let items = items
                     .iter()
                     .map(|(key, value)| {
@@ -369,12 +400,12 @@ impl BoundPattern {
         let mut parts = selected
             .into_iter()
             .zip(shapes)
-            .map(|((v, default), shape)| v.lower(state, &shape, dims, default))
+            .map(|((v, default), shape)| v.lower(tree, session, &shape, dims, default))
             .collect::<Converted<Vec<_>>>()?;
         if unpacked {
             parts.reverse();
         }
-        Ok(if parts.len() == 1 {
+        Ok(if parts.len() == 1 && shape.unpacked_struct.is_none() {
             parts.remove(0)
         } else {
             Expr::Concat(parts)

@@ -7,6 +7,7 @@
 
 mod analysis;
 pub mod assignment;
+mod baseline;
 mod cfg;
 mod color;
 mod constraints;
@@ -29,6 +30,8 @@ mod spilling;
 mod ssa;
 mod ssa_state_home;
 mod stack_color;
+#[cfg(test)]
+mod test_programs;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -56,6 +59,18 @@ pub struct RegallocResult {
 pub(crate) struct RegallocTrace {
     pub mir_after_late_memory_folds: String,
     pub mir_after_scheduling: String,
+}
+
+/// Allocation algorithm requested by native code generation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RegallocStrategy {
+    /// Verified SSA split/color allocator for the optimizing image.
+    Optimizing,
+    /// Linear allocator for the baseline image. A release build which hits a
+    /// structured baseline failure falls back to the optimizing allocator,
+    /// giving each spill a unique slot while the frame stays within
+    /// `spill_budget` bytes.
+    Baseline { spill_budget: usize },
 }
 
 /// Structured failure from a verified register-allocation phase.
@@ -285,7 +300,7 @@ pub(crate) fn run_regalloc_with_label_and_trace_and_diagnostics(
         trace,
         diagnostics,
         native_tick_loop,
-        None,
+        RegallocStrategy::Optimizing,
         is_cancelled,
     )?;
     *func = working;
@@ -304,7 +319,7 @@ pub(crate) fn run_regalloc_for_codegen(
     trace: Option<&mut RegallocTrace>,
     diagnostics: &crate::NativeDiagnostics,
     native_tick_loop: bool,
-    baseline_spill_budget: Option<usize>,
+    strategy: RegallocStrategy,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<RegallocResult, RegallocError> {
     run_regalloc_in_place(
@@ -313,7 +328,7 @@ pub(crate) fn run_regalloc_for_codegen(
         trace,
         diagnostics,
         native_tick_loop,
-        baseline_spill_budget,
+        strategy,
         is_cancelled,
     )
 }
@@ -324,7 +339,7 @@ fn run_regalloc_in_place(
     mut trace: Option<&mut RegallocTrace>,
     diagnostics: &crate::NativeDiagnostics,
     native_tick_loop: bool,
-    baseline_spill_budget: Option<usize>,
+    strategy: RegallocStrategy,
     is_cancelled: impl Fn() -> bool,
 ) -> Result<RegallocResult, RegallocError> {
     // Shared borrow so the checkpoint closure and downstream callees observe
@@ -353,8 +368,8 @@ fn run_regalloc_in_place(
     }
     // Edge splitting can nearly double the block count. Classify the original
     // MIR so medium-size functions do not pay for global allocator trimming.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    let release_unused_pages = func.blocks.len() >= 60_000;
+    let release_unused_pages =
+        cfg!(all(target_os = "linux", target_env = "gnu")) && func.blocks.len() >= 60_000;
     let cfg_start = timing.then(crate::timing::now);
     let normalized_cfg =
         cfg::normalize(func).map_err(|error| cfg_error("CFG normalization", error))?;
@@ -405,74 +420,47 @@ fn run_regalloc_in_place(
         );
     }
     checkpoint()?;
-    let allocation_constraints =
-        constraints::ConstraintModel::build_for_codegen(func, &normalized_cfg, verify)
-            .map_err(|error| constraint_error("placement constraint construction", error))?;
-    if verify {
-        allocation_constraints
-            .verify(func)
-            .map_err(|error| constraint_error("placement constraint verification", error))?;
-    }
-    // W/S planning owns independent homes, explicit phi-edge transfers, and
-    // the one authoritative dependency-ready instruction order. Introducing
-    // snapshot copies before that walk would lengthen the ranges it is meant
-    // to split and make a second instruction order authoritative.
-    let reload_recipe_start = timing.then(crate::timing::now);
-    let planning_recipes = reload::analyze_for_planning(func, &normalized_cfg)
-        .map_err(|error| reload_recipe_error("reload-recipe planning analysis", error))?;
-    if let Some(start) = reload_recipe_start {
-        tracing::debug!(
-            "[regalloc-timing] label={label} reload_recipe_plan_analyze elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    checkpoint()?;
-    // Instruction selection and MIR optimization have dropped their temporary
-    // maps. Return unused glibc pages before building the large CFG analyses,
-    // rather than retaining both phases' high-water marks in resident memory.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    if release_unused_pages {
-        unsafe {
-            libc::malloc_trim(0);
-        }
-    }
-    let next_use_start = timing.then(crate::timing::now);
-    let next_use = next_use::analyze(func, &normalized_cfg)
-        .map_err(|error| next_use_error("next-use analysis", error))?;
-    if let Some(start) = next_use_start {
-        tracing::debug!(
-            "[regalloc-timing] label={label} next_use_analyze elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    let next_use_verify_start = timing.then(crate::timing::now);
-    if verify {
-        next_use
-            .verify(func, &normalized_cfg)
-            .map_err(|error| next_use_error("next-use verification", error))?;
-    }
-    if let Some(start) = next_use_verify_start {
-        tracing::debug!(
-            "[regalloc-timing] label={label} next_use_verify elapsed={:?}",
-            start.elapsed()
-        );
-    }
-    checkpoint()?;
     let alloc_start = timing.then(crate::timing::now);
-    let allocation = ssa::allocate(
-        func,
-        &normalized_cfg,
-        next_use,
-        planning_recipes,
-        &allocation_constraints,
-        trace,
-        timing,
-        verify,
-        baseline_spill_budget,
-        is_cancelled,
-    )?;
-    let mut assignment = allocation.assignment;
-    let mut spill_frame_size = allocation.spill_frame_size;
+    let mut implementation = "ssa-split-color";
+    let baseline = match strategy {
+        RegallocStrategy::Optimizing => None,
+        RegallocStrategy::Baseline { .. } => {
+            match allocate_baseline(func, &normalized_cfg, label, timing, verify, is_cancelled) {
+                Ok(allocation) => {
+                    implementation = "baseline-local";
+                    if let Some(trace) = trace.as_deref_mut() {
+                        trace.mir_after_scheduling = func.to_string();
+                    }
+                    Some(allocation)
+                }
+                // Tests and debug builds must not hide allocator bugs.
+                Err(error) if verify || is_cancellation(&error) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(
+                        "baseline register allocation of {label} failed, using the optimizing allocator: {error}"
+                    );
+                    None
+                }
+            }
+        }
+    };
+    let (mut assignment, mut spill_frame_size) = match baseline {
+        Some(allocation) => allocation,
+        None => allocate_optimizing(
+            func,
+            &normalized_cfg,
+            label,
+            trace,
+            timing,
+            verify,
+            match strategy {
+                RegallocStrategy::Optimizing => None,
+                RegallocStrategy::Baseline { spill_budget } => Some(spill_budget),
+            },
+            release_unused_pages,
+            is_cancelled,
+        )?,
+    };
     let tick_loop = label == "eval_comb_apply_ff" && native_tick_loop;
     let vector_allocation = super::x86_slp::allocate(func, spill_frame_size, tick_loop);
     for (value, location) in vector_allocation.assignments {
@@ -503,7 +491,7 @@ fn run_regalloc_in_place(
     }
     if let Some(start) = alloc_start {
         tracing::debug!(
-            "[regalloc-timing] label={label} implementation=ssa-split-color blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
+            "[regalloc-timing] label={label} implementation={implementation} blocks={} insts={} vregs={} spill_frame={} elapsed={:?}",
             func.blocks.len(),
             func.blocks
                 .iter()
@@ -547,6 +535,203 @@ fn run_regalloc_in_place(
         assignment,
         spill_frame_size,
     })
+}
+
+fn allocate_baseline(
+    func: &mut MFunction,
+    cfg: &cfg::NormalizedCfg,
+    label: &str,
+    timing: bool,
+    verify: bool,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<(AssignmentMap, u32), RegallocError> {
+    let allocation = baseline::allocate(func, cfg, label, timing, verify, is_cancelled)?;
+    if let Some(facts) = &allocation.frame_facts {
+        if verify {
+            func.verify_result()
+                .map_err(|error| RegallocError::mir("baseline output verification", error))?;
+        }
+        baseline::verify_frame(func, cfg, facts)?;
+    }
+    Ok((allocation.assignment, allocation.spill_frame_size))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn allocate_optimizing(
+    func: &mut MFunction,
+    normalized_cfg: &cfg::NormalizedCfg,
+    label: &str,
+    trace: Option<&mut RegallocTrace>,
+    timing: bool,
+    verify: bool,
+    spill_budget: Option<usize>,
+    release_unused_pages: bool,
+    is_cancelled: impl Fn() -> bool,
+) -> Result<(AssignmentMap, u32), RegallocError> {
+    let is_cancelled = &is_cancelled;
+    let checkpoint = || -> Result<(), RegallocError> {
+        if is_cancelled() {
+            Err(cancellation_error())
+        } else {
+            Ok(())
+        }
+    };
+    let rotation_copies = isolate_phi_rotations(func, normalized_cfg)?;
+    if timing && rotation_copies != 0 {
+        tracing::debug!("[regalloc-timing] label={label} phi_rotation_copies={rotation_copies}");
+    }
+    let allocation_constraints =
+        constraints::ConstraintModel::build_for_codegen(func, normalized_cfg, verify)
+            .map_err(|error| constraint_error("placement constraint construction", error))?;
+    if verify {
+        allocation_constraints
+            .verify(func)
+            .map_err(|error| constraint_error("placement constraint verification", error))?;
+    }
+    // W/S planning owns independent homes, explicit phi-edge transfers, and
+    // the one authoritative dependency-ready instruction order. Introducing
+    // snapshot copies before that walk would lengthen the ranges it is meant
+    // to split and make a second instruction order authoritative.
+    let reload_recipe_start = timing.then(crate::timing::now);
+    let planning_recipes = reload::analyze_for_planning(func, normalized_cfg)
+        .map_err(|error| reload_recipe_error("reload-recipe planning analysis", error))?;
+    if let Some(start) = reload_recipe_start {
+        tracing::debug!(
+            "[regalloc-timing] label={label} reload_recipe_plan_analyze elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    checkpoint()?;
+    // Instruction selection and MIR optimization have dropped their temporary
+    // maps. Return unused glibc pages before building the large CFG analyses,
+    // rather than retaining both phases' high-water marks in resident memory.
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    let _ = release_unused_pages;
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if release_unused_pages {
+        unsafe {
+            libc::malloc_trim(0);
+        }
+    }
+    let next_use_start = timing.then(crate::timing::now);
+    let next_use = next_use::analyze(func, normalized_cfg)
+        .map_err(|error| next_use_error("next-use analysis", error))?;
+    if let Some(start) = next_use_start {
+        tracing::debug!(
+            "[regalloc-timing] label={label} next_use_analyze elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    let next_use_verify_start = timing.then(crate::timing::now);
+    if verify {
+        next_use
+            .verify(func, normalized_cfg)
+            .map_err(|error| next_use_error("next-use verification", error))?;
+    }
+    if let Some(start) = next_use_verify_start {
+        tracing::debug!(
+            "[regalloc-timing] label={label} next_use_verify elapsed={:?}",
+            start.elapsed()
+        );
+    }
+    checkpoint()?;
+    let allocation = ssa::allocate(
+        func,
+        normalized_cfg,
+        next_use,
+        planning_recipes,
+        &allocation_constraints,
+        trace,
+        timing,
+        verify,
+        spill_budget,
+        is_cancelled,
+    )?;
+    Ok((allocation.assignment, allocation.spill_frame_size))
+}
+
+/// Copy every phi source that is itself a phi of the same block.
+///
+/// Phis read their sources in parallel, so on a loop backedge a row such as
+/// `q = phi(.., latch: p)` needs `p`'s value from this iteration while `p`'s
+/// own row writes `p`'s next value. The spill planner gives each value one
+/// home and materializes all stores at an edge before its reloads, so a
+/// stack-resident `p` would be overwritten before `q` reads it. Reading `p`
+/// through a copy made at the end of the predecessor gives the row a
+/// distinct value and home, which no row on that edge writes. Only rotated
+/// or swapped loop-carried values have such rows.
+fn isolate_phi_rotations(
+    func: &mut MFunction,
+    cfg: &cfg::NormalizedCfg,
+) -> Result<usize, RegallocError> {
+    let mut inserted = 0;
+    for successor in 0..func.blocks.len() {
+        let block = &func.blocks[successor];
+        if block.phis.is_empty() {
+            continue;
+        }
+        let own = block
+            .phis
+            .iter()
+            .map(|phi| phi.dst)
+            .collect::<crate::HashSet<_>>();
+        let rows = block
+            .phis
+            .iter()
+            .enumerate()
+            .flat_map(|(phi, node)| {
+                node.sources
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, source))| own.contains(source))
+                    .map(move |(row, &(predecessor, source))| (phi, row, predecessor, source))
+            })
+            .collect::<Vec<_>>();
+        let mut copies = crate::HashMap::<(BlockId, VReg), VReg>::default();
+        for (phi, row, predecessor, source) in rows {
+            let copy = match copies.get(&(predecessor, source)) {
+                Some(&copy) => copy,
+                None => {
+                    let Some(&predecessor_index) = cfg.block_index.get(&predecessor) else {
+                        return Err(RegallocError::new(
+                            "phi rotation isolation",
+                            "PHI_ISOLATION.PREDECESSOR",
+                            Some(func.blocks[successor].id),
+                            None,
+                            vec![source],
+                            format!("phi source predecessor {predecessor} is not in the CFG"),
+                        ));
+                    };
+                    let copy = func.vregs.try_alloc().map_err(|error| {
+                        RegallocError::new(
+                            "phi rotation isolation",
+                            "PHI_ISOLATION.VREG_EXHAUSTED",
+                            Some(predecessor),
+                            None,
+                            vec![source],
+                            error.to_string(),
+                        )
+                    })?;
+                    let desc = func.spill_descs[source.0 as usize].copy_for_snapshot();
+                    func.spill_descs.push(desc);
+                    let insts = &mut func.blocks[predecessor_index].insts;
+                    let terminator = insts.len().saturating_sub(1);
+                    insts.insert(
+                        terminator,
+                        MInst::Mov {
+                            dst: copy,
+                            src: source,
+                        },
+                    );
+                    copies.insert((predecessor, source), copy);
+                    inserted += 1;
+                    copy
+                }
+            };
+            func.blocks[successor].phis[phi].sources[row].1 = copy;
+        }
+    }
+    Ok(inserted)
 }
 
 /// Normalize block layout to reverse postorder before the single forward

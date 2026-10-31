@@ -4,6 +4,11 @@ use std::sync::Arc;
 
 use fxhash::FxHashMap as HashMap;
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static COPIED_OVERLAY_BINDINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Cloning a scope shares both tables. Mutation copies only local changes when
 /// another scope still shares the overlay, never the complete module table.
 /// `None` in the overlay hides a symbol in the shared table.
@@ -29,6 +34,14 @@ impl<V> From<HashMap<String, V>> for ScopedMap<V> {
 }
 
 impl<V> ScopedMap<V> {
+    /// Identity of an immutable snapshot, valid while a borrower retains it.
+    pub fn identity(&self) -> (usize, usize) {
+        (
+            Arc::as_ptr(&self.base) as usize,
+            Arc::as_ptr(&self.overlay) as usize,
+        )
+    }
+
     pub fn get(&self, name: &str) -> Option<&V> {
         match self.overlay.get(name) {
             Some(value) => value.as_ref(),
@@ -57,6 +70,11 @@ impl<V: Clone> ScopedMap<V> {
             return base.insert(name, value);
         }
         let old = self.get(&name).cloned();
+        #[cfg(test)]
+        if Arc::strong_count(&self.overlay) > 1 {
+            COPIED_OVERLAY_BINDINGS.with(|count| count.set(count.get() + self.overlay.len()));
+        }
+
         Arc::make_mut(&mut self.overlay).insert(name, Some(value));
         old
     }
@@ -68,6 +86,11 @@ impl<V: Clone> ScopedMap<V> {
             return base.remove(name);
         }
         let old = self.get(name).cloned();
+        #[cfg(test)]
+        if Arc::strong_count(&self.overlay) > 1 {
+            COPIED_OVERLAY_BINDINGS.with(|count| count.set(count.get() + self.overlay.len()));
+        }
+
         if self.base.contains_key(name) {
             Arc::make_mut(&mut self.overlay).insert(name.to_string(), None);
         } else {

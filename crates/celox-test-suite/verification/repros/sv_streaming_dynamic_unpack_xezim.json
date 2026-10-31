@@ -1,0 +1,30 @@
+{
+  "case": "streaming::streaming_dynamic_unpack",
+  "source": "src/sv/cases/streaming.vtest",
+  "standard": "IEEE 1800-2023 11.4.14.4: unpacking into a list with an unbounded dynamically sized item is greedy, the first such item is resized to accept all the data except the subsequent fixed-size items; 6.24.3 extracts the data in left-to-right order. The 17-byte stream gives o_data 5 bytes and o_crc 42.",
+  "method": "The shared case runs unchanged in verify-sv-xezim; the reduced source below runs without the adapter. The case's later {>> {o_data}} = {<< byte {o_data}} passes standalone in xezim 0.11.3 and fails in the case only because o_data holds the wrong unpack result.",
+  "reduced_source": "module Top;\n    int i_header = 12, i_len = 5, i_crc = 42;\n    byte i_data[];\n    int o_header, o_len, o_crc;\n    byte o_data[];\n    byte pkt[$];\n    initial begin\n        i_data = new[5];\n        foreach (i_data[k]) i_data[k] = byte'(k + 1);\n        pkt = {<< 8 {i_header, i_len, i_data, i_crc}};\n        $display(\"pkt size=%0d pkt[0]=%0d pkt[4]=%0d pkt[13]=%0d\", pkt.size(), pkt[0], pkt[4], pkt[13]);\n        {<< 8 {o_header, o_len, o_data, o_crc}} = pkt;\n        $display(\"header=%0d len=%0d crc=%0d size=%0d data[0]=%0d data[4]=%0d\", o_header, o_len, o_crc, o_data.size(), o_data[0], o_data[4]);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "status": "compile_error",
+      "stderr": "%Error: Internal Error: repro.sv:12:31: ../V3Expand.cpp:574: Width mismatch\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:10: syntax error\nrepro.sv:10: error: Malformed statement\nrepro.sv:12: syntax error\nrepro.sv:12: Syntax in assignment statement l-value.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "pkt size=17 pkt[0]=42 pkt[4]=5 pkt[13]=12\nheader=12 len=5 crc=83886080 size=4 data[0]=0 data[4]=0\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "pkt size=17 pkt[0]=42 pkt[4]=5 pkt[13]=12\nheader=12 len=5 crc=42 size=5 data[0]=1 data[4]=5\n"
+    }
+  ]
+}

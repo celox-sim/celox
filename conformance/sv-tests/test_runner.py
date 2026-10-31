@@ -112,7 +112,12 @@ sys.exit(code)
         self.assertEqual(self.case()["mode"], "elaboration")
         self.assertEqual(self.case(":type: parsing elaboration\n")["mode"], "elaboration")
         self.assertEqual(self.case(":type: elaboration simulation\n", "// OUTPUT: :assert: 1 == 1")["result"], "pass")
-        self.assertEqual(self.case(":type: simulation\n", "// OUTPUT: :assert: 1 == 2")["result"], "fail")
+        row = self.case(":type: simulation\n", "// OUTPUT: :assert: 1 == 2")
+        self.assertEqual((row["result"], row["failure_category"]), ("fail", "assertion_failure"))
+        row = self.case(":should_fail_because: invalid\n")
+        self.assertEqual((row["result"], row["failure_category"]), ("fail", "unexpected_success"))
+        row = self.case(":should_fail_because: invalid\n", "// OUTPUT: unsupported_simulator_parser\n// EXIT: 1")
+        self.assertEqual((row["result"], row["diagnostic"]), ("pass", "unsupported_construct"))
         row = self.case(":type: simulation\n:should_fail_because: invalid\n", "// EXIT: 1")
         self.assertEqual((row["result"], row["rc"]), ("pass", "1"))
         self.assertEqual(self.case(":type: simulation\n:should_fail_because: invalid\n", "// EXIT: 1\n// OUTPUT: :assert: False")["result"], "fail")
@@ -172,6 +177,7 @@ sys.exit(code)
     def test_official_timeout(self):
         row = self.case(":type: simulation\n:timeout: 1\n", "// SLEEP")
         self.assertEqual((row["result"], row["rc"]), ("fail", "71"))
+        self.assertEqual(row["failure_category"], "timeout")
 
     def test_partial_update_and_comparison(self):
         self.case()
@@ -189,6 +195,35 @@ sys.exit(code)
         (self.tests / "replacement.sv").write_text("/*\n:tags: fixture\n:description: fixture\n*/")
         self.assertEqual(runner.main(args), 1)
 
+
+    def test_shards_partition_the_tests_and_their_expectations(self):
+        names = [f"case{index}.sv" for index in range(5)]
+        for name in names:
+            (self.tests / name).write_text("/*\n:tags: fixture\n:description: fixture\n*/")
+        expected = self.root / "expected.tsv"
+        # A test the corpus lost is reported missing by exactly one shard.
+        runner.write_expected(expected, {
+            **{(name, mode): "pass" for name in names for mode in runner.MODES},
+            ("lost.sv", "2state"): "pass",
+        })
+        args = [str(self.root), "--driver", str(self.driver), "--out-dir", str(self.out),
+                "--expected", str(expected), "--jobs", "2"]
+        members = [runner.shard_members(names + ["lost.sv"], (index, 2)) for index in (1, 2)]
+        self.assertFalse(members[0] & members[1])
+        self.assertEqual(members[0] | members[1], set(names) | {"lost.sv"})
+        verdicts = [runner.main(args + ["--shard", f"{index}/2"]) for index in (1, 2)]
+        self.assertEqual(sorted(verdicts), [0, 1])
+        self.assertEqual(verdicts[0 if "lost.sv" in members[0] else 1], 1)
+        # An update replaces only the rows of its shard.
+        runner.write_expected(expected, {(name, mode): "fail" for name in names for mode in runner.MODES})
+        self.assertEqual(runner.main(args + ["--shard", "1/2", "--update"]), 0)
+        self.assertEqual(runner.read_expected(expected), {
+            (name, mode): "pass" if name in members[0] else "fail"
+            for name in names for mode in runner.MODES
+        })
+        for value in ("0/2", "3/2", "1/0", "1", "a/b"):
+            with self.assertRaises(runner.argparse.ArgumentTypeError):
+                runner.shard(value)
 
     def test_parallel_collection_is_deterministic_and_isolated(self):
         self.case(":type: simulation\n", "// OUTPUT: :assert: True")
@@ -230,3 +265,23 @@ sys.exit(code)
                             "--jobs", "4", "--expected", str(expected), "--update"])
         self.assertEqual(code, 2)
         self.assertEqual(expected.read_bytes(), original)
+        summary = json.loads((self.out / "report.summary.json").read_text())
+        self.assertFalse(summary["complete"])
+        self.assertEqual(summary["requested"], 4)
+        self.assertTrue(summary["collection_errors"])
+        self.assertTrue(all(error["test"] == "broken.sv" for error in summary["collection_errors"]))
+        with (self.out / "report.tsv").open() as stream:
+            rows = list(csv.DictReader(stream, delimiter="\t"))
+        self.assertTrue(all(row["result"] == "pass" for row in rows))
+        self.assertIn("INCOMPLETE", (self.out / "report.summary.md").read_text())
+
+    def test_preflight_failure_replaces_stale_reports(self):
+        self.case()
+        args = [str(self.root), "--driver", str(self.driver), "--out-dir", str(self.out)]
+        self.assertEqual(runner.main(args), 0)
+        self.driver.unlink()
+        self.assertEqual(runner.main(args), 2)
+        summary = json.loads((self.out / "report.summary.json").read_text())
+        self.assertFalse(summary["complete"])
+        self.assertEqual(summary["collected"], 0)
+        self.assertEqual(summary["collection_errors"][0]["stage"], "preflight")

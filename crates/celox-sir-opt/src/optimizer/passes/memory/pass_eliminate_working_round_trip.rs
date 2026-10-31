@@ -29,6 +29,19 @@ pub fn eliminate_partial_working_round_trip(eu: &mut ExecutionUnit<RegionedAbsol
 
 fn eliminate_working_round_trip_impl(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>, partial: bool) {
     use crate::HashMap;
+    // An image-local callee can observe or publish any working slot. Its
+    // contents are outside this function's proof of independent publication.
+    if eu
+        .blocks
+        .values()
+        .flat_map(|block| &block.instructions)
+        .any(|inst| {
+            matches!(inst, SIRInstruction::ExternCall { func, .. }
+            if celox_sir::extern_abi::native_kernel_index(*func).is_some())
+        })
+    {
+        return;
+    }
 
     // Phase 1: Scan — collect info about each WORKING variable
     struct VarInfo {

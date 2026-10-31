@@ -409,6 +409,8 @@ impl<A: Hash + Eq + Clone> SLTNode<A> {
                     celox_design::UnaryOp::Float { .. } => "float",
                     celox_design::UnaryOp::Ident => "",
                     celox_design::UnaryOp::ToTwoState => "2state",
+                    celox_design::UnaryOp::ToPlanes => "planes",
+                    celox_design::UnaryOp::FromPlanes => "from_planes",
                     celox_design::UnaryOp::Minus => "-",
                     celox_design::UnaryOp::BitNot => "~",
                     celox_design::UnaryOp::LogicNot => "!",

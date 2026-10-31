@@ -12,7 +12,9 @@
 //!
 //! Promotion is whole-program. On x86-64, a baseline native image is prepared
 //! first, followed by an optimizing image which replaces it at a safe point.
-//! Both images use the same live state and event buffers. The interpreter
+//! Single-edge derived kernels are compiled only after a host requests them;
+//! coincident-edge hosts can adopt an optimized core without those kernels.
+//! Every image uses the same live state and event buffers. The interpreter
 //! remains the permanent fallback whenever baseline compilation fails, and
 //! [`TierPromotion::Never`] skips background compilation entirely so the
 //! simulation stays interpreted without paying for a worker thread.
@@ -521,22 +523,142 @@ pub struct TieredExecutionStats {
 /// Ordinary simulations do not read the host clock. Benchmark callers start
 /// timing immediately before executing a workload and finish it afterwards;
 /// `promotion_elapsed` is the time from that start until generated code is
-/// adopted at a scheduler safe point.
+/// adopted at a scheduler safe point, and `upgrade_elapsed` until the
+/// optimizing image replaced it. A compiled testbench also records its tick
+/// at each of these points, so the share of the workload each tier ran is
+/// visible.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct TieredExecutionTiming {
-    promotion_elapsed: Option<Duration>,
+    promotion: Option<TierTransition>,
+    upgrade: Option<TierTransition>,
+    finish_tick: Option<u64>,
+    /// A build compiles at most a baseline, an optimizing and a derived-edge
+    /// image.
+    compiles: [Option<TieredCompileStage>; 3],
+}
+
+/// When a tier took over, measured from the start of execution timing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TierTransition {
+    /// Wall-clock time from the measurement start.
+    pub elapsed: Duration,
+    /// The compiled testbench's tick, when one runs.
+    pub tick: Option<u64>,
+}
+
+/// One background compilation of a tiered simulation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TieredCompileStage {
+    pub kind: TieredCompileKind,
+    /// Wall-clock time the compilation took on the worker.
+    pub elapsed: Duration,
+    pub completed: bool,
+}
+
+/// Which image a background compilation produced.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum TieredCompileKind {
+    /// The only stage of a single-stage build.
+    Single,
+    /// The low-latency image a two-stage build adopts first.
+    Baseline,
+    /// The optimizing image that replaces the baseline.
+    Optimizing,
+    /// The optimizing image with derived-edge units, built on demand.
+    DerivedEdges,
 }
 
 impl TieredExecutionTiming {
     /// Time from the measurement start until the compiled tier was adopted.
     pub fn promotion_elapsed(self) -> Option<Duration> {
-        self.promotion_elapsed
+        self.promotion.map(|transition| transition.elapsed)
+    }
+
+    /// When generated code was adopted.
+    pub fn promotion(self) -> Option<TierTransition> {
+        self.promotion
+    }
+
+    /// When the optimizing image replaced the baseline image.
+    pub fn upgrade(self) -> Option<TierTransition> {
+        self.upgrade
+    }
+
+    /// The compiled testbench's tick when timing finished.
+    pub fn finish_tick(self) -> Option<u64> {
+        self.finish_tick
+    }
+
+    /// The background compilations that finished, in completion order. A
+    /// stage still running when timing finished is absent.
+    pub fn compiles(self) -> impl Iterator<Item = TieredCompileStage> {
+        self.compiles.into_iter().flatten()
     }
 }
 
 struct ActiveExecutionTiming {
     started_at: Instant,
-    promotion_elapsed: Option<Duration>,
+    promotion: Option<TierTransition>,
+    upgrade: Option<TierTransition>,
+}
+
+/// Background compilations the worker finished, shared with the backend.
+type CompileLog = Arc<std::sync::Mutex<Vec<TieredCompileStage>>>;
+
+/// Run one background compilation, recording how long it took.
+fn logged<T>(
+    log: &CompileLog,
+    kind: TieredCompileKind,
+    compile: impl FnOnce() -> Result<T, SimulatorError>,
+) -> Result<T, SimulatorError> {
+    let started = Instant::now();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(compile))
+        .unwrap_or_else(|_| Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError)));
+    let elapsed = started.elapsed();
+    match &result {
+        Ok(_) => tracing::info!(
+            ?kind,
+            elapsed_ms = elapsed.as_millis() as u64,
+            "tiered compilation completed"
+        ),
+        Err(error) => {
+            tracing::warn!(?kind, elapsed_ms = elapsed.as_millis() as u64, error = %error, "tiered compilation failed")
+        }
+    }
+    if let Ok(mut log) = log.lock() {
+        log.push(TieredCompileStage {
+            kind,
+            elapsed,
+            completed: result.is_ok(),
+        });
+    }
+    result
+}
+
+// An optimized core can be adopted without the optional single-edge units.
+struct NativeUpgrade {
+    code: CompiledCode,
+    derived_edges: bool,
+}
+
+struct DerivedCompileRequest {
+    sent: bool,
+    sender: mpsc::Sender<()>,
+}
+
+impl DerivedCompileRequest {
+    fn request(&mut self) {
+        if !std::mem::replace(&mut self.sent, true) {
+            let _ = self.sender.send(());
+        }
+    }
+}
+
+/// The tick counter of the program's compiled testbench, if it has one.
+fn testbench_ticks(laid_out: &LaidOutProgram, interp: &InterpBackend) -> Option<SignalRef> {
+    let scheduler = laid_out.runtime.testbench.as_ref()?.scheduler()?;
+    Some(interp.resolve_signal(&scheduler.control[celox_testbench::TB_TICKS]))
 }
 
 /// A [`SimBackend`] that interprets immediately and promotes to generated
@@ -556,11 +678,14 @@ pub struct TieredBackend {
     compiler_worker: Option<JoinHandle<()>>,
     /// Second-stage receiver for a native baseline-pipeline build. After the
     /// first stage adopts a low-latency baseline image, this receiver yields
-    /// the optimizing image for an in-place shared-code replacement.
-    upgrade_receiver: Option<mpsc::Receiver<Result<CompiledCode, SimulatorError>>>,
+    /// optimized core and, if requested, the derived-edge image for in-place
+    /// shared-code replacement.
+    upgrade_receiver: Option<mpsc::Receiver<Result<NativeUpgrade, SimulatorError>>>,
+    // Dropping the sender wakes a worker waiting for its first single-edge use.
+    derived_compile_request: Option<DerivedCompileRequest>,
     /// The adopted code has the generated derived-edge units: a single-stage
     /// image or the optimizing one. The baseline image leaves them out, so
-    /// their build cost lands in the optimizing tier.
+    /// their build cost lands in the optimizing tier only on demand.
     derived_edges_live: bool,
     /// Evaluate-only events whose apply phase has not run yet. Promotion is
     /// deferred while this is non-zero so the compiled apply phase always
@@ -586,6 +711,9 @@ pub struct TieredBackend {
     /// Opt-in benchmark timing. Kept out of deterministic execution stats so
     /// normal simulations neither read the clock nor expose noisy state.
     execution_timing: Option<ActiveExecutionTiming>,
+    compile_log: CompileLog,
+    /// The compiled testbench's tick counter, when the program has one.
+    ticks: Option<SignalRef>,
 }
 
 impl TieredBackend {
@@ -760,6 +888,9 @@ impl TieredBackend {
 
         let cancel = CompileCancel::new();
         let worker_cancel = cancel.clone();
+        let compile_log = CompileLog::default();
+        let worker_log = compile_log.clone();
+        let ticks = testbench_ticks(laid_out, &interp);
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the background-failure policy instead of
         // panicking the embedding application.
@@ -790,20 +921,9 @@ impl TieredBackend {
                         }
                     );
                     let result = span.in_scope(|| {
-                        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        logged(&worker_log, TieredCompileKind::Single, || {
                             compile(&background_laid_out, &background_options, &worker_cancel)
-                        }))
-                        .unwrap_or_else(|_| {
-                            Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
-                        });
-                        match &result {
-                            Ok(_) => tracing::info!("tiered background compilation completed"),
-                            Err(error) => tracing::warn!(
-                                error = %error,
-                                "tiered background compilation failed"
-                            ),
-                        }
-                        result
+                        })
                     });
                     let _ = sender.send(result);
                 }) {
@@ -831,6 +951,7 @@ impl TieredBackend {
             cancel,
             compiler_worker,
             upgrade_receiver: None,
+            derived_compile_request: None,
             derived_edges_live: false,
             pending_split_applies: 0,
             promotion_threshold,
@@ -841,12 +962,17 @@ impl TieredBackend {
             split_apply_deferrals: 0,
             threshold_deferrals: 0,
             execution_timing: None,
+            compile_log,
+            ticks,
         }
     }
 
     /// Build a tiered simulation whose native worker compiles a low-latency
     /// baseline image first (`baseline_options`) and then keeps compiling the
     /// optimizing image (`optimizing_options`) on the same worker thread.
+    /// Single-edge derived units are omitted until a host requests them. An
+    /// early request keeps the original two-stage build; a later request adds
+    /// a final image after the optimized core is already available.
     ///
     /// The baseline result adopts exactly like a single-stage build; the
     /// optimizing result is later swapped in at a scheduler safe point. A
@@ -889,11 +1015,34 @@ impl TieredBackend {
 
         let cancel = CompileCancel::new();
         let worker_cancel = cancel.clone();
+        let compile_log = CompileLog::default();
+        let worker_log = compile_log.clone();
+        let ticks = testbench_ticks(laid_out, &interp);
         let (baseline_sender, baseline_receiver) = mpsc::channel();
         let (upgrade_sender, upgrade_receiver) = mpsc::channel();
+        let (derived_compile_request, derived_receiver) =
+            if laid_out.runtime.runtime_schema.derived_edges.is_empty() {
+                (None, None)
+            } else {
+                let (sender, receiver) = mpsc::channel();
+                (
+                    Some(DerivedCompileRequest {
+                        sent: false,
+                        sender,
+                    }),
+                    Some(receiver),
+                )
+            };
         let background_laid_out = laid_out.clone();
         // The baseline image runs derived edges by walking their plans.
         let baseline_laid_out = crate::derived_edge::without_units(laid_out);
+        // It settles before each domain rather than compiling a fused copy
+        // of the settle per domain into the scheduler.
+        let first_tier_laid_out = crate::scheduler::without_fused_domains(
+            baseline_laid_out.clone(),
+            !baseline_options.native_force_support
+                && baseline_options.signal_access.force_signals.is_empty(),
+        );
         let worker_baseline_options = baseline_options.clone();
         // A failed spawn keeps the interpreter as the permanent tier with the
         // reason recorded, matching the single-stage background-failure policy.
@@ -902,18 +1051,14 @@ impl TieredBackend {
             .spawn(move || {
                 let span = tracing::info_span!("celox.tiered.compile", target = "native");
                 span.in_scope(|| {
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        compile(&baseline_laid_out, &worker_baseline_options, &worker_cancel)
-                    }))
-                    .unwrap_or_else(|_| {
-                        Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+                    let result = logged(&worker_log, TieredCompileKind::Baseline, || {
+                        compile(
+                            &first_tier_laid_out,
+                            &worker_baseline_options,
+                            &worker_cancel,
+                        )
                     });
-                    match &result {
-                        Ok(_) => tracing::info!("tiered baseline compilation completed"),
-                        Err(error) => {
-                            tracing::warn!(error = %error, "tiered baseline compilation failed")
-                        }
-                    }
+                    drop(first_tier_laid_out);
                     let ready = result.is_ok();
                     let delivered = baseline_sender.send(result).is_ok();
                     // A failed baseline leaves nothing to replace; the
@@ -921,20 +1066,57 @@ impl TieredBackend {
                     if !delivered || !ready || worker_cancel.is_cancelled() {
                         return;
                     }
-                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        compile(&background_laid_out, &optimizing_options, &worker_cancel)
-                    }))
-                    .unwrap_or_else(|_| {
-                        Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+                    // Preserve the existing two-stage path when single-edge
+                    // execution has already requested the specialized units.
+                    // Coincident-edge hosts never request them, so publish an
+                    // optimized core without paying for unused edge kernels.
+                    let defer_edges = match derived_receiver.as_ref().map(|rx| rx.try_recv()) {
+                        Some(Err(mpsc::TryRecvError::Empty)) => true,
+                        Some(Err(mpsc::TryRecvError::Disconnected)) => return,
+                        _ => false,
+                    };
+                    let optimized = if defer_edges {
+                        &baseline_laid_out
+                    } else {
+                        &background_laid_out
+                    };
+                    // Without derived edges there are no units to defer.
+                    let kind = if defer_edges || derived_receiver.is_none() {
+                        TieredCompileKind::Optimizing
+                    } else {
+                        TieredCompileKind::DerivedEdges
+                    };
+                    let result = logged(&worker_log, kind, || {
+                        compile(optimized, &optimizing_options, &worker_cancel)
                     });
-                    match &result {
-                        Ok(_) => tracing::info!("tiered optimizing compilation completed"),
-                        Err(error) => tracing::warn!(
-                            error = %error,
-                            "tiered optimizing compilation failed"
-                        ),
+                    let ready = result.is_ok();
+                    let delivered = upgrade_sender
+                        .send(result.map(|code| NativeUpgrade {
+                            code,
+                            derived_edges: !defer_edges,
+                        }))
+                        .is_ok();
+                    if !defer_edges || !ready || !delivered || worker_cancel.is_cancelled() {
+                        return;
                     }
-                    let _ = upgrade_sender.send(result);
+                    // Only the full program is needed for a late edge request.
+                    // Release the baseline/core IR copy before going idle.
+                    drop(baseline_laid_out);
+                    // This wait consumes no CPU. Cancellation and Drop close
+                    // the sender before joining, including when no host ever
+                    // uses a single-edge specialized unit.
+                    if derived_receiver.as_ref().unwrap().recv().is_err()
+                        || worker_cancel.is_cancelled()
+                    {
+                        return;
+                    }
+                    let result = logged(&worker_log, TieredCompileKind::DerivedEdges, || {
+                        compile(&background_laid_out, &optimizing_options, &worker_cancel)
+                    });
+                    let _ = upgrade_sender.send(result.map(|code| NativeUpgrade {
+                        code,
+                        derived_edges: true,
+                    }));
                 });
             }) {
             Ok(handle) => (Promotion::Pending(baseline_receiver), Some(handle)),
@@ -960,6 +1142,7 @@ impl TieredBackend {
             cancel,
             compiler_worker,
             upgrade_receiver: Some(upgrade_receiver),
+            derived_compile_request,
             derived_edges_live: false,
             pending_split_applies: 0,
             promotion_threshold,
@@ -970,6 +1153,8 @@ impl TieredBackend {
             split_apply_deferrals: 0,
             threshold_deferrals: 0,
             execution_timing: None,
+            compile_log,
+            ticks,
         }
     }
 
@@ -1003,19 +1188,48 @@ impl TieredBackend {
 
     /// Start measuring time to promotion for a benchmark workload.
     pub fn start_execution_timing(&mut self) {
+        let tick = self.tick();
         self.execution_timing = Some(ActiveExecutionTiming {
             started_at: Instant::now(),
-            promotion_elapsed: self.is_compiled().then_some(Duration::ZERO),
+            promotion: self.is_compiled().then_some(TierTransition {
+                elapsed: Duration::ZERO,
+                tick,
+            }),
+            upgrade: None,
         });
     }
 
-    /// Stop timing and return the observed promotion interval.
+    /// Stop timing and return the observed tier transitions.
     pub fn finish_execution_timing(&mut self) -> Option<TieredExecutionTiming> {
+        let finish_tick = self.tick();
+        let mut compiles = [None; 3];
+        if let Ok(log) = self.compile_log.lock() {
+            for (slot, stage) in compiles.iter_mut().zip(log.iter()) {
+                *slot = Some(*stage);
+            }
+        }
         self.execution_timing
             .take()
             .map(|timing| TieredExecutionTiming {
-                promotion_elapsed: timing.promotion_elapsed,
+                promotion: timing.promotion,
+                upgrade: timing.upgrade,
+                finish_tick,
+                compiles,
             })
+    }
+
+    /// The compiled testbench's tick, when one runs.
+    fn tick(&self) -> Option<u64> {
+        self.ticks.map(|ticks| self.get_as::<u64>(ticks))
+    }
+
+    /// Record a tier transition for opt-in timing.
+    fn transition(&self) -> Option<TierTransition> {
+        let timing = self.execution_timing.as_ref()?;
+        Some(TierTransition {
+            elapsed: timing.started_at.elapsed(),
+            tick: self.tick(),
+        })
     }
 
     /// Why promotion has not happened yet, for diagnostics.
@@ -1034,7 +1248,8 @@ impl TieredBackend {
     /// The native-tier worker unwinds at its next task boundary. Before the
     /// first promotion, the simulation stays interpreted and the reason is
     /// available through [`TieredBackend::promotion_error`]; after baseline
-    /// adoption, cancellation keeps that code running without an upgrade.
+    /// adoption, cancellation keeps the last adopted code running without
+    /// further upgrades and releases a worker waiting for a derived-edge request.
     /// A result that already reached the channel (or arrives afterwards from
     /// a tier that ignores the token) is rejected so cancellation is
     /// honored regardless of compiler timing. Returns whether a background
@@ -1044,6 +1259,7 @@ impl TieredBackend {
         let promotion_pending = matches!(self.promotion, Promotion::Pending(_));
         let upgrade_pending = self.upgrade_receiver.take().is_some();
         self.cancel.cancel();
+        self.derived_compile_request = None;
         if promotion_pending {
             self.promotion = Promotion::Failed(super::compile_cancel::cancelled_error());
         }
@@ -1177,22 +1393,23 @@ impl TieredBackend {
             self.derived_edges_live = self.upgrade_receiver.is_none();
             self.promotion = Promotion::Promoted;
             self.promoted_after_interpreted_steps = Some(self.interpreted_steps);
+            let transition = self.transition();
             if let Some(timing) = &mut self.execution_timing
-                && timing.promotion_elapsed.is_none()
+                && timing.promotion.is_none()
             {
-                timing.promotion_elapsed = Some(timing.started_at.elapsed());
+                timing.promotion = transition;
             }
-            tracing::info!("tiered backend adopted generated code");
+            tracing::info!(tick = self.tick(), "tiered backend adopted generated code");
         }
     }
 
     /// Swap the adopted native image for the optimizing replacement when a
-    /// baseline-pipeline build finishes its second compilation stage.
+    /// baseline-pipeline build finishes an optimizing compilation stage.
     ///
     /// Like interpreter promotion, the replacement grows the live image
     /// within its existing allocation; the allocation never moves, so
     /// external views stay valid. Failure or cancellation keeps the
-    /// baseline code running for the rest of the simulation.
+    /// last adopted code running for the rest of the simulation.
     fn maybe_upgrade(&mut self) {
         if self.cancel.is_cancelled() {
             self.upgrade_receiver = None;
@@ -1215,7 +1432,7 @@ impl TieredBackend {
                 return;
             }
         };
-        let code = match result {
+        let upgrade = match result {
             Ok(code) => code,
             Err(error) => {
                 tracing::warn!(
@@ -1225,6 +1442,16 @@ impl TieredBackend {
                 return;
             }
         };
+        if !upgrade.derived_edges {
+            self.upgrade_receiver = Some(receiver);
+        }
+        let NativeUpgrade {
+            code,
+            derived_edges,
+        } = upgrade;
+        if derived_edges {
+            self.derived_compile_request = None;
+        }
         let required = code.required_image_words();
         if let Phase::Compiled(compiled) = &mut self.phase
             && compiled.memory_word_capacity() < required
@@ -1238,8 +1465,18 @@ impl TieredBackend {
         if let Phase::Compiled(compiled) = &mut self.phase
             && compiled.replace_native_code(code)
         {
-            tracing::info!("tiered backend adopted optimizing native code");
-            self.derived_edges_live = true;
+            tracing::info!(
+                derived_edges,
+                tick = self.tick(),
+                "tiered backend adopted optimizing native code"
+            );
+            self.derived_edges_live = derived_edges;
+            let transition = self.transition();
+            if let Some(timing) = &mut self.execution_timing
+                && timing.upgrade.is_none()
+            {
+                timing.upgrade = transition;
+            }
         }
     }
 }
@@ -1247,6 +1484,7 @@ impl TieredBackend {
 impl Drop for TieredBackend {
     fn drop(&mut self) {
         self.cancel.cancel();
+        self.derived_compile_request = None;
         if let Some(worker) = self.compiler_worker.take() {
             let _ = worker.join();
         }
@@ -1264,6 +1502,12 @@ impl SimBackend for TieredBackend {
         matches!(self.phase, Phase::Compiled(_)) && self.derived_edges_live
     }
 
+    fn request_derived_edge_units(&mut self) {
+        if let Some(request) = &mut self.derived_compile_request {
+            request.request();
+        }
+    }
+
     type Event = TieredEventRef;
 
     fn eval_comb(&mut self) -> Result<(), SimulatorErrorCode> {
@@ -1274,6 +1518,23 @@ impl SimBackend for TieredBackend {
             Phase::Interpreting(Some(interp)) => interp.eval_comb(),
             Phase::Compiled(compiled) => compiled.eval_comb(),
             Phase::Interpreting(None) => unreachable!("promoted backend left no interpreter"),
+        }
+    }
+
+    fn eval_clock_aliases(&mut self, event: TieredEventRef) -> Result<bool, SimulatorErrorCode> {
+        // Do not promote during a partial settle: normal evaluation boundaries
+        // continue to own tier changes and their accounting.
+        match &mut self.phase {
+            #[cfg(any(
+                target_arch = "x86_64",
+                feature = "arm64-codegen",
+                target_arch = "aarch64"
+            ))]
+            Phase::Compiled(CompiledTier::Native(native)) => {
+                let event = native.id_to_event_slice()[event.id()];
+                native.eval_clock_aliases(event)
+            }
+            _ => Ok(false),
         }
     }
 
@@ -2874,6 +3135,189 @@ module Top (
     }
 
     #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    fn build_lazy_derived_test(
+        fail_stage: Option<usize>,
+    ) -> (Simulator<TieredBackend>, [Gate; 3], mpsc::Receiver<usize>) {
+        let source = r#"
+            module Top(clk: input '_ clock, rst: input '_ reset,
+                       q: output logic<8>, b: output logic<8>) {
+                always_ff (clk, rst) {
+                    if_reset { q = 0; } else { q += 1; }
+                }
+                let divided: '_ clock = q[1];
+                always_ff (divided, rst) {
+                    if_reset { b = 0; } else { b += 1; }
+                }
+            }
+        "#;
+        let (layout_sender, layout_receiver) = mpsc::channel();
+        let mut sim = SimulatorBuilder::<Simulator>::new(source, "Top")
+            .four_state(false)
+            .build_tiered_with_compiler(move |laid_out, options, _| {
+                layout_sender
+                    .send((laid_out.clone(), options.clone()))
+                    .unwrap();
+                Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError))
+            })
+            .unwrap();
+        let (laid_out, mut baseline_options) = layout_receiver
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap();
+        assert!(!laid_out.runtime.runtime_schema.derived_edges.is_empty());
+        let mut optimizing_options = baseline_options.clone();
+        baseline_options.x86_options.baseline = true;
+        optimizing_options.x86_options.baseline = false;
+        let gates = [Gate::closed(), Gate::closed(), Gate::closed()];
+        let worker_gates = gates.each_ref().map(|gate| gate.0.clone());
+        let (stages, receiver) = mpsc::channel();
+        sim.backend = TieredBackend::with_two_stage_compiler(
+            &laid_out,
+            &baseline_options,
+            optimizing_options,
+            move |program, options, cancel| {
+                let stage = if options.x86_options.baseline {
+                    0
+                } else if program.runtime.runtime_schema.derived_edges.is_empty() {
+                    1
+                } else {
+                    2
+                };
+                stages.send(stage).unwrap();
+                wait_for_gate_or_cancel(&worker_gates[stage], cancel)?;
+                if fail_stage == Some(stage) {
+                    return Err(SimulatorError::from(crate::RuntimeErrorCode::InternalError));
+                }
+                let image = NativeBackend::compile_image_with_cancel(program, options, cancel)?;
+                let shared = unsafe { SharedNativeCode::from_image(image)? };
+                Ok(CompiledCode::Native(Arc::new(shared)))
+            },
+        );
+        let rst = sim.signal("rst");
+        let q = sim.signal("q");
+        let b = sim.signal("b");
+        sim.set(rst, 1u8);
+        sim.set(q, 1u8);
+        sim.set(b, 9u8);
+        sim.eval_comb().unwrap();
+        assert_eq!(receiver.recv_timeout(Duration::from_secs(60)).unwrap(), 0);
+        (sim, gates, receiver)
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    fn adopt_lazy_core(
+        sim: &mut Simulator<TieredBackend>,
+        gates: &[Gate; 3],
+        stages: &mpsc::Receiver<usize>,
+    ) {
+        gates[0].open();
+        assert_eq!(stages.recv_timeout(Duration::from_secs(60)).unwrap(), 1);
+        sim.backend.maybe_promote();
+        let baseline = adopted_native_code(&sim.backend);
+        let base = sim.backend.memory_as_ptr().0;
+        gates[1].open();
+        let deadline = Instant::now() + Duration::from_secs(60);
+        loop {
+            sim.backend.maybe_upgrade();
+            if !Arc::ptr_eq(&baseline, &adopted_native_code(&sim.backend)) {
+                break;
+            }
+            assert!(Instant::now() < deadline, "optimized core was not adopted");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(!sim.backend.derived_edges_live);
+        assert_eq!(sim.backend.memory_as_ptr().0, base);
+        assert_eq!(stages.try_recv(), Err(mpsc::TryRecvError::Empty));
+        assert_eq!(sim.get_as::<u8>(sim.signal("q")), 1);
+        assert_eq!(sim.get_as::<u8>(sim.signal("b")), 9);
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn native_lazy_derived_adopts_core_then_requested_edge_units() {
+        let (mut sim, gates, stages) = build_lazy_derived_test(None);
+        adopt_lazy_core(&mut sim, &gates, &stages);
+        let core = adopted_native_code(&sim.backend);
+        let base = sim.backend.memory_as_ptr().0;
+        sim.backend.request_derived_edge_units();
+        assert!(!sim.backend.runs_derived_edge_units());
+        assert_eq!(stages.recv_timeout(Duration::from_secs(60)).unwrap(), 2);
+        gates[2].open();
+        sim.backend.compiler_worker.take().unwrap().join().unwrap();
+        sim.backend.maybe_upgrade();
+        assert!(sim.backend.derived_edges_live);
+        assert!(!Arc::ptr_eq(&core, &adopted_native_code(&sim.backend)));
+        assert_eq!(sim.backend.memory_as_ptr().0, base);
+        let clk = sim.event("clk");
+        sim.edge(clk, celox_runtime::Edge::Rising).unwrap();
+        assert_eq!(sim.get_as::<u8>(sim.signal("q")), 2);
+        assert_eq!(sim.get_as::<u8>(sim.signal("b")), 10);
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn native_lazy_derived_early_request_keeps_two_stage_path() {
+        let (mut sim, gates, stages) = build_lazy_derived_test(None);
+        sim.backend.request_derived_edge_units();
+        assert!(!sim.backend.runs_derived_edge_units());
+        gates[0].open();
+        assert_eq!(stages.recv_timeout(Duration::from_secs(60)).unwrap(), 2);
+        sim.backend.maybe_promote();
+        gates[2].open();
+        sim.backend.compiler_worker.take().unwrap().join().unwrap();
+        sim.backend.maybe_upgrade();
+        assert!(sim.backend.derived_edges_live);
+        let clk = sim.event("clk");
+        sim.edge(clk, celox_runtime::Edge::Rising).unwrap();
+        assert_eq!(sim.get_as::<u8>(sim.signal("q")), 2);
+        assert_eq!(sim.get_as::<u8>(sim.signal("b")), 10);
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn native_lazy_derived_cancel_wakes_idle_compiler_and_keeps_core() {
+        let (mut sim, gates, stages) = build_lazy_derived_test(None);
+        adopt_lazy_core(&mut sim, &gates, &stages);
+        let core = adopted_native_code(&sim.backend);
+        assert!(sim.backend.cancel_background_compilation());
+        sim.backend.compiler_worker.take().unwrap().join().unwrap();
+        let clk = sim.event("clk");
+        sim.edge(clk, celox_runtime::Edge::Rising).unwrap();
+        assert!(Arc::ptr_eq(&core, &adopted_native_code(&sim.backend)));
+        assert_eq!(sim.get_as::<u8>(sim.signal("q")), 2);
+        assert_eq!(sim.get_as::<u8>(sim.signal("b")), 10);
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn native_lazy_derived_failed_edge_compilation_keeps_core() {
+        let (mut sim, gates, stages) = build_lazy_derived_test(Some(2));
+        adopt_lazy_core(&mut sim, &gates, &stages);
+        let core = adopted_native_code(&sim.backend);
+        sim.backend.request_derived_edge_units();
+        assert!(!sim.backend.runs_derived_edge_units());
+        assert_eq!(stages.recv_timeout(Duration::from_secs(60)).unwrap(), 2);
+        gates[2].open();
+        sim.backend.compiler_worker.take().unwrap().join().unwrap();
+        sim.backend.maybe_upgrade();
+        assert!(!sim.backend.derived_edges_live);
+        assert!(Arc::ptr_eq(&core, &adopted_native_code(&sim.backend)));
+        let clk = sim.event("clk");
+        sim.edge(clk, celox_runtime::Edge::Rising).unwrap();
+        assert_eq!(sim.get_as::<u8>(sim.signal("q")), 2);
+        assert_eq!(sim.get_as::<u8>(sim.signal("b")), 10);
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn native_lazy_derived_drop_wakes_idle_compiler() {
+        let (mut sim, gates, stages) = build_lazy_derived_test(None);
+        adopt_lazy_core(&mut sim, &gates, &stages);
+        let worker = sim.backend.compiler_worker.take().unwrap();
+        drop(sim);
+        worker.join().unwrap();
+    }
+
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
     fn adopted_native_code(backend: &TieredBackend) -> Arc<SharedNativeCode> {
         let Phase::Compiled(CompiledTier::Native(native)) = &backend.phase else {
             panic!("native code was not adopted");
@@ -3003,6 +3447,33 @@ module Top (
         backend.eval_comb().unwrap();
         assert_eq!(backend.get_as::<u8>(q), 61);
         assert_eq!(backend.memory_as_ptr().0, base);
+    }
+
+    /// A design without derived edges compiles a baseline and an optimizing
+    /// image, and the timing names them so.
+    #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]
+    #[test]
+    fn timing_names_the_stages_of_an_edge_free_two_stage_build() {
+        let baseline_gate = Gate::closed();
+        let upgrade_gate = Gate::closed();
+        let (mut sim, _baseline_ready) =
+            build_gated_two_stage(&baseline_gate, &upgrade_gate, false);
+        let backend = &mut sim.backend;
+        backend.start_execution_timing();
+        baseline_gate.open();
+        upgrade_gate.open();
+        backend.compiler_worker.take().unwrap().join().unwrap();
+        backend.maybe_promote();
+        backend.maybe_upgrade();
+        let timing = backend.finish_execution_timing().unwrap();
+        let kinds: Vec<_> = timing.compiles().map(|stage| stage.kind).collect();
+        assert_eq!(
+            kinds,
+            [TieredCompileKind::Baseline, TieredCompileKind::Optimizing]
+        );
+        assert!(timing.compiles().all(|stage| stage.completed));
+        assert!(timing.promotion().is_some());
+        assert!(timing.upgrade().is_some());
     }
 
     #[cfg(all(target_arch = "x86_64", not(feature = "arm64-codegen")))]

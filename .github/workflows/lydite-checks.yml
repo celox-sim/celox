@@ -62,18 +62,21 @@ jobs:
         with:
           persist-credentials: false
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install recorded solver version
         run: python -m pip install z3-solver==5.1.0
+      - name: Check independent Aplite version
+        working-directory: .
+        run: node scripts/check-aplite-release.mjs
       - name: Test affected Lydite packages and documentation
         run: |
           Z3_BIN="$(command -v z3)"
           export Z3_BIN
-          cargo test --locked -p lydite -p lydite-ir -p lydite-solver -p lydite-syntax -p lydite-verify
+          cargo test --locked -p lydite -p lydite-ir -p lydite-solver -p lydite-syntax -p lydite-verify -p aplite
 
   documentation:
     needs: changes
@@ -95,7 +98,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - name: Build the isolated editor worker
         run: cargo build --release --locked -p lydite --bin lydite-editor
       - name: Check bounded responses and reject deadlock and dropped-request mutants
@@ -129,7 +132,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
         with:
           components: rustfmt
       # The conformance gates are pinned to Python 3.12.

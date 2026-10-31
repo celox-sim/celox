@@ -3,12 +3,13 @@
 use super::*;
 
 pub(super) fn coerce_procedural_assignment_rhs(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     rhs: Expr,
     lhs: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
-    let Some(target_type) = lvalue_expr_type(state, lhs, packed_dimensions) else {
+    let functions = &tree.functions;
+    let Some(target_type) = lvalue_expr_type(functions, lhs, packed_dimensions) else {
         return rhs;
     };
     let Some(source_signed) = expr_signedness_with_return_types(
@@ -20,7 +21,7 @@ pub(super) fn coerce_procedural_assignment_rhs(
         return rhs;
     };
     let assigned = if source_signed == target_type.signed
-        && expr_static_width(state, &rhs, packed_dimensions) == Some(target_type.width)
+        && expr_static_width(tree, &rhs, packed_dimensions) == Some(target_type.width)
     {
         rhs
     } else {
@@ -58,7 +59,7 @@ pub(super) fn coerce_procedural_assignment_rhs(
 }
 
 pub(super) fn lvalue_expr_type(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     value: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Option<ExprType> {
@@ -72,7 +73,7 @@ pub(super) fn lvalue_expr_type(
                 .chain(dimensions.unpacked.iter().map(|dimension| &dimension.width))
                 .try_fold(1usize, |width, dimension| {
                     let dimension_width =
-                        eval_ast_const_expr(state, dimension, &packed_dimensions.const_env)?;
+                        eval_ast_const_expr(functions, dimension, &packed_dimensions.const_env)?;
                     width.checked_mul(usize::try_from(dimension_width).ok()?)
                 })?;
             Some(ExprType {
@@ -83,8 +84,8 @@ pub(super) fn lvalue_expr_type(
         LValue::Select {
             msb, lsb, signed, ..
         } => {
-            let msb = eval_ast_const_expr(state, msb, &packed_dimensions.const_env)?;
-            let lsb = eval_ast_const_expr(state, lsb, &packed_dimensions.const_env)?;
+            let msb = eval_ast_const_expr(functions, msb, &packed_dimensions.const_env)?;
+            let lsb = eval_ast_const_expr(functions, lsb, &packed_dimensions.const_env)?;
             Some(ExprType {
                 width: usize::try_from(msb.abs_diff(lsb)).ok()?.checked_add(1)?,
                 signed: *signed,
@@ -94,7 +95,8 @@ pub(super) fn lvalue_expr_type(
 }
 
 pub(super) fn simplify_condition(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expression: Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
@@ -105,7 +107,7 @@ pub(super) fn simplify_condition(
         op: BinaryOp::LogicOr,
         right,
     } = &expression
-        && two_state_conditions_are_complements(state, left, right, packed_dimensions)
+        && two_state_conditions_are_complements(tree, session, left, right, packed_dimensions)
     {
         return Expr::Literal("1'b1".to_string());
     }
@@ -113,7 +115,8 @@ pub(super) fn simplify_condition(
 }
 
 pub(super) fn assignment_op_expr(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     lhs: &LValue,
     op: &str,
     rhs: Expr,
@@ -135,7 +138,7 @@ pub(super) fn assignment_op_expr(
         "^" => BinaryOp::BitXor,
         _ => return Err(operator()),
     };
-    let left = expr_from_lvalue(state, lhs, packed_dimensions);
+    let left = expr_from_lvalue(tree, lhs, packed_dimensions);
     if (expression_binding::real_value(&left, packed_dimensions)
         || expression_binding::real_value(&rhs, packed_dimensions))
         && !matches!(
@@ -147,7 +150,8 @@ pub(super) fn assignment_op_expr(
     }
     Ok(expression_binding::remove_real_division_guards(
         guard_zero_divisions(
-            state,
+            tree,
+            session,
             Expr::Binary {
                 left: Box::new(left),
                 op,
@@ -159,11 +163,12 @@ pub(super) fn assignment_op_expr(
 }
 
 pub(super) fn expr_from_lvalue(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     lhs: &LValue,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
-    if let Some(value) = selects::invalid_unpacked_read(state, lhs, packed_dimensions) {
+    let functions = &tree.functions;
+    if let Some(value) = selects::invalid_unpacked_read(tree, lhs, packed_dimensions) {
         return value;
     }
     let (base, array_slice_width, array_slice_reversed, signed) = match lhs {
@@ -195,7 +200,7 @@ pub(super) fn expr_from_lvalue(
             ..
         }
     ) {
-        let Some(r#type) = lvalue_expr_type(state, lhs, packed_dimensions) else {
+        let Some(r#type) = lvalue_expr_type(&tree.functions, lhs, packed_dimensions) else {
             return base;
         };
         Expr::Resize {
@@ -216,7 +221,7 @@ pub(super) fn expr_from_lvalue(
         return base;
     };
     let Some(element_width) =
-        eval_ast_const_expr(state, array_slice_width, &packed_dimensions.const_env)
+        eval_ast_const_expr(functions, array_slice_width, &packed_dimensions.const_env)
             .and_then(|width| usize::try_from(width).ok())
             .filter(|width| *width != 0)
     else {
@@ -225,9 +230,9 @@ pub(super) fn expr_from_lvalue(
     let Expr::Select { msb, lsb, .. } = &base else {
         return base;
     };
-    let Some(total_width) = eval_ast_const_expr(state, msb, &packed_dimensions.const_env)
+    let Some(total_width) = eval_ast_const_expr(functions, msb, &packed_dimensions.const_env)
         .and_then(|msb| {
-            eval_ast_const_expr(state, lsb, &packed_dimensions.const_env)
+            eval_ast_const_expr(functions, lsb, &packed_dimensions.const_env)
                 .and_then(|lsb| usize::try_from(msb.abs_diff(lsb)).ok())
         })
         .and_then(|width| width.checked_add(1))

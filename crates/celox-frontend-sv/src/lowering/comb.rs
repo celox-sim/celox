@@ -583,7 +583,18 @@ impl<'p, 'a> Comb<'p, 'a> {
         expr: &sv::ir::Expr,
         context: Option<(usize, bool)>,
     ) -> Result<Value, sv::AnalyzerError> {
-        let expr = expr_for_state_mode(expr, self.m.four_state);
+        self.eval_mode(store, frames, expr, context, false)
+    }
+
+    fn eval_mode(
+        &mut self,
+        store: &mut Store,
+        frames: &[Frame],
+        expr: &sv::ir::Expr,
+        context: Option<(usize, bool)>,
+        preserve_literals: bool,
+    ) -> Result<Value, sv::AnalyzerError> {
+        let expr = expr_for_state_mode(expr, self.m.four_state || preserve_literals);
         let expr = if self.m.calls(&expr) {
             self.hoist(store, frames, &expr)?
         } else {
@@ -847,11 +858,14 @@ impl<'p, 'a> Comb<'p, 'a> {
                     }
                 }
                 sources.extend(r_sources);
-                let rebuilt = if l == left && r == right {
-                    node
-                } else {
-                    self.alloc(SLTNode::Binary(l, op, r))?
-                };
+                let rebuilt =
+                    if !self.m.four_state && matches!(op, BinaryOp::EqCase | BinaryOp::NeCase) {
+                        super::case_equality::compare(self.arena, l, op, r).map_err(slt_error)?
+                    } else if l == left && r == right {
+                        node
+                    } else {
+                        self.alloc(SLTNode::Binary(l, op, r))?
+                    };
                 (rebuilt, sources)
             }
             SLTNode::Unary(op, inner) => {
@@ -2027,7 +2041,9 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<Store, sv::AnalyzerError> {
         match stmt {
             sv::ir::Stmt::DisableFork => Ok(store),
-            sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => {
+            sv::ir::Stmt::Fork { .. }
+            | sv::ir::Stmt::WaitFork
+            | sv::ir::Stmt::AssertionRegion { .. } => {
                 Err(unsupported("fork control outside a timed process"))
             }
             sv::ir::Stmt::Assign {
@@ -2285,7 +2301,13 @@ impl<'p, 'a> Comb<'p, 'a> {
             return Ok(conditions);
         }
         let selector_signed = self.expr_signed(selector);
-        let (selector_node, selector_sources) = self.eval(store, frames, selector, None)?;
+        let (selector_node, selector_sources) = self.eval_mode(
+            store,
+            frames,
+            selector,
+            None,
+            kind == sv::ir::CaseKind::Exact,
+        )?;
         let mut labels = Vec::with_capacity(items.len());
         let mut width = self.width(selector_node);
         let mut all_signed = selector_signed;
@@ -2296,7 +2318,8 @@ impl<'p, 'a> Comb<'p, 'a> {
                     return Err(unsupported("range label outside case inside"));
                 };
                 all_signed &= self.expr_signed(value);
-                let (node, sources) = self.eval(store, frames, value, None)?;
+                let (node, sources) =
+                    self.eval_mode(store, frames, value, None, kind == sv::ir::CaseKind::Exact)?;
                 width = width.max(self.width(node));
                 item_labels.push((node, sources));
             }
@@ -2307,8 +2330,14 @@ impl<'p, 'a> Comb<'p, 'a> {
         // equality: an unsigned operand also turns the others' operands
         // unsigned (11.8.2).
         let selector_node = if self.width(selector_node) < width || selector_signed != all_signed {
-            self.eval(store, frames, selector, Some((width, all_signed)))?
-                .0
+            self.eval_mode(
+                store,
+                frames,
+                selector,
+                Some((width, all_signed)),
+                kind == sv::ir::CaseKind::Exact,
+            )?
+            .0
         } else {
             selector_node
         };
@@ -2322,7 +2351,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                     && (self.width(*node) < width || self.expr_signed(value) != all_signed)
                 {
                     *node = self
-                        .eval(store, frames, value, Some((width, all_signed)))?
+                        .eval_mode(
+                            store,
+                            frames,
+                            value,
+                            Some((width, all_signed)),
+                            kind == sv::ir::CaseKind::Exact,
+                        )?
                         .0;
                 }
             }
@@ -2337,7 +2372,12 @@ impl<'p, 'a> Comb<'p, 'a> {
             for (node, mut sources) in item_labels {
                 let node = coerce_node_width(self.arena, node, Some(width), all_signed)
                     .map_err(slt_error)?;
-                let matched = self.alloc(SLTNode::Binary(selector_node, op, node))?;
+                let matched = if !self.m.four_state && kind == sv::ir::CaseKind::Exact {
+                    super::case_equality::compare(self.arena, selector_node, op, node)
+                        .map_err(slt_error)?
+                } else {
+                    self.alloc(SLTNode::Binary(selector_node, op, node))?
+                };
                 let matched = if kind == sv::ir::CaseKind::X {
                     // A wildcard comparison returns X when only selector
                     // unknowns prevent a definite match. casex ignores those
@@ -2526,8 +2566,77 @@ impl<'p, 'a> Comb<'p, 'a> {
         }
     }
 
+    /// Possible values of one selector bit, as a set of 0, 1, Z, X.
+    /// Follow only wiring operations: other expressions retain the original
+    /// conservative domain. Bound work even for a slice of a large/deep DAG.
+    fn case_bit_values(&self, mut node: NodeId, mut bit: usize, four_state: bool) -> u8 {
+        let fallback = if four_state { 0b1111 } else { 0b0011 };
+        let mut budget = 256usize;
+        while budget > 0 {
+            budget -= 1;
+            if bit >= self.width(node) {
+                return fallback;
+            }
+            match self.arena.get(node) {
+                SLTNode::Constant(value, mask, _, _) => {
+                    let digit =
+                        u8::from(value.bit(bit as u64)) | (u8::from(mask.bit(bit as u64)) << 1);
+                    return 1 << digit;
+                }
+                SLTNode::Input {
+                    variable, index, ..
+                } => {
+                    return if !self.m.four_state
+                        || (index.is_empty()
+                            && self
+                                .m
+                                .variables
+                                .get(variable)
+                                .is_some_and(|var| !var.is_4state))
+                    {
+                        0b0011
+                    } else {
+                        fallback
+                    };
+                }
+                SLTNode::Unary(UnaryOp::ToTwoState, _) => return 0b0011,
+                SLTNode::Unary(UnaryOp::Ident, inner) | SLTNode::Capture { expr: inner, .. } => {
+                    node = *inner
+                }
+                SLTNode::Slice { expr, access } => {
+                    let Some(offset) = bit.checked_add(access.lsb) else {
+                        return fallback;
+                    };
+                    bit = offset;
+                    node = *expr;
+                }
+                SLTNode::Concat(parts) => {
+                    let mut selected = None;
+                    // SLT concatenations store their most significant part first.
+                    for (part, width) in parts.iter().rev() {
+                        if budget == 0 {
+                            return fallback;
+                        }
+                        budget -= 1;
+                        if bit < *width {
+                            selected = Some(*part);
+                            break;
+                        }
+                        bit -= width;
+                    }
+                    let Some(part) = selected else {
+                        return fallback;
+                    };
+                    node = part;
+                }
+                _ => return fallback,
+            }
+        }
+        fallback
+    }
+
     /// For each item, whether it and the items before it cover every
-    /// two-state value of the selector with constant labels.
+    /// possible selector value with constant labels.
     fn case_coverage(
         &mut self,
         store: &mut Store,
@@ -2538,11 +2647,21 @@ impl<'p, 'a> Comb<'p, 'a> {
     ) -> Result<Vec<bool>, sv::AnalyzerError> {
         let none = vec![false; items.len()];
         let mut probe = store.fork();
-        let (selector_node, _) = self.eval(&mut probe, frames, selector, None)?;
+        let (selector_node, _) = self.eval_mode(
+            &mut probe,
+            frames,
+            selector,
+            None,
+            kind == sv::ir::CaseKind::Exact,
+        )?;
         let selector_width = self.width(selector_node);
         // A four-state selector also takes X and Z bits; only exact
         // comparisons of a narrow selector are enumerated.
-        let four_state_selector = !self.two_state(selector_node);
+        let four_state_selector = if self.m.four_state {
+            !self.two_state(selector_node)
+        } else {
+            !super::case_equality::is_known(self.arena, selector_node).map_err(slt_error)?
+        };
         if four_state_selector && (kind != sv::ir::CaseKind::Exact || selector_width > 6) {
             return Ok(none);
         }
@@ -2558,7 +2677,13 @@ impl<'p, 'a> Comb<'p, 'a> {
                     sv::AnalyzerError,
                 > {
                     let signed = this.expr_signed(expr);
-                    let (node, _) = this.eval(&mut probe, frames, expr, None)?;
+                    let (node, _) = this.eval_mode(
+                        &mut probe,
+                        frames,
+                        expr,
+                        None,
+                        kind == sv::ir::CaseKind::Exact,
+                    )?;
                     Ok(slt_const4(this.arena, &mut this.consts, node)
                         .map(|(value, mask, width)| (value, mask, width, signed)))
                 };
@@ -2628,9 +2753,32 @@ impl<'p, 'a> Comb<'p, 'a> {
             }
             return Ok(coverage);
         }
+        // A concatenated fixed X/Z bit is not a free four-state input.
+        // Restrict enumeration to each bit's possible values; correlations
+        // between nonconstant bits remain conservatively unconstrained.
+        let digit_width = if four_state_selector { 2 } else { 1 };
+        let digit_mask = (1u64 << digit_width) - 1;
+        let mut fixed_bits = 0u64;
+        let mut required_bits = 0u64;
+        for bit in 0..selector_width {
+            let values = self.case_bit_values(selector_node, bit, four_state_selector);
+            let shift = digit_width * bit;
+            if values.is_power_of_two() {
+                let digit = u64::from(values.trailing_zeros());
+                if !four_state_selector && digit > 1 {
+                    return Ok(none);
+                }
+                fixed_bits |= digit_mask << shift;
+                required_bits |= digit << shift;
+            } else if four_state_selector && values == 0b0011 {
+                // A two-state variable bit has a free payload and a zero mask.
+                fixed_bits |= 2 << shift;
+            }
+        }
         let mut remaining: Vec<(BigUint, BigUint)> = if four_state_selector {
             // Each bit is 0, 1, Z (payload 0, mask 1), or X (payload 1, mask 1).
             (0u64..(1u64 << (2 * selector_width)))
+                .filter(|raw| raw & fixed_bits == required_bits)
                 .map(|raw| {
                     let mut value = BigUint::zero();
                     let mut mask = BigUint::zero();
@@ -2651,6 +2799,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                 .collect()
         } else {
             (0u64..(1u64 << selector_width))
+                .filter(|raw| raw & fixed_bits == required_bits)
                 .map(|raw| (extend(&BigUint::from(raw), selector_width), BigUint::zero()))
                 .collect()
         };
@@ -3234,6 +3383,17 @@ impl<'p, 'a> Comb<'p, 'a> {
         args: &[Option<sv::ir::Expr>],
         arg_order: &[usize],
     ) -> Result<Option<Value>, sv::AnalyzerError> {
+        if args.is_empty()
+            && let Some(literal) = self.m.constant_functions.value(name)
+        {
+            let node = self.alloc(SLTNode::Constant(
+                literal.value,
+                literal.mask,
+                literal.width,
+                literal.signed,
+            ))?;
+            return Ok(Some((node, Sources::default())));
+        }
         let subroutine = self
             .m
             .subroutine(name)
@@ -3265,6 +3425,7 @@ impl<'p, 'a> Comb<'p, 'a> {
         // Copy the inputs in, left to right, in the caller's scope.
         let mut outputs = Vec::new();
         let mut copied = Vec::new();
+        let mut references = Vec::new();
         let positions: Vec<_> = if arg_order.is_empty() {
             (0..subroutine.params.len()).collect()
         } else {
@@ -3285,6 +3446,44 @@ impl<'p, 'a> Comb<'p, 'a> {
                 .cloned()
                 .flatten()
                 .or_else(|| param.default.clone());
+            if param.direction.is_reference() && !param.leaves.is_empty() {
+                // Each member of a formal of unpacked structure type names
+                // the matching member variable of the actual.
+                let targets = match &actual {
+                    Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts
+                        .iter()
+                        .map(|part| match part {
+                            sv::ir::Expr::Ident(actual) => self.m.id(actual),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>(),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    unsupported(format!("ref argument `{}` of `{name}`", param.source_name))
+                })?;
+                for (leaf, target) in param.leaves.iter().zip(targets) {
+                    let id = self
+                        .m
+                        .id(leaf)
+                        .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+                    references.push((leaf.clone(), id, target));
+                }
+                continue;
+            }
+            if param.direction.is_reference() {
+                // A reference formal names the actual variable itself
+                // (IEEE 1800-2023 13.5.2); other actuals fall back to Ff.
+                let target = match &actual {
+                    Some(sv::ir::Expr::Ident(actual)) => self.m.id(actual),
+                    _ => None,
+                }
+                .ok_or_else(|| {
+                    unsupported(format!("ref argument `{}` of `{name}`", param.source_name))
+                })?;
+                references.push((param.name.clone(), id, target));
+                continue;
+            }
             if param.direction.is_written() {
                 let actual = actual.as_ref().and_then(lvalue_from_expr).ok_or_else(|| {
                     unsupported(format!(
@@ -3350,6 +3549,9 @@ impl<'p, 'a> Comb<'p, 'a> {
             let width = self.m.var(id).width;
             self.write(store, id, full(width), value)?;
         }
+        for (formal, _, target) in &references {
+            self.m.name_to_id.insert(formal.clone(), *target);
+        }
         let return_var = match &subroutine.return_var {
             Some(name) => {
                 let id = self
@@ -3373,6 +3575,9 @@ impl<'p, 'a> Comb<'p, 'a> {
         self.active_calls.push(name.to_string());
         let result = self.exec_block(store.fork(), &call_frames, &subroutine.body);
         self.active_calls.pop();
+        for (formal, original, _) in references {
+            self.m.name_to_id.insert(formal, original);
+        }
         *store = result?;
         // Copy the outputs back.
         for (id, lvalues) in outputs {
@@ -3543,11 +3748,7 @@ impl<'p, 'a> Comb<'p, 'a> {
                         expr.clone()
                     };
                     let signed = self.expr_signed(&expr);
-                    arg_is_handle.push(reads_string_variable(
-                        &expr,
-                        self.m.variables,
-                        self.m.name_to_id,
-                    ));
+                    arg_is_handle.push(self.m.expr_is_string(&expr));
                     arg_float_precision.push(floating::precision(
                         &expr,
                         self.m.variables,
@@ -3575,6 +3776,19 @@ impl<'p, 'a> Comb<'p, 'a> {
                     return Err(unsupported(format!("empty argument of `{task}`")));
                 }
             };
+            arg_widths.push(self.width(node));
+            captured.push(self.capture(node)?);
+        }
+        // A report carries the time it is issued at (IEEE 1800-2023 20.10).
+        // The time does not run the process.
+        let timestamp_arg = matches!(kind, SystemTaskKind::Message(_) | SystemTaskKind::Fatal);
+        if timestamp_arg {
+            let time = sv::ir::Expr::Ident(self.m.time_slot());
+            let (node, _) = self.eval(store, frames, &time, None)?;
+            arg_signed.push(false);
+            arg_is_string.push(false);
+            arg_float_precision.push(None);
+            arg_is_handle.push(false);
             arg_widths.push(self.width(node));
             captured.push(self.capture(node)?);
         }
@@ -3649,6 +3863,7 @@ impl<'p, 'a> Comb<'p, 'a> {
             location: report_location(site),
             assertion: assertion_site.cloned(),
             deferred,
+            timestamp_arg,
             arg_widths,
             arg_signed,
             arg_is_string,

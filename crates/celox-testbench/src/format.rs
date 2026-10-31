@@ -720,7 +720,7 @@ mod tests {
             is_string: false,
             float_precision: None,
         };
-        assert_eq!(format_sized_display_arg(&arg, 's', Some(0)), []);
+        assert!(format_sized_display_arg(&arg, 's', Some(0)).is_empty());
     }
 
     fn sized(value: u32, width: usize, signed: bool, spec: char, field: Option<usize>) -> String {

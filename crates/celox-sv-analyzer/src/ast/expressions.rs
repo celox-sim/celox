@@ -2,7 +2,12 @@
 
 use super::*;
 
-pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
+pub(super) fn guard_zero_divisions(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expr: Expr,
+) -> Expr {
+    let functions = &tree.functions;
     // Binding an enclosing expression can visit an already guarded operand.
     // Its children were guarded when it was constructed. Wrapping it again
     // loses the operation's type when the internal unknown arm is lowered.
@@ -19,7 +24,7 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
             lsb,
             signed,
         } => Expr::Select {
-            expr: Box::new(guard_zero_divisions(state, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             msb,
             lsb,
             signed,
@@ -27,14 +32,14 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|expr| guard_zero_divisions(state, expr))
+                .map(|expr| guard_zero_divisions(tree, session, expr))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|expr| guard_zero_divisions(state, expr))
+                .map(|expr| guard_zero_divisions(tree, session, expr))
                 .collect(),
         },
         Expr::Resize {
@@ -42,24 +47,24 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
             width,
             signed,
         } => Expr::Resize {
-            expr: Box::new(guard_zero_divisions(state, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             width,
             signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(guard_zero_divisions(state, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
         },
         Expr::Binary { left, op, right } => {
-            let left = Box::new(guard_zero_divisions(state, *left));
-            let right = Box::new(guard_zero_divisions(state, *right));
+            let left = Box::new(guard_zero_divisions(tree, session, *left));
+            let right = Box::new(guard_zero_divisions(tree, session, *right));
             let operation = Expr::Binary {
                 left,
                 op,
                 right: right.clone(),
             };
-            let divisor_is_nonzero = expr_to_const(state, (*right).clone())
-                .and_then(|right| eval_ast_const_expr(state, &right, &HashMap::default()))
+            let divisor_is_nonzero = expr_to_const(session, (*right).clone())
+                .and_then(|right| eval_ast_const_expr(functions, &right, &HashMap::default()))
                 .is_some_and(|right| right != 0);
             if matches!(op, BinaryOp::Div | BinaryOp::Mod) && !divisor_is_nonzero {
                 Expr::Mux {
@@ -80,15 +85,15 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(guard_zero_divisions(state, *condition)),
-            then_expr: Box::new(guard_zero_divisions(state, *then_expr)),
-            else_expr: Box::new(guard_zero_divisions(state, *else_expr)),
+            condition: Box::new(guard_zero_divisions(tree, session, *condition)),
+            then_expr: Box::new(guard_zero_divisions(tree, session, *then_expr)),
+            else_expr: Box::new(guard_zero_divisions(tree, session, *else_expr)),
         },
         Expr::Inside { expr, items } => Expr::Inside {
-            expr: Box::new(guard_zero_divisions(state, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             items: items
                 .into_iter()
-                .map(|item| item.map(&mut |operand| guard_zero_divisions(state, operand)))
+                .map(|item| item.map(&mut |operand| guard_zero_divisions(tree, session, operand)))
                 .collect(),
         },
         Expr::Call {
@@ -100,18 +105,18 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
             callee,
             args: args
                 .into_iter()
-                .map(|arg| arg.map(|expr| guard_zero_divisions(state, expr)))
+                .map(|arg| arg.map(|expr| guard_zero_divisions(tree, session, expr)))
                 .collect(),
         },
     }
 }
 
 pub(super) fn identifier_expression(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: String,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    if scope::imported(state).interface_types.contains_key(&name) && dimensions.get(&name).is_none()
+    if scope::imported(tree).interface_types.contains_key(&name) && dimensions.get(&name).is_none()
     {
         return Err(unsupported(format!(
             "use of interface `{name}` other than as a port connection or through a member"
@@ -122,23 +127,69 @@ pub(super) fn identifier_expression(
 
 /// Numeric system-function semantics for already-bound native arguments.
 pub(super) fn numeric_system_function(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     function: SystemFunction,
     mut arguments: Vec<Expr>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    let functions = &tree.functions;
     let operand_error = || unsupported(format!("operand of `{}`", function.name()));
     match function {
         SystemFunction::Signed | SystemFunction::Unsigned => {
             let argument = arguments.pop().ok_or_else(operand_error)?;
-            let width =
-                expr_static_width(state, &argument, dimensions).ok_or_else(operand_error)?;
+            let width = expr_static_width(tree, &argument, dimensions).ok_or_else(operand_error)?;
             Ok(Expr::Resize {
                 expr: Box::new(argument),
                 width,
                 signed: function == SystemFunction::Signed,
             })
         }
+        // A sampled value has the type of its operand; the frontend reads
+        // it from copies of the operand's variables (IEEE 1800-2023 16.9.3).
+        SystemFunction::Sampled | SystemFunction::Past => {
+            let argument = arguments.first().cloned().ok_or_else(operand_error)?;
+            // A real operand keeps its type: an integral resize would
+            // round it.
+            if expression_binding::real_value(&argument, dimensions) {
+                return Ok(Expr::Call {
+                    callee: Callee::System(function),
+                    args: arguments.into_iter().map(Some).collect(),
+                    arg_order: Vec::new(),
+                });
+            }
+            let width = expr_static_width(tree, &argument, dimensions).ok_or_else(operand_error)?;
+            let signed =
+                dimensions::expression_signedness(&argument, dimensions, &dimensions.const_env)
+                    .ok_or_else(operand_error)?;
+            // The number of ticks is a constant expression, which the frontend
+            // reads as a literal.
+            if function == SystemFunction::Past
+                && let Some(ticks) = arguments.get_mut(1)
+                && let Some(constant) = expr_to_const(session, ticks.clone())
+                && let Some(value) =
+                    eval_ast_const_expr(functions, &constant, &dimensions.const_env)
+            {
+                *ticks = Expr::Literal(value.to_string());
+            }
+            Ok(Expr::Resize {
+                expr: Box::new(Expr::Call {
+                    callee: Callee::System(function),
+                    args: arguments.into_iter().map(Some).collect(),
+                    arg_order: Vec::new(),
+                }),
+                width,
+                signed,
+            })
+        }
+        SystemFunction::Rose
+        | SystemFunction::Fell
+        | SystemFunction::Stable
+        | SystemFunction::Changed => Ok(Expr::Call {
+            callee: Callee::System(function),
+            args: arguments.into_iter().map(Some).collect(),
+            arg_order: Vec::new(),
+        }),
         SystemFunction::Ln
         | SystemFunction::Log10
         | SystemFunction::Exp
@@ -174,9 +225,9 @@ pub(super) fn numeric_system_function(
         | SystemFunction::Countbits => {
             if function == SystemFunction::Clog2
                 && let [argument] = arguments.as_slice()
-                && let Some(argument) = expr_to_const(state, argument.clone())
+                && let Some(argument) = expr_to_const(session, argument.clone())
                 && let Some(value) = eval_ast_const_expr(
-                    state,
+                    functions,
                     &ConstExpr::Function {
                         callee: Callee::System(function),
                         args: vec![argument],
@@ -308,7 +359,7 @@ pub(super) fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDim
 /// Syntax adapters provide normalized names and optional values, not source text.
 pub(super) fn bind_normalized_call_arguments<T: Clone>(
     name: &str,
-    mut positional: Vec<Option<T>>,
+    positional: Vec<Option<T>>,
     named: Vec<(String, Option<T>)>,
     signatures: &HashMap<String, Vec<String>>,
 ) -> Converted<(Vec<Option<T>>, Vec<usize>)> {
@@ -318,26 +369,47 @@ pub(super) fn bind_normalized_call_arguments<T: Clone>(
     let params = signatures
         .get(name)
         .ok_or_else(|| unsupported(format!("named arguments of `{name}`")))?;
-    if positional.len() > params.len() {
-        return Err(unsupported(format!("too many arguments of `{name}`")));
+    bind_to_formals(name, positional, named, params)
+}
+
+/// Binds the positional actuals, then the named ones, to `formals`. An
+/// unnamed formal is the empty string. Returns the actual of each formal,
+/// `None` for one that takes its default (13.5.3), and the formals in the
+/// order their actuals are written, then the rest, which is the order they
+/// are evaluated in.
+pub(super) fn bind_to_formals<T>(
+    name: &str,
+    mut positional: Vec<Option<T>>,
+    named: Vec<(String, Option<T>)>,
+    formals: &[impl AsRef<str>],
+) -> Converted<(Vec<Option<T>>, Vec<usize>)> {
+    let invalid = |detail: String| AnalyzerError::InvalidCallArguments {
+        subroutine: name.to_string(),
+        detail: format!("{detail} (IEEE 1800-2023 13.5.4)"),
+    };
+    if positional.len() > formals.len() {
+        return Err(invalid(format!(
+            "{} actuals for {} formals",
+            positional.len() + named.len(),
+            formals.len()
+        )));
     }
     let mut order: Vec<_> = (0..positional.len()).collect();
     let mut bound: HashSet<_> = order.iter().copied().collect();
-    positional.resize(params.len(), None);
+    positional.resize_with(formals.len(), || None);
     for (formal, expr) in named {
-        let position = params
+        let position = formals
             .iter()
-            .position(|param| *param == formal)
-            .ok_or_else(|| unsupported(format!("argument `{formal}` of `{name}`")))?;
+            .position(|param| !formal.is_empty() && param.as_ref() == formal)
+            .ok_or_else(|| invalid(format!("no formal named `{formal}`")))?;
+        // An empty named actual `.a()` binds its formal too.
         if !bound.insert(position) {
-            return Err(unsupported(format!(
-                "duplicate argument `{formal}` of `{name}`"
-            )));
+            return Err(invalid(format!("formal `{formal}` is bound twice")));
         }
         positional[position] = expr;
         order.push(position);
     }
     // Defaults for unbound formals are resolved by the call lowerer.
-    order.extend((0..params.len()).filter(|position| !bound.contains(position)));
+    order.extend((0..formals.len()).filter(|position| !bound.contains(position)));
     Ok((positional, order))
 }

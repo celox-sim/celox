@@ -95,7 +95,7 @@ test("a failed lookup stops the workflow instead of permitting a rewrite", () =>
   assert.equal(result.output, "");
 });
 
-test("freeze suppresses only PR writes, preserving release creation on every event", () => {
+test("master updates release PRs but never creates tags or GitHub releases", () => {
   const action = workflow
     .split("      - name: Create release or update release pull request\n")[1]
     .split("      - name: Queue package publication for this release\n")[0];
@@ -105,6 +105,6 @@ test("freeze suppresses only PR writes, preserving release creation on every eve
     action,
     /skip-github-pull-request: \$\{\{ steps\.release-pr\.outputs\.frozen == 'true' \}\}/,
   );
-  assert.doesNotMatch(action, /skip-github-release:|\n        if:/);
+  assert.match(action, /skip-github-release: true/);
   assert.doesNotMatch(guard, /github\.event_name|\n        if:/);
 });

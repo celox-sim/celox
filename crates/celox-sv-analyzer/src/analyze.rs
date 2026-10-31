@@ -16,7 +16,9 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let mut module_table = ModuleTable::default();
     let mut modules = Vec::new();
     for module in source.modules() {
-        let state = module.constant_function_state();
+        let syntax = crate::source_tree::SourceTree::empty();
+        let tree = &module.constant_context(&syntax);
+        let session = &mut ast::Session::default();
         let id = module_table.insert(module)?;
         let mut constants = HashMap::default();
         let mut parameter_types = HashMap::default();
@@ -42,7 +44,8 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             }
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
             let (resolved_value, literal) = parameter.resolved_value_and_literal(
-                &state,
+                tree,
+                session,
                 &constants,
                 &parameter_types,
                 &parameter_literals,
@@ -79,7 +82,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             .with_declaration(
                 parameter.value().map(|value| {
                     module
-                        .declaration_expr(&state, value, &parameter_signedness)
+                        .declaration_expr(tree, session, value, &parameter_signedness)
                         .into()
                 }),
                 parameter
@@ -88,10 +91,20 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     .map(|range| {
                         ir::PackedRange::new(
                             module
-                                .declaration_expr(&state, range.left(), &parameter_signedness)
+                                .declaration_expr(
+                                    tree,
+                                    session,
+                                    range.left(),
+                                    &parameter_signedness,
+                                )
                                 .into(),
                             module
-                                .declaration_expr(&state, range.right(), &parameter_signedness)
+                                .declaration_expr(
+                                    tree,
+                                    session,
+                                    range.right(),
+                                    &parameter_signedness,
+                                )
                                 .into(),
                         )
                     })
@@ -116,20 +129,62 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                         port.r#type().clone(),
                         &ast::const_functions::Environment {
                             constants: &constants,
-                            functions: &state.const_functions,
+                            functions: &tree.functions,
                         },
                     ),
                     port.is_net(),
                 )
+                .with_unresolved_net(port.is_unresolved_net())
                 .with_default(port.default().cloned().map(Into::into))
                 .with_pattern_target(port.r#type().pattern_target(
                     &ast::const_functions::Environment {
                         constants: &constants,
-                        functions: &state.const_functions,
+                        functions: &tree.functions,
                     },
                 )),
             );
         }
+        let member_ports = ports
+            .iter()
+            .flat_map(|port| {
+                port.r#type().structure_leaves().iter().map(|(member, ty)| {
+                    ir::Port::new(
+                        format!("{}.{member}", port.name()),
+                        port.direction(),
+                        ty.clone(),
+                        port.is_net(),
+                    )
+                    .with_unresolved_net(port.is_unresolved_net())
+                })
+            })
+            .collect::<Vec<_>>();
+        // As with local structures, intermediate members name aggregates,
+        // not storage. Keep their nominal types for `.i(port.member)` glue.
+        for port in module.ports() {
+            for (name, ty) in port
+                .r#type()
+                .structure_aggregates(port.name())
+                .into_iter()
+                .skip(1)
+            {
+                ports.push(
+                    ir::Port::new(
+                        name,
+                        port.direction().into(),
+                        ir::Type::from_ast(
+                            ty,
+                            &ast::const_functions::Environment {
+                                constants: &constants,
+                                functions: &tree.functions,
+                            },
+                        ),
+                        port.is_net(),
+                    )
+                    .with_unresolved_net(port.is_unresolved_net()),
+                );
+            }
+        }
+        ports.extend(member_ports);
         let signals = module
             .signals()
             .iter()
@@ -140,11 +195,12 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                         signal.r#type().clone(),
                         &ast::const_functions::Environment {
                             constants: &constants,
-                            functions: &state.const_functions,
+                            functions: &tree.functions,
                         },
                     ),
                     signal.is_net(),
                 )
+                .with_unresolved_net(signal.is_unresolved_net())
                 .with_package_variable(signal.package_variable())
                 .with_hierarchical(signal.hierarchical())
             })
@@ -230,6 +286,8 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     .map(|subroutine| subroutine.map(&mut Into::into, &mut Into::into, &mut |t| t))
                     .collect(),
             )
+            .with_interface_scope_names(module.interface_scope_names().to_vec())
+            .with_interface_handles(module.interface_handles().to_vec())
             .with_dpi_imports(module.dpi_imports().to_vec())
             .with_program(module.is_program())
             .with_imported_parameters(imported_parameters)

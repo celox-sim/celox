@@ -36,6 +36,15 @@
           "path": "crates/celox-napi/package.json",
           "jsonpath": "$.version"
         }
+      ],
+      "exclude-paths": [
+        "crates/aplite",
+        ".release-please-aplite-manifest.json",
+        "release-please-aplite-config.json",
+        ".github/workflows/release-aplite.yml",
+        ".github/workflows/publish-aplite.yml",
+        "scripts/publish-aplite.mjs",
+        "scripts/publish-aplite.test.mjs"
       ]
     }
   }

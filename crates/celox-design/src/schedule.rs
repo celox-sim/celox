@@ -46,6 +46,9 @@ pub struct ScheduleModel<A> {
     /// Objects the scheduler stores the current time into
     /// ([`RuntimeSchema::time_slots`]).
     pub time_slots: Vec<A>,
+    /// Sampled variables and their copies
+    /// ([`RuntimeSchema::sample_shadows`]).
+    pub sample_shadows: Vec<(A, A)>,
     /// The compiled scheduler, if one was generated
     /// ([`RuntimeSchema::scheduler`]).
     pub scheduler: Option<crate::SchedulerSchema<A>>,
@@ -77,6 +80,8 @@ pub struct TermModel<A> {
     /// Design code may write the signal. Otherwise only the host and the
     /// scheduler do.
     pub driven: bool,
+    /// The term's `iff` condition ([`crate::WaitSite::gates`]).
+    pub gate: Option<crate::WaitGate<A>>,
 }
 
 impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
@@ -115,10 +120,18 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
             let terms = site
                 .terms
                 .iter()
-                .map(|&(signal, kind)| TermModel {
-                    signal,
-                    kind,
-                    driven: driven.contains(&signal),
+                .enumerate()
+                .map(|(index, &(signal, kind))| {
+                    let gate = site.gate(index);
+                    TermModel {
+                        signal,
+                        kind,
+                        // A gate without counters is judged at checks
+                        // after settling, which only check driven terms.
+                        driven: driven.contains(&signal)
+                            || gate.is_some_and(|gate| gate.counters.is_none()),
+                        gate,
+                    }
                 })
                 .collect();
             processes[site.process].waits.push(terms);
@@ -140,7 +153,9 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
         Self {
             events: design.events.clone(),
             kinds: design.event_kinds(),
-            timed: !processes.is_empty(),
+            timed: processes
+                .iter()
+                .any(|process| process.slots.kind != crate::ProcessKind::Callable),
             counted,
             probes: schema.occurrence_probes.clone(),
             processes,
@@ -152,6 +167,7 @@ impl<A: Copy + Eq + std::hash::Hash> ScheduleModel<A> {
                 .any(|site| matches!(site.kind, RuntimeEventKind::Finish)),
             active_commits: schema.active_commits.clone(),
             time_slots: schema.time_slots.clone(),
+            sample_shadows: schema.sample_shadows.clone(),
             scheduler: schema.scheduler.clone(),
         }
     }

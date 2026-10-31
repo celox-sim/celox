@@ -11,11 +11,13 @@ use crate::{Handle, HandleKind, Heap};
 /// The handle of `null`, the value of zero-initialized memory.
 pub const NULL: Handle = 0;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Object {
     class: u32,
     random_state: u64,
     random_modes: RandomModes,
+    constraint_default: bool,
+    constraint_modes: fxhash::FxHashMap<u32, bool>,
     saved_random_modes: Vec<RandomModes>,
     /// Remaining domain indices for each randc property, keyed by byte offset.
     random_cycles: fxhash::FxHashMap<u32, Vec<u16>>,
@@ -24,7 +26,7 @@ pub(crate) struct Object {
     pub(crate) handles: Vec<(u32, HandleKind)>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 struct RandomModes {
     overrides: fxhash::FxHashMap<u32, bool>,
     /// Non-rand properties temporarily made random by an argument list.
@@ -47,19 +49,33 @@ impl Object {
 
 /// An error that compiled code made in a heap operation, which the runtime
 /// reports once control returns to it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Fault {
+    ConstraintRandomization(String),
+    NegativeArraySize,
+    ContainerAllocationLimit,
     /// A property access or method call through `null` or a handle of no
     /// live object (IEEE 1800-2023 8.4).
     NullDereference,
     /// The first randomization subset does not implement virtual dispatch.
     RandomizationClassMismatch,
+    /// A streaming concatenation whose sizes do not fit (IEEE 1800-2023
+    /// 11.4.14), such as a stream wider than its fixed-size target.
+    Stream(String),
 }
 
 impl std::fmt::Display for Fault {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ConstraintRandomization(reason) => {
+                write!(f, "constraint randomization failed: {reason}")
+            }
+            Self::NegativeArraySize => f.write_str("negative dynamic array size"),
+            Self::ContainerAllocationLimit => {
+                f.write_str("dynamic container allocation limit exceeded")
+            }
             Self::NullDereference => f.write_str("null object handle dereferenced"),
+            Self::Stream(reason) => write!(f, "streaming concatenation: {reason}"),
             Self::RandomizationClassMismatch => {
                 f.write_str("class randomization through a base handle is unsupported")
             }
@@ -67,7 +83,59 @@ impl std::fmt::Display for Fault {
     }
 }
 
+/// The contents of a structure record: its bytes and handle fields.
+pub(crate) type RecordContents = (Box<[u8]>, Vec<(u32, HandleKind)>);
+
 impl Heap {
+    /// The handle of the record with the contents of the finished `record`,
+    /// so that equal values of an unpacked structure have one handle, as
+    /// equal strings and containers do: `null` for the default value, whose
+    /// bytes are all zero (a `null` record reads as its members' defaults).
+    /// A record is never written after it is finished.
+    pub fn finish_record(&mut self, record: Handle) -> Handle {
+        let Some(object) = self.objects.get(&record) else {
+            return record;
+        };
+        if object.bytes.iter().all(|&byte| byte == 0) {
+            self.objects.remove(&record);
+            return NULL;
+        }
+        let contents = (object.bytes.clone(), object.handles.clone());
+        match self.record_lookup.get(&contents) {
+            Some(&canonical) if canonical != record && self.objects.contains_key(&canonical) => {
+                self.objects.remove(&record);
+                canonical
+            }
+            _ => {
+                self.record_lookup.insert(contents, record);
+                record
+            }
+        }
+    }
+
+    /// A new named event: a handle no object or container ever gets.
+    pub fn new_event(&mut self) -> Handle {
+        self.events = true;
+        let handle = self.next_object;
+        self.next_object = handle
+            .checked_add(1)
+            .expect("the heap created more objects than handles can name");
+        handle
+    }
+
+    /// The handle the next object gets, once a named event got one: a state
+    /// file saves the handles of events as values.
+    pub fn event_watermark(&self) -> Option<Handle> {
+        self.events.then_some(self.next_object)
+    }
+
+    /// Give later objects handles from `next` on at least, so they differ
+    /// from the events of a loaded state file.
+    pub fn reserve_objects(&mut self, next: Handle) {
+        self.events = true;
+        self.next_object = self.next_object.max(next);
+    }
+
     /// A new object of `class` with `size` zeroed bytes.
     pub fn new_object(&mut self, class: u32, size: usize) -> Handle {
         let handle = self.next_object;
@@ -80,6 +148,8 @@ impl Heap {
                 class,
                 random_state: 0,
                 random_modes: RandomModes::default(),
+                constraint_default: true,
+                constraint_modes: Default::default(),
                 saved_random_modes: Vec::new(),
                 random_cycles: Default::default(),
                 bytes: vec![0; size].into(),
@@ -88,6 +158,28 @@ impl Heap {
         );
         self.created += 1;
         handle
+    }
+
+    /// Persistent per-object constraint modes (IEEE 1800-2023 18.9).
+    pub fn constraint_mode(&mut self, handle: Handle, index: u32) -> bool {
+        self.object_mut(handle).is_some_and(|object| {
+            object
+                .constraint_modes
+                .get(&index)
+                .copied()
+                .unwrap_or(object.constraint_default)
+        })
+    }
+
+    pub fn set_constraint_mode(&mut self, handle: Handle, index: Option<u32>, enabled: bool) {
+        if let Some(object) = self.object_mut(handle) {
+            if let Some(index) = index {
+                object.constraint_modes.insert(index, enabled);
+            } else {
+                object.constraint_modes.clear();
+                object.constraint_default = enabled;
+            }
+        }
     }
 
     /// Seed an object's independent random stream (IEEE 1800-2023 18.13.3).
@@ -300,6 +392,28 @@ mod tests {
     }
 
     #[test]
+    fn equal_records_share_one_handle_until_collected() {
+        let mut heap = Heap::new();
+        let record = |heap: &mut Heap, value: u64| {
+            let record = heap.new_object(u32::MAX, 8);
+            heap.declare_handle(record, 0, HandleKind::String);
+            heap.store(record, 4, 4, value);
+            heap.finish_record(record)
+        };
+        let first = record(&mut heap, 1);
+        let second = record(&mut heap, 1);
+        let other = record(&mut heap, 2);
+        assert_eq!(first, second);
+        assert_ne!(first, other);
+        assert_eq!(heap.objects.len(), 2);
+        assert_eq!(record(&mut heap, 0), NULL);
+        assert_eq!(heap.objects.len(), 2);
+        heap.collect([Root::object(other)]);
+        assert_eq!(heap.record_lookup.len(), 1);
+        assert_ne!(record(&mut heap, 1), first);
+    }
+
+    #[test]
     fn null_dereferences_are_faults_that_read_zero() {
         let mut heap = Heap::new();
         assert_eq!(heap.load(NULL, 0, 4), 0);
@@ -307,6 +421,32 @@ mod tests {
         assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
         assert_eq!(heap.take_fault(), None);
         assert_eq!(heap.class_of(NULL), 0);
+    }
+
+    #[test]
+    fn constraint_modes_are_object_state_and_do_not_follow_random_mode_scopes() {
+        let mut heap = Heap::new();
+        let handle = heap.new_object(1, 4);
+        assert!(heap.constraint_mode(handle, 0));
+        let original = heap.clone();
+        heap.set_constraint_mode(handle, None, false);
+        heap.set_constraint_mode(handle, Some(1), true);
+        assert!(!heap.same_contents(&original));
+        heap.push_random_modes(handle);
+        heap.set_constraint_mode(handle, Some(0), true);
+        heap.pop_random_modes(handle);
+        assert!(heap.constraint_mode(handle, 0));
+        assert!(heap.constraint_mode(handle, 1));
+        assert!(!heap.constraint_mode(handle, 2));
+        let bytes = serde_json::to_vec(&heap.objects[&handle]).unwrap();
+        let restored: Object = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(restored, heap.objects[&handle]);
+        let copy = heap.copy_object(handle);
+        heap.set_constraint_mode(copy, None, true);
+        assert!(heap.constraint_mode(copy, 2));
+        assert!(!heap.constraint_mode(handle, 2));
+        assert!(!heap.constraint_mode(NULL, 0));
+        assert_eq!(heap.take_fault(), Some(Fault::NullDereference));
     }
 
     #[test]

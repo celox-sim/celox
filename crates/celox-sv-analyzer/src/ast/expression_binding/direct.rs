@@ -10,7 +10,7 @@ pub(in crate::ast) fn ungroup(mut id: ExprId, native: &Declarations) -> ExprId {
 }
 
 pub(in crate::ast) fn call_name(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
 ) -> Option<String> {
@@ -21,8 +21,8 @@ pub(in crate::ast) fn call_name(
             separator,
             name,
         } if separator == "::" => Some(scope::qualified_name(
-            state,
-            &call_name(state, *expression, native)?,
+            tree,
+            &call_name(tree, *expression, native)?,
             &instances::normalize_identifier(&name.spelling),
         )),
         _ => None,
@@ -30,11 +30,11 @@ pub(in crate::ast) fn call_name(
 }
 
 pub(in crate::ast) fn callable_name(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
 ) -> Option<String> {
-    if let Some(name) = call_name(state, id, native) {
+    if let Some(name) = call_name(tree, id, native) {
         return (name != "randomize").then_some(name);
     }
     let ExprKind::Member {
@@ -48,8 +48,8 @@ pub(in crate::ast) fn callable_name(
     if separator != "." {
         return None;
     }
-    let handle = call_name(state, *expression, native)?;
-    scope::imported(state)
+    let handle = call_name(tree, *expression, native)?;
+    scope::imported(tree)
         .interface_members
         .get(&format!(
             "{handle}.{}",
@@ -61,11 +61,17 @@ pub(in crate::ast) fn callable_name(
 /// Resolve interface selections with the constant environment of the call site.
 pub(super) fn bound_callable_name(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
-    if let Some(name) = callable_name(&tree.state, id, native) {
+    if let Some(name) = callable_name(tree, id, native) {
+        return Ok(Some(name));
+    }
+    if let Some((name, _, objects::Receiver::Static)) =
+        objects::method(tree, session, id, native, dimensions)?
+    {
         return Ok(Some(name));
     }
     let ExprKind::Member {
@@ -82,10 +88,11 @@ pub(super) fn bound_callable_name(
     let handle = interface_binding::actual_handle_key(
         *expression,
         tree,
+        session,
         &dimensions.const_env,
         &dimensions.type_aliases,
     )?;
-    Ok(scope::imported(&tree.state)
+    Ok(scope::imported(tree)
         .interface_members
         .get(&format!(
             "{handle}.{}",
@@ -109,6 +116,42 @@ pub(in crate::ast) fn arguments(
     } else {
         args
     };
+    let (positional, named) = split_arguments(name, args)?;
+    let signatures = expressions::call_signatures(name, dimensions);
+    let (values, order) =
+        expressions::bind_normalized_call_arguments(name, positional, named, &signatures)?;
+    expressions::check_query_omissions(name, &values, dimensions)?;
+    Ok((values, order))
+}
+
+/// The actuals `args` of a call of `name` pass to each of `formals`, by
+/// position or by name, and the order they are evaluated in, see
+/// [`expressions::bind_to_formals`].
+pub(in crate::ast) fn formal_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+    formals: &[Option<String>],
+) -> Converted<(Vec<Option<ExprId>>, Vec<usize>)> {
+    // `f()` lists one empty actual, which a subroutine without formals
+    // does not take.
+    let args = match args {
+        [arg] if formals.is_empty() && arg.name.is_none() && arg.value.is_none() => &[],
+        args => args,
+    };
+    let (positional, named) = split_arguments(name, args)?;
+    let formals = formals
+        .iter()
+        .map(|formal| formal.as_deref().unwrap_or_default())
+        .collect::<Vec<_>>();
+    expressions::bind_to_formals(name, positional, named, &formals)
+}
+
+/// The positional actuals, which come first, and the named ones with their
+/// normalized names (IEEE 1800-2023 13.5.4).
+fn split_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+) -> Converted<(Vec<Option<ExprId>>, Vec<(String, Option<ExprId>)>)> {
     let mut positional = Vec::new();
     let mut named = Vec::new();
     for arg in args {
@@ -117,14 +160,13 @@ pub(in crate::ast) fn arguments(
         } else if named.is_empty() {
             positional.push(arg.value);
         } else {
-            return Err(unsupported("positional argument after named argument"));
+            return Err(AnalyzerError::InvalidCallArguments {
+                subroutine: name.to_string(),
+                detail: "a positional actual after a named one (IEEE 1800-2023 13.5.4)".into(),
+            });
         }
     }
-    let signatures = expressions::call_signatures(name, dimensions);
-    let (values, order) =
-        expressions::bind_normalized_call_arguments(name, positional, named, &signatures)?;
-    expressions::check_query_omissions(name, &values, dimensions)?;
-    Ok((values, order))
+    Ok((positional, named))
 }
 
 pub(in crate::ast) fn cast_target_native(
@@ -132,6 +174,7 @@ pub(in crate::ast) fn cast_target_native(
     operand: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<casts::RuntimeCastTarget> {
     let target = ungroup(target, native);
@@ -141,7 +184,7 @@ pub(in crate::ast) fn cast_target_native(
         return Ok(casts::RuntimeCastTarget::String);
     }
     if let ExprKind::Type(id) = native.expression(target).kind
-        && let Some(ty) = type_binding::binding::bind_in(id, native, tree, dimensions)?
+        && let Some(ty) = type_binding::binding::bind_in(id, native, tree, session, dimensions)?
         && matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)
     {
         return Ok(casts::RuntimeCastTarget::Real {
@@ -153,13 +196,13 @@ pub(in crate::ast) fn cast_target_native(
     {
         return Ok(casts::RuntimeCastTarget::Signing(name.spelling == "signed"));
     }
-    let named = call_name(&tree.state, target, native);
+    let named = call_name(tree, target, native);
     let (ty, numeric, two_state) = if let Some(ty) = named
         .as_ref()
         .and_then(|name| dimensions.type_aliases.get(name))
     {
         (
-            casts::expr_type_from_type(&tree.state, ty, &dimensions.const_env)
+            casts::expr_type_from_type(&tree.functions, ty, &dimensions.const_env)
                 .ok_or_else(|| unsupported("cast target type"))?,
             false,
             ty.kind() == TypeKind::Bit,
@@ -174,18 +217,18 @@ pub(in crate::ast) fn cast_target_native(
             celox_sv_syntax::DataTypeKind::Named(_) => {}
             _ => return Err(unsupported("cast target type")),
         }
-        let ty = type_binding::binding::bind_in(id, native, tree, dimensions)?
+        let ty = type_binding::binding::bind_in(id, native, tree, session, dimensions)?
             .ok_or_else(|| unsupported("cast target type"))?;
         (
-            casts::expr_type_from_type(&tree.state, &ty, &dimensions.const_env)
+            casts::expr_type_from_type(&tree.functions, &ty, &dimensions.const_env)
                 .ok_or_else(|| unsupported("cast target type"))?,
             false,
             ty.kind() == TypeKind::Bit,
         )
     } else {
-        let value = super::bind_value(target, native, tree, dimensions, None)?;
-        let value = expr_to_const(&tree.state, value)
-            .and_then(|value| eval_ast_const_expr(&tree.state, &value, &dimensions.const_env))
+        let value = super::bind_value(target, native, tree, session, dimensions, None)?;
+        let value = expr_to_const(session, value)
+            .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env))
             .and_then(|value| usize::try_from(value).ok())
             .filter(|width| *width > 0)
             .ok_or_else(|| unsupported("cast target type"))?;
@@ -234,16 +277,37 @@ enum Finish {
     Inside(Vec<bool>),
     /// A string operation on the bound children, see [`strings`].
     StringCall(StringOp),
+    /// An enumerated type method; the children are the receiver, then the
+    /// count when one is given.
+    EnumMethod {
+        method: enums::Method,
+        domain: std::sync::Arc<crate::ast::enums::EnumDomain>,
+        count: bool,
+    },
+    /// `$sformatf` of the bound children, whose native expressions are `ids`.
+    Format {
+        ticks_per_unit: u64,
+        ids: Vec<ExprId>,
+    },
     /// A read of property `property` of the object handle child.
     ObjectLoad(Box<crate::ast::classes::Property>),
-    /// A call of method subroutine `name` with `formals` formals; the first
-    /// child is the object handle when `receiver` is one.
-    MethodCall {
-        name: String,
-        formals: usize,
-        receiver: objects::Receiver,
-        selection: Option<Expr>,
-    },
+    /// A read of a member through the virtual interface child.
+    VirtualMember(Box<(crate::ast::virtual_interfaces::VirtualInterface, String)>),
+    MethodCall(Box<MethodCall>),
+}
+
+/// A call of method subroutine `name` with `formals` formals; the first
+/// child is the object handle when `receiver` is one, then come the given
+/// actuals in the order of the formals.
+struct MethodCall {
+    name: String,
+    /// Whether each formal has an actual.
+    given: Vec<bool>,
+    /// The formals in the order their actuals are evaluated.
+    order: Vec<usize>,
+    formals: usize,
+    receiver: objects::Receiver,
+    selection: Option<Expr>,
 }
 
 enum Job {
@@ -253,12 +317,65 @@ enum Job {
         Option<Rc<PackedDimensions>>,
     ),
     Finish(Finish, usize, Option<Rc<PackedDimensions>>),
+    /// A streaming concatenation operand of a bit-stream cast to an integral
+    /// type (IEEE 1800-2023 11.4.14).
+    Stream(
+        ExprId,
+        Option<streams::Receiver>,
+        Option<Rc<PackedDimensions>>,
+    ),
+}
+
+/// Whether the call copies actual `position` of `name` into its formal and
+/// never back: an input, not a reference (IEEE 1800-2023 13.5.1).
+pub(super) fn copied_in(dimensions: &PackedDimensions, name: &str, position: usize) -> bool {
+    dimensions
+        .subroutine_directions
+        .get(name)
+        .and_then(|directions| directions.get(position))
+        .is_some_and(|direction| *direction == crate::procedural::ParamDirection::Input)
+}
+
+/// Check the actual of an output or inout container formal, which the call
+/// copies back as a handle.
+fn check_written_container(
+    name: &str,
+    position: usize,
+    actual: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+) -> Converted<()> {
+    use crate::procedural::ParamDirection;
+    let direction = dimensions
+        .subroutine_directions
+        .get(name)
+        .and_then(|directions| directions.get(position))
+        .copied();
+    if let Some(direction @ (ParamDirection::Output | ParamDirection::Inout)) = direction
+        && let Some(container) = dimensions
+            .subroutine_param_shapes
+            .get(name)
+            .and_then(|shapes| shapes.get(position))
+            .and_then(|shape| shape.container.as_deref())
+    {
+        containers::check_written_actual(
+            actual,
+            tree,
+            session,
+            dimensions,
+            container,
+            direction == ParamDirection::Inout,
+        )?;
+    }
+    Ok(())
 }
 
 pub(in crate::ast) fn bind_value(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     target: Option<&VariableDimensions>,
 ) -> Converted<Expr> {
@@ -268,6 +385,49 @@ pub(in crate::ast) fn bind_value(
         match job {
             Job::Enter(id, target, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
+                if let Some(value) = dimensions.effect_values.get(&id) {
+                    values.push(value.clone());
+                    continue;
+                }
+                unpacked_structs::check_operands(id, native, tree, session, dimensions)?;
+                // An argument, result or other value received as an unpacked
+                // structure is a pattern or a value of its type (6.22.3).
+                if let Some(aggregate) = target
+                    .as_deref()
+                    .filter(|shape| shape.unpacked.is_empty())
+                    .and_then(|shape| shape.unpacked_struct.as_deref())
+                {
+                    unpacked_structs::check_value(
+                        aggregate, id, native, tree, session, dimensions,
+                    )?;
+                } else if target
+                    .as_deref()
+                    .is_some_and(|shape| shape.unpacked.is_empty() && shape.container.is_none())
+                    && unpacked_structs::native_struct(id, native, tree, session, dimensions)?
+                        .is_some()
+                {
+                    return Err(unsupported(
+                        "unpacked structure value received by a destination that is not of its type",
+                    ));
+                }
+                if let Some(ty) = target.as_deref().and_then(|shape| {
+                    shape
+                        .virtual_interface
+                        .as_deref()
+                        .filter(|_| shape.unpacked.is_empty() && shape.container.is_none())
+                }) {
+                    virtual_interfaces::check_assignment(
+                        tree, session, id, native, dimensions, ty,
+                    )?;
+                }
+                if let Some(ty) = target.as_deref().and_then(|shape| {
+                    shape
+                        .virtual_interface
+                        .as_deref()
+                        .filter(|_| !shape.unpacked.is_empty() && shape.container.is_none())
+                }) {
+                    virtual_interfaces::check_array_assignment(id, native, dimensions, ty)?;
+                }
                 if let Some(shape) = target.as_deref()
                     && shape
                         .members
@@ -279,10 +439,10 @@ pub(in crate::ast) fn bind_value(
                     )
                 {
                     let actual = if let ExprKind::Cast { target, .. } = native.expression(id).kind {
-                        cast_shape(target, native, tree, dimensions)?
-                            .and_then(|shape| shape.pattern_type(&tree.state, dimensions))
+                        cast_shape(target, native, tree, session, dimensions)?
+                            .and_then(|shape| shape.pattern_type(&tree.functions, dimensions))
                     } else {
-                        bound_patterns::native_value_type(id, tree, dimensions)?
+                        bound_patterns::native_value_type(id, tree, session, dimensions)?
                     };
                     if !actual.is_some_and(|ty| {
                         ty.members
@@ -296,7 +456,106 @@ pub(in crate::ast) fn bind_value(
                         ));
                     }
                 }
-                if let Some(call) = objects::rand_mode_call(tree, id, native, dimensions, false)? {
+                // A container formal passed by value receives a copy of a
+                // container value, as an assignment does (13.5.1, 7.6).
+                if let Some(container) = target
+                    .as_deref()
+                    .filter(|shape| shape.unpacked.is_empty())
+                    .and_then(|shape| shape.container.as_deref())
+                {
+                    if containers::dynamic_array_new(id, native).is_some() {
+                        return Err(AnalyzerError::Parse(
+                            "`new[]` is not an argument; it only initializes or is assigned \
+                             to a dynamic array (IEEE 1800-2023 7.5.1)"
+                                .into(),
+                        ));
+                    }
+                    values.push(containers::assignment(
+                        id, tree, session, dimensions, container,
+                    )?);
+                    continue;
+                }
+                if let Some(value) = locators::index(id, native, tree, session, dimensions)? {
+                    values.push(value);
+                    continue;
+                }
+                if let Some(value) = locators::bind(id, native, tree, session, dimensions)? {
+                    values.push(value);
+                    continue;
+                }
+                let enum_method = match &native.expression(id).kind {
+                    ExprKind::Call {
+                        expression,
+                        arguments,
+                    } => enums::method(tree, session, *expression, native, dimensions)?
+                        .map(|method| (method, arguments.as_slice())),
+                    ExprKind::Member { .. } => {
+                        enums::method(tree, session, id, native, dimensions)?
+                            .map(|method| (method, &[][..]))
+                    }
+                    _ => None,
+                };
+                if let Some(((method, receiver, domain), arguments)) = enum_method {
+                    // `v.next()` lists one empty argument.
+                    let arguments = match arguments {
+                        [argument] if argument.name.is_none() && argument.value.is_none() => &[],
+                        arguments => arguments,
+                    };
+                    let counts = arguments
+                        .iter()
+                        .map(|argument| argument.value.filter(|_| argument.name.is_none()))
+                        .collect::<Option<Vec<_>>>()
+                        .filter(|counts| counts.len() <= method.formals())
+                        .ok_or_else(|| {
+                            unsupported(format!(
+                                "arguments of enumerated type method `{}`",
+                                native.token_text(native.expression(id).tokens).trim()
+                            ))
+                        })?;
+                    let mut children = vec![receiver];
+                    children.extend(&counts);
+                    jobs.push(Job::Finish(
+                        Finish::EnumMethod {
+                            method,
+                            domain,
+                            count: !counts.is_empty(),
+                        },
+                        children.len(),
+                        scope.clone(),
+                    ));
+                    jobs.extend(
+                        children
+                            .into_iter()
+                            .rev()
+                            .map(|id| Job::Enter(id, None, scope.clone())),
+                    );
+                    continue;
+                }
+                if let Some(call) = scheduler_call(tree, session, id, native, dimensions)? {
+                    values.push(*call);
+                    continue;
+                }
+                if let Some((value, _)) =
+                    array_reductions::bind(id, native, tree, session, dimensions)?
+                {
+                    values.push(value);
+                    continue;
+                }
+                if let Some(value) =
+                    containers::value(id, native, tree, session, dimensions, false)?
+                {
+                    values.push(value);
+                    continue;
+                }
+                if let Some(call) =
+                    objects::constraint_mode_call(tree, session, id, native, dimensions, false)?
+                {
+                    values.push(call);
+                    continue;
+                }
+                if let Some(call) =
+                    objects::rand_mode_call(tree, session, id, native, dimensions, false)?
+                {
                     values.push(call);
                     continue;
                 }
@@ -317,7 +576,7 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Call {
                         expression,
                         arguments,
-                    } => call_name(&tree.state, *expression, native)
+                    } => call_name(tree, *expression, native)
                         .filter(|name| matches!(name.as_str(), "$time" | "$stime" | "$realtime"))
                         .map(|name| (name, arguments.as_slice())),
                     _ => None,
@@ -384,16 +643,33 @@ pub(in crate::ast) fn bind_value(
                         {
                             return Err(unsupported(format!("`{name}`")));
                         }
-                        if let Some(value) = objects::unqualified_property(tree, dimensions, &name)?
+                        if let Some(value) = unpacked_structs::whole(&name, dimensions) {
+                            values.push(value);
+                            continue;
+                        }
+                        if let Some((aggregate, class, _)) =
+                            objects::aggregate_property(tree, session, id, native, dimensions)?
+                        {
+                            values.push(objects::aggregate_load(
+                                &aggregate,
+                                &class,
+                                &objects::this(),
+                            )?);
+                            continue;
+                        }
+                        if let Some(value) =
+                            objects::unqualified_property(tree, session, dimensions, &name)?
                         {
                             values.push(value);
                             continue;
                         }
-                        values.push(expressions::identifier_expression(
-                            &tree.state,
-                            name,
-                            dimensions,
-                        )?);
+                        if let Some(value) =
+                            virtual_interfaces::identity(tree, session, &name, dimensions)?
+                        {
+                            values.push(value);
+                            continue;
+                        }
+                        values.push(expressions::identifier_expression(tree, name, dimensions)?);
                         continue;
                     }
                     ExprKind::Unary {
@@ -407,10 +683,17 @@ pub(in crate::ast) fn bind_value(
                         left,
                         operator,
                         right,
-                    } if operator != "inside" => (
-                        Finish::Binary(operator.clone()),
-                        vec![(*left, None), (*right, None)],
-                    ),
+                    } if operator != "inside" => {
+                        if matches!(operator.as_str(), "==" | "!=" | "===" | "!==") {
+                            virtual_interfaces::check_equality(
+                                tree, session, *left, *right, native, dimensions,
+                            )?;
+                        }
+                        (
+                            Finish::Binary(operator.clone()),
+                            vec![(*left, None), (*right, None)],
+                        )
+                    }
                     ExprKind::Conditional {
                         condition,
                         then_expression,
@@ -431,67 +714,184 @@ pub(in crate::ast) fn bind_value(
                         children.extend(expressions.iter().map(|id| (*id, None)));
                         (Finish::Repeat, children)
                     }
+                    ExprKind::Cast { target, expression }
+                        if streams::is_stream(*expression, native) =>
+                    {
+                        // A cast to a type that is not integral receives the
+                        // stream as an assignment does.
+                        let ty = match call_name(tree, *target, native) {
+                            Some(name) => dimensions.type_aliases.get(&name).cloned(),
+                            None => match native.expression(ungroup(*target, native)).kind {
+                                ExprKind::Type(ty) => type_binding::binding::bind_in(
+                                    ty, native, tree, session, dimensions,
+                                )?,
+                                _ => None,
+                            },
+                        };
+                        if let Some(shape) = ty
+                            .as_ref()
+                            .map(procedural::dimensions_from_type)
+                            .filter(|shape| {
+                                shape.container.is_some()
+                                    || shape.string
+                                    || !shape.unpacked.is_empty()
+                            })
+                        {
+                            let receiver = streams::receiver(&shape, &tree.functions, dimensions)?;
+                            values.push(streams::pack(
+                                *expression,
+                                Some(receiver),
+                                native,
+                                tree,
+                                session,
+                                dimensions,
+                            )?);
+                            continue;
+                        }
+                        let cast = cast_target_native(
+                            *target,
+                            *expression,
+                            native,
+                            tree,
+                            session,
+                            dimensions,
+                        )?;
+                        let receiver = match &cast {
+                            casts::RuntimeCastTarget::String => {
+                                values.push(streams::pack(
+                                    *expression,
+                                    Some(streams::Receiver::String),
+                                    native,
+                                    tree,
+                                    session,
+                                    dimensions,
+                                )?);
+                                continue;
+                            }
+                            casts::RuntimeCastTarget::Integral { target, .. }
+                            | casts::RuntimeCastTarget::Zero(target) => {
+                                Some(streams::Receiver::Cast(target.width))
+                            }
+                            _ => None,
+                        };
+                        jobs.push(Job::Finish(Finish::Cast(cast), 1, scope.clone()));
+                        jobs.push(Job::Stream(*expression, receiver, scope.clone()));
+                        continue;
+                    }
                     ExprKind::Cast { target, expression } => (
                         Finish::Cast(cast_target_native(
                             *target,
                             *expression,
                             native,
                             tree,
+                            session,
                             dimensions,
                         )?),
                         vec![(
                             *expression,
-                            cast_shape(*target, native, tree, dimensions)?.map(Rc::new),
+                            cast_shape(*target, native, tree, session, dimensions)?.map(Rc::new),
                         )],
                     ),
                     ExprKind::Call {
                         expression,
                         arguments: args,
-                    } if objects::method(tree, *expression, native, dimensions)?.is_some() => {
+                    } if objects::method(tree, session, *expression, native, dimensions)?
+                        .is_some() =>
+                    {
                         let (name, formals, receiver) =
-                            objects::method(tree, *expression, native, dimensions)?
+                            objects::method(tree, session, *expression, native, dimensions)?
                                 .expect("checked by the guard");
                         let selection = name
                             .ends_with("::randomize")
                             .then(|| {
-                                objects::random_selection(tree, dimensions, &name, args, native)
+                                objects::random_selection(
+                                    tree, session, dimensions, &name, args, native,
+                                )
                             })
                             .transpose()?;
-                        if selection.is_none()
-                            && (args.len() > formals
-                                || (name.ends_with("::srandom") && args.len() != 1)
-                                || args.iter().any(|arg| arg.name.is_some()))
+                        if name.ends_with("::srandom")
+                            && (args.len() != 1 || args[0].name.is_some())
                         {
                             return Err(unsupported(format!("arguments of method `{name}`")));
                         }
+                        let (actuals, order) = match selection {
+                            Some(_) => (Vec::new(), Vec::new()),
+                            None => formal_arguments(
+                                name.strip_suffix("$virtual").unwrap_or(&name),
+                                args,
+                                &formals,
+                            )?,
+                        };
                         let mut children = Vec::new();
                         if let objects::Receiver::Handle(handle) = receiver {
                             children.push((handle, None));
                         }
-                        for arg in args.iter().filter(|_| selection.is_none()) {
-                            let Some(value) = arg.value else {
-                                return Err(unsupported(format!(
-                                    "omitted argument of method `{name}`"
-                                )));
-                            };
-                            children.push((value, None));
+                        // The shapes of the formals, after `this` of a method
+                        // that is not static, receive assignment patterns.
+                        let first = usize::from(receiver != objects::Receiver::Static);
+                        let shapes = dimensions.subroutine_param_shapes.get(&name);
+                        for (position, value) in actuals.iter().enumerate() {
+                            let Some(value) = *value else { continue };
+                            references::check_actual(
+                                &name,
+                                first + position,
+                                value,
+                                native,
+                                tree,
+                                session,
+                                dimensions,
+                            )?;
+                            check_written_container(
+                                &name,
+                                first + position,
+                                value,
+                                tree,
+                                session,
+                                dimensions,
+                            )?;
+                            let shape = shapes.and_then(|shapes| shapes.get(first + position));
+                            let copied_in = copied_in(dimensions, &name, first + position);
+                            // The formal is copied out to the actual.
+                            if let Some(formal) = shape
+                                .filter(|shape| !copied_in && shape.unpacked.is_empty())
+                                .and_then(|shape| shape.virtual_interface.as_deref())
+                            {
+                                virtual_interfaces::check_copy_out(
+                                    tree, session, value, native, dimensions, formal,
+                                )?;
+                            }
+                            let shape = shape
+                                .filter(|shape| {
+                                    shape.unpacked_struct.is_some()
+                                        || (shape.container.is_some()
+                                            || shape.virtual_interface.is_some())
+                                            && copied_in
+                                })
+                                .cloned()
+                                .map(Rc::new);
+                            children.push((value, shape));
                         }
                         (
-                            Finish::MethodCall {
+                            Finish::MethodCall(Box::new(MethodCall {
                                 name,
-                                formals,
+                                given: actuals.iter().map(Option::is_some).collect(),
+                                order,
+                                formals: formals.len(),
                                 receiver,
                                 selection,
-                            },
+                            })),
                             children,
                         )
                     }
                     ExprKind::Call {
                         expression,
                         arguments: args,
-                    } if strings::method(tree, *expression, native, dimensions).is_some() => {
-                        let (op, base) = strings::method(tree, *expression, native, dimensions)
-                            .expect("checked by the guard");
+                    } if strings::method(tree, session, *expression, native, dimensions)
+                        .is_some() =>
+                    {
+                        let (op, base) =
+                            strings::method(tree, session, *expression, native, dimensions)
+                                .expect("checked by the guard");
                         if op.updates_receiver() {
                             return Err(unsupported(format!(
                                 "string method `{op}` used as a value"
@@ -519,7 +919,7 @@ pub(in crate::ast) fn bind_value(
                         arguments: args,
                     } => {
                         if matches!(
-                            call_name(&tree.state, *expression, native).as_deref(),
+                            call_name(tree, *expression, native).as_deref(),
                             Some("randomize" | "std::randomize")
                         ) {
                             if args
@@ -553,7 +953,8 @@ pub(in crate::ast) fn bind_value(
                                         "scope randomize requires a packed variable with a supported enum domain",
                                     ));
                                 }
-                                domains.push(shape.enum_values.clone());
+                                domains
+                                    .push(shape.enum_domain.as_ref().map(|domain| domain.values()));
                                 if !expressions::query_actual_is_writable(
                                     &Expr::Ident(name),
                                     dimensions,
@@ -576,10 +977,11 @@ pub(in crate::ast) fn bind_value(
                             );
                             continue;
                         }
-                        let name = bound_callable_name(tree, *expression, native, dimensions)?
-                            .ok_or_else(|| unsupported("method or randomize call"))?;
+                        let name =
+                            bound_callable_name(tree, session, *expression, native, dimensions)?
+                                .ok_or_else(|| unsupported("method or randomize call"))?;
                         let cast = match name.as_str() {
-                            "$cast" => objects::cast(tree, args, native, dimensions)?,
+                            "$cast" => objects::cast(tree, session, args, native, dimensions)?,
                             _ => None,
                         };
                         if let Some(cast) = cast {
@@ -601,6 +1003,15 @@ pub(in crate::ast) fn bind_value(
                                 },
                                 vec![(destination, None), (source, None)],
                             )
+                        } else if name == "$sformatf" {
+                            let actuals = format_arguments(&name, args)?;
+                            (
+                                Finish::Format {
+                                    ticks_per_unit: timescales::time_divisor(id, tree)?,
+                                    ids: actuals.clone(),
+                                },
+                                actuals.into_iter().map(|id| (id, None)).collect(),
+                            )
                         } else if name.starts_with('$') && !name.contains("::") {
                             let presence = args
                                 .iter()
@@ -617,6 +1028,18 @@ pub(in crate::ast) fn bind_value(
                                 (!args.iter().any(|arg| arg.name.is_some()))
                                     .then_some(presence.as_slice()),
                             )?;
+                            if function == SystemFunction::Typename {
+                                let argument = args[0]
+                                    .value
+                                    .ok_or_else(|| unsupported(format!("operand of `{name}`")))?;
+                                values.push(type_names::query_value(
+                                    argument,
+                                    tree,
+                                    session,
+                                    scope.as_deref().unwrap_or(dimensions),
+                                )?);
+                                continue;
+                            }
                             if function == SystemFunction::Bits
                                 && let Some(argument) = args.first().and_then(|a| a.value)
                             {
@@ -635,7 +1058,7 @@ pub(in crate::ast) fn bind_value(
                                     let context = match &scope {
                                         Some(scope) => scope.clone(),
                                         None => Rc::new(dimensions::query_context_for_operand(
-                                            argument, tree, dimensions,
+                                            argument, tree, session, dimensions,
                                         )?),
                                     };
                                     if scope.is_none() {
@@ -657,9 +1080,10 @@ pub(in crate::ast) fn bind_value(
                                     | SystemFunction::ArrayQuery(_)
                             ) {
                                 values.push(
-                                    dimensions::query_value(id, tree, dimensions)?.ok_or_else(
-                                        || unsupported(format!("operand of `{name}`")),
-                                    )?,
+                                    dimensions::query_value(id, tree, session, dimensions)?
+                                        .ok_or_else(|| {
+                                            unsupported(format!("operand of `{name}`"))
+                                        })?,
                                 );
                                 continue;
                             }
@@ -667,7 +1091,7 @@ pub(in crate::ast) fn bind_value(
                                 let arg = args
                                     .first()
                                     .and_then(|arg| arg.value)
-                                    .and_then(|id| call_name(&tree.state, id, native));
+                                    .and_then(|id| call_name(tree, id, native));
                                 let Some(arg) = arg.filter(|name| {
                                     dimensions
                                         .const_env
@@ -708,7 +1132,7 @@ pub(in crate::ast) fn bind_value(
                                 if function.writes_argument(position)
                                     && let Some(id) = id
                                 {
-                                    check_tagged_copyout(*id, None, tree, dimensions)?;
+                                    check_tagged_copyout(*id, None, tree, session, dimensions)?;
                                 }
                             }
                             (
@@ -723,6 +1147,14 @@ pub(in crate::ast) fn bind_value(
                         } else {
                             let (actuals, order) = arguments(&name, args, dimensions)?;
                             for (position, id) in actuals.iter().enumerate() {
+                                if let Some(id) = id {
+                                    references::check_actual(
+                                        &name, position, *id, native, tree, session, dimensions,
+                                    )?;
+                                    check_written_container(
+                                        &name, position, *id, tree, session, dimensions,
+                                    )?;
+                                }
                                 if let Some(id) = id
                                     && let Some(shape) = dimensions
                                         .subroutine_param_shapes
@@ -735,12 +1167,28 @@ pub(in crate::ast) fn bind_value(
                                         .and_then(|directions| directions.get(position))
                                         .is_some_and(|direction| direction.is_written())
                                     {
-                                        check_tagged_copyout(*id, Some(shape), tree, dimensions)?;
+                                        check_tagged_copyout(
+                                            *id,
+                                            Some(shape),
+                                            tree,
+                                            session,
+                                            dimensions,
+                                        )?;
+                                        // The formal is copied out to the actual.
+                                        if let Some(formal) = shape
+                                            .virtual_interface
+                                            .as_deref()
+                                            .filter(|_| shape.unpacked.is_empty())
+                                        {
+                                            virtual_interfaces::check_copy_out(
+                                                tree, session, *id, native, dimensions, formal,
+                                            )?;
+                                        }
                                     }
                                     array_compatibility::check_native_unpacked_assignment(
-                                        &tree.state,
+                                        tree,
+                                        session,
                                         *id,
-                                        native,
                                         shape,
                                         || format!("argument {} of `{name}`", position + 1),
                                         dimensions,
@@ -752,13 +1200,32 @@ pub(in crate::ast) fn bind_value(
                                 .enumerate()
                                 .filter_map(|(position, id)| {
                                     id.map(|id| {
+                                        let output = dimensions
+                                            .subroutine_directions
+                                            .get(&name)
+                                            .and_then(|directions| directions.get(position))
+                                            .is_some_and(|direction| {
+                                                matches!(direction, ParamDirection::Output)
+                                            });
                                         (
                                             id,
                                             dimensions
                                                 .subroutine_param_shapes
                                                 .get(&name)
                                                 .and_then(|shapes| shapes.get(position))
+                                                .filter(|shape| {
+                                                    shape.container.is_none()
+                                                        || copied_in(dimensions, &name, position)
+                                                })
                                                 .cloned()
+                                                // An output actual is not a value
+                                                // assigned to the formal.
+                                                .map(|mut shape| {
+                                                    if output {
+                                                        shape.virtual_interface = None;
+                                                    }
+                                                    shape
+                                                })
                                                 .map(Rc::new),
                                         )
                                     })
@@ -791,7 +1258,7 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Select {
                         expression,
                         dimension,
-                    } if strings::native_string(tree, *expression, native, dimensions) => {
+                    } if strings::native_string(tree, session, *expression, native, dimensions) => {
                         let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
                             return Err(unsupported("part-select of a string"));
                         };
@@ -801,19 +1268,58 @@ pub(in crate::ast) fn bind_value(
                         )
                     }
                     ExprKind::Member { .. }
-                        if objects::class_parameter(tree, id, native, dimensions)?.is_some() =>
+                        if objects::class_parameter(tree, session, id, native, dimensions)?
+                            .is_some() =>
                     {
                         values.push(
-                            objects::class_parameter(tree, id, native, dimensions)?
+                            objects::class_parameter(tree, session, id, native, dimensions)?
                                 .expect("checked by the guard"),
                         );
                         continue;
                     }
                     ExprKind::Member { .. }
-                        if objects::property(tree, id, native, dimensions)?.is_some() =>
+                        if virtual_interfaces::native_member(
+                            tree, session, id, native, dimensions,
+                        )
+                        .is_some() =>
                     {
-                        let (property, receiver) = objects::property(tree, id, native, dimensions)?
-                            .expect("checked by the guard");
+                        let (handle, ty, member) = virtual_interfaces::native_member(
+                            tree, session, id, native, dimensions,
+                        )
+                        .expect("checked by the guard");
+                        (
+                            Finish::VirtualMember(Box::new((ty.as_ref().clone(), member))),
+                            vec![(handle, None)],
+                        )
+                    }
+                    ExprKind::Member { .. }
+                        if containers::element_member(id, native, tree, session, dimensions)?
+                            .is_some() =>
+                    {
+                        let (_, value) =
+                            containers::element_member(id, native, tree, session, dimensions)?
+                                .expect("checked by the guard");
+                        values.push(value);
+                        continue;
+                    }
+                    ExprKind::Member { .. }
+                        if objects::aggregate_property(tree, session, id, native, dimensions)?
+                            .is_some() =>
+                    {
+                        let (aggregate, class, receiver) =
+                            objects::aggregate_property(tree, session, id, native, dimensions)?
+                                .expect("checked by the guard");
+                        let handle =
+                            objects::receiver(tree, session, receiver, native, dimensions)?;
+                        values.push(objects::aggregate_load(&aggregate, &class, &handle)?);
+                        continue;
+                    }
+                    ExprKind::Member { .. }
+                        if objects::property(tree, session, id, native, dimensions)?.is_some() =>
+                    {
+                        let (property, receiver) =
+                            objects::property(tree, session, id, native, dimensions)?
+                                .expect("checked by the guard");
                         match receiver {
                             Some(receiver) => (
                                 Finish::ObjectLoad(Box::new(property)),
@@ -825,8 +1331,31 @@ pub(in crate::ast) fn bind_value(
                             }
                         }
                     }
+                    ExprKind::Member { .. } | ExprKind::Select { .. }
+                        if virtual_interfaces::native_identity(tree, session, id, dimensions)
+                            .is_some() =>
+                    {
+                        values.push(
+                            virtual_interfaces::native_identity(tree, session, id, dimensions)
+                                .expect("checked by the guard"),
+                        );
+                        continue;
+                    }
+                    ExprKind::Select { .. }
+                        if let Some((handle, ty, member)) =
+                            virtual_interfaces::native_selected_member(
+                                tree, session, id, native, dimensions,
+                            ) =>
+                    {
+                        let selected = selected_value(id, native, tree, session, dimensions)?;
+                        let handle = bind_value(handle, native, tree, session, dimensions, None)?;
+                        values.push(virtual_interfaces::selected_read(
+                            tree, session, handle, &ty, &member, selected, dimensions,
+                        )?);
+                        continue;
+                    }
                     ExprKind::Member { .. } | ExprKind::Select { .. } => {
-                        values.push(selected_value(id, native, tree, dimensions)?);
+                        values.push(selected_value(id, native, tree, session, dimensions)?);
                         continue;
                     }
                     ExprKind::Pattern { .. } => {
@@ -834,6 +1363,7 @@ pub(in crate::ast) fn bind_value(
                             id,
                             native,
                             tree,
+                            session,
                             dimensions,
                             target.as_deref(),
                         )?);
@@ -889,11 +1419,44 @@ pub(in crate::ast) fn bind_value(
                             .collect();
                         (Finish::Tagged(plan), children)
                     }
+                    // A stream is the source of an assignment to a target of
+                    // the shape the context gives (IEEE 1800-2023 11.4.14).
                     ExprKind::Streaming { .. } => {
-                        return Err(unsupported("streaming concatenation"));
+                        let Some(shape) = target.as_deref() else {
+                            return Err(AnalyzerError::InvalidStream(
+                                "a streaming concatenation operand shall first be cast to a bit-stream type".into(),
+                            ));
+                        };
+                        let receiver = streams::receiver(shape, &tree.functions, dimensions)?;
+                        values.push(streams::pack(
+                            id,
+                            Some(receiver),
+                            native,
+                            tree,
+                            session,
+                            dimensions,
+                        )?);
+                        continue;
                     }
                     ExprKind::Concatenation(_) => {
                         return Err(unsupported("empty unpacked array concatenation"));
+                    }
+                    ExprKind::RandomizeWith {
+                        expression,
+                        constraints,
+                    } => {
+                        values.push(objects::randomize_with(
+                            tree,
+                            session,
+                            *expression,
+                            constraints.as_deref(),
+                            native,
+                            dimensions,
+                        )?);
+                        continue;
+                    }
+                    ExprKind::ArrayMethodWith { .. } => {
+                        return Err(unsupported("array method with expression"));
                     }
                     ExprKind::MinTypMax { .. } => return Err(unsupported("mintypmax expression")),
                     _ => return Err(unsupported("primary expression")),
@@ -906,13 +1469,19 @@ pub(in crate::ast) fn bind_value(
                         .map(|(id, shape)| Job::Enter(id, shape, scope.clone())),
                 );
             }
+            Job::Stream(id, receiver, scope) => {
+                let dimensions = scope.as_deref().unwrap_or(dimensions);
+                values.push(streams::pack(
+                    id, receiver, native, tree, session, dimensions,
+                )?);
+            }
             Job::Finish(finish, count, scope) => {
                 let dimensions = scope.as_deref().unwrap_or(dimensions);
                 let start = values.len().checked_sub(count).ok_or_else(disagreement)?;
                 let mut operands = values.split_off(start);
                 let value = match finish {
                     Finish::Tagged(plan) => {
-                        packed_structs::construct(&tree.state, plan, operands.pop(), dimensions)?
+                        packed_structs::construct(tree, session, plan, operands.pop(), dimensions)?
                     }
                     Finish::Unary(op) => {
                         let operand = operands.pop().ok_or_else(disagreement)?;
@@ -953,14 +1522,39 @@ pub(in crate::ast) fn bind_value(
                                     | ">="
                                     | "&&"
                                     | "||"
+                                    | "->"
+                                    | "<->"
                             )
                         {
                             return Err(unsupported("operator on a real operand"));
                         }
+                        let implication = op == "->";
+                        let equivalence = op == "<->";
+                        let left = if implication || equivalence {
+                            Expr::Unary {
+                                op: UnaryOp::LogicNot,
+                                expr: Box::new(left),
+                            }
+                        } else {
+                            left
+                        };
+                        // Each truth-value conversion evaluates its operand once (11.4.7).
+                        let right = if equivalence {
+                            Expr::Unary {
+                                op: UnaryOp::LogicNot,
+                                expr: Box::new(right),
+                            }
+                        } else {
+                            right
+                        };
                         let xnor = matches!(op.as_str(), "~^" | "^~");
                         let value = Expr::Binary {
                             left: Box::new(left),
-                            op: if xnor {
+                            op: if equivalence {
+                                BinaryOp::Eq
+                            } else if implication {
+                                BinaryOp::LogicOr
+                            } else if xnor {
                                 BinaryOp::BitXor
                             } else {
                                 constants::binary_op_from_text(&op)
@@ -979,7 +1573,7 @@ pub(in crate::ast) fn bind_value(
                     }
                     Finish::Bits => {
                         let operand = operands.pop().ok_or_else(disagreement)?;
-                        let ty = dimensions::bound_bits_type(&tree.state, &operand, dimensions)
+                        let ty = dimensions::bound_bits_type(tree, &operand, dimensions)
                             .ok_or_else(|| unsupported("operand of `$bits`"))?;
                         Expr::Literal(ty.width.to_string())
                     }
@@ -1007,9 +1601,37 @@ pub(in crate::ast) fn bind_value(
                         strings::call(StringOp::Concat, operands)
                     }
                     Finish::Concat => Expr::Concat(operands),
+                    Finish::EnumMethod {
+                        method,
+                        domain,
+                        count,
+                    } => {
+                        let count = count.then(|| operands.pop()).flatten();
+                        enums::call(
+                            tree,
+                            session,
+                            method,
+                            &domain,
+                            operands.pop(),
+                            count,
+                            dimensions,
+                        )?
+                    }
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
                     }
+                    Finish::Format {
+                        ticks_per_unit,
+                        ids,
+                    } => format_patterns::format(
+                        ticks_per_unit,
+                        &ids,
+                        operands,
+                        tree,
+                        session,
+                        native,
+                        dimensions,
+                    )?,
                     Finish::ScopeRandomize(domains) => {
                         // Preserve the original call when no enum is present.
                         // Every scalar operation succeeds and returns signed int 1;
@@ -1054,42 +1676,74 @@ pub(in crate::ast) fn bind_value(
                         let handle = operands.pop().ok_or_else(disagreement)?;
                         objects::load(&property, handle)
                     }
-                    Finish::MethodCall {
-                        name,
-                        formals,
-                        receiver,
-                        selection,
-                    } => {
+                    Finish::VirtualMember(access) => {
+                        let (ty, member) = *access;
+                        let handle = operands.pop().ok_or_else(disagreement)?;
+                        virtual_interfaces::read(
+                            tree, session, handle, &ty, &member, dimensions, Ok,
+                        )?
+                    }
+                    Finish::MethodCall(call) => {
+                        let MethodCall {
+                            name,
+                            given,
+                            order,
+                            formals,
+                            receiver,
+                            selection,
+                        } = *call;
                         let mut args: Vec<Option<Expr>> = Vec::with_capacity(formals + 1);
-                        if receiver == objects::Receiver::This {
-                            args.push(Some(objects::this()));
+                        let mut operands = operands.into_iter();
+                        if receiver != objects::Receiver::Static {
+                            args.push(Some(match receiver {
+                                objects::Receiver::This => objects::this(),
+                                _ => operands.next().ok_or_else(disagreement)?,
+                            }));
                         }
-                        let handles = usize::from(receiver != objects::Receiver::Static);
-                        args.extend(operands.into_iter().map(Some));
+                        let handles = args.len();
+                        for given in given {
+                            args.push(if given {
+                                Some(operands.next().ok_or_else(disagreement)?)
+                            } else {
+                                None
+                            });
+                        }
                         args.extend(selection.map(Some));
-                        // Omitted trailing arguments take their defaults.
+                        // Omitted arguments take their defaults (13.5.3).
                         args.resize(formals + handles, None);
+                        // The receiver is evaluated before the actuals.
+                        let arg_order = if order.iter().enumerate().all(|(at, index)| at == *index)
+                        {
+                            Vec::new()
+                        } else {
+                            (0..handles)
+                                .chain(order.into_iter().map(|index| index + handles))
+                                .collect()
+                        };
                         Expr::Call {
                             callee: Callee::Subroutine(name),
                             args,
-                            arg_order: Vec::new(),
+                            arg_order,
                         }
                     }
                     Finish::Cast(target) => {
                         let operand = remove_real_division_guards(
                             guard_zero_divisions(
-                                &tree.state,
+                                tree,
+                                session,
                                 operands.pop().ok_or_else(disagreement)?,
                             ),
                             dimensions,
                         );
                         if dimensions.constant_indexed_base {
-                            let operand =
-                                selects::indexed_expression_value(&tree.state, operand, dimensions)
-                                    .ok_or_else(|| unsupported("constant cast operand"))?;
+                            let operand = selects::indexed_expression_value(
+                                tree, session, operand, dimensions,
+                            )
+                            .ok_or_else(|| unsupported("constant cast operand"))?;
                             const_expr_to_expr(
                                 casts::cast_constant_target(
-                                    &tree.state,
+                                    tree,
+                                    session,
                                     operand,
                                     target,
                                     &dimensions.const_env,
@@ -1097,12 +1751,7 @@ pub(in crate::ast) fn bind_value(
                                 .ok_or_else(|| unsupported("constant cast operand"))?,
                             )
                         } else {
-                            casts::runtime_cast_target_expr(
-                                &tree.state,
-                                target,
-                                operand,
-                                dimensions,
-                            )?
+                            casts::runtime_cast_target_expr(tree, target, operand, dimensions)?
                         }
                     }
                     Finish::Repeat
@@ -1122,8 +1771,8 @@ pub(in crate::ast) fn bind_value(
                     }
                     Finish::Repeat => {
                         let count = operands.remove(0);
-                        let count = expr_to_const(&tree.state, count.clone())
-                            .or_else(|| expr_to_index_const(&tree.state, count, dimensions))
+                        let count = expr_to_const(session, count.clone())
+                            .or_else(|| expr_to_index_const(tree, session, count, dimensions))
                             .ok_or_else(|| unsupported("replication count"))?;
                         Expr::RepeatConcat {
                             count,
@@ -1180,7 +1829,7 @@ pub(in crate::ast) fn bind_value(
                                                     "writable $fread destination",
                                                 ));
                                             }
-                                        } else if expr_static_width(&tree.state, value, dimensions)
+                                        } else if expr_static_width(tree, value, dimensions)
                                             .is_none()
                                         {
                                             return Err(unsupported("integral $fread argument"));
@@ -1225,15 +1874,14 @@ pub(in crate::ast) fn bind_value(
                                     ) && position >= 2
                                         && real_value(arg, dimensions);
                                     if (!real_output
-                                        && expr_static_width(&tree.state, arg, dimensions)
-                                            .is_none())
+                                        && expr_static_width(tree, arg, dimensions).is_none())
                                         || args
                                             .get(position)
                                             .copied()
                                             .flatten()
                                             .and_then(|id| {
                                                 array_compatibility::native_unpacked_shape(
-                                                    id, native, dimensions,
+                                                    id, tree, session, dimensions,
                                                 )
                                             })
                                             .is_some()
@@ -1265,11 +1913,17 @@ pub(in crate::ast) fn bind_value(
                                     arg_order: Vec::new(),
                                 }
                             } else {
+                                let mut operands = operands;
+                                // An omitted number of ticks of `$past` is
+                                // one (IEEE 1800-2023 16.9.3); the gate stays
+                                // the third argument.
+                                if function == SystemFunction::Past
+                                    && args.get(1).is_some_and(Option::is_none)
+                                {
+                                    operands.insert(1, Expr::Literal("1".into()));
+                                }
                                 expressions::numeric_system_function(
-                                    &tree.state,
-                                    function,
-                                    operands,
-                                    dimensions,
+                                    tree, session, function, operands, dimensions,
                                 )?
                             }
                         } else {
@@ -1304,7 +1958,7 @@ pub(in crate::ast) fn bind_value(
         return Err(disagreement());
     }
     Ok(remove_real_division_guards(
-        guard_zero_divisions(&tree.state, values.pop().unwrap()),
+        guard_zero_divisions(tree, session, values.pop().unwrap()),
         dimensions,
     ))
 }
@@ -1313,9 +1967,10 @@ fn index_value(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<ConstExpr> {
-    let value = bind_value(id, native, tree, dimensions, None)?;
+    let value = bind_value(id, native, tree, session, dimensions, None)?;
     if real_value(&value, dimensions) {
         return Err(unsupported("real-valued select index"));
     }
@@ -1326,9 +1981,10 @@ fn index_value(
         0,
         true,
     );
-    if let Some(folded) = selects::indexed_expression_value(&tree.state, value.clone(), dimensions)
+    if let Some(folded) =
+        selects::indexed_expression_value(tree, session, value.clone(), dimensions)
         && (matches!(folded, ConstExpr::Literal(_))
-            || eval_ast_const_expr(&tree.state, &folded, &dimensions.const_env).is_some())
+            || eval_ast_const_expr(&tree.functions, &folded, &dimensions.const_env).is_some())
     {
         if matches!(&folded, ConstExpr::Literal(text) if real_value(&Expr::Literal(text.clone()), dimensions))
         {
@@ -1337,9 +1993,9 @@ fn index_value(
         return Ok(folded);
     }
     (if dimensions.constant_indexed_base {
-        selects::indexed_expression_value(&tree.state, value, dimensions)
+        selects::indexed_expression_value(tree, session, value, dimensions)
     } else {
-        expr_to_index_const(&tree.state, value, dimensions)
+        expr_to_index_const(tree, session, value, dimensions)
     })
     .ok_or_else(|| unsupported("index expression"))
 }
@@ -1348,16 +2004,17 @@ fn read_index_value(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<ConstExpr> {
-    let value = index_value(id, native, tree, dimensions)?;
+    let value = index_value(id, native, tree, session, dimensions)?;
     if !dimensions.constant_indexed_base
         && matches!(
             native.expression(ungroup(id, native)).kind,
             ExprKind::Conditional { .. }
         )
-        && eval_ast_const_expr(&tree.state, &value, &dimensions.const_env).is_none()
-        && !inlining::calls_subroutine(&bind_value(id, native, tree, dimensions, None)?)
+        && eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env).is_none()
+        && !inlining::calls_subroutine(&bind_value(id, native, tree, session, dimensions, None)?)
     {
         return Err(unsupported(format!(
             "select index `{}`",
@@ -1367,15 +2024,34 @@ fn read_index_value(
     Ok(value)
 }
 
-fn path(
+pub(super) fn path(
     mut root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<String>, Option<String>)> {
+    let authored = root;
+    // A member through a virtual interface is selected in its template,
+    // which the caller applies to the member of each instance.
+    if let Some((_, ty, member)) =
+        virtual_interfaces::native_member(tree, session, root, native, dimensions)
+    {
+        virtual_interfaces::member(session, &ty, &member)?;
+        return Ok((
+            vec![virtual_interfaces::template(&ty.interface, &member)],
+            None,
+        ));
+    }
     // A static class property is a variable of the module.
-    if let Some(variable) = objects::static_property(tree, root, native, dimensions)? {
+    if let Some(variable) = objects::static_property(tree, session, root, native, dimensions)? {
         return Ok((vec![variable], None));
+    }
+    // The property whose select is being bound is bound as its template.
+    if dimensions.property_select_base == Some(ungroup(root, native))
+        && let Some((property, _)) = objects::property(tree, session, root, native, dimensions)?
+    {
+        return Ok((vec![objects::select_template(&property)], None));
     }
     let mut parts = Vec::new();
     let mut qualified = None;
@@ -1403,19 +2079,36 @@ fn path(
                 let DimensionKind::Index(index) = dimension.kind else {
                     unreachable!()
                 };
-                let value = index_value(index, native, tree, dimensions)?;
-                let value = eval_ast_const_expr(&tree.state, &value, &dimensions.const_env)
+                let value = index_value(index, native, tree, session, dimensions)?;
+                let value = eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env)
                     .ok_or_else(|| unsupported("hierarchical index"))?;
-                let (mut prefix, base) = path(*expression, native, tree, dimensions)?;
+                let (mut prefix, base) = path(*expression, native, tree, session, dimensions)?;
                 let last = prefix.last_mut().ok_or_else(disagreement)?;
                 last.push_str(&format!("[{value}]"));
                 prefix.extend(parts.into_iter().rev());
+                if base.is_none()
+                    && let Some(name) = interface_binding::unindexed_parameter(
+                        &prefix, tree, session, dimensions, authored,
+                    )
+                {
+                    return Ok((vec![name], None));
+                }
                 return Ok((prefix, base));
             }
             _ => return Err(unsupported("member receiver")),
         }
     }
     parts.reverse();
+    if qualified.is_none() {
+        unpacked_structs::collapse(&mut parts, dimensions);
+    }
+    if qualified.is_none()
+        && let Some(name) =
+            interface_binding::unindexed_parameter(&parts, tree, session, dimensions, authored)
+    {
+        return Ok((vec![name], None));
+    }
+
     if let Some(length) = qualified {
         if parts.len() == length + 1 {
             let base = parts[..2].join("::");
@@ -1432,6 +2125,7 @@ fn selected_value(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     let mut base = root;
@@ -1452,36 +2146,153 @@ fn selected_value(
     {
         return Err(unsupported("bit-select or part-select of a real variable"));
     }
-    if let ExprKind::Concatenation(_) | ExprKind::Replication { .. } = native.expression(base).kind
+    // A select of a class property is bound as a select of its template,
+    // a variable of the property's type, which the property's value then
+    // replaces: the select keeps the semantics of a variable select
+    // (IEEE 1800-2023 11.5.1).
+    if !suffix.is_empty()
+        && let Some((property, receiver)) =
+            objects::property(tree, session, base, native, dimensions)?
+        && property.field.handle.is_none()
+        && property.r#type.container.is_none()
+        && property.r#type.unpacked_struct().is_none()
     {
-        let expr = bind_value(base, native, tree, dimensions, None)?;
+        let base = ungroup(base, native);
+        let template = objects::select_template(&property);
+        if dimensions.property_select_base != Some(base) {
+            // The value replaces the template as a `[N-1:0]` vector.
+            if !zero_based_vector(&property.r#type, tree, dimensions) {
+                return Err(unsupported(
+                    "read of a select of a class property that is not declared [N-1:0]",
+                ));
+            }
+            let mut scope = dimensions.clone();
+            scope.insert(
+                template.clone(),
+                procedural::dimensions_from_type(&property.r#type),
+            );
+            scope.property_select_base = Some(base);
+            let selected = selected_value(root, native, tree, session, &scope)?;
+            let handle = objects::receiver(tree, session, receiver, native, dimensions)?;
+            return Ok(crate::ast::inlining::substitute_expr_idents(
+                selected,
+                &HashMap::from_iter([(template, objects::load(&property, handle))]),
+            ));
+        }
+    }
+    // A select of the iterator of a locator over elements kept in records,
+    // such as `item[31:0]`, selects the element's value.
+    if !suffix.is_empty()
+        && let ExprKind::Name(name) = &native.expression(base).kind
+        && let name = instances::normalize_identifier(&name.spelling)
+        && dimensions.get(&name).is_none()
+        && let Some((container, handle)) = locators::record_iterator(base, native, dimensions)
+        && container.element.unpacked_struct().is_none()
+    {
+        if !zero_based_vector(&container.element, tree, dimensions) {
+            return Err(unsupported(
+                "select of an element wider than 64 bits that is not declared [N-1:0]",
+            ));
+        }
+        let mut scope = dimensions.clone();
+        scope.insert(
+            name.clone(),
+            procedural::dimensions_from_type(&container.element),
+        );
+        scope
+            .expression_signedness
+            .insert(name.clone(), container.element.is_signed());
+        let selected = selected_value(root, native, tree, session, &scope)?;
+        return Ok(crate::ast::inlining::substitute_expr_idents(
+            selected,
+            &HashMap::from_iter([(name, containers::element_read(&container, handle))]),
+        ));
+    }
+    // An element wider than 64 bits is held in a record, whose packed
+    // selects, such as `q[0][129]`, are not bound yet.
+    if let ExprKind::Name(name) = &native.expression(base).kind
+        && let Some(shape) = dimensions.get(&instances::normalize_identifier(&name.spelling))
+        && let Some(mut container) = shape.container.as_deref()
+    {
+        let mut levels = shape.unpacked.len() + 1;
+        while let Some(inner) = container.element.container.as_deref() {
+            container = inner;
+            levels += 1;
+        }
+        if suffix.len() > levels
+            && container.record.is_some()
+            && container.element.unpacked_struct().is_none()
+        {
+            return Err(unsupported(
+                "bit-select or part-select of a container element wider than 64 bits",
+            ));
+        }
+    }
+    // A select of a member of a container element reads the member first.
+    let element_member = if suffix.is_empty() {
+        None
+    } else {
+        containers::element_member(base, native, tree, session, dimensions)?
+    };
+    if element_member.is_some()
+        || matches!(
+            native.expression(base).kind,
+            ExprKind::Concatenation(_) | ExprKind::Replication { .. }
+        )
+    {
+        let expr = match element_member {
+            Some((ty, value)) => {
+                // The select indices are offsets from bit 0, which only a
+                // `[N-1:0]` range declares.
+                let zero_based = match ty.packed_ranges() {
+                    [range] => {
+                        eval_ast_const_expr(&tree.functions, range.right(), &dimensions.const_env)
+                            == Some(0)
+                            && eval_ast_const_expr(
+                                &tree.functions,
+                                range.left(),
+                                &dimensions.const_env,
+                            )
+                            .is_some_and(|left| left >= 0)
+                    }
+                    _ => false,
+                };
+                if !zero_based || ty.unpacked_struct().is_some() || !ty.members.is_empty() {
+                    return Err(unsupported(
+                        "select of a container element member that is not declared [N-1:0]",
+                    ));
+                }
+                value
+            }
+            None => bind_value(base, native, tree, session, dimensions, None)?,
+        };
         if suffix.len() != 1 {
             return Err(unsupported("concatenation select"));
         }
         let selection = match suffix[0] {
             DimensionKind::Range { left, right } => {
                 selects::AggregateSelection::Range(selects::ParameterRange::Bounds(
-                    read_index_value(*left, native, tree, dimensions)?,
-                    read_index_value(*right, native, tree, dimensions)?,
+                    read_index_value(*left, native, tree, session, dimensions)?,
+                    read_index_value(*right, native, tree, session, dimensions)?,
                 ))
             }
-            DimensionKind::Index(id) => {
-                selects::AggregateSelection::Index(read_index_value(*id, native, tree, dimensions)?)
-            }
+            DimensionKind::Index(id) => selects::AggregateSelection::Index(read_index_value(
+                *id, native, tree, session, dimensions,
+            )?),
             DimensionKind::Indexed {
                 base,
                 operator,
                 width,
             } => selects::AggregateSelection::Range(selects::ParameterRange::Indexed {
-                base: read_index_value(*base, native, tree, dimensions)?,
-                width: read_index_value(*width, native, tree, dimensions)?,
+                base: read_index_value(*base, native, tree, session, dimensions)?,
+                width: read_index_value(*width, native, tree, session, dimensions)?,
                 plus: operator == "+:",
             }),
             _ => return Err(unsupported("concatenation select")),
         };
-        return selects::aggregate_selection_value(&tree.state, expr, selection, dimensions);
+        return selects::aggregate_selection_value(tree, expr, selection, dimensions);
     }
-    let (parts, qualified) = path(base, native, tree, dimensions)?;
+    let (parts, qualified) = path(base, native, tree, session, dimensions)?;
     if dimensions.constant_indexed_base && parts.len() == 1 {
         let name = qualified.clone().unwrap_or_else(|| parts[0].clone());
         let mut indices = Vec::new();
@@ -1494,12 +2305,12 @@ fn selected_value(
             ranged = !matches!(dimension, DimensionKind::Index(_));
             match dimension {
                 DimensionKind::Index(id) => {
-                    indices.push(read_index_value(*id, native, tree, dimensions)?)
+                    indices.push(read_index_value(*id, native, tree, session, dimensions)?)
                 }
                 DimensionKind::Range { left, right } => {
                     range = Some(selects::ParameterRange::Bounds(
-                        read_index_value(*left, native, tree, dimensions)?,
-                        read_index_value(*right, native, tree, dimensions)?,
+                        read_index_value(*left, native, tree, session, dimensions)?,
+                        read_index_value(*right, native, tree, session, dimensions)?,
                     ))
                 }
                 DimensionKind::Indexed {
@@ -1508,8 +2319,8 @@ fn selected_value(
                     width,
                 } => {
                     range = Some(selects::ParameterRange::Indexed {
-                        base: read_index_value(*base, native, tree, dimensions)?,
-                        width: read_index_value(*width, native, tree, dimensions)?,
+                        base: read_index_value(*base, native, tree, session, dimensions)?,
+                        width: read_index_value(*width, native, tree, session, dimensions)?,
                         plus: operator == "+:",
                     })
                 }
@@ -1517,9 +2328,9 @@ fn selected_value(
             }
         }
         return if let Some(range) = range {
-            selects::indexed_parameter_range(&tree.state, name, indices, range, dimensions)
+            selects::indexed_parameter_range(tree, name, indices, range, dimensions)
         } else {
-            selects::indexed_parameter_indices(&tree.state, name, indices, dimensions)
+            selects::indexed_parameter_indices(tree, name, indices, dimensions)
         };
     }
     for dimension in &suffix {
@@ -1529,24 +2340,27 @@ fn selected_value(
                 ExprKind::Conditional { .. }
             )
         {
-            read_index_value(*id, native, tree, dimensions)?;
+            read_index_value(*id, native, tree, session, dimensions)?;
         }
     }
-    let value = expr_from_lvalue(
-        &tree.state,
-        &selected_lvalue(root, native, tree, dimensions, false)?,
-        dimensions,
-    );
-    let guards = member_context(root, native, tree, dimensions)?
+    let lvalue = selected_lvalue(root, native, tree, session, dimensions, false)?;
+    let value = expr_from_lvalue(tree, &lvalue, dimensions);
+    if let Expr::Ident(name) = &value
+        && let Some(value) = unpacked_structs::whole(name, dimensions)
+    {
+        return Ok(value);
+    }
+    let guards = member_context(root, native, tree, session, dimensions)?
         .map(|(guards, _)| guards)
         .unwrap_or_default();
-    packed_structs::checked_value(guards, value, &tree.state, dimensions)
+    packed_structs::checked_value(guards, value, tree, dimensions)
 }
 
 pub(in crate::ast) fn selected_lvalue(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     net: bool,
 ) -> Converted<LValue> {
@@ -1561,11 +2375,14 @@ pub(in crate::ast) fn selected_lvalue(
         base = *expression;
     }
     suffix.reverse();
-    let (parts, qualified) = path(base, native, tree, dimensions)?;
+    let (parts, qualified) = path(base, native, tree, session, dimensions)?;
     if suffix.is_empty() && parts.len() > 1 {
-        return packed_structs::whole_member(&tree.state, parts, qualified, dimensions);
+        return packed_structs::whole_member(tree, parts, qualified, dimensions);
     }
-    let finish = |name: String, context: &PackedDimensions, strict: bool| -> Converted<LValue> {
+    let mut finish = |name: String,
+                      context: &PackedDimensions,
+                      strict: bool|
+     -> Converted<LValue> {
         if context.get(&name).is_some_and(|ty| {
             ty.members
                 .first()
@@ -1589,15 +2406,14 @@ pub(in crate::ast) fn selected_lvalue(
             }
             ranged = !matches!(dimension, DimensionKind::Index(_));
             match dimension {
-                DimensionKind::Index(id) => indices.push(selects::self_determined_index(
-                    &tree.state,
-                    index_value(*id, native, tree, context)?,
-                    context,
-                )),
+                DimensionKind::Index(id) => {
+                    let index = index_value(*id, native, tree, session, context)?;
+                    indices.push(selects::self_determined_index(tree, index, context))
+                }
                 DimensionKind::Range { left, right } => {
                     range = Some((
-                        index_value(*left, native, tree, context)?,
-                        index_value(*right, native, tree, context)?,
+                        index_value(*left, native, tree, session, context)?,
+                        index_value(*right, native, tree, session, context)?,
                         false,
                     ))
                 }
@@ -1606,16 +2422,17 @@ pub(in crate::ast) fn selected_lvalue(
                     operator,
                     width,
                 } => {
-                    let start = index_value(*base, native, tree, context)?;
-                    let width = index_value(*width, native, tree, context)?;
+                    let start = index_value(*base, native, tree, session, context)?;
+                    let width = index_value(*width, native, tree, session, context)?;
                     let ((msb, lsb), dynamic) = if net {
-                        let width = eval_ast_const_expr(&tree.state, &width, &context.const_env)
-                            .ok_or_else(|| {
-                                unsupported("indexed part-select width that is not constant")
-                            })?;
+                        let width =
+                            eval_ast_const_expr(&tree.functions, &width, &context.const_env)
+                                .ok_or_else(|| {
+                                    unsupported("indexed part-select width that is not constant")
+                                })?;
                         (
                             selects::indexed_select_bounds_values(
-                                &tree.state,
+                                tree,
                                 start,
                                 operator == "+:",
                                 width,
@@ -1626,7 +2443,7 @@ pub(in crate::ast) fn selected_lvalue(
                         )
                     } else {
                         selects::indexed_range_values(
-                            &tree.state,
+                            tree,
                             &name,
                             start,
                             width,
@@ -1641,20 +2458,20 @@ pub(in crate::ast) fn selected_lvalue(
             }
         }
         if strict
-            && !selects::constant_packed_indices_in_range(&tree.state, &name, &indices, context)
+            && !selects::constant_packed_indices_in_range(&tree.functions, &name, &indices, context)
         {
             return Err(unsupported(format!(
                 "constant select of `{name}` outside its declared range"
             )));
         }
         if let Some((msb, lsb, dynamic)) = range {
-            selects::lvalue_from_range(&tree.state, name, indices, msb, lsb, dynamic, context)
+            selects::lvalue_from_range(tree, name, indices, msb, lsb, dynamic, context)
         } else {
-            selects::lvalue_from_indices(&tree.state, name, indices, context)
+            selects::lvalue_from_indices(tree, name, indices, context)
         }
     };
     let lvalue = if parts.len() > 1 {
-        packed_structs::select_member(&tree.state, parts, qualified, dimensions, finish)?
+        packed_structs::select_member(tree, parts, qualified, dimensions, finish)?
     } else {
         finish(
             qualified.unwrap_or_else(|| parts[0].clone()),
@@ -1665,9 +2482,46 @@ pub(in crate::ast) fn selected_lvalue(
     Ok(lvalue)
 }
 
+/// The actuals of `$sformatf` (IEEE 1800-2023 21.3.3): a format followed by
+/// any values, all given and positional.
+pub(in crate::ast) fn format_arguments(
+    name: &str,
+    args: &[celox_sv_syntax::Argument],
+) -> Converted<Vec<ExprId>> {
+    if args.iter().any(|arg| arg.name.is_some()) {
+        return Err(unsupported(format!("named arguments of `{name}`")));
+    }
+    let actuals = args
+        .iter()
+        .enumerate()
+        .map(|(position, arg)| {
+            arg.value.ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
+                name: name.to_string(),
+                detail: format!("argument {} is omitted", position + 1),
+            })
+        })
+        .collect::<Converted<Vec<_>>>()?;
+    if actuals.is_empty() {
+        return Err(AnalyzerError::InvalidSystemTfCall {
+            name: name.to_string(),
+            detail: "expected a format argument".into(),
+        });
+    }
+    Ok(actuals)
+}
+
 /// String literals in integral contexts are unsigned packed arrays of bytes
 /// (IEEE 1800-2023 5.9). Keep the semantic IR integral, including escapes.
 fn packed_string_literal(text: &str) -> Option<String> {
+    match format_patterns::bytes_literal(&string_literal_bytes(text)?) {
+        Expr::Literal(literal) => Some(literal),
+        _ => unreachable!("a packed literal"),
+    }
+}
+
+/// The bytes of string literal `text`, written with its quotes, after its
+/// escapes (IEEE 1800-2023 5.9.1).
+pub(in crate::ast) fn string_literal_bytes(text: &str) -> Option<Vec<u8>> {
     let text = if let Some(text) = text.strip_prefix("\"\"\"") {
         text.strip_suffix("\"\"\"")?
     } else {
@@ -1728,12 +2582,7 @@ fn packed_string_literal(text: &str) -> Option<String> {
         };
         bytes.push(value);
     }
-    let width = (bytes.len() * 8).max(8);
-    Some(format!(
-        "{}'h{}",
-        width,
-        num_bigint::BigUint::from_bytes_be(&bytes).to_str_radix(16)
-    ))
+    Some(bytes)
 }
 
 pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {
@@ -1787,6 +2636,12 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
             .functions
             .get(name)
             .is_some_and(|function| function.return_real),
+        // A sampled value has the type of its operand.
+        Expr::Call {
+            callee: Callee::System(SystemFunction::Sampled | SystemFunction::Past),
+            args,
+            ..
+        } => matches!(args.first(), Some(Some(operand)) if real_value(operand, dimensions)),
         Expr::Unary {
             op: UnaryOp::Plus | UnaryOp::Minus | UnaryOp::ToTwoState,
             expr,
@@ -1863,6 +2718,7 @@ pub(in crate::ast) fn member_context(
     mut root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<(Vec<Expr>, Type)>> {
     while let ExprKind::Select { expression, .. } = native.expression(root).kind {
@@ -1871,23 +2727,24 @@ pub(in crate::ast) fn member_context(
     if !matches!(native.expression(root).kind, ExprKind::Member { .. }) {
         return Ok(None);
     }
-    let (mut parts, qualified) = path(root, native, tree, dims)?;
+    let (mut parts, qualified) = path(root, native, tree, session, dims)?;
     if let Some(name) = qualified {
         parts[0] = name;
     }
-    packed_structs::member_access(parts, dims, &tree.state)
+    packed_structs::member_access(parts, dims, tree)
 }
 
 fn cast_shape(
     target: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<VariableDimensions>> {
-    let ty = if let Some(name) = call_name(&tree.state, target, native) {
+    let ty = if let Some(name) = call_name(tree, target, native) {
         dims.type_aliases.get(&name).cloned()
     } else if let ExprKind::Type(id) = native.expression(target).kind {
-        type_binding::binding::bind_in(id, native, tree, dims)?
+        type_binding::binding::bind_in(id, native, tree, session, dims)?
     } else {
         None
     };
@@ -1902,6 +2759,7 @@ fn check_tagged_copyout(
     root: ExprId,
     formal: Option<&VariableDimensions>,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     let native = tree.declarations();
@@ -1912,12 +2770,12 @@ fn check_tagged_copyout(
             pending.extend(parts.iter().map(|id| (*id, None)));
             continue;
         }
-        let Some(actual) = bound_patterns::native_value_type(root, tree, dims)? else {
+        let Some(actual) = bound_patterns::native_value_type(root, tree, session, dims)? else {
             continue;
         };
         if actual.tagged_identity().is_some()
             && formal
-                .and_then(|shape| shape.pattern_type(&tree.state, dims))
+                .and_then(|shape| shape.pattern_type(&tree.functions, dims))
                 .as_ref()
                 != Some(&actual)
         {
@@ -1927,6 +2785,61 @@ fn check_tagged_copyout(
         }
     }
     Ok(())
+}
+
+/// A value of a call of a method of a built-in class whose objects the
+/// scheduler owns, or `e.triggered`. Boxed and kept out of line, so that the
+/// frame of the recursive binder holds one pointer for all of them.
+#[inline(never)]
+fn scheduler_call(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Box<Expr>>> {
+    if let Some(call) =
+        super::super::processes::value(tree, session, id, native, dimensions, false)?
+    {
+        return Ok(Some(Box::new(call)));
+    }
+    if let Some(call) =
+        super::super::semaphores::value(tree, session, id, native, dimensions, false)?
+    {
+        return Ok(Some(Box::new(call)));
+    }
+    if let Some(call) =
+        super::super::mailboxes::value(tree, session, id, native, dimensions, false)?
+    {
+        return Ok(Some(Box::new(call)));
+    }
+    // `e.triggered` (IEEE 1800-2023 15.5.3).
+    if let Some(event) = super::super::events::triggered(tree, session, id, native, dimensions)? {
+        let event = super::value(event, native, tree, session, dimensions)?;
+        return Ok(Some(Box::new(super::super::events::call(
+            celox_design::ProcessOp::Triggered,
+            vec![event],
+        ))));
+    }
+    Ok(None)
+}
+
+/// `r#type` is a vector with one `[N-1:0]` range, whose select indices are
+/// offsets from bit 0.
+fn zero_based_vector(
+    r#type: &Type,
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+) -> bool {
+    let zero_based = match r#type.packed_ranges() {
+        [range] => {
+            eval_ast_const_expr(&tree.functions, range.right(), &dimensions.const_env) == Some(0)
+                && eval_ast_const_expr(&tree.functions, range.left(), &dimensions.const_env)
+                    .is_some_and(|left| left >= 0)
+        }
+        _ => false,
+    };
+    zero_based && r#type.members.is_empty()
 }
 
 #[cfg(test)]

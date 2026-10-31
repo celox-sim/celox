@@ -11,8 +11,12 @@ use celox_runtime::{
     UnitExecutor, host_watch,
 };
 
+mod checkpoint_file;
+pub use checkpoint_file::CheckpointFileError;
 mod differential;
 mod vcd_tasks;
+mod waveform_state;
+pub use waveform_state::SourceWaveformState;
 
 /// Saved state of a [`Simulation`], created by [`Simulation::checkpoint`]:
 /// the design state together with simulation time, clocks and pending events.
@@ -162,6 +166,19 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         self.runtime_finish()
     }
 
+    fn enter_deferred_assertion_process(&mut self, process: usize) {
+        self.enter_deferred_process(process);
+    }
+    fn leave_deferred_assertion_process(&mut self) {
+        self.leave_deferred_process();
+    }
+    fn finish_deferred_assertion_process(&mut self, process: usize) {
+        self.finish_deferred_process(process);
+    }
+    fn cancel_deferred_assertion_process(&mut self, process: usize) {
+        self.cancel_deferred_process(process);
+    }
+
     fn reset_declaration_startup(&mut self) -> Result<(), Halt> {
         self.reset_declaration_state();
         Ok(())
@@ -172,6 +189,10 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
     }
     fn apply_declaration_startup(&mut self) -> Result<(), Halt> {
         self.apply_ordinary_initial_state();
+        // Runtime declarations may also run on the first deferred step. Initialize
+        // sampled copies and history defaults then (IEEE 1800-2023 16.5.1).
+        // Restoring a completed declaration phase never calls this hook.
+        self.initialize_copies();
         Ok(())
     }
 
@@ -181,6 +202,9 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         timestamp: u64,
     ) -> Result<(), Halt> {
         match request.kind {
+            celox_design::HostRequestKind::Process | celox_design::HostRequestKind::Testbench => {
+                Err(celox_runtime::SimulatorErrorCode::InternalError.into())
+            }
             celox_design::HostRequestKind::Plusargs => {
                 self.run_plusargs_request(request, timestamp)
             }
@@ -190,6 +214,7 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
             celox_design::HostRequestKind::FileIo => self.run_file_io_request(request, timestamp),
             celox_design::HostRequestKind::Vcd => self.run_vcd_request(request, timestamp),
             celox_design::HostRequestKind::Scan => self.run_scan_request(request, timestamp),
+            celox_design::HostRequestKind::Format => self.run_format_request(request, timestamp),
         }
     }
 }
@@ -271,19 +296,14 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
 
     fn compiled_slots(&self) -> celox_runtime::CompiledSlots {
         use celox_runtime::CompiledSlots;
-        // Deferred assertions mature when a slot is over, which the
-        // runtime's loop tells apart from the end of a step.
-        if self.frozen
-            || !self.components.is_empty()
-            || self.deferred_assertions
-            || !self.backend.runs_compiled_scheduler()
-        {
+        if self.frozen || !self.components.is_empty() || !self.backend.runs_compiled_scheduler() {
             return CompiledSlots::None;
         }
-        // Waveforms record, the heap collects and a slot observer looks at
-        // every slot boundary.
+        // Waveforms record, the heap collects, deferred assertions mature
+        // and a slot observer looks at every slot boundary.
         let vcd = &self.sv_vcd;
-        if self.slot_observer.is_some()
+        if self.deferred_assertions
+            || self.slot_observer.is_some()
             || self.vcd_writer.is_some()
             || vcd.path.is_some()
             || vcd.started.is_some()
@@ -319,10 +339,26 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         self.dump_unless_rewound(timestamp);
     }
 
-    /// Deferred assertions mature in the Observed and Postponed regions of
-    /// the slot (IEEE 1800-2023 16.4).
+    /// Combinational logic still to settle belongs to `timestamp`, so its
+    /// reports read that time: settle it before the run moves on.
+    fn try_leave_time(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        if self.timestamped_reports && self.dirty {
+            self.eval_comb_checked().map_err(Halt::Error)?;
+            self.dirty = false;
+            self.runtime_finish()?;
+        }
+        Ok(())
+    }
+
+    fn try_observed_deferred_assertions(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        self.mature_deferred_assertion_region(celox_design::AssertionDeferral::Observed)
+            .map_err(Halt::Error)
+    }
+
+    /// Final deferred assertions mature in Postponed, after Reactive activity.
     fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
-        self.mature_deferred_assertions().map_err(Halt::Error)
+        self.mature_deferred_assertion_region(celox_design::AssertionDeferral::Final)
+            .map_err(Halt::Error)
     }
 
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {
@@ -373,7 +409,7 @@ impl<B: SimBackend> Simulator<B> {
     }
 }
 
-fn vcd_dump_runtime_error(error: crate::simulator::DumpError) -> RuntimeErrorCode {
+pub(crate) fn vcd_dump_runtime_error(error: crate::simulator::DumpError) -> RuntimeErrorCode {
     match error {
         crate::simulator::DumpError::Runtime(error) => error,
         crate::simulator::DumpError::Io(error) => RuntimeErrorCode::Runtime {
@@ -449,7 +485,15 @@ impl<B: SimBackend> Simulation<B> {
         Self::try_new(simulator).expect("runtime static declaration initialization failed")
     }
 
-    pub(crate) fn try_new(mut simulator: Simulator<B>) -> Result<Self, RuntimeErrorCode> {
+    #[cfg(test)]
+    pub(crate) fn try_new(simulator: Simulator<B>) -> Result<Self, RuntimeErrorCode> {
+        Self::try_new_with_initialization(simulator, true)
+    }
+
+    pub(crate) fn try_new_with_initialization(
+        mut simulator: Simulator<B>,
+        initialize: bool,
+    ) -> Result<Self, RuntimeErrorCode> {
         let mut state = simulation_state(&simulator);
         simulator.host_watch = host_watch(&simulator.backend, &simulator.schedule);
         // Only a timed simulation ends at an RTL `$finish`; a bare
@@ -457,7 +501,11 @@ impl<B: SimBackend> Simulation<B> {
         simulator.finish_sites = simulator.schedule.finish_sites;
         simulator.timed = true;
         simulator.skip_runtime_finish();
-        state.initialize_declarations(&mut simulator)?;
+        if initialize {
+            state.initialize_declarations(&mut simulator)?;
+            // Initialize sampled values and histories before the first slot.
+            simulator.initialize_copies();
+        }
         Ok(Self {
             simulator,
             state,
@@ -479,6 +527,8 @@ impl<B: SimBackend> Simulation<B> {
     }
 
     /// Save the design state, simulation time, clocks and pending events.
+    /// Effect-handler state (including file I/O and VPI) is excluded. The host
+    /// system coordinates its own handler snapshots with this core checkpoint.
     pub fn checkpoint(&self) -> Result<SimulationCheckpoint<B>, CheckpointError> {
         if self.state.is_suspended() {
             return Err(CheckpointError::Stopped);
@@ -488,6 +538,27 @@ impl<B: SimBackend> Simulation<B> {
             schedule: self.state.snapshot(),
             host_writes: self.simulator.host_watch.log().to_vec(),
         })
+    }
+
+    /// File-I/O effect state owned by the embedding system, outside core checkpoints.
+    pub fn file_io(&self) -> &celox_runtime::file_io::FileIo {
+        self.simulator.file_io()
+    }
+
+    /// Install a host-prepared file-I/O handler at an execution boundary.
+    pub fn replace_file_io(&mut self, file_io: celox_runtime::file_io::FileIo) {
+        self.simulator.replace_file_io(file_io);
+    }
+
+    /// The schema used for diagnostic HDL captures, including observer callbacks.
+    pub fn state_schema(&self) -> std::sync::Arc<crate::StateSchema> {
+        self.simulator.state_schema()
+    }
+
+    /// Capture current HDL values without settling or advancing time. The file
+    /// has no schedule and cannot resume a timed simulation or a VPI session.
+    pub fn capture_state(&self) -> Result<celox_runtime::StateFile, StateError> {
+        self.state_schema().capture(&self.simulator.backend)
     }
 
     /// Save the value of every state object by path, together with the
@@ -508,16 +579,15 @@ impl<B: SimBackend> Simulation<B> {
         if self.state.is_suspended() {
             return Err(CheckpointError::Stopped.into());
         }
-        if self.state.has_fork_activations() {
-            return Err(StateError::Processes);
-        }
         let mut file = self
             .simulator
             .state_schema()
             .capture(&self.simulator.backend)?;
         let parts = self.state.export_schedule(&self.simulator.backend);
-        let mut record = self.simulator.name_schedule(parts);
+        let mut record = self.simulator.name_schedule(parts, &mut file.strings)?;
         record.processes.host_writes = self.simulator.name_host_writes();
+        self.simulator
+            .validate_activation_queue_values(&record.processes)?;
         file.schedule = Some(record);
         Ok(file)
     }
@@ -528,12 +598,20 @@ impl<B: SimBackend> Simulation<B> {
     pub fn load_state(&mut self, file: &celox_runtime::StateFile) -> Result<(), StateError> {
         let record = file.schedule.as_ref().ok_or(StateError::MissingSchedule)?;
         self.simulator.check_vcd_rewind(record.time)?;
-        let parts = self.simulator.resolve_schedule(record)?;
+        self.simulator
+            .validate_activation_queue_values(&record.processes)?;
+        let mut parts = self.simulator.resolve_schedule(record, file)?;
         let host_writes = self
             .simulator
             .resolve_host_writes(&record.processes.host_writes)?;
         self.simulator.load_state_at_time(file, record.time)?;
+        self.simulator.bind_activation_strings(
+            &mut parts.process_state,
+            &record.processes,
+            &file.strings,
+        );
         self.state.import_schedule(parts);
+        self.state.retain_activation_roots(&mut self.simulator);
         // The file keeps the time in its schedule, not in the time slots.
         let time = self.state.time();
         self.state.advance_time(&mut self.simulator.backend, time);
@@ -563,7 +641,8 @@ impl<B: SimBackend> Simulation<B> {
                     .filter(|local| local.addr() == event.addr())
             })
             .map_err(|_| CheckpointError::DesignMismatch)?;
-        self.simulator.restore(&checkpoint.simulator)?;
+        self.simulator
+            .restore_checkpoint_prepared(&checkpoint.simulator)?;
         self.state.retain_activation_roots(&mut self.simulator);
         self.simulator.declaration_phase = false;
         self.simulator
@@ -672,6 +751,9 @@ impl<B: SimBackend> Simulation<B> {
         F: FnOnce(&mut crate::IOContext<B>),
     {
         let result = self.simulator.modify(f);
+        // The tracked writes counted their occurrences of gated waits.
+        self.state
+            .note_gated_host_writes(&mut self.simulator.backend, false);
         if let Err(error) = &result {
             self.finalize_fatal(error);
         }
@@ -750,7 +832,11 @@ impl<B: SimBackend> Simulation<B> {
             return self.watched_step();
         }
         // With nothing scheduled, the step ends the slot too.
+        let was_stopped = self.is_stopped();
         self.end_idle_slot(self.state.next_event_time().unwrap_or(u64::MAX))?;
+        if !was_stopped && self.is_stopped() {
+            return Ok(Some(self.time()));
+        }
         self.step_until(u64::MAX)
     }
 
@@ -761,7 +847,7 @@ impl<B: SimBackend> Simulation<B> {
     /// run at that time.
     #[inline]
     fn end_idle_slot(&mut self, end_time: u64) -> Result<(), RuntimeErrorCode> {
-        if !self.simulator.deferred_assertions
+        if (!self.simulator.host_slot_work && !self.simulator.timestamped_reports)
             || end_time <= self.state.time()
             || self.state.next_event_time() == Some(self.state.time())
         {
@@ -776,7 +862,8 @@ impl<B: SimBackend> Simulation<B> {
         let result = if self.simulator.dirty {
             let result = self.simulator.eval_comb_checked();
             self.simulator.dirty = false;
-            result
+            // A `$finish` of the settle finishes the simulation here.
+            result.and_then(|()| self.sync_finish_checked())
         } else {
             Ok(())
         };
@@ -798,7 +885,7 @@ impl<B: SimBackend> Simulation<B> {
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > self.state.time() {
                 self.watch_settle()?;
-                if self.reports.failure.is_some() {
+                if self.is_finished() || self.is_stopped() || self.reports.failure.is_some() {
                     return Ok(Some(self.state.time()));
                 }
             }
@@ -846,7 +933,7 @@ impl<B: SimBackend> Simulation<B> {
             }
             if next_time > self.state.time() {
                 self.watch_settle()?;
-                if self.reports.failure.is_some() {
+                if self.is_finished() || self.is_stopped() || self.reports.failure.is_some() {
                     return Ok(false);
                 }
             }
@@ -860,7 +947,7 @@ impl<B: SimBackend> Simulation<B> {
             }
         }
         self.watch_settle()?;
-        Ok(self.reports.failure.is_none())
+        Ok(!self.is_stopped() && self.reports.failure.is_none())
     }
 
     /// Settle combinational logic that no step settled, as after host writes
@@ -879,7 +966,11 @@ impl<B: SimBackend> Simulation<B> {
             return Ok(());
         }
         if self.simulator.dirty {
-            if let Err(error) = self.simulator.eval_comb_checked() {
+            if let Err(error) = self
+                .simulator
+                .eval_comb_checked()
+                .and_then(|()| self.sync_finish_checked())
+            {
                 self.finalize_fatal(&error);
                 self.flush_error_output();
                 return Err(error);
@@ -961,7 +1052,11 @@ impl<B: SimBackend> Simulation<B> {
                 return Ok(());
             }
         } else {
+            let was_stopped = self.is_stopped();
             self.end_idle_slot(end_time)?;
+            if !was_stopped && self.is_stopped() {
+                return Ok(());
+            }
         }
         let reached = match self.shadow.take() {
             None => self.state.run_until(&mut self.simulator, end_time)?,
@@ -1010,6 +1105,9 @@ impl<B: SimBackend> Simulation<B> {
         } else {
             self.end_idle_slot(time)?;
         }
+        if self.is_finished() || self.is_stopped() {
+            return Ok(());
+        }
         self.state.advance_time(&mut self.simulator.backend, time);
         if let Some(shadow) = &mut self.shadow {
             shadow
@@ -1039,7 +1137,11 @@ impl<B: SimBackend> Simulation<B> {
             self.run_until(end_time)?;
             return Ok(!self.state.is_stopped());
         }
+        let was_stopped = self.is_stopped();
         self.end_idle_slot(end_time)?;
+        if !was_stopped && self.is_stopped() {
+            return Ok(false);
+        }
         let mut steps = 0;
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
@@ -1170,6 +1272,8 @@ impl<B: SimBackend> Simulation<B> {
     /// writes may wake a process or changed an event signal. Waits and
     /// counters see the values the writes left, not each write.
     pub fn note_raw_writes(&mut self) {
+        self.state
+            .note_gated_host_writes(&mut self.simulator.backend, true);
         self.state.note_host_writes(&self.simulator.backend, false);
     }
 
@@ -1937,6 +2041,8 @@ endmodule
     }
 }
 
+#[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+mod process_control_tests;
 #[cfg(all(test, feature = "host-runtime"))]
 mod runtime_core_tests;
 

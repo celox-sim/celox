@@ -89,7 +89,7 @@ pub fn interface_prototypes_with_options(
                 .zip(sources)
                 .map(|(file, (_, path))| (&file.syntax_tree, *path))
                 .collect::<Vec<_>>(),
-            options,
+            options.clone(),
         )?)
     };
     let trees = files
@@ -679,10 +679,13 @@ struct InterfaceDecl {
     /// Whether the declaration refers to compilation-unit items of its file.
     uses_unit_items: bool,
     parameters: Vec<InterfaceParameter>,
+    /// Value parameters and localparams whose instance paths VPI can observe.
+    reflected_parameters: Vec<String>,
     type_parameters: Vec<String>,
     parameter_order: Vec<String>,
     items: Vec<Item>,
     members: Vec<Member>,
+    has_ports: bool,
     functions: Vec<Function>,
     modports: HashMap<String, Vec<ModportItem>>,
     /// The names declared in the interface scope.
@@ -976,9 +979,14 @@ struct Design<'a> {
     modules: HashMap<String, ModuleDecl>,
     /// The ports of every subroutine declared or imported, by name.
     subroutines: HashMap<String, Vec<(Scope, usize, SubroutinePorts)>>,
-    expansions: std::cell::RefCell<HashMap<ExpansionKey, Expansion>>,
+}
+
+/// The interface port expansions a plan computes, each once.
+#[derive(Default)]
+struct Expansions {
+    done: HashMap<ExpansionKey, Expansion>,
     /// The expansions being computed, to reject a recursive instantiation.
-    expanding: std::cell::RefCell<HashSet<ExpansionKey>>,
+    expanding: HashSet<ExpansionKey>,
 }
 
 impl<'a> Design<'a> {
@@ -1144,8 +1152,6 @@ impl<'a> Design<'a> {
             interfaces,
             modules,
             subroutines,
-            expansions: Default::default(),
-            expanding: Default::default(),
         })
     }
 
@@ -1164,6 +1170,7 @@ impl<'a> Design<'a> {
 
     fn expansion(
         &self,
+        expansions: &mut Expansions,
         module: &str,
         port: &str,
         interface: &str,
@@ -1175,23 +1182,24 @@ impl<'a> Design<'a> {
             interface.to_string(),
             bindings.to_vec(),
         );
-        if let Some(expansion) = self.expansions.borrow().get(&key) {
+        if let Some(expansion) = expansions.done.get(&key) {
             return Ok(expansion.clone());
         }
-        if !self.expanding.borrow_mut().insert(key.clone()) {
+        if !expansions.expanding.insert(key.clone()) {
             return Err(unsupported(format!(
                 "recursive instantiation through interface port `{port}` of module `{module}`"
             )));
         }
-        let expansion = self.compute_expansion(module, port, interface, bindings);
-        self.expanding.borrow_mut().remove(&key);
+        let expansion = self.compute_expansion(expansions, module, port, interface, bindings);
+        expansions.expanding.remove(&key);
         let expansion = expansion?;
-        self.expansions.borrow_mut().insert(key, expansion.clone());
+        expansions.done.insert(key, expansion.clone());
         Ok(expansion)
     }
 
     fn compute_expansion(
         &self,
+        expansions: &mut Expansions,
         module_name: &str,
         port_name: &str,
         interface_name: &str,
@@ -1278,6 +1286,7 @@ impl<'a> Design<'a> {
                 .filter(|child| child.handle == port_name)
             {
                 let child_expansion = self.expansion(
+                    expansions,
                     &child.module,
                     &child.formal,
                     interface_name,
@@ -1354,6 +1363,7 @@ impl<'a> Design<'a> {
             .filter(|child| child.handle == port_name)
         {
             let child_expansion = self.expansion(
+                expansions,
                 &child.module,
                 &child.formal,
                 interface_name,
@@ -2399,11 +2409,6 @@ impl InterfaceDecl {
         let unit = tree.root_unit()?;
         let native = tree.declarations();
         let interface_name = native_name(&unit.name);
-        if !unit.ports.is_empty() {
-            return Err(unsupported(format!(
-                "ports of interface `{interface_name}`"
-            )));
-        }
         if native.types.iter().any(|ty| {
             unit.tokens.start <= ty.tokens.start
                 && ty.tokens.end <= unit.tokens.end
@@ -2423,16 +2428,38 @@ impl InterfaceDecl {
             uses_unit_items: false,
             uses_macros: has_directive(file.text(span)),
             parameters: Vec::new(),
+            reflected_parameters: Vec::new(),
             type_parameters: Vec::new(),
             parameter_order: Vec::new(),
             items: Vec::new(),
             members: Vec::new(),
+            has_ports: !unit.ports.is_empty(),
             functions: Vec::new(),
             modports: HashMap::default(),
             names: HashSet::default(),
             references: Vec::new(),
             lvalues: HashSet::default(),
         };
+        for port in &unit.ports {
+            let native::PortKind::Named(name) = &port.kind else {
+                return Err(unsupported(format!(
+                    "non-ANSI ports of interface `{interface_name}`"
+                )));
+            };
+            interface.add_member(Member {
+                name: native_name(name),
+                data_type: port
+                    .data_type
+                    .and_then(|id| file.range_span(native.data_type(id).tokens)),
+                dimensions: port
+                    .dimensions
+                    .iter()
+                    .map(|dimension| file.span(dimension.tokens))
+                    .collect::<Converted<_>>()?,
+                // A port default is not a variable initializer.
+                initializer: None,
+            })?;
+        }
         for id in &unit.package_bindings {
             let binding = native.package_binding(*id);
             if unit.header.start <= binding.tokens.start && binding.tokens.end <= unit.header.end {
@@ -2614,6 +2641,7 @@ impl InterfaceDecl {
             });
             return Ok(());
         };
+        self.reflected_parameters.push(native_name(&parameter.name));
         if local {
             self.declare(native_name(&parameter.name))?;
             self.items.push(Item::Constant {
@@ -3059,6 +3087,8 @@ pub struct NativePortPlan {
     pub all_members: Vec<String>,
     pub name: String,
     pub interface: String,
+    /// The modport the port is declared with.
+    pub modport: Option<String>,
     pub members: Vec<(String, PortDirection)>,
     pub parameters: Vec<String>,
     pub type_parameters: Vec<String>,
@@ -3174,6 +3204,8 @@ pub fn plan_interfaces_with_member_paths(
     } else {
         Design::collect(&files)?
     };
+    let mut expansions = Expansions::default();
+    let expansions = &mut expansions;
     let mut result = NativeInterfacePlan::default();
     let mut reflected_paths = HashMap::default();
     if design.interfaces.is_empty() {
@@ -3257,7 +3289,8 @@ pub fn plan_interfaces_with_member_paths(
                         port.name
                     ))
                 })?;
-            let expansion = design.expansion(&name, &port.name, interface, &bindings)?;
+            let expansion =
+                design.expansion(expansions, &name, &port.name, interface, &bindings)?;
             let uses = design.module_uses(&name, (&port.name, interface), &bindings)?;
             let declaration = &design.interfaces[interface];
             for (handle, member, _) in &uses.references {
@@ -3304,6 +3337,7 @@ pub fn plan_interfaces_with_member_paths(
                     .collect(),
                 name: port.name.clone(),
                 interface: interface.clone(),
+                modport: declared.modport.clone(),
                 members: expansion
                     .members
                     .iter()
@@ -3362,7 +3396,9 @@ pub fn plan_interfaces_with_member_paths(
                 .copied()
                 .unwrap_or(module.span);
             for instance in &instantiation.instances {
-                check_no_connections(instance, &interface)?;
+                if !design.interfaces[&interface].has_ports {
+                    check_no_connections(instance, &interface)?;
+                }
                 let handle = native_name(&instance.name);
                 handles.insert(
                     handle,
@@ -3463,6 +3499,7 @@ pub fn plan_interfaces_with_member_paths(
                         })
                         .collect::<Vec<_>>();
                     let child_expansion = design.expansion(
+                        expansions,
                         &child_name,
                         &formal,
                         &handle.interface,
@@ -3506,11 +3543,17 @@ pub fn plan_interfaces_with_member_paths(
         let mut member_paths = HashMap::default();
         for (handle_name, declarations) in &handles.by_name {
             for (_, handle) in declarations {
-                for member in &design.interfaces[&handle.interface].members {
+                let interface = &design.interfaces[&handle.interface];
+                for member in interface
+                    .members
+                    .iter()
+                    .map(|member| &member.name)
+                    .chain(&interface.reflected_parameters)
+                {
                     member_paths.insert(
-                        format!("{handle_name}{SEPARATOR}{}", member.name),
+                        format!("{handle_name}{SEPARATOR}{member}"),
                         InterfaceMemberPath {
-                            segments: vec![handle_name.clone(), member.name.clone()],
+                            segments: vec![handle_name.clone(), member.clone()],
                             arrayed: handle.arrayed,
                         },
                     );

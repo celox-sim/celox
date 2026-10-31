@@ -911,6 +911,64 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 18 31\n44\n"))
 
+(case named_method_arguments
+  (source "class.sv" #"
+module Top(output bit done);
+    class Pair;
+        string name;
+        function new(string name);
+            this.name = name;
+        endfunction
+    endclass
+    class Base;
+        virtual function int m(int a, int b = 5, int c = 7);
+            return a * 100 + b * 10 + c;
+        endfunction
+    endclass
+    class Derived extends Base;
+        static function int sf(int x = 1, int y = 2);
+            return x * 10 + y;
+        endfunction
+        virtual function int m(int a, int b = 6, int c = 8);
+            return 1000 + super.m(.c(c), .a(a));
+        endfunction
+        function int own();
+            return this.m(.b(1), .a(2)) + m(3, .c(4));
+        endfunction
+        task automatic t(input int a, output int o, input int d = 9);
+            #1 o = a + d;
+        endtask
+        function bit pair_matches(Pair match_pair, Pair requested, string requested_name);
+            return match_pair == requested || match_pair.name == requested_name;
+        endfunction
+        function int find(Pair pair, string name);
+            if (pair_matches(.match_pair(pair), .requested(null), .requested_name(name)))
+                return 1;
+            return pair_matches(.requested_name(name), .requested(pair), .match_pair(pair)) ? 2 : 0;
+        endfunction
+    endclass
+    Derived d;
+    Base b;
+    Pair pair;
+    int o;
+    initial begin
+        d = new;
+        pair = new("x");
+        b = d;
+        $display("%0d %0d %0d", d.m(.a(1)), b.m(.c(2), .a(1)), d.m(1, , 3));
+        $display("%0d %0d %0d", Derived::sf(.y(5)), Derived::sf(.x(), .y()), d.own());
+        d.t(.o(o), .a(4));
+        $display("%0d", o);
+        d.t(5, .o(o), .d());
+        $display("%0d", o);
+        $display("%0d %0d", d.find(pair, "x"), d.find(pair, "y"));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output "1158 1152 1153\n15 12 2612\n13\n14\n1 2\n"))
+
 (case typedefs_of_interface_classes
   (source "class.sv" #"
 module Top(output bit done);
@@ -1911,3 +1969,1577 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "5\n"))
+
+(case constrained_randomize_scalar
+  (source "constraints.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit [3:0] x, y;
+        int limit = 4;
+        constraint bounds { x < limit; y < 4; x + y == 5; x >= 0; y > 0; x <= 3; }
+    endclass
+    Packet p;
+    int old_x, old_y;
+    initial begin
+        p = new;
+        p.srandom(17);
+        repeat (8) begin
+            if (!p.randomize()) $fatal(1, "sat failed");
+            if (!(p.x < 4 && p.y < 4 && p.x + p.y == 5)) $fatal(1, "invalid model");
+        end
+        old_x = p.x; old_y = p.y;
+        p.limit = 1;
+        if (p.randomize()) $fatal(1, "unsat succeeded");
+        if (p.x != old_x || p.y != old_y) $fatal(1, "unsat changed fields");
+        p.limit = 4;
+        p.x = 2; p.y = 3;
+        if (!p.randomize(null)) $fatal(1, "check-only failed");
+        p.y = 0;
+        if (p.randomize(null)) $fatal(1, "check-only ignored constraints");
+        p.x.rand_mode(0);
+        if (!p.randomize() || p.x != 2 || p.y != 3) $fatal(1, "disabled rand is not state");
+        p.y = 1;
+        if (p.randomize(x)) $fatal(1, "selection should be unsat");
+        if (p.x.rand_mode() != 0 || p.y.rand_mode() != 1) $fatal(1, "failed selection leaked modes");
+        p.y = 3;
+        if (!p.randomize() || p.x != 2) $fatal(1, "modes not restored");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_width_and_inheritance
+  (source "constraint_widths.sv" #"
+module Top(output bit done);
+    class Base;
+        rand bit signed [7:0] a;
+        rand bit signed [15:0] b;
+        rand bit [31:0] c;
+        constraint values { a == -1; b == 1; c == 256; }
+        constraint sum { (a + b) == c; }
+    endclass
+    class Derived extends Base;
+        constraint values { a == -2; b == 2; c == 256; }
+    endclass
+    Base p;
+    Derived q;
+    initial begin
+        p = new;
+        if (!p.randomize()) $fatal(1, "unsigned context was lost");
+        if (p.a != -1 || p.b != 1 || p.c != 256) $fatal(1, "base values");
+        q = new;
+        p = q;
+        if (!p.randomize()) $fatal(1, "derived constraints were not dispatched");
+        if (q.a != -2 || q.b != 2 || q.c != 256) $fatal(1, "override values");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_hooks
+  (source "constraint_hooks.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x;
+        int limit, before_count, after_count;
+        constraint bounds { x == limit; x < 3; }
+        function void pre_randomize(); before_count++; limit = before_count; endfunction
+        function void post_randomize(); after_count++; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!p.randomize() || p.x != 1) $fatal(1, "first pre state");
+        if (!p.randomize() || p.x != 2) $fatal(1, "second pre state");
+        if (p.randomize() || p.x != 2) $fatal(1, "unsat changed fields");
+        if (p.before_count != 3 || p.after_count != 2) $fatal(1, "post called on failure");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inside
+  (source "constraint_inside.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x, lo, hi;
+        constraint bounds { lo inside {-3, -2}; hi inside {2, 3};
+            x inside {[lo:hi], 9}; !(x inside {0, 9}); }
+    endclass
+    class Empty;
+        rand int x;
+        constraint c { x inside {[3:-3]}; }
+    endclass
+    Packet p;
+    Empty e;
+    initial begin
+        e = new; e.x = 42;
+        if (e.randomize() || e.x != 42) $fatal(1, "empty range changed fields");
+        p = new;
+        repeat (12) begin
+            if (!p.randomize()) $fatal(1, "membership unsat");
+            if (p.lo < -3 || p.lo > -2 || p.hi < 2 || p.hi > 3 ||
+                p.x < p.lo || p.x > p.hi || p.x == 0) $fatal(1, "membership");
+        end
+        p.lo = 3; p.hi = -3;
+        if (p.randomize(x)) $fatal(1, "reversed range must be empty");
+        p.lo = -2; p.hi = 2; p.x = -1;
+        if (!p.randomize(null)) $fatal(1, "negative check-only member");
+        p.x = p.lo;
+        if (!p.randomize(null)) $fatal(1, "low endpoint excluded");
+        p.x = p.hi;
+        if (!p.randomize(null)) $fatal(1, "high endpoint excluded");
+        p.x = 0;
+        if (p.randomize(null)) $fatal(1, "excluded check-only member");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inside_widths
+  (source "constraint_inside_widths.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit signed [7:0] x;
+        rand bit [15:0] y;
+        constraint c { x inside {-2, -1}; y inside {x}; }
+    endclass
+    class WideSet;
+        bit [3:0] a, b;
+        constraint c { !((a + b) inside {4'd0, 8'd17}); }
+    endclass
+    class WideRange;
+        bit [3:0] a, b;
+        constraint c { (a + b) inside {[4'd1:8'd16]}; }
+    endclass
+    Packet p;
+    WideSet s;
+    WideRange r;
+    initial begin
+        p = new;
+        if (!p.randomize()) $fatal(1, "mixed width membership");
+        if (p.x != -2 && p.x != -1) $fatal(1, "signed membership");
+        if (p.y != 254 && p.y != 255) $fatal(1, "unsigned comparison context");
+        s = new; s.a = 15; s.b = 1;
+        if (!s.randomize(null)) $fatal(1, "membership-wide sum width");
+        r = new; r.a = 15; r.b = 1;
+        if (!r.randomize(null)) $fatal(1, "range endpoint width");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_conditionals
+  (source "conditional_constraints.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit mode;
+        rand int value;
+        int required;
+        constraint c {
+            value == required;
+            if (mode) { value inside {[1:3]}; value != 2; }
+            else value == 8;
+            mode -> { value > 0; if (value == 3) value != 1; }
+        }
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        p.required = 8;
+        if (!p.randomize() || p.mode != 0 || p.value != 8) $fatal(1, "reverse else solve");
+        p.required = 3;
+        if (!p.randomize() || p.mode != 1 || p.value != 3) $fatal(1, "reverse then solve");
+        p.required = 2;
+        if (p.randomize() || p.value != 3) $fatal(1, "block constraint lost");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_nested_guards
+  (source "nested_guards.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit a, b;
+        rand int x;
+        constraint c {
+            x == 7;
+            if (a) if (b) x == 1; else x == 7;
+            !a -> x == 2;
+            a -> b -> x == 1;
+            if (1'b0) x == 123;
+        }
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!p.randomize() || p.a != 1 || p.b != 0 || p.x != 7) $fatal(1, "nested guards");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline
+  (source "inline_constraints.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x, y;
+        int limit, pre_count, post_count;
+        constraint c { x < 10; }
+        function void pre_randomize(); limit=3; pre_count++; endfunction
+        function void post_randomize(); post_count++; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!(p.randomize() with { x inside {[1:limit]}; y == x + 1; }))
+            $fatal(1, "inline success");
+        if (p.x < 1 || p.x > 3 || p.y != p.x + 1) $fatal(1, "inline values");
+        if (p.randomize() with { x == 12; }) $fatal(1, "lost class constraint");
+        if (p.pre_count != 2 || p.post_count != 1) $fatal(1, "inline hooks");
+        if (!(p.randomize() with { x == 7; if (x == 7) y == 8; })) $fatal(1, "inline leaked");
+        if (!p.randomize(null)) $fatal(1, "ordinary check");
+        if (p.randomize(null) with { x == 2; }) $fatal(1, "inline check");
+        if (p.x != 7 || p.y != 8) $fatal(1, "check-only changed fields");
+        if (!(p.randomize(x) with { x == y; })) $fatal(1, "inline selection");
+        if (p.x != 8 || p.y != 8) $fatal(1, "unselected field changed");
+        p.randomize() with { x == 4; y == 5; };
+        if (p.x != 4 || p.y != 5) $fatal(1, "discarded call");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_inheritance
+  (source "inline_inheritance.sv" #"
+module Top(output bit done);
+    class Base;
+        rand int x;
+    endclass
+    class Derived extends Base;
+        rand int x;
+        int hook;
+        constraint c { x == 9; }
+        function void pre_randomize(); hook++; endfunction
+    endclass
+    Base b;
+    Derived d;
+    initial begin
+        d = new; b = d;
+        if (!(b.randomize() with { x == 2; })) $fatal(1, "base inline scope");
+        if (b.x != 2 || d.x != 9 || d.hook != 1) $fatal(1, "static scope or dynamic hooks");
+        if (!(b.randomize() with { x == 5; })) $fatal(1, "second inline");
+        if (b.x != 5 || d.x != 9 || d.hook != 2) $fatal(1, "inline persistence");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_basic
+  (source "inline_basic.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand int x;
+        constraint c { x inside {1, 2}; }
+        function int pick(); return randomize() with { x == 1; }; endfunction
+    endclass
+    Packet p;
+    initial begin
+        p = new;
+        if (!(p.randomize() with { x == 2; })) $fatal(1, "inline member");
+        if (p.x != 2) $fatal(1, "inline value");
+        if (!p.pick() || p.x != 1) $fatal(1, "unqualified inline call");
+        if (p.randomize() with { x == 3; }) $fatal(1, "named constraint lost");
+        if (p.x != 1) $fatal(1, "failed inline changed member");
+        if (!(p.randomize() with { x == 2; })) $fatal(1, "inline not per-call");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_package_instances
+  (source "inline_package.sv" #"
+package pkg;
+    class Packet;
+        rand int x;
+        function int pick(); return randomize() with { x == 2; }; endfunction
+    endclass
+endpackage
+module Child(output bit done);
+    class Derived extends pkg::Packet;
+        rand int y;
+        int calls;
+        constraint c { y == 7; }
+        function void pre_randomize(); calls++; endfunction
+    endclass
+    pkg::Packet p;
+    Derived d;
+    if (1) begin : g
+        initial begin
+            p = new;
+            if (!p.pick() || p.x != 2) $fatal(1, "package method inline");
+            if (!(p.randomize() with { x == 3; }) || p.x != 3) $fatal(1, "instance inline");
+            d = new;
+            p = d;
+            if (!p.pick() || p.x != 2 || d.y != 7 || d.calls != 1)
+                $fatal(1, "imported inline subclass dispatch");
+            done = 1;
+        end
+    end
+endmodule
+module Top(output bit done);
+    wire a, b;
+    Child c0(a), c1(b);
+    assign done = a & b;
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_inputs
+  (source "inline_inputs.sv" #"
+module Top(output bit done);
+    class Packet;
+        rand bit signed [7:0] x;
+        rand bit [15:0] y;
+        constraint c { y == 7; }
+    endclass
+    Packet p;
+    bit signed [7:0] wanted;
+    bit signed [7:0] x;
+    initial begin
+        p = new;
+        wanted = -2;
+        x = -3;
+        if (!(p.randomize() with { x == wanted; })) $fatal(1, "fallback input");
+        if (p.x != -2 || p.y != 7 || wanted != -2) $fatal(1, "signed readonly input");
+        if (!(p.randomize() with { x == local::x; })) $fatal(1, "local qualifier");
+        if (p.x != -3 || x != -3) $fatal(1, "shadowed local");
+        wanted = 4;
+        if (!(p.randomize() with { x inside {[wanted:6]}; })) $fatal(1, "input range");
+        if (p.x < 4 || p.x > 6) $fatal(1, "new call input");
+        wanted = p.x;
+        if (!(p.randomize(null) with { x == wanted; })) $fatal(1, "input check");
+        wanted = 12;
+        if (p.randomize(y) with { y == wanted; }) $fatal(1, "input unsat");
+        if (p.x < 4 || p.x > 6 || p.y != 7) $fatal(1, "unsat changed object");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_input_methods
+  (source "inline_input_methods.sv" #"
+package pkg;
+    class Base;
+        rand bit [7:0] x;
+        function int pick(bit [7:0] wanted);
+            return randomize() with { x == wanted; };
+        endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Derived extends pkg::Base;
+        rand bit [7:0] y;
+        constraint c { y == 9; }
+    endclass
+    Derived d;
+    pkg::Base b;
+    initial begin
+        d = new; b = d;
+        if (!b.pick(2) || d.x != 2 || d.y != 9) $fatal(1, "imported input");
+        if (!b.pick(5) || d.x != 5 || d.y != 9) $fatal(1, "repeated method input");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constrained_randomize_inline_input_hooks
+  (source "inline_input_hooks.sv" #"
+module Top(output bit done);
+    bit [7:0] wanted;
+    class Base;
+        rand bit [7:0] x;
+        int pre_calls, post_calls;
+        function void pre_randomize(); wanted = 5; pre_calls++; endfunction
+        function void post_randomize(); post_calls++; endfunction
+    endclass
+    class Derived extends Base;
+        function void pre_randomize(); wanted = 6; pre_calls++; endfunction
+    endclass
+    Base p;
+    Derived d;
+    initial begin
+        p = new; wanted = 2;
+        if (!(p.randomize(x) with { x == wanted; })) $fatal(1, "hook input solve");
+        if (p.x != 5 || wanted != 5 || p.pre_calls != 1 || p.post_calls != 1)
+            $fatal(1, "input sampled before hook");
+        wanted = 2;
+        if (p.randomize(x) with { x == wanted; x == 2; }) $fatal(1, "hook unsat");
+        if (p.x != 5 || p.pre_calls != 2 || p.post_calls != 1) $fatal(1, "hook failure state");
+        d = new; p = d; wanted = 2;
+        if (!(p.randomize() with { x == wanted; }) || p.x != 6 || p.pre_calls != 1 || p.post_calls != 1)
+            $fatal(1, "dynamic input hook");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_basic
+  (source "constraint_mode_basic.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit [3:0] x;
+        constraint low { x == 2; }
+        constraint high { x == 9; }
+        function void enable_low(); constraint_mode(0); low.constraint_mode(1); endfunction
+    endclass
+    C c, alias_c, other;
+    initial begin
+        c = new; other = new; alias_c = c;
+        if (c.low.constraint_mode() != 1 || c.high.constraint_mode() != 1) $fatal(1, "initial modes");
+        c.x = 7;
+        if (c.randomize() || c.x != 7) $fatal(1, "initial contradiction");
+        alias_c.high.constraint_mode(0);
+        if ((c.high.constraint_mode() != 0) || (other.high.constraint_mode() == 0)) $fatal(1, "alias isolation");
+        if (!c.randomize() || c.x != 2) $fatal(1, "disabled block");
+        c.constraint_mode(0);
+        if (!(c.randomize() with { x == 5; }) || c.x != 5) $fatal(1, "inline remains active");
+        c.high.constraint_mode(1);
+        if (c.randomize(null)) $fatal(1, "check only fails");
+        if (!c.randomize() || c.x != 9 || !c.randomize(null)) $fatal(1, "check only succeeds");
+        c.enable_low();
+        if (!c.randomize() || c.x != 2) $fatal(1, "implicit receiver");
+        c.low.constraint_mode(2);
+        if (c.low.constraint_mode() != 0) $fatal(1, "bit conversion");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_inheritance
+  (source "constraint_mode_inheritance.sv" #"
+package pkg;
+    class Base;
+        rand bit [3:0] x, y;
+        constraint first { x == 1; }
+        constraint second { y == 3; }
+        function void disable_first(); first.constraint_mode(0); endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Derived extends pkg::Base;
+        constraint first { x == 7; }
+        constraint third { y == 5; }
+    endclass
+    Derived d;
+    pkg::Base b;
+    initial begin
+        d = new; b = d;
+        b.constraint_mode(0);
+        if ((d.first.constraint_mode() != 0) || (d.second.constraint_mode() != 0) || (d.third.constraint_mode() != 0)) $fatal(1, "dynamic all");
+        b.first.constraint_mode(1);
+        d.third.constraint_mode(1);
+        if ((d.first.constraint_mode() == 0) || (d.second.constraint_mode() != 0) || (d.third.constraint_mode() == 0)) $fatal(1, "override modes");
+        // Package-base randomize dispatch is tracked separately in #1892.
+        if (!d.randomize()) $fatal(1, "override solve");
+        if (d.x != 7 || d.y != 5) $fatal(1, "override values x=%d y=%d", d.x, d.y);
+        b.disable_first();
+        if ((d.first.constraint_mode() != 0) || (d.third.constraint_mode() == 0)) $fatal(1, "inherited method");
+        if (!(d.randomize() with { x == 2; }) || d.x != 2 || d.y != 5) $fatal(1, "disabled override");
+        b.constraint_mode(1);
+        if ((d.first.constraint_mode() == 0) || (d.second.constraint_mode() == 0) || (d.third.constraint_mode() == 0)) $fatal(1, "all enabled");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_hooks
+  (source "constraint_mode_hooks.sv" #"
+module Top(output bit done);
+    class C;
+        rand bit [3:0] x;
+        bit disable_c;
+        constraint c { x == 2; }
+        function void pre_randomize(); c.constraint_mode(!disable_c); endfunction
+    endclass
+    C p;
+    initial begin
+        p = new; p.disable_c = 1;
+        if (!(p.randomize(x) with { x == 7; }) || p.x != 7) $fatal(1, "pre-hook disable");
+        if (p.c.constraint_mode() != 0) $fatal(1, "mode survives selected randomize");
+        p.disable_c = 0;
+        if (p.randomize(x) with { x == 7; }) $fatal(1, "pre-hook enable");
+        if ((p.c.constraint_mode() == 0) || p.x != 7) $fatal(1, "failed solve mode");
+        if (!p.randomize() || p.x != 2) $fatal(1, "subsequent solve");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_base_dispatch
+  (source "constraint_mode_base_dispatch.sv" #"
+module Top(output bit done);
+    class Base;
+        rand bit [3:0] x, y;
+        constraint a { x == 1; }
+        constraint b { y == 3; }
+    endclass
+    class Derived extends Base;
+        constraint a { x == 7; }
+        constraint c { y == 5; }
+    endclass
+    Base b;
+    Derived d;
+    initial begin
+        d = new; b = d;
+        b.b.constraint_mode(0);
+        if (!b.randomize() || d.x != 7 || d.y != 5) $fatal(1, "dynamic override");
+        b.a.constraint_mode(0);
+        if (!(b.randomize() with { x == 2; }) || d.x != 2 || d.y != 5) $fatal(1, "inline dynamic modes");
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case constraint_mode_ordinary_struct_members
+  (source "constraint_mode_struct.sv" #"
+    module Top(input int data, output int direct_value, nested_value);
+      struct packed { int constraint_mode; } direct_data;
+      struct packed { struct packed { int constraint_mode; } child; } nested_data;
+      always_comb begin
+        direct_data.constraint_mode = data;
+        nested_data.child.constraint_mode = data + 1;
+        direct_value = direct_data.constraint_mode;
+        nested_value = nested_data.child.constraint_mode;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for value (list 0 37 255)
+    (modify (set data value))
+    (assert_eq direct_value value)
+    (assert_eq nested_value (+ value 1))))
+
+(case type_parameter_imports
+  (source "type_parameter_imports.sv" #"
+package p;
+    class Item;
+        static int value = 42;
+        typedef bit [7:0] word_t;
+    endclass
+    class Unused #(type TYPE = Item);
+        typedef TYPE::word_t element_t;
+        static function int get(); return TYPE::value; endfunction
+    endclass
+endpackage
+module Top(output bit done);
+    class Local #(type TYPE = p::Item);
+        extern static function int get();
+    endclass
+    function int Local::get(); return TYPE::value; endfunction
+    initial done = Local#()::get() == 42;
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1))
+
+(case type_parameter_shadowing
+  (source "type_parameter_shadowing.sv" #"
+package TYPE;
+    parameter int value = 7;
+endpackage
+module Top(output bit [1:0] flags);
+    class Item; static int value = 42; endclass
+    class Local #(type TYPE = Item);
+        static function int get(); return TYPE::value; endfunction
+    endclass
+    initial begin
+        flags[0] = TYPE::value == 7;
+        flags[1] = Local#()::get() == 42;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 3))
+
+(case type_alias_members
+  (source "class.sv" #"
+package p;
+    class Item #(int N = 42);
+        static int value = N;
+        typedef bit [7:0] word_t;
+        static function int read(); return value; endfunction
+    endclass
+    typedef Item#(23) Alias;
+    class Reader;
+        static function int read(); return Alias::read(); endfunction
+    endclass
+endpackage
+module Top(output int sum, output bit done);
+    import p::*;
+    typedef Alias LocalAlias;
+    class Word;
+        typedef bit [7:0] word_t;
+    endclass
+    typedef Word WordAlias;
+    WordAlias::word_t sample;
+    initial begin
+        sample = 8'hff;
+        sum = Reader::read() + LocalAlias::value + sample;
+        Alias::value = 24;
+        done = Reader::read() == 24 && LocalAlias::value == 24;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 301) (assert_eq done 1))
+
+(case type_alias_lexical_scopes
+  (source "class.sv" #"
+package Alias;
+    parameter int value = 7;
+endpackage
+module Top(output int sum, output bit done);
+    class Item;
+        static int value = 42;
+    endclass
+    class Reader;
+        typedef Item Alias;
+        extern static function int read();
+    endclass
+    function int Reader::read(); return Alias::value; endfunction
+    initial begin
+        sum = Reader::read() + Alias::value;
+        done = sum == 49;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 49) (assert_eq done 1))
+
+(case imported_member_type_dimensions
+  (source "classes.sv" #"
+package p;
+    class Box #(int N = 5);
+        typedef bit [N-1:0] element_t;
+    endclass
+    typedef Box#() Small;
+    typedef Box#(9) Wide;
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    import p::*;
+    localparam int N = 29;
+    Small::element_t sample;
+    Wide::element_t other;
+    initial begin
+        sample = '1;
+        other = '1;
+        sum = sample + other;
+        done = $bits(sample) == 5 && $bits(other) == 9;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 542) (assert_eq done 1))
+
+(case imported_member_type_inheritance
+  (source "classes.sv" #"
+package p;
+    class Base #(type T = byte);
+        typedef T item_t;
+    endclass
+    class Derived #(int N = 9) extends Base#(bit [2:0]); endclass
+    typedef Derived#() Tiny;
+    typedef Base#(bit [6:0]) Other;
+endpackage
+"#)
+  (source "exports.sv" #"
+package q;
+    import p::Tiny;
+    import p::Other;
+    export p::Tiny;
+    export p::Other;
+    class Sub extends Tiny;
+        typedef bit [4:0] item_t;
+        typedef item_t copied_t;
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    import q::*;
+    Sub::copied_t a;
+    Other::T b;
+    Tiny::item_t c;
+    initial begin
+        a = '1;
+        b = '1;
+        c = '1;
+        sum = a + b + c;
+        done = $bits(a) == 5 && $bits(b) == 7 && $bits(c) == 3;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 165) (assert_eq done 1))
+(case package_constant_class_defaults
+  (source "package.sv" #"
+package p;
+    parameter int WIDTH = 5;
+    class Box #(int N = WIDTH, int M = N + 2);
+        function int get(); return WIDTH + 10 * N + M; endfunction
+    endclass
+    typedef Box#() Small;
+    typedef Box Implicit;
+    typedef Box#(9) Wide;
+    function automatic int read();
+        Small defaulted = new();
+        Implicit normal = new();
+        Wide wide = new();
+        return defaulted.get() + normal.get() + wide.get();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    localparam int WIDTH = 29;
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 230))
+(case package_constant_type_arguments
+  (source "package.sv" #"
+package p;
+    parameter int W = 6;
+    typedef bit signed [W-1:0] word_t;
+    class Utils #(type T = int);
+        static function int width();
+            T v;
+            return $bits(v);
+        endfunction
+        static function int negative();
+            T v = '1;
+            return v < 0;
+        endfunction
+    endclass
+    typedef Utils#(word_t) word_utils;
+    typedef Utils#(bit [W:0]) wide_utils;
+    function automatic int read();
+        return 100 * word_utils::width() + 10 * wide_utils::width()
+            + 2 * word_utils::negative() + wide_utils::negative();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    localparam int W = 29;
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 672))
+(case named_aggregate_type_arguments
+  (source "package.sv" #"
+package p;
+    typedef enum {A0, A1} first_e;
+    typedef enum {B0, B1} second_e;
+    typedef first_e alias_e;
+    typedef struct packed { bit [3:0] a; } s1_t;
+    typedef struct packed { bit [3:0] a; } s2_t;
+    class Box #(type T = int);
+        static int count;
+        function new();
+            count++;
+        endfunction
+        static function int width();
+            T v;
+            return $bits(v);
+        endfunction
+    endclass
+    function automatic int read();
+        Box#(first_e) a = new();
+        Box#(alias_e) b = new();
+        Box#(second_e) c = new();
+        Box#(s1_t) d = new();
+        Box#(s2_t) e = new();
+        Box#(s2_t) f = new();
+        return 10000 * Box#(first_e)::count + 1000 * Box#(second_e)::count
+            + 100 * Box#(s1_t)::count + 10 * Box#(s2_t)::count + Box#(s1_t)::width();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 21124))
+(case generate_scope_enum_type_arguments
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    class Box #(type T = int);
+        static int count;
+        function new();
+            count++;
+        endfunction
+    endclass
+    typedef enum {C0, C1} shared_e;
+    int counts[2];
+    for (genvar i = 0; i < 2; i++) begin : g
+        typedef enum {A, B} e_t;
+        typedef shared_e alias_e;
+        initial begin
+            automatic Box#(e_t) local_box = new();
+            automatic Box#(alias_e) shared_box = new();
+            #1 counts[i] = 10 * Box#(e_t)::count + Box#(alias_e)::count;
+        end
+    end
+    initial begin
+        #2;
+        sum = 100 * counts[0] + counts[1];
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq sum 1212) (assert_eq done 1))
+
+(case four_state_properties
+  (four_state)
+  (source "class.sv" #"
+module Top(output bit done);
+    class C;
+        time t;
+        logic [3:0] l;
+        integer i = 7;
+        reg signed [7:0] r;
+        bit [3:0] b;
+        logic [63:0] w;
+    endclass
+    C x, y;
+    initial begin
+        x = new;
+        $display("init %0d %b %0d %0d %b %h", x.t, x.l, x.i, x.r, x.b, x.w);
+        #5 x.t = $time;
+        x.l = 4'b1z0x;
+        x.r = -3;
+        x.i += 1;
+        x.w = 64'hdead_beef_0123_4567;
+        $display("set %0d %b %0d %0d %h", x.t, x.l, x.i, x.r, x.w);
+        y = new x;
+        y.l = 4'b1110;
+        $display("copy %b %b %0d %0d", x.l, y.l, y.t, x.l === 4'b1z0x);
+        x.w = 'x;
+        $display("x %h %0d", x.w, x.w === 64'bx);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq done 1)
+  (expect_output "init x xxxx 7 x 0000 xxxxxxxxxxxxxxxx\nset 5 1z0x 8 -3 deadbeef01234567\ncopy 1z0x 1110 5 1\nx xxxxxxxxxxxxxxxx 1\n"))
+(case method_ranges_of_scope_declarations
+  (source "top.sv" #"
+module Top(output int a, output int b);
+    logic [7:0] data;
+    class C;
+        static function logic [$bits(data)-1:0] f();
+            return '1;
+        endfunction
+    endclass
+    logic [$bits(C::f())-1:0] y;
+    assign a = $bits(y);
+    assign b = $bits(C::f());
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq a 8) (assert_eq b 8))
+
+(case waits_on_static_properties
+  ; A static property is a variable of the declaring scope, so a wait in a
+  ; method wakes when another process writes it (IEEE 1800-2023 8.9, 9.4.3).
+  (source "class.sv" #"
+class C;
+    static int s_state;
+    task wait_for(int s);
+        wait (s_state >= s);
+        $display("reached %0d at %0d", s, $time);
+    endtask
+endclass
+module Top;
+    C c;
+    initial begin
+        c = new;
+        fork
+            c.wait_for(2);
+            begin #1 c.s_state = 1; #1 c.s_state = 2; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 5)
+  (expect_output "reached 2 at 2\n"))
+; Package generic requests are bound where used and share static state across
+; importing module scopes. Matching aliases select the same specialization (8.25).
+(case foreign_generic_static_state_across_modules
+ (source "foreign_state.sv" #"
+package p;
+ class Db #(type T=int);
+  static T last;
+  static int count=0;
+  static function void set(T v); last=v; count++; endfunction
+ endclass
+endpackage
+module Writer;
+ initial begin #1; p::Db#(byte)::set(8'h35); p::Db#(int)::set(32'h12345678); end
+endmodule
+module Reader(output int narrow, wide, narrow_count, wide_count);
+ typedef p::Db#(byte) ByteDb;
+ initial begin
+  #2; narrow=ByteDb::last; wide=p::Db#(int)::last;
+  narrow_count=ByteDb::count; wide_count=p::Db#(int)::count;
+ end
+endmodule
+module Top(output int narrow, wide, narrow_count, wide_count);
+ Writer writer();
+ Reader reader(narrow, wide, narrow_count, wide_count);
+endmodule"#)
+ (top Top) (run_until 3)
+ (assert_eq narrow 0x35) (assert_eq wide 0x12345678)
+ (assert_eq narrow_count 1) (assert_eq wide_count 1))
+
+; A package factory receives a compilation-unit class as a type parameter and
+; resolves its constructor in that class's declaration scope, including type_id.
+(case foreign_generic_unit_type_constructor
+ (source "foreign_factory.sv" #"
+package p;
+ class Registry #(type T, string NAME="User");
+  static function string get_name(); return T::type_name(); endfunction
+  static function string registered_name(); return NAME; endfunction
+  static function int get_kind(); return T::kind; endfunction
+  static function string get_label(); return T::label; endfunction
+  static function T create(int n);
+   T object;
+   object=new(n);
+   return object;
+  endfunction
+ endclass
+endpackage
+import p::*;
+class User;
+ static function string type_name(); return "User"; endfunction
+ parameter string label="unit_label";
+ static const int kind=7;
+ typedef Registry#(User, "user_registry") type_id;
+ int value;
+ function new(int n); value=n; endfunction
+ static function User make();
+  if (type_id::get_name() != "User" || type_id::registered_name() != "user_registry" || type_id::get_kind() != 7 || type_id::get_label() != "unit_label") return type_id::create(-1);
+  return type_id::create(23);
+ endfunction
+endclass
+module Top(output int result);
+ User object;
+ initial begin object=User::make(); result=object.value; end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq result 23))
+
+; The same specialized static handle is one object when accessed from multiple
+; modules; another type argument has independent static storage (8.25).
+(case foreign_generic_static_handle_identity
+ (source "foreign_handles.sv" #"
+package p;
+ class Item;
+  int value;
+  function new(int n); value=n; endfunction
+ endclass
+ class Other;
+  int value;
+  function new(int n); value=n; endfunction
+ endclass
+ class Slot #(type T);
+  static T saved;
+  static function void put(T h); saved=h; endfunction
+ endclass
+endpackage
+module Writer;
+ p::Item item;
+ p::Other other;
+ initial begin
+  item=new(41); other=new(99);
+  #1; p::Slot#(p::Item)::put(item); p::Slot#(p::Other)::put(other);
+ end
+endmodule
+module Reader(output int value, other_value, same);
+ p::Item item;
+ initial begin
+  #2; item=p::Slot#(p::Item)::saved;
+  same=(item==p::Slot#(p::Item)::saved);
+  item.value++; value=p::Slot#(p::Item)::saved.value;
+  other_value=p::Slot#(p::Other)::saved.value;
+ end
+endmodule
+module Top(output int value, other_value, same);
+ Writer writer(); Reader reader(value, other_value, same);
+endmodule"#)
+ (top Top) (run_until 3)
+ (assert_eq value 42) (assert_eq other_value 99) (assert_eq same 1))
+
+; Explicit actuals are evaluated in the importing module; defaults and qualified
+; package references retain the declaration scope, despite local shadows (8.25).
+(case foreign_generic_declaration_scope_and_equivalent_defaults
+ (source "foreign_scopes.sv" #"
+package p;
+ parameter int W=5;
+ typedef bit [W-1:0] word_t;
+ class Box #(int N=W, type T=word_t);
+  static int count=0;
+  T value;
+  function new(); count++; endfunction
+  static function int width(); return $bits(T); endfunction
+  static function int number(); return N; endfunction
+  static function int from_pkg(); int W; W=77; return p::W; endfunction
+ endclass
+endpackage
+module Top(output int checks);
+ parameter int W=9;
+ typedef bit [W-1:0] word_t;
+ typedef p::Box#(.T(word_t)) Wide;
+ typedef p::Box#(.T(word_t),.N(5)) Same;
+ typedef Wide::T word_again;
+ Wide a; Same b; p::Box#() c;
+ initial begin
+  a=new(); b=new(); c=new();
+  checks=(Wide::number()==5);
+  checks+=(Wide::width()==9)*2;
+  checks+=(p::Box#()::width()==5)*4;
+  checks+=(Wide::N==5)*8;
+  checks+=($bits(word_again)==9)*16;
+  checks+=(Wide::count==2 && Same::count==2 && p::Box#()::count==1)*32;
+  checks+=(Wide::from_pkg()==5)*64;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 127))
+
+; Distinct caller classes from different source files specialize one package
+; factory independently, under either compilation-unit model (8.25).
+(case foreign_generic_multiple_user_classes
+ (source "registry.sv" #"
+package p;
+ class Registry #(type T);
+  static int count=0;
+  static function T create(); T object; object=new(); count++; return object; endfunction
+ endclass
+endpackage"#)
+ (source "first.sv" #"
+import p::*;
+class FirstUser;
+ int value;
+ function new(); value=42; endfunction
+ typedef Registry#(FirstUser) type_id;
+endclass
+module First(output int result, count);
+ FirstUser object;
+ initial begin object=FirstUser::type_id::create(); result=object.value; count=FirstUser::type_id::count; end
+endmodule"#)
+ (source "second.sv" #"
+import p::*;
+class SecondUser;
+ int padding;
+ int value;
+ function new(); padding=99; value=73; endfunction
+ typedef Registry#(SecondUser) type_id;
+endclass
+module Second(output int result, count);
+ SecondUser object;
+ initial begin object=SecondUser::type_id::create(); result=object.value; count=SecondUser::type_id::count; end
+endmodule"#)
+ (source "top.sv" #"
+module Top(output int first, second, first_count, second_count);
+ First a(first, first_count); Second b(second, second_count);
+endmodule"#)
+ (top Top) (run_until 0)
+ (assert_eq first 42) (assert_eq second 73)
+ (assert_eq first_count 1) (assert_eq second_count 1))
+
+; Aliases match their original enum/struct, while distinct declarations and
+; nested package generic actuals remain distinct specializations (6.22.1, 8.25).
+(case foreign_generic_nominal_and_nested_types
+ (source "foreign_types.sv" #"
+package p;
+ class Counter #(type T);
+  static int count=0;
+  static function int tick(); count++; return count; endfunction
+ endclass
+ class Wrap #(type T); endclass
+endpackage
+module Top(output int checks);
+ typedef enum bit [1:0] {A0=0,A1=1} A;
+ typedef A Alias;
+ typedef enum bit [1:0] {B0=0,B1=1} B;
+ typedef struct packed {bit [3:0] x;} S;
+ typedef struct packed {bit [3:0] x;} U;
+ typedef p::Wrap#(byte)::T element_t;
+ typedef int int_queue[$];
+ typedef byte byte_queue[$];
+ initial begin
+  checks=(p::Counter#(A)::tick()==1);
+  checks+=(p::Counter#(Alias)::tick()==2)*2;
+  checks+=(p::Counter#(B)::tick()==1)*4;
+  checks+=(p::Counter#(S)::tick()==1)*8;
+  checks+=(p::Counter#(U)::tick()==1)*16;
+  checks+=(p::Counter#(p::Wrap#(byte))::tick()==1)*32;
+  checks+=(p::Counter#(p::Wrap#(byte))::tick()==2)*64;
+  checks+=(p::Counter#(p::Wrap#(int))::tick()==1)*128;
+  checks+=($bits(element_t)==8)*256;
+  checks+=(p::Counter#(int_queue)::tick()==1)*512;
+  checks+=(p::Counter#(byte_queue)::tick()==1)*1024;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 2047))
+
+; Inherited parameters are class members; the derived declaration sees their
+; bound values instead of same-named package constants (8.13, 8.25).
+(case foreign_generic_inherited_constants
+ (source "foreign_inheritance.sv" #"
+package p;
+ class Base #(int N=3, type T=bit[N-1:0]);
+  localparam int LOCAL=N+1;
+  parameter string LABEL="base";
+  typedef T item_t;
+ endclass
+endpackage
+package q;
+ import p::*;
+ parameter int N=99, LOCAL=23;
+ parameter string LABEL="package_q";
+ class Child #(int M=5) extends Base#(M);
+  bit[LOCAL-1:0] field;
+  function int checks();
+   return (N==5) + (LOCAL==6)*2 + ($bits(item_t)==5)*4
+          + ($bits(field)==6)*8 + (LABEL=="base")*16;
+  endfunction
+ endclass
+endpackage
+module Top(output int checks);
+ q::Child#(5) child;
+ initial begin child=new(); checks=child.checks(); end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 31))
+
+; A factory's type argument constructor retains compilation-unit functions and
+; mutable variables from its declaration scope (3.12.1, 8.25).
+(case foreign_generic_constructor_lexical_scope
+ (source "foreign_constructor_scope.sv" #"
+package p;
+ int source_value=96;
+ function automatic int initial_value(); return source_value+3; endfunction
+ class Factory #(type T);
+  static int count=0;
+  static function T create(); T result; result=new(); count++; return result; endfunction
+ endclass
+endpackage
+int value=20;
+function automatic int initial_value(); return value+3; endfunction
+class User;
+ int value;
+ function new(int n=initial_value()); value=n; endfunction
+endclass
+module Top(output int result, count);
+ User object;
+ initial begin
+  object=p::Factory#(User)::create(); result=object.value; count=p::Factory#(User)::count;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq result 23) (assert_eq count 1))
+
+; A caller supplies a class from a package the generic owner does not import.
+; Its static fields retain their original package storage (8.9, 8.25, 26.2).
+(case foreign_generic_package_type_static_storage
+ (source "foreign_package_type.sv" #"
+package p;
+ class Item;
+  static int tag=7;
+  int value;
+  function new(); value=42; endfunction
+ endclass
+endpackage
+package q;
+ class Factory #(type T);
+  static int count=0;
+  static function T create(); T result; result=new(); count++; return result; endfunction
+  static function int type_tag(); return T::tag; endfunction
+ endclass
+endpackage
+module Top(output int result, tag, count);
+ p::Item object;
+ initial begin
+  object=q::Factory#(p::Item)::create(); result=object.value;
+  tag=q::Factory#(p::Item)::type_tag(); count=q::Factory#(p::Item)::count;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq result 42) (assert_eq tag 7) (assert_eq count 1))
+(case foreign_generic_template_of_the_named_package
+  (source "packages.sv" #"
+package a;
+    class C #(type U = int);
+        static function int width();
+            U v;
+            return $bits(v);
+        endfunction
+    endclass
+endpackage
+package p;
+    class C #(type T = int);
+        static function int width();
+            T v;
+            return 100 + $bits(v);
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int w);
+    initial w = p::C#(.T(byte))::width();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq w 108))
+(case foreign_generic_in_a_module_with_interface_instances
+  (source "package.sv" #"
+package p;
+    class C #(type T = int);
+        static T v;
+        static function void set(T value);
+            v = value;
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+interface bus_if;
+    logic x;
+endinterface
+module Top(output int got);
+    import p::*;
+    bus_if b();
+    initial begin
+        C#(byte)::set(2);
+        got = C#(byte)::v;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq got 2))
+(case enumeration_constants_of_classes
+  (source "package.sv" #"
+package p;
+    class C;
+        typedef bit [1:0] mode_t;
+        typedef enum mode_t {STRICT = 2'b00, HIGHEST = 2'b01, CHECK = 2'b10} mode_e;
+        localparam mode_t DEFAULT = CHECK;
+        mode_e m = HIGHEST;
+        function int f();
+            return DEFAULT + 10 * m;
+        endfunction
+        static function int g();
+            return C::CHECK;
+        endfunction
+    endclass
+    class P #(int N = 1);
+        typedef enum {A = N, B} e;
+        static function int b();
+            return B;
+        endfunction
+    endclass
+    typedef P#(5) P5;
+    typedef P#() P1;
+    typedef enum {OTHER = 1} other_e;
+    class Q;
+        localparam int OTHER = 7;
+        typedef other_e alias_e;
+        static function int f();
+            return OTHER;
+        endfunction
+    endclass
+    class Base;
+        typedef enum bit [1:0] {FIRST = 2'b01} base_e;
+    endclass
+    class Derived extends Base;
+        typedef enum bit [1:0] {SECOND = FIRST} derived_e;
+        static function int f();
+            return SECOND;
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic C c = new();
+        sum = c.f() + 100 * C::g() + 1000 * C::CHECK + 10000 * C::DEFAULT
+            + 100000 * P5::b() + 1000000 * P1::b() + 10000000 * Q::f()
+            + 100000000 * Derived::f();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 172622212))
+(case container_type_aliases_of_classes
+  (source "package.sv" #"
+package p;
+    class C;
+        typedef int queue_t[$];
+        typedef bit flags_t[string];
+        typedef byte bytes_t[];
+        queue_t q;
+        flags_t flags;
+        bytes_t b;
+        function void fill(ref queue_t r);
+            foreach (q[i]) r.push_back(q[i] * 2);
+        endfunction
+        function int f();
+            queue_t copy;
+            q.push_back(3);
+            q.push_back(4);
+            flags["a"] = 1;
+            flags["b"] = 0;
+            b = new[3];
+            fill(copy);
+            return copy.size() + 10 * copy[1] + 100 * flags.num() + 1000 * b.size();
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic C c = new();
+        C::queue_t outside;
+        outside.push_back(7);
+        sum = c.f() + 100000 * outside[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 703282))
+(case members_of_call_results
+  (source "package.sv" #"
+package p;
+    class Base;
+        int n;
+        virtual function Base report_object();
+            return this;
+        endfunction
+        function int v();
+            return n;
+        endfunction
+    endclass
+    class Derived extends Base;
+        virtual function Base report_object();
+            return this;
+        endfunction
+        function int probe();
+            return report_object().v() + 10 * report_object().report_object().n;
+        endfunction
+    endclass
+    class R;
+        int n = 3;
+        static R inst;
+        function R get();
+            return this;
+        endfunction
+        function int v();
+            return n;
+        endfunction
+        static function R instance_of();
+            if (inst == null) inst = new();
+            return inst;
+        endfunction
+    endclass
+    function R get();
+        return R::instance_of();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic Derived d = new();
+        automatic R r;
+        d.n = 2;
+        r = get().get();
+        r.n = 5;
+        sum = d.probe() + 100 * get().v() + 1000 * get().get().n
+            + 10000 * R::instance_of().get().v();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 55522))
+
+; Handles declared with a class-scoped typedef of a registry specialization,
+; as `uvm_object_utils` declares `type_id`, call its methods: static
+; `C::type_id::create()`, virtual ones through a base handle, and a method
+; whose local has the registry's own class-scoped typedef (8.23, 8.25.1).
+(case scoped_typedef_handles
+ (source "scoped_typedef_handles.sv" #"
+package p;
+ virtual class Wrapper;
+  pure virtual function string get_type_name();
+ endclass
+ typedef class Common;
+ class Registry #(type T = int, string Tname = "<unknown>") extends Wrapper;
+  typedef Registry #(T, Tname) this_type;
+  typedef Common #(this_type, T, Tname) common_type;
+  static this_type me;
+  static function this_type get();
+   if (me == null) me = new;
+   return me;
+  endfunction
+  static function T create();
+   T object = new;
+   return object;
+  endfunction
+  virtual function string get_type_name();
+   common_type common = common_type::get();
+   return common.name();
+  endfunction
+ endclass
+ class Common #(type Reg = int, type T = int, string Tname = "<unknown>");
+  static Common #(Reg, T, Tname) inst;
+  static function Common #(Reg, T, Tname) get();
+   if (inst == null) inst = new;
+   return inst;
+  endfunction
+  function string name();
+   return Tname;
+  endfunction
+ endclass
+ class PkgComp;
+  int value = 3;
+  typedef Registry #(PkgComp, "pkg") type_id;
+ endclass
+endpackage
+import p::*;
+class UnitComp;
+ int value = 5;
+ typedef Registry #(UnitComp, "unit") type_id;
+endclass
+module Top(output int sum, output int names);
+ class LocalRegistry #(type T = int, string Tname = "<unknown>");
+  typedef LocalRegistry #(T, Tname) this_type;
+  static function T create();
+   T object = new;
+   return object;
+  endfunction
+  virtual function string get_type_name();
+   this_type self = this;
+   return Tname;
+  endfunction
+ endclass
+ class LocalComp;
+  int value = 7;
+  typedef LocalRegistry #(LocalComp, "local") type_id;
+ endclass
+ initial begin
+  automatic UnitComp::type_id u = new;
+  automatic PkgComp::type_id k = new;
+  automatic LocalComp::type_id l = new;
+  automatic Wrapper w = k;
+  automatic UnitComp uc = UnitComp::type_id::create();
+  automatic PkgComp pc = PkgComp::type_id::create();
+  automatic LocalComp lc = LocalComp::type_id::create();
+  sum = uc.value + 10 * pc.value + 100 * lc.value;
+  names = (u.get_type_name() == "unit") + 2 * (w.get_type_name() == "pkg")
+   + 4 * (l.get_type_name() == "local")
+   + 8 * (UnitComp::type_id::get() == UnitComp::type_id::get());
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 735) (assert_eq names 15))
+
+; A string class parameter wider than 128 bits is passed on by name to the
+; specializations its typedefs, property, return and local types name (8.25).
+(case parameter_strings_wider_than_a_constant
+ (source "parameter_strings_wider_than_a_constant.sv" #"
+package p;
+ class Named #(string S = "x");
+  typedef Named #(S) this_type;
+  static Named #(S) inst;
+  static function Named #(S) get();
+   if (inst == null) inst = new;
+   return inst;
+  endfunction
+  function string name();
+   this_type self = this;
+   Named #(S) again = self;
+   return S;
+  endfunction
+ endclass
+ class Holder #(string S = "x");
+  typedef Named #(S) named_t;
+  function string name();
+   named_t named = named_t::get();
+   return named.name();
+  endfunction
+ endclass
+endpackage
+module Top(output int ok, output int len);
+ import p::*;
+ Holder #("a_name_longer_than_sixteen") holder = new;
+ initial begin
+  ok = holder.name() == "a_name_longer_than_sixteen";
+  len = holder.name().len();
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq ok 1) (assert_eq len 26))
+
+; `new` initializes subroutine locals whose class a package scope or a typedef
+; names (8.7).
+(case new_initializers_of_scoped_and_alias_types
+ (source "new_initializers_of_scoped_and_alias_types.sv" #"
+package items;
+ class Item;
+  int value = 4;
+ endclass
+ typedef Item item_t;
+endpackage
+typedef items::Item unit_item_t;
+module Top(output int sum);
+ function automatic int total();
+  items::Item a = new;
+  items::item_t b = new;
+  unit_item_t c = new;
+  a.value += 1;
+  b.value += 2;
+  return a.value + 10 * b.value + 100 * c.value;
+ endfunction
+ initial sum = total();
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 465))
+
+; A class parameter without an integral value hides the module's constant of
+; its name, and the class passes its value on by name (8.25).
+(case parameter_literals_hide_module_constants
+ (source "parameter_literals_hide_module_constants.sv" #"
+module Top(output int ok);
+ localparam string S = "module";
+ class Name #(string S = "x"); function string s(); return S; endfunction endclass
+ class Shadow #(string S = "x");
+  function string s();
+   Name #(S) name = new;
+   return name.s();
+  endfunction
+ endclass
+ Shadow #("a_name_longer_than_sixteen") shadow = new;
+ initial ok = shadow.s() == "a_name_longer_than_sixteen";
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq ok 1))

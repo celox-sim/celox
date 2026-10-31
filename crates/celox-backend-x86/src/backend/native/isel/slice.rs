@@ -7,6 +7,11 @@ impl ISelContext<'_> {
         &mut self,
         inst: &SIRInstruction<RegionedAbsoluteAddr>,
     ) {
+        if matches!(inst, SIRInstruction::ExternCall { func, .. }
+            if celox_sir::extern_abi::native_kernel_index(*func).is_some())
+        {
+            self.reg_addrs.clear();
+        }
         if let Some(write) = inst.memory_write()
             && write.width != 0
         {

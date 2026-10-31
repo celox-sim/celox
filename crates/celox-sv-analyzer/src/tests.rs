@@ -1409,6 +1409,7 @@ fn resolves_imported_constant_parameter_part_selects() {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap();
     assert_eq!(ir.modules()[0].parameters()[0].resolved_value(), Some(11));
@@ -2938,20 +2939,80 @@ fn rejects_unpacked_arrays_of_nonequivalent_element_types() {
     "#;
     let error = analyze_source(source, Path::new("nonequivalent_unpacked.sv"))
         .expect_err("a signed row is not equivalent to an unsigned one");
-    let row = |signed| typecheck::UnpackedArrayType {
-        dims: vec![2],
-        element_width: 8,
-        signed,
-        four_state: true,
-    };
     assert_eq!(
         error,
         AnalyzerError::IncompatibleUnpackedArray {
             context: "assignment pattern item".to_string(),
-            actual: row(true),
-            target: row(false),
+            actual: "logic signed [7:0] [2]".to_string(),
+            target: "logic [7:0] [2]".to_string(),
         }
     );
+}
+
+#[test]
+fn rejects_unpacked_arrays_of_nonequivalent_named_elements_in_every_assignment() {
+    // A named element type is equivalent only to itself (IEEE 1800-2023
+    // 6.22.2), and every way an array value is assigned checks it (7.6):
+    // slices on either side, the operands of `?:`, results and defaults.
+    for (items, context) in [
+        (
+            "typedef enum {A, B} e_t; e_t a[2]; int b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "typedef enum {A, B} e_t; e_t a[2]; int b[2]; initial b = a;",
+            "assignment",
+        ),
+        (
+            "typedef enum {A, B} e_t; typedef enum {C, D} f_t; e_t a[2]; f_t b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "class X; endclass class Y; endclass X a[2]; Y b[2]; initial a = b;",
+            "assignment",
+        ),
+        (
+            "int a[4]; byte b[4]; initial a[0:1] = b[2:3];",
+            "assignment",
+        ),
+        ("int a[4]; byte b[2]; initial a[1+:2] = b;", "assignment"),
+        (
+            "int a[2]; byte b[2], c[2]; bit s; initial a = s ? b : c;",
+            "assignment",
+        ),
+        (
+            "byte d[2]; typedef int ia_t[2]; function ia_t f(); return d; endfunction",
+            "return value",
+        ),
+        (
+            "byte d[2]; function void f(int p[2] = d); endfunction initial f();",
+            "default of `p`",
+        ),
+    ] {
+        let source = format!("module Top; {items} endmodule");
+        let error = analyze_source(&source, Path::new("nonequivalent_named.sv")).expect_err(items);
+        assert!(
+            matches!(&error, AnalyzerError::IncompatibleUnpackedArray { context: c, .. } if c == context)
+                || matches!(&error, AnalyzerError::IncompatibleClassHandle { .. }),
+            "{items}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn accepts_unpacked_arrays_of_the_same_named_element_in_every_assignment() {
+    // Operands that name the same element type stay equivalent when they are
+    // passed, returned, defaulted or selected (IEEE 1800-2023 6.22.2, 7.6).
+    for items in [
+        "e_t a[2]; function void f(e_t p[2]); endfunction initial f(a);",
+        "e_t d[2]; typedef e_t ea_t[2]; function ea_t g(); return d; endfunction",
+        "e_t d[2]; function void h(e_t p[2] = d); endfunction initial h();",
+        "e_t m[2][2]; e_t r[2]; initial r = m[1];",
+        "e_t m[2][2]; function void f(e_t p[2]); endfunction initial f(m[0]);",
+    ] {
+        let source = format!("module Top; typedef enum {{A, B}} e_t; {items} endmodule");
+        analyze_source(&source, Path::new("same_named.sv")).expect(items);
+    }
 }
 
 #[test]
@@ -3494,12 +3555,13 @@ fn rejects_unlowered_constructs() {
 #[test]
 fn rejects_unimplemented_timing_constructs() {
     for (body, construct) in [
-        // The `event` data type is rejected by name before its uses.
-        ("event e; initial @e;", "named event"),
-        ("event e; initial ->e;", "named event"),
         (
-            "logic clk, en; initial @(posedge clk iff en);",
-            "iff-qualified event",
+            "event e; initial ->> @(e) e;",
+            "delayed nonblocking event trigger",
+        ),
+        (
+            "event e; logic c; initial @(e or posedge c);",
+            "event control mixing named events with other events",
         ),
         (
             "logic a, b; initial a = #1 b;",
@@ -3524,8 +3586,8 @@ fn rejects_unimplemented_timing_constructs() {
         );
     }
     assert_eq!(
-        AnalyzerError::Unsupported("iff-qualified event".to_string()).tracking_issue(),
-        1444
+        AnalyzerError::Unsupported("iff-qualified always_ff event".to_string()).tracking_issue(),
+        452
     );
 }
 
@@ -3773,6 +3835,7 @@ fn native_interface_module(source: &str, name: &str) -> ir::Module {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap()
         .modules()[0]
@@ -3820,6 +3883,7 @@ fn native_interface_sources(sources: &[(&str, &Path)]) -> Result<Vec<ir::Module>
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )?;
             modules.extend(ir.modules().iter().cloned());
         }
@@ -4820,10 +4884,6 @@ fn rejects_unsupported_interface_uses() {
     }
     for (interface, message) in [
         (
-            "interface I(input logic clk); endinterface",
-            "ports of interface `I`",
-        ),
-        (
             "interface I; enum {Idle, Busy} state; endinterface",
             "enum type in interface `I`",
         ),
@@ -5191,7 +5251,8 @@ fn named_constant_calls_retain_parameter_dependencies() {
             .unwrap();
     let source = ast::Source::from_syntax(&syntax).unwrap();
     let module = &source.modules()[0];
-    let state = module.constant_function_state();
+    let empty = crate::source_tree::SourceTree::empty();
+    let evaluation = module.constant_context(&empty);
     let expression: ir::ConstExpr = module
         .parameters()
         .iter()
@@ -5207,7 +5268,7 @@ fn named_constant_calls_retain_parameter_dependencies() {
             &expression,
             &ast::const_functions::Environment {
                 constants: &values,
-                functions: &state.const_functions
+                functions: &evaluation.functions
             }
         ),
         Some(17)
@@ -5280,6 +5341,7 @@ fn native_interface_array_ports_reject_incompatible_shapes() {
             &[],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap_err();
     assert_eq!(
@@ -5316,6 +5378,7 @@ fn rejects_mismatched_interface_array_connection_widths_and_shapes() {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap_err();
         assert!(
@@ -6100,18 +6163,23 @@ fn timed_task_calls_require_a_suspendable_context() {
 }
 
 #[test]
-fn timed_tasks_reject_static_locals_instead_of_reinitializing_them() {
+fn timed_tasks_keep_static_locals_as_module_variables() {
+    // Overlapping calls share the locals (IEEE 1800-2023 6.21, 13.3.1), so
+    // no declaration reinitializes them on entry.
     for declaration in [
         "task t; int saved = 1; #1; saved = 2; endtask",
         "task automatic t; static int saved = 1; #1; saved = 2; endtask",
     ] {
         let source = format!("module Top; {declaration} initial t(); endmodule");
-        let error = analyze_source(&source, Path::new("timed_static.sv"))
-            .expect_err("static local storage across timed calls is not lowered yet");
-        assert!(
-            error.to_string().contains("static local in a timed task"),
-            "{error}"
-        );
+        let ir = analyze_source(&source, Path::new("timed_static.sv")).unwrap();
+        let module = &ir.modules()[0];
+        let task = &module.subroutines()[0];
+        assert_eq!(task.persistent_locals.len(), 1, "{declaration}");
+        let mut declared = false;
+        for stmt in &task.body {
+            stmt.walk(&mut |stmt| declared |= matches!(stmt, ir::Stmt::Local { .. }));
+        }
+        assert!(!declared, "{declaration}");
     }
 }
 
@@ -6588,7 +6656,27 @@ fn explicit_output_data_types_default_to_variables() {
 fn class_randomize_rejects_unsupported_semantics() {
     for (members, call, expected) in [
         (
-            "rand int x; constraint c { x == 1; }",
+            "rand int x; constraint c { soft x == 1; }",
+            "c.randomize()",
+            "constraints",
+        ),
+        (
+            "rand int x, y; constraint c { solve x before y; x == y; }",
+            "c.randomize()",
+            "constraints",
+        ),
+        (
+            "rand int x; constraint c { x inside {[1:$]}; }",
+            "c.randomize()",
+            "constraint",
+        ),
+        (
+            "rand int x; constraint c { (x == 1) <-> (x < 3); }",
+            "c.randomize()",
+            "constraints",
+        ),
+        (
+            "rand int x; constraint c { x dist {1 := 2}; }",
             "c.randomize()",
             "constraints",
         ),
@@ -6616,7 +6704,7 @@ fn class_randomize_rejects_unsupported_semantics() {
         ),
         (
             "rand int x;",
-            "c.randomize() with { x == 1; }",
+            "c.randomize() with { outside == 1; }",
             "unsupported",
         ),
         ("rand int x;", "c.randomize(x + 1)", "arguments"),
@@ -6765,7 +6853,11 @@ fn tagged_constant_checks_preserve_guard_width_and_sign() {
         ("1'bz", "8'd4", 8, false, None),
     ] {
         let expr = ConstExpr::Function {
-            callee: Callee::Checked { width, signed },
+            callee: Callee::Checked {
+                width,
+                signed,
+                check: crate::system_functions::AccessCheck::TaggedMember,
+            },
             args: vec![
                 ConstExpr::Literal(guard.into()),
                 ConstExpr::Literal(payload.into()),
@@ -6893,6 +6985,165 @@ fn class_visibility_rejects_inaccessible_members() {
         let error = analyze_source(&source, Path::new("visibility.sv")).unwrap_err();
         assert!(
             matches!(&error, AnalyzerError::InaccessibleClassMember { owner, .. } if owner == "C"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn imported_class_member_types_keep_declaration_dimensions() {
+    let package = r#"
+        package p;
+            class Box #(int N = 5);
+                typedef bit [N-1:0] element_t;
+            endclass
+            typedef Box#() Small;
+            typedef Box#(9) Wide;
+        endpackage
+    "#;
+    let packages = analyze_packages(&[(package, Path::new("member-types-package.sv"))]).unwrap();
+    let ir = analyze_source_module_with_packages(
+        r#"
+        module Top import p::*; #(parameter int N = 29) (
+            input Small::element_t sample, input Wide::element_t other,
+            output bit done
+        );
+            assign done = $bits(sample) == 5 && $bits(other) == 9;
+        endmodule
+        "#,
+        Path::new("member-types-top.sv"),
+        "Top",
+        &HashMap::default(),
+        &packages,
+        &mut packages.design(),
+    )
+    .expect("imported class typedefs must retain their declaration's dimensions");
+    let top = ir
+        .modules()
+        .iter()
+        .find(|module| module.name() == "Top")
+        .unwrap();
+    for (name, expected) in [("sample", 5), ("other", 9)] {
+        let width = top
+            .ports()
+            .iter()
+            .find(|port| port.name() == name)
+            .and_then(|port| port.r#type().resolved_width());
+        assert_eq!(width, Some(expected), "{name}");
+    }
+}
+
+#[test]
+fn imported_class_member_types_preserve_package_qualifier_precedence() {
+    analyze_source(
+        r#"
+        package p; typedef bit [4:0] word_t; endpackage
+        package q; typedef byte p; endpackage
+        package r; typedef int p; endpackage
+        module Top import q::*; import r::*; (input p::word_t value, output bit done);
+            assign done = $bits(value) == 5;
+        endmodule
+        "#,
+        Path::new("package-qualifier-before-wildcards.sv"),
+    )
+    .expect("a package qualifier must not bind ambiguous wildcard type names");
+}
+
+#[test]
+fn imported_class_member_types_do_not_export_package_locals() {
+    let error = analyze_source(
+        r#"
+        package p;
+            typedef bit [3:0] Hidden;
+            class Item; typedef bit [7:0] Public; endclass
+        endpackage
+        module Top(output int sum);
+            import p::Item;
+            Item::Hidden sample;
+            initial sum = sample;
+        endmodule
+        "#,
+        Path::new("imported-class-private-scope.sv"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("Hidden"), "{error}");
+}
+
+#[test]
+fn class_type_parameter_qualifiers_are_not_package_dependencies() {
+    for body in [
+        "static function int get(); return TYPE::value; endfunction",
+        "typedef TYPE::word_t element_t;",
+        "localparam type element_t = TYPE::word_t;",
+        "extern static function int get();",
+    ] {
+        let out_of_block = if body.starts_with("extern") {
+            "function int Q::get(); return TYPE::value; endfunction"
+        } else {
+            ""
+        };
+        let source = format!(
+            "package p; class Item; static int value=42; typedef bit[7:0] word_t; endclass class Q#(type TYPE=Item); {body} endclass {out_of_block} endpackage module Top; endmodule"
+        );
+        analyze_source(&source, Path::new("class-type-qualifier.sv"))
+            .unwrap_or_else(|error| panic!("{body}: {error}"));
+    }
+}
+
+#[test]
+fn class_type_parameter_scopes_do_not_hide_unknown_packages() {
+    for (body, outside, name) in [
+        (
+            "static function int get(); return missing::value; endfunction",
+            "",
+            "missing",
+        ),
+        ("", "localparam int value=TYPE::value;", "TYPE"),
+        (
+            "typedef TYPE Alias;",
+            "localparam int value=Alias::value;",
+            "Alias",
+        ),
+    ] {
+        let source = format!(
+            "package p; class Item; endclass class Q#(type TYPE=Item); {body} endclass endpackage module Top; {outside} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("class-type-real-package.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("unknown package `{name}`")),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn class_type_alias_qualifiers_are_not_package_dependencies() {
+    for source in [
+        "package p; class Item; static int value=42; endclass typedef Item Alias; class Q; static function int get(); return Alias::value; endfunction endclass endpackage module Top; endmodule",
+        "package p; class Item#(int N=42); static int value=N; endclass typedef Item#(23) Alias; class Q; static function int get(); return Alias::value; endfunction endclass endpackage module Top; endmodule",
+        "module Top; class Item; typedef bit[7:0] word_t; endclass typedef Item Alias; Alias::word_t value; endmodule",
+        "package Alias; class Item; static int value=42; endclass endpackage module Top; typedef Alias::Item Alias; initial $display(Alias::value); endmodule",
+        "module Top; class Item; static int value=42; endclass if (1) begin : g typedef Item Alias; initial $display(Alias::value); end endmodule",
+        "module Top; class Item; static int value=42; endclass class Q; typedef Item Alias; static function int get(); return Alias::value; endfunction endclass endmodule",
+        "package a; typedef int Alias; endpackage package b; typedef byte Alias; endpackage module Top; import a::*; import b::*; class Item; static int value=42; endclass class Q; typedef Item Alias; static function int get(); return Alias::value; endfunction endclass endmodule",
+    ] {
+        analyze_source(source, Path::new("class-alias-qualifier.sv"))
+            .unwrap_or_else(|error| panic!("{source}: {error}"));
+    }
+}
+
+#[test]
+fn class_type_alias_scopes_preserve_package_dependencies() {
+    for source in [
+        "module Top; class Item; static int value=42; endclass class Q; typedef Item Alias; endclass localparam int value=Alias::value; endmodule",
+        "module Top; class Item; static int value=42; endclass if (1) begin : g typedef Item Alias; end localparam int value=Alias::value; endmodule",
+        "module Top; class Item; endclass typedef Alias::Item Alias; endmodule",
+    ] {
+        let error = analyze_source(source, Path::new("class-alias-real-package.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("unknown package `Alias`"),
             "{source}: {error}"
         );
     }
@@ -7197,14 +7448,90 @@ fn final_procedures_allow_direct_nba_and_unexecuted_scheduling_calls() {
 }
 
 #[test]
-fn final_join_none_is_unsupported_rather_than_a_function_statement_violation() {
-    let error = analyze_source(
+fn detached_children_obey_task_rules_in_functions_and_finals() {
+    for source in [
         "module Top; final fork #1; join_none endmodule",
-        Path::new("final_join_none.sv"),
-    )
-    .unwrap_err();
-    assert!(error.to_string().contains("fork-join block"), "{error}");
-    assert!(error.to_string().contains("final procedure"), "{error}");
+        "module Top; function void f(); fork #1; join_none endfunction initial f(); endmodule",
+    ] {
+        analyze_source(source, Path::new("join_none.sv")).unwrap();
+    }
+}
+
+#[test]
+fn folded_detached_children_keep_their_process_scope() {
+    for child in [
+        "if (0) #1;",
+        "if (1) ; else wait (value);",
+        "if (0) @(value);",
+        "if (0) delay_task();",
+        "fork begin if (0) #1; end join",
+        "if (0) fork #1; join",
+    ] {
+        for context in [
+            format!(
+                "function automatic void f(); fork begin {child} end join_none endfunction initial f();"
+            ),
+            format!("final fork begin {child} end join_none"),
+        ] {
+            let source = format!(
+                "module Top; bit value; task delay_task(); #1; endtask {context} endmodule"
+            );
+            analyze_source(&source, Path::new("folded_detached.sv"))
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+        }
+    }
+}
+
+#[test]
+fn folded_function_branches_still_reject_blocking_statements() {
+    for statement in [
+        "#1;",
+        "wait (value);",
+        "@(value);",
+        "delay_task();",
+        "fork #1; join",
+        "fork #1; join_any",
+    ] {
+        for branch in [
+            format!("if (0) {statement}"),
+            format!("if (1) ; else {statement}"),
+        ] {
+            let source = format!(
+                "module Top; bit value; task delay_task(); #1; endtask function automatic void f(); {branch} endfunction initial f(); endmodule"
+            );
+            assert!(
+                analyze_source(&source, Path::new("folded_blocking.sv")).is_err(),
+                "{source}"
+            );
+        }
+    }
+}
+
+#[test]
+fn detached_function_scheduling_requires_a_process_caller() {
+    for body in [
+        "final f();",
+        "int initialized = f();",
+        "always_comb value = f();",
+        "always_ff @(posedge clk) value <= f();",
+    ] {
+        let source = format!(
+            "module Top; bit clk; int value; function int f(); fork #1; join_none return 1; endfunction {body} endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("invalid_join_none.sv")).is_err(),
+            "{source}"
+        );
+    }
+    for statement in ["#1;", "wait (1);", "fork #1; join", "fork #1; join_any"] {
+        let source = format!(
+            "module Top; function void f(); {statement} endfunction initial f(); endmodule"
+        );
+        assert!(
+            analyze_source(&source, Path::new("blocking_function.sv")).is_err(),
+            "{source}"
+        );
+    }
 }
 
 #[test]
@@ -7237,5 +7564,626 @@ fn final_procedures_only_follow_defaults_for_omitted_arguments() {
         } else {
             result.unwrap_or_else(|error| panic!("{body}: {error}"));
         }
+    }
+}
+
+#[test]
+fn class_randomize_bounds_nested_membership_expansion() {
+    for levels in [4, 25] {
+        let mut expr = "x".to_owned();
+        for _ in 0..levels {
+            expr = format!("({expr}) inside {{0, 1}}");
+        }
+        let source = format!(
+            "module Top; class C; rand bit x; constraint c {{ {expr}; }} endclass C c; initial begin c = new; c.randomize(); end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("nested_membership.sv"));
+        if levels == 4 {
+            result.expect("small nested membership must remain supported");
+        } else {
+            let error = result
+                .expect_err("expanded membership must be bounded")
+                .to_string();
+            assert!(
+                error.contains("constraint expression expansion limit"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn class_inline_randomize_retains_call_specific_constraints() {
+    let source = r#"module Top;
+        class C; rand int x; constraint c { x < 10; } endclass
+        C obj;
+        initial begin
+            obj = new;
+            if (!(obj.randomize() with { x == 2; })) $fatal;
+            obj.randomize() with { x == 3; };
+        end
+    endmodule"#;
+    analyze_source(source, Path::new("inline_randomize.sv")).unwrap();
+}
+
+#[test]
+fn class_inline_randomize_binds_local_inputs() {
+    let source = r#"module Top;
+        class C; rand bit [7:0] x; endclass
+        C obj;
+        bit [7:0] wanted, x;
+        initial begin
+            obj = new;
+            wanted = 2; x = 3;
+            obj.randomize() with { x == wanted; };
+            obj.randomize() with { x == local::x; };
+        end
+    endmodule"#;
+    analyze_source(source, Path::new("inline_inputs.sv")).unwrap();
+}
+
+#[test]
+fn class_inline_randomize_static_names_do_not_capture_caller_locals() {
+    for (expression, supported) in [("x == limit", false), ("x == local::limit", true)] {
+        let source = format!(
+            r#"module Top;
+            class C; rand bit [7:0] x; static bit [7:0] limit = 5; endclass
+            C obj; bit [7:0] limit;
+            initial begin obj = new; limit = 3; obj.randomize() with {{ {expression}; }}; end
+        endmodule"#
+        );
+        let result = analyze_source(&source, Path::new("inline_static_scope.sv"));
+        if supported {
+            result.unwrap();
+        } else {
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("static properties in inline constraints"),
+                "{error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn constraint_mode_rejects_invalid_calls() {
+    for (statement, expected) in [
+        ("c.constraint_mode();", "getter requires"),
+        ("c.missing.constraint_mode(0);", "unknown constraint"),
+        ("c.x.constraint_mode();", "unknown constraint"),
+        ("result = c.rule.constraint_mode(1);", "setter is void"),
+        ("c.rule.constraint_mode(1, 0);", "one on_off"),
+    ] {
+        let source = format!(
+            "module Top; class C; rand bit [3:0] x; constraint rule {{ x == 1; }} endclass C c; int result; initial begin c = new; {statement} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("constraint_mode.sv"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{statement}: {error}");
+    }
+}
+
+#[test]
+fn constraint_mode_cannot_be_overridden() {
+    let source = "module Top; class C; function void constraint_mode(bit flag); endfunction endclass C c; initial c = new; endmodule";
+    let error = analyze_source(source, Path::new("constraint_mode_override.sv"))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("overriding"), "{error}");
+}
+
+#[test]
+fn constraint_mode_outside_classes_remains_an_ordinary_function() {
+    let source = "module Top(output int value); function int constraint_mode(); return 42; endfunction initial value = constraint_mode(); endmodule";
+    analyze_source(source, Path::new("constraint_mode_function.sv")).unwrap();
+}
+
+#[test]
+fn constraint_mode_names_do_not_intercept_struct_members() {
+    for source in [
+        "module Top(output int value); struct packed { int constraint_mode; } s; initial value = s.constraint_mode; endmodule",
+        "module Top(output int value); struct packed { struct packed { int constraint_mode; } child; } s; initial value = s.child.constraint_mode; endmodule",
+        "module Top(output int value); class C; function int f(); struct packed { int constraint_mode; } s; s.constraint_mode=37; return s.constraint_mode; endfunction endclass C c; initial begin c=new; value=c.f(); end endmodule",
+    ] {
+        analyze_source(source, Path::new("constraint_mode_struct.sv")).unwrap();
+    }
+}
+
+#[test]
+fn interface_header_members_preserve_parameter_dependent_types() {
+    let source = "interface Bus #(parameter W=8)(input logic [W-1:0] data); modport reader(input data); endinterface";
+    let signatures = crate::interface_prototypes(&[(source, Path::new("bus.sv"))]).unwrap();
+    let port = &signatures[0].module.ports()[0];
+    assert_eq!(port.name(), "h$data");
+    let values = fxhash::FxHashMap::from_iter([("h$W".to_string(), 12)]);
+    assert_eq!(
+        typecheck::eval_const_expr(port.r#type().packed_ranges()[0].left(), &values),
+        Some(11),
+    );
+}
+
+#[test]
+fn class_alias_defaults_wait_for_package_constants() {
+    for aliases in [
+        "typedef Box#() Small; typedef Box Implicit;",
+        "typedef Box#()::element_t Word;",
+    ] {
+        let source = format!(
+            r#"package p;
+            parameter int WIDTH = 5;
+            class Box #(int N = WIDTH, int M = N + 2);
+                typedef bit [N-1:0] element_t;
+                function int get(); return 10 * N + M; endfunction
+            endclass
+            {aliases}
+        endpackage
+        module Top; endmodule"#
+        );
+        analyze_source(&source, Path::new("class-constant-default.sv"))
+            .expect("class defaults see their package constants after parameter collection");
+    }
+}
+
+#[test]
+fn unresolved_class_alias_defaults_still_fail() {
+    for default in ["MISSING", "WIDTH"] {
+        let source = format!(
+            "package p; class Box #(int N = {default}); endclass \
+             typedef Box#() Small; endpackage \
+             module Top; localparam int WIDTH=29; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("unresolved-class-default.sv"))
+            .expect_err("caller constants cannot supply missing class defaults");
+        assert!(
+            error
+                .to_string()
+                .contains("class parameter `N` without a constant value"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn class_alias_type_arguments_wait_for_package_constants() {
+    for aliases in [
+        "typedef bit signed [W-1:0] word_t; typedef Utils#(word_t) word_utils;",
+        "typedef Utils#(bit [W:0]) wide_utils;",
+        "typedef Utils#(bit [W:0])::item_t item_t;",
+    ] {
+        let source = format!(
+            r#"package p;
+            parameter int W = 6;
+            class Utils #(type T = int);
+                typedef T item_t;
+            endclass
+            {aliases}
+        endpackage
+        module Top; endmodule"#
+        );
+        analyze_source(&source, Path::new("class-constant-type-argument.sv"))
+            .expect("class type arguments see their package constants after parameter collection");
+    }
+}
+
+#[test]
+fn unresolved_class_alias_type_arguments_still_fail() {
+    let source = "package p; class Utils #(type T = int); endclass \
+         typedef Utils#(bit [MISSING:0]) wide_utils; endpackage \
+         module Top; localparam int MISSING = 29; endmodule";
+    let error = analyze_source(source, Path::new("unresolved-class-type-argument.sv"))
+        .expect_err("caller constants cannot bound a package type argument");
+    assert!(
+        error.to_string().contains("class type parameter value"),
+        "{error}"
+    );
+}
+
+#[test]
+fn named_aggregate_type_arguments_keep_their_declarations() {
+    let source = "package p;
+        typedef enum {A0, A1} first_e;
+        typedef enum {B0, B1} second_e;
+        typedef first_e alias_e;
+        typedef struct packed { bit [3:0] a; } s1_t;
+        typedef struct packed { bit [3:0] a; } s2_t;
+        class Box #(type T = int); endclass
+        class Holder; typedef enum {C0, C1} inner_e; endclass
+        typedef Box#(first_e) first_box;
+        typedef Box#(alias_e) alias_box;
+        typedef Box#(second_e) second_box;
+        typedef Box#(s1_t) s1_box;
+        typedef Box#(s2_t) s2_box;
+        typedef Box#(Holder::inner_e) inner_box;
+    endpackage
+    module Top; endmodule";
+    analyze_source(source, Path::new("named-aggregate-type-arguments.sv"))
+        .expect("typedefs name enumeration and struct type arguments");
+    for anonymous in ["enum {A, B}", "struct packed { int x; }"] {
+        let source = format!(
+            "package p; class Box #(type T = int); endclass \
+             typedef Box#({anonymous}) anonymous_box; endpackage module Top; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("anonymous-type-argument.sv"))
+            .expect_err("an anonymous aggregate type has no declaration to key on");
+        assert!(
+            error
+                .to_string()
+                .contains("as a class type parameter value"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn foreign_generic_specializations_bind_module_and_unit_requests() {
+    for user in [
+        "module Top; initial begin p::Db#(byte)::set(5); $display(\"%0d\", p::Db#(byte)::last); end endmodule",
+        "import p::*; class User; static function int go(); Db#(byte)::set(7); return Db#(byte)::last; endfunction endclass module Top; initial $display(\"%0d\", User::go()); endmodule",
+    ] {
+        let source = format!(
+            "package p; class Db #(type T=int); static T last; \
+             static function void set(T v); last=v; endfunction endclass endpackage {user}"
+        );
+        analyze_source(&source, Path::new("foreign_generic.sv"))
+            .unwrap_or_else(|error| panic!("{user}: {error}"));
+    }
+}
+
+#[test]
+fn foreign_generic_specialization_constructs_unit_type_argument() {
+    let code = r#"
+      package p;
+        class Registry #(type T);
+          static function T create(int n);
+            T object;
+            object=new(n);
+            return object;
+          endfunction
+        endclass
+      endpackage
+      import p::*;
+      class User;
+        typedef Registry#(User) type_id;
+        int value;
+        function new(int n); value=n; endfunction
+        static function User make(); return type_id::create(23); endfunction
+      endclass
+      module Top;
+        User object;
+        initial begin object=User::make(); $display("%0d", object.value); end
+      endmodule
+    "#;
+    analyze_source(code, Path::new("foreign_factory.sv")).unwrap();
+}
+
+#[test]
+fn foreign_generic_does_not_capture_compilation_unit_names() {
+    let source = r#"
+        class User; int value; endclass
+        package p;
+            class Factory #(type T);
+                static function User create(); User object; object=new(); return object; endfunction
+            endclass
+        endpackage
+        module Top; initial $display("%p", p::Factory#(int)::create()); endmodule
+    "#;
+    assert!(analyze_source(source, Path::new("foreign_scope_capture.sv")).is_err());
+}
+
+#[test]
+fn foreign_generic_rejects_module_class_without_instance_identity() {
+    for (name, canonical) in [("Item", "Item"), ("\\Item::Nested ", "\\Item::Nested")] {
+        let source = format!(
+            r#"
+            package p; class Box #(type T); static int count; endclass endpackage
+            module Top;
+                class {name}; int value; endclass
+                p::Box#({name}) object;
+            endmodule
+        "#
+        );
+        let error = analyze_source(&source, Path::new("foreign_module_class.sv")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(&format!("module-local class `{canonical}`")),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn foreign_generic_nested_actuals_are_bounded_on_default_stack() {
+    std::thread::Builder::new().stack_size(2 * 1024 * 1024).spawn(|| {
+        let mut actual = "int".to_owned();
+        for _ in 0..70 { actual = format!("p::Box#({actual})"); }
+        let source = format!("package p; class Box #(type T); endclass endpackage module Top; {actual} object; endmodule");
+        let error = analyze_source(&source, Path::new("foreign_depth.sv")).unwrap_err();
+        assert!(error.to_string().contains("class specializations nested more than"), "{error}");
+    }).unwrap().join().unwrap();
+}
+
+#[test]
+fn long_handle_chains_resolve_in_linear_time() {
+    // Each `.next` resolves its receiver once; resolving it again for the
+    // static and the instance lookup doubled the work per field.
+    let chain = ".next".repeat(30);
+    let source = format!(
+        "class Node; Node next; int value; endclass
+        module Top(output int y);
+            Node head;
+            initial y = head{chain}.value;
+        endmodule"
+    );
+    let started = std::time::Instant::now();
+    analyze_source(&source, Path::new("handle-chain.sv")).expect("the chain analyzes");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
+fn container_formals_copy_only_what_container_assignment_represents() {
+    // IEEE 1800-2023 13.5.1: a container formal that is not a reference
+    // holds a copy, which an input receives as a container value and an
+    // output or inout returns to a container its value fits.
+    for formal in [
+        "int q[$]",
+        "output int q[$]",
+        "inout int q[$]",
+        "q_t q",
+        "output q_t q",
+        "int q[]",
+        "int q[string]",
+        "output int q[string]",
+    ] {
+        let source = format!(
+            "module Top; typedef int q_t[$]; int a[$]; int d[]; int m[string]; \
+             function automatic void f({formal}); endfunction \
+             initial f({}); endmodule",
+            if formal.contains("[string]") {
+                "m"
+            } else if formal.contains("[]") {
+                "d"
+            } else {
+                "a"
+            }
+        );
+        analyze_source(&source, Path::new("container_formal.sv"))
+            .unwrap_or_else(|error| panic!("{formal}: {error}"));
+    }
+    for (formal, actual, detail) in [
+        ("output int q[$]", "b", "another queue bound"),
+        ("inout int q[$:3]", "a", "another queue bound"),
+        ("output int q[$]", "x", "compatible container"),
+        ("inout int q[$]", "m", "incompatible dynamic container"),
+        ("int q[$]", "m", "incompatible dynamic container"),
+        ("int q[$]", "make()", "compatible container"),
+    ] {
+        let source = format!(
+            "module Top; typedef int q_t[$]; int a[$]; int b[$:3]; int x; int m[string]; \
+             function automatic q_t make(); return a; endfunction \
+             function automatic void f({formal}); endfunction \
+             initial f({actual}); endmodule"
+        );
+        let error = analyze_source(&source, Path::new("container_formal.sv"))
+            .expect_err("an actual the copy cannot represent must be rejected");
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(_)) && error.to_string().contains(detail),
+            "{formal} <- {actual}: {error}"
+        );
+    }
+    // `new[]` is no expression (IEEE 1800-2023 7.5.1, A.6.2).
+    for call in ["f(new[2])", "f((new[2](d)))", "g()"] {
+        let source = format!(
+            "module Top; int d[]; \
+             function automatic void f(int q[]); endfunction \
+             function automatic void g(int q[] = new[2]); endfunction \
+             initial {call}; endmodule"
+        );
+        let error = analyze_source(&source, Path::new("container_formal.sv"))
+            .expect_err("`new[]` must not be an argument");
+        assert!(matches!(error, AnalyzerError::Parse(_)), "{call}: {error}");
+    }
+}
+
+#[test]
+fn streaming_concatenations_follow_the_lrm_constraints() {
+    // IEEE 1800-2023 11.4.14: a stream is an assignment source or target, a
+    // bit-stream cast operand or a stream operand; it is never wider than a
+    // fixed-size target, an unpack source has enough bits, and a slice size
+    // is positive.
+    for (body, expected) in [
+        (
+            "initial i = {<<{a, b, c}};",
+            "96-bit stream is wider than its 32-bit target",
+        ),
+        ("initial if ({<<{a}}) i = 0;", "shall first be cast"),
+        ("initial i = {<<{a}} + 1;", "shall first be cast"),
+        ("initial i = {<< 0 {a}};", "slice size 0 is not positive"),
+        (
+            "initial {>>{a, b, c}} = 23'b1;",
+            "23-bit source has fewer bits than the 96-bit stream",
+        ),
+        (
+            "initial i = {>>{a with [0]}};",
+            "with applies to a one-dimensional unpacked array",
+        ),
+        (
+            "initial i = {>>{r}};",
+            "real value is not of bit-stream type",
+        ),
+        ("initial i = {>>{x}};", "string"),
+        ("initial {>>{x}} = 32'd0;", "string"),
+    ] {
+        let source = format!(
+            "module Top; typedef struct {{ string s; }} S; S x; int a, b, c, i; real r; {body} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("streams.sv"))
+            .expect_err(body)
+            .to_string();
+        assert!(error.contains(expected), "{body}: {error}");
+    }
+}
+
+#[test]
+fn constant_streams_evaluate_like_the_lrm_examples() {
+    use crate::system_functions::{Stream, StreamArg};
+    let pack = |slice, widths: &[usize], width| Stream {
+        args: widths
+            .iter()
+            .map(|&width| StreamArg::packed(width))
+            .collect(),
+        slice,
+        unpack: false,
+        targets: vec![StreamArg::packed(width)],
+    };
+    // 11.4.14.2
+    assert_eq!(
+        pack(Some(8), &[32], 32).evaluate(&[0x41424344]),
+        Some(0x44434241)
+    );
+    assert_eq!(
+        pack(Some(16), &[32], 32).evaluate(&[0x41424344]),
+        Some(0x43444142)
+    );
+    assert_eq!(
+        pack(Some(4), &[6], 6).evaluate(&[0b11_0101]),
+        Some(0b01_0111)
+    );
+    assert_eq!(pack(None, &[6], 6).evaluate(&[0b11_0101]), Some(0b11_0101));
+    // 11.4.14.3: a narrower stream is aligned to the left.
+    assert_eq!(pack(None, &[4, 4], 12).evaluate(&[1, 2]), Some(0x120));
+    let unpack = Stream {
+        args: vec![StreamArg::packed(8)],
+        slice: Some(3),
+        unpack: true,
+        targets: vec![StreamArg::packed(4), StreamArg::packed(4)],
+    };
+    let unpacked = unpack.evaluate(&[0b1101_0011]).unwrap();
+    assert_eq!(
+        pack(Some(3), &[8], 8).evaluate(&[unpacked]),
+        Some(0b1101_0011)
+    );
+    // An array argument streams its first element, in its least significant
+    // bits, first.
+    let array = Stream {
+        args: vec![StreamArg {
+            width: 16,
+            bits: None,
+            element: Some(8),
+        }],
+        slice: None,
+        unpack: false,
+        targets: vec![StreamArg::packed(16)],
+    };
+    assert_eq!(array.evaluate(&[0x2211]), Some(0x1122));
+}
+
+#[test]
+fn dynamically_sized_streams_follow_the_lrm_constraints() {
+    // IEEE 1800-2023 6.24.3: an associative array is illegal as the
+    // destination of a bit-stream conversion; a stream that fills
+    // dynamically sized variables unpacks in a procedural body.
+    for (body, expected) in [
+        (
+            "initial m = {>>{q}};",
+            "associative array cannot receive a stream",
+        ),
+        (
+            "initial {>>{m}} = 32'd0;",
+            "associative array cannot receive a stream",
+        ),
+        (
+            "initial {>>{q}} <= 32'd0;",
+            "nonblocking assignment to a streaming concatenation",
+        ),
+        ("initial i = {>>{q with [0]}} + 1;", "shall first be cast"),
+        ("initial i = {>>{h}};", "class handle"),
+        ("initial sq = {>>{32'h61626364}};", "container of strings"),
+    ] {
+        let source = format!(
+            "module Top; class C; endclass byte q[$]; int m[int]; int i; C h; string sq[$]; {body} endmodule"
+        );
+        let error = analyze_source(&source, Path::new("dynamic_streams.sv"))
+            .expect_err(body)
+            .to_string();
+        assert!(error.contains(expected), "{body}: {error}");
+    }
+}
+
+#[test]
+fn property_select_reads_require_a_zero_based_range() {
+    // A read replaces the property's template by its value, a `[N-1:0]`
+    // vector; a write goes through a local of the property's type.
+    for (declaration, statement, accepted) in [
+        ("logic [15:0] p", "r = c.p[3:0];", true),
+        ("logic [8:1] p", "c.p[8:5] = 4'h0;", true),
+        ("logic [0:7] p", "c.p[0:1] = 2'b11;", true),
+        ("logic [8:1] p", "r = c.p[8:5];", false),
+        ("logic [0:7] p", "r = c.p[1:3];", false),
+    ] {
+        let source = format!(
+            "module Top; class C; {declaration}; endclass C c; logic [15:0] r; \
+             initial begin c = new; {statement} end endmodule"
+        );
+        let result = analyze_source(&source, Path::new("property_select.sv"));
+        match result {
+            Ok(_) => assert!(accepted, "{declaration}: {statement} was accepted"),
+            Err(error) => assert!(
+                !accepted
+                    && matches!(error, AnalyzerError::Unsupported(_))
+                    && error.to_string().contains("not declared [N-1:0]"),
+                "{declaration}: {statement}: {error}"
+            ),
+        }
+    }
+}
+
+#[test]
+fn wide_container_elements_reject_whole_container_operations() {
+    // Elements wider than 64 bits are held in records, which these
+    // operations would compare or combine as handles.
+    for (statement, detail) in [
+        ("q.sort();", "sorting elements wider than 64 bits"),
+        (
+            "r = q.sum();",
+            "array reduction of elements wider than 64 bits",
+        ),
+        ("b = q == p;", "elements wider than 64 bits"),
+        (
+            "$display(\"%p\", q);",
+            "%p of a container of elements wider than 64 bits",
+        ),
+        (
+            "p = q.min();",
+            "elements wider than 64 bits requires a with",
+        ),
+        (
+            "p = q.unique();",
+            "elements wider than 64 bits requires a with",
+        ),
+        (
+            "ix = q.unique_index();",
+            "elements wider than 64 bits requires a with",
+        ),
+        ("b = q[0][99];", "container element wider than 64 bits"),
+        ("r = q[0][7:0];", "container element wider than 64 bits"),
+        ("ix[0] = $bits(q[0][99]);", "query selection"),
+        ("q[0][3] = 1'b1;", "requires a compatible container"),
+    ] {
+        let source = format!(
+            "module Top; logic [99:0] q[$], p[$]; logic [99:0] r; bit b; int ix[$]; \
+             initial begin {statement} end endmodule"
+        );
+        let error = analyze_source(&source, Path::new("wide_elements.sv"))
+            .expect_err("the operation must be rejected");
+        assert!(
+            matches!(error, AnalyzerError::Unsupported(_)) && error.to_string().contains(detail),
+            "{statement}: {error}"
+        );
     }
 }

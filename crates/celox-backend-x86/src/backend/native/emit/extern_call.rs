@@ -50,8 +50,10 @@ pub(super) fn set_call_area(
 }
 
 /// The XMM registers a call must save: pinned ones the callee may change.
-fn saved_xmms(context: &EmissionContext) -> impl Iterator<Item = usize> {
-    let saved = context.pinned_xmms & !C_PRESERVED_XMMS;
+fn saved_xmms(context: &EmissionContext, native_kernel: bool) -> impl Iterator<Item = usize> {
+    // Generated x86 functions use SysV on every host, including Windows.
+    let preserved = if native_kernel { 0 } else { C_PRESERVED_XMMS };
+    let saved = context.pinned_xmms & !preserved;
     (0..16).filter(move |index| saved & (1 << index) != 0)
 }
 
@@ -98,11 +100,12 @@ pub(super) fn emit_call_extern(
     let context = asm.context;
     let area = call_area(&context);
     let strategy = state_base_strategy(&context);
+    let kernel = celox_sir::extern_abi::native_kernel_index(func);
 
     // RBX is callee-saved in every C ABI and free here: it holds the state
     // pointer while the segment base belongs to C code.
     emit_state_base(asm, rbx)?;
-    for index in saved_xmms(&context) {
+    for index in saved_xmms(&context, kernel.is_some()) {
         asm.movq(
             qword_ptr(rbx + (area + CALL_AREA_XMM_SAVE + 8 * index as i32)),
             xmm_register(index),
@@ -119,14 +122,15 @@ pub(super) fn emit_call_extern(
         StateBaseStrategy::R15 => {}
     }
 
-    let (registers, shadow): (&[AsmRegister64], i32) = if cfg!(target_os = "windows") {
-        (&[rcx, rdx, r8, r9], 32)
-    } else {
-        (&[rdi, rsi, rdx, rcx, r8, r9], 0)
-    };
+    let (registers, shadow): (&[AsmRegister64], i32) =
+        if cfg!(target_os = "windows") && kernel.is_none() {
+            (&[rcx, rdx, r8, r9], 32)
+        } else {
+            (&[rdi, rsi, rdx, rcx, r8, r9], 0)
+        };
     // The heap helper takes the state pointer before the staged arguments.
     let heap = func == celox_sir::extern_abi::HEAP_HELPER_ID;
-    let leading = usize::from(heap);
+    let leading = usize::from(heap || kernel.is_some());
     let arg_count = usize::from(arg_count) + leading;
     let stack_args = arg_count.saturating_sub(registers.len()) as i32;
     // Generated code is entered with RSP = 8 (mod 16) and never moves it.
@@ -158,7 +162,7 @@ pub(super) fn emit_call_extern(
     } else if heap {
         -16
     } else {
-        i32::try_from(u64::from(func) * 8).expect("extern function index")
+        i32::try_from(u64::from(kernel.unwrap_or(func)) * 8).expect("extern function index")
     };
     asm.mov(rax, qword_ptr(rax + offset))?;
     asm.call(rax)?;
@@ -170,7 +174,7 @@ pub(super) fn emit_call_extern(
         StateBaseStrategy::Gs => asm.wrgsbase(rbx)?,
         StateBaseStrategy::R15 => {}
     }
-    for index in saved_xmms(&context) {
+    for index in saved_xmms(&context, kernel.is_some()) {
         asm.movq(
             xmm_register(index),
             qword_ptr(rbx + (area + CALL_AREA_XMM_SAVE + 8 * index as i32)),

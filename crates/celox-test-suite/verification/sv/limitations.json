@@ -1,5 +1,22 @@
 [
   {
+    "id": "sv_verilator_logical_equivalence_side_effects",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "IEEE 1800-2023 11.4.7 requires each logical equivalence operand to be evaluated exactly once. Verilator 5.052 evaluates the left function twice in the standalone reproduction and emits SIDEEFFECT warnings; Icarus 13.0 evaluates both functions once.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_logical_equivalence_once.sv",
+      "src/sv/cases/operators.vtest"
+    ],
+    "cases": {
+      "verilator": [
+        "operators::logical_equivalence_evaluates_operands_once"
+      ]
+    }
+  },
+  {
     "id": "sv_static_function_result_lifetime",
     "category": "simulator_disagreement",
     "phase": "execute",
@@ -54,6 +71,23 @@
     "cases": {
       "icarus": [
         "procedural::static_function_real_locals_and_results_keep_value"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_explicit_static_task_local",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects an explicit static local in an automatic task (\"Overriding the default variable lifetime is not yet supported.\"), a class declared in a module, and the package-scoped call tick_pkg::tick(b), with syntax errors. IEEE 1800-2023 6.21 and 13.3.1 permit the declaration and share it between all calls, 8.6 makes class methods automatic, and 26.3 permits the package-scoped reference. Verilator 5.052, xezim 0.11.3 and Celox run the adapter-free source with the expected sums.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_static_task_declared_locals_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::timed_task_declared_static_locals_are_shared"
       ]
     }
   },
@@ -321,7 +355,8 @@
         "procedural::select_indices_call_functions",
         "synthesizable::function_output_and_inout_arguments_are_written_back",
         "system_functions::unpacked_dimensions_accepts_function_result_arguments",
-        "system_functions::unpacked_dimensions_validates_writable_function_arguments"
+        "system_functions::unpacked_dimensions_validates_writable_function_arguments",
+        "string_format::sformatf_with_reference_argument"
       ]
     }
   },
@@ -671,7 +706,8 @@
         "indexed_select::ascending_part_selects_partly_outside_write_the_bits_inside",
         "indexed_select::constant_part_selects_partly_outside_write_the_bits_inside",
         "indexed_select::known_run_time_selects_stay_within_their_element",
-        "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang"
+        "indexed_select::runtime_indexed_writes_keep_unselected_bits_and_clip_overhang",
+        "property_selects::property_selects_through_handles_and_this"
       ]
     }
   },
@@ -705,6 +741,7 @@
       "verification/sv/limitations/interface-array-ports-icarus.json",
       "verification/sv/limitations/implicit-interface-ports-icarus.json",
       "verification/repros/sv_mixed_interface_connections_icarus.json",
+      "verification/repros/sv_header_modport_icarus.json",
       "LIMITATIONS.md#systemverilog-suite"
     ],
     "cases": {
@@ -718,6 +755,7 @@
         "interfaces::clocks_interface_processes_from_member_clocks",
         "interfaces::drives_members_through_child_outputs_and_array_generate_regions",
         "interfaces::elaborates_net_members_typedefs_and_localparams",
+        "interfaces::forwards_header_ports_through_modports",
         "interfaces::infers_directions_of_ports_without_modport",
         "interfaces::mixes_module_contracts_with_local_interface_connections",
         "interfaces::overrides_body_parameters_and_drives_members_from_imported_functions",
@@ -1786,7 +1824,8 @@
       "icarus": [
         "string::character_access",
         "string::concatenation_and_replication",
-        "string::methods"
+        "string::methods",
+        "string::characters_are_signed_bytes"
       ]
     }
   },
@@ -1900,7 +1939,8 @@
       "icarus": [
         "class::static_properties_and_methods",
         "class::classes_of_the_compilation_unit",
-        "class::package_classes_by_their_qualified_names"
+        "class::package_classes_by_their_qualified_names",
+        "class::named_method_arguments"
       ]
     }
   },
@@ -2059,7 +2099,9 @@
         "class::class_declarations_bind_in_their_scopes",
         "class::parameter_defaults_bind_where_the_class_is_declared",
         "class::specialization_keys_follow_the_bound_parameters",
-        "class::derived_classes_keep_their_declaration_scopes"
+        "class::derived_classes_keep_their_declaration_scopes",
+        "property_selects::property_selects_of_parameterized_classes",
+        "wide_container_elements::wide_elements_of_parameterized_classes"
       ]
     }
   },
@@ -2076,7 +2118,8 @@
     ],
     "cases": {
       "icarus": [
-        "class::shallow_copies"
+        "class::shallow_copies",
+        "wide_class_properties::wide_properties_keep_every_bit"
       ]
     }
   },
@@ -2189,7 +2232,8 @@
     "cases": {
       "icarus": [
         "class::randomize_without_rand_members",
-        "class::unconstrained_randomize"
+        "class::unconstrained_randomize",
+        "wide_class_properties::wide_random_properties_fill_every_word"
       ]
     }
   },
@@ -2576,6 +2620,1006 @@
     "cases": {
       "icarus": [
         "scan::sscanf_string_format_expression"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_scalar_constraints",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (devel)",
+    "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_scalar_constraints.json",
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/sv_inside_constraints.json",
+      "verification/repros/sv_conditional_constraints.json",
+      "verification/repros/sv_inline_constraints.json",
+      "verification/repros/sv_inline_input_icarus.json",
+      "verification/repros/sv_inline_input_hooks.json"
+    ],
+    "cases": {
+      "icarus": [
+        "class::constrained_randomize_scalar",
+        "class::constrained_randomize_width_and_inheritance",
+        "class::constrained_randomize_hooks",
+        "class::constrained_randomize_inside",
+        "class::constrained_randomize_inside_widths",
+        "class::constrained_randomize_conditionals",
+        "class::constrained_randomize_nested_guards",
+        "class::constrained_randomize_inline",
+        "class::constrained_randomize_inline_inheritance",
+        "class::constrained_randomize_inline_basic",
+        "class::constrained_randomize_inline_package_instances",
+        "class::constrained_randomize_inline_inputs",
+        "class::constrained_randomize_inline_input_methods",
+        "class::constrained_randomize_inline_input_hooks"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_post_randomize_unsat",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator invokes post_randomize unconditionally after an UNSAT ordinary randomize call. Generated C++ calls the post hook after constraint.next without testing its return. IEEE 1800-2023 18.6.3 requires skipping the post hook on failure. The case keeps its assertion and tests that pre_randomize updates state before solving.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_scalar_constraints.json",
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/sv_inline_constraints.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constrained_randomize_hooks",
+        "class::constrained_randomize_inline"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_inline_constraint_static_scope",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Through a Base handle containing a Derived object that hides Base.x, Verilator binds inline x == 2 to Derived.x, conflicting with its x == 9 block. IEEE 1800-2023 18.7 starts inline name lookup in the class of the object handle used at the call. Base.x must be 2 and Derived.x must be 9. The standalone source reproduces UNSAT without the suite adapter. Assertions are retained.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_inline_constraint_scope.sv",
+      "verification/repros/sv_inline_constraints.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constrained_randomize_inline_inheritance"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_inline_inputs_before_pre_hook",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator copies caller-scope inline inputs into its generated helper before pre_randomize. When the hook changes wanted from 2 to 5, the solve still assigns x = 2. IEEE 1800-2023 18.6.2 invokes the pre-hook before randomization, and 18.7 permits references to caller-scope state variables. The regression retains the post-hook value and single-invocation assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_inline_input_hooks.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constrained_randomize_inline_input_hooks"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_constraint_mode_bit_argument",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "IEEE 1800-2023 18.9 declares constraint_mode(bit on_off). Passing integer 2 converts to bit zero and disables the block. Verilator keeps it enabled; the regression preserves the mode query assertion.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constraint_mode_basic"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_constraint_mode_override",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "IEEE 1800-2023 18.5.2 replaces an inherited constraint with the derived block of the same name, and 18.9 permits mode control of a block in the class hierarchy. Verilator changes a separate base-block mode through a base handle: the derived mode query remains disabled after enabling the base name, or the overridden predicate remains active after disabling it. The regressions retain both getter and solve assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "verilator": [
+        "class::constraint_mode_inheritance",
+        "class::constraint_mode_base_dispatch"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_constraint_modes",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (devel)",
+    "reason": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_constraint_modes.json"
+    ],
+    "cases": {
+      "icarus": [
+        "class::constraint_mode_base_dispatch",
+        "class::constraint_mode_basic",
+        "class::constraint_mode_hooks",
+        "class::constraint_mode_inheritance"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_iff_event_controls",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects `iff` in an event control with \"syntax error\" and \"Malformed event control expression.\" IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_event_controls_icarus.json",
+      "verification/repros/sv_iff_hierarchy_automatic.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::iff_events_occur_only_while_the_condition_holds",
+        "timing::iff_conditions_see_writes_before_the_event",
+        "timing::iff_conditions_apply_to_their_own_items",
+        "timing::iff_conditions_read_automatic_task_arguments",
+        "timing::unknown_iff_conditions_are_false",
+        "timing::plain_always_iff_events_run_as_processes",
+        "timing::iff_conditions_are_judged_before_edge_processes_run",
+        "timing::iff_conditions_are_judged_at_the_write",
+        "timing::iff_conditions_follow_nonblocking_update_order",
+        "timing::iff_conditions_consume_occurrences_while_false",
+        "timing::iff_conditions_follow_combinational_process_order",
+        "timing::iff_conditions_preserve_cross_module_combinational_order",
+        "timing::iff_forked_automatic_gates_are_separate",
+        "timing::iff_shared_automatic_gate_uses_edge_time_value",
+        "timing::iff_automatic_clock_preserves_enabled_pulses"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_static_property_wait",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 compiles a `wait` on a static class property in a class task but vvp cannot load the result (\"unresolved vvp_net reference\", \"Program not runnable\"). IEEE 1800-2023 8.9 and 9.4.3 make the property one variable that the wait watches. Verilator 5.052 and xezim 0.11.3 pass the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_static_property_wait_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "class::waits_on_static_properties"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_iff_late_conditions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. Standalone probes print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. A hierarchical waiter on clk also sees the later en write of a child always_comb (clk=a; en=a), giving rejected=2 instead of 0; reversing those writes correctly gives accepted=2.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_late_conditions_verilator.json",
+      "verification/repros/sv_iff_hierarchy_automatic.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::iff_conditions_are_judged_at_the_write",
+        "timing::iff_conditions_follow_nonblocking_update_order",
+        "timing::iff_conditions_follow_combinational_process_order",
+        "timing::iff_conditions_preserve_cross_module_combinational_order"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_iff_shared_automatic",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects the write to a shared automatic gate or event signal in fork/join_none with Error-LIFETIME. IEEE 1800-2023 6.21 extends the enclosing scope lifetime until its fork children complete; 9.4.2.3 judges each gate when its event occurs. Standalone Top and Wrapped probes reproduce the rejection. The assertions require accepted=1 and rejected=0.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_iff_hierarchy_automatic.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::iff_shared_automatic_gate_uses_edge_time_value",
+        "timing::iff_automatic_clock_preserves_enabled_pulses"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_boolean_concurrent_assertions",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_concurrent_regions.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "concurrent_assertions::assume_cover_and_generate",
+        "concurrent_assertions::disable_iff_after_nba",
+        "concurrent_assertions::predicates_before_all_actions",
+        "concurrent_assertions::sampled_predicate_live_action",
+        "concurrent_assertions::unknown_predicates_and_disable_conditions"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_concurrent_regions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_concurrent_regions.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "concurrent_assertions::sampled_predicate_live_action",
+        "concurrent_assertions::disable_iff_after_nba"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_string_character_signedness",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 reads a string character, s[i] and s.getc(i), as an unsigned 8-bit value: a character code of 255 converts to int 255 and compares greater than 0. IEEE 1800-2023 6.16 makes a character a byte and 6.11 makes byte signed, so the code reads as -1; xezim 0.11.3 agrees with the expected values and Icarus 13.0 also reads it as 255.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_string_character_signedness.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "string::characters_are_signed_bytes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_string_conditional",
+    "category": "simulator_internal_error",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 aborts with an assertion in eval_vec4.c (draw_eval_vec4) on a conditional operator whose operands are strings, also with two string variables. IEEE 1800-2023 11.4.11 permits operands of equivalent nonintegral types such as string. Verilator 5.052 and xezim pass the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::sformatf_in_conditional_expressions"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_sformat_property_output",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 compiles $sformat with a string class property as its output, but vvp stops with \"$sformat's first argument must be a register or SV string.\" IEEE 1800-2023 21.3.3 permits a string variable as the output, and a class property is one (8.5). Verilator 5.052 and xezim pass the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::sformat_property_output"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_integral_format_string",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 compiles $sformatf with a bit-vector variable as the format, but vvp stops with \"$sformatf's first argument must be a string or a register.\" IEEE 1800-2023 21.3.3 permits an expression of integral type whose content is the format. Verilator 5.052 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::sformatf_packed_runtime_format"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_string_associative_arrays_and_property_queue_methods",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects associative arrays with string and bit [63:0] indices (\"Type names are not valid expressions here\") and queue methods called on a class property (\"Can't find task push_back in class Log\"). IEEE 1800-2023 7.8 and 7.10 define both; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-format-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite",
+      "verification/repros/sv_associative_index_cast.json"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::sformatf_in_container_operands",
+        "string_format::sformatf_with_associative_index"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_associative_index_cast",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 evaluates the index x + 32'd1 of an associative array with a bit [63:0] index at the expression's own 32 bits, so the element is stored under key 0. IEEE 1800-2023 7.8.4 evaluates an integral index as a cast to the index type, and 6.24.1 gives a size cast the value after an assignment to that width, so the key is 64'h100000000; xezim 0.11.3 also stores key 0.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_associative_index_cast.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "string_format::sformatf_with_associative_index"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_unpacked_structs",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 does not support unpacked structures (\"sorry: Unpacked structs not supported.\"), which IEEE 1800-2023 7.2 defines; the standalone source reproduces the diagnostic. Verilator passes all but the nested default pattern, see sv_verilator_nested_struct_default.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_icarus_unpacked_structs.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "unpacked_structs::assignment_patterns",
+        "unpacked_structs::class_properties",
+        "unpacked_structs::class_properties_inheritance_and_collections",
+        "unpacked_structs::class_property_assignment_order",
+        "unpacked_structs::class_property_four_state_members",
+        "unpacked_structs::container_element_four_state_defaults",
+        "unpacked_structs::container_element_member_selects",
+        "unpacked_structs::container_elements",
+        "unpacked_structs::container_records_survive_heap_collections",
+        "unpacked_structs::four_state_members",
+        "unpacked_structs::handle_members_survive_heap_collections",
+        "unpacked_structs::initializers_results_and_defaults",
+        "unpacked_structs::members_whole_copies_and_equality",
+        "unpacked_structs::module_port_four_state_members",
+        "unpacked_structs::module_port_patterns",
+        "unpacked_structs::module_port_recursive_defaults",
+        "unpacked_structs::module_ports",
+        "unpacked_structs::module_variables",
+        "unpacked_structs::reference_formal_handles_survive_heap_collections",
+        "unpacked_structs::reference_formals",
+        "unpacked_structs::reference_formals_across_time",
+        "unpacked_structs::reference_formals_four_state",
+        "unpacked_structs::reference_formals_of_virtual_methods",
+        "unpacked_structs::results_and_outputs",
+        "unpacked_structs::subroutine_arguments_and_results",
+        "wide_class_properties::wide_type_parameters_and_records"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_nested_struct_default",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 (\"5 0000 1\" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_verilator_nested_struct_default.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "unpacked_structs::assignment_patterns",
+        "unpacked_structs::module_port_recursive_defaults"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_nested_containers",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects an associative array whose index type is a type name (\"Type names are not valid expressions here.\"), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays (\"Sorry: Dynamic array of type `dynamic array of ...` is not yet supported.\"), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_icarus_nested_containers.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "containers::class_keys_survive_heap_collections",
+        "containers::methods_of_nested_container_elements",
+        "containers::nested_containers_and_class_keys",
+        "containers::nested_updates_evaluate_indices_once"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_container_formals",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_icarus_container_formals.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "container_formals::container_formals_forwarded_and_read_from_properties",
+        "container_formals::container_formals_of_class_handles_copy_the_container",
+        "container_formals::container_formals_of_class_methods",
+        "container_formals::inout_container_is_copied_in_and_back",
+        "container_formals::input_container_changes_are_not_seen_by_the_caller",
+        "container_formals::input_container_from_an_empty_concatenation",
+        "container_formals::input_container_from_container_values",
+        "container_formals::output_container_starts_empty_and_is_copied_back",
+        "container_formals::static_subroutine_container_formals",
+        "container_formals::task_copies_containers_back_when_it_returns"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_property_selects",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_icarus_property_selects.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "property_selects::property_selects_evaluate_the_object_and_value_once",
+        "property_selects::property_selects_keep_unknown_bits",
+        "property_selects::property_selects_through_handles_and_this",
+        "property_selects::wide_property_selects_pack_and_unpack",
+        "property_selects::property_selects_compound_indices_evaluate_once",
+        "property_selects::property_selects_compound_receivers_evaluate_once"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_compound_part_select_index",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 evaluates the index of an indexed part-select target of an assignment operator twice: v[next_bit() +: 2] += 2'd1 calls next_bit() once for the read and again for the write, so the sum lands in other bits. IEEE 1800-2023 11.4.1 evaluates a left-hand index expression of an assignment operator only once; Verilator does so for a bit-select target, and the standalone source reproduces the difference. xezim 0.11.3 calls it once.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_verilator_compound_part_select_index.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "property_selects::property_selects_compound_indices_evaluate_once"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_queue_argument_extension",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Verilator 5.052 zero-extends a signed value passed to push_back or insert of a queue whose elements are wider than the value: push_back of an int of -1 into a bit [199:0] or bit [47:0] queue stores 'hffff_ffff zero-extended instead of all ones. IEEE 1800-2023 7.10.2 and 13.5.1 copy the item argument as by assignment, which extends a signed value by its sign (10.7); Verilator sign-extends the same value assigned to an element or a variable, and the standalone source reproduces the difference. xezim 0.11.3 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_verilator_queue_argument_extension.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "wide_container_elements::wide_elements_extend_by_the_value_signedness"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_container_dimensions",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+    "reason": "Icarus 13.0 returns 0 for $dimensions of a queue or a dynamic array. IEEE 1800-2023 20.7 counts the unpacked dimension of the container and the packed dimensions of its element type, so int q[$] and logic [7:0] d[] both have 2; the standalone source reproduces the 0. Verilator 5.052 and xezim 0.11.3 return 2.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_icarus_container_dimensions.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "wide_container_elements::wide_elements_extend_by_the_value_signedness"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_empty_concatenation_argument",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects {} passed to an input queue formal (\"%Error-UNSUPPORTED: ... Unsupported/Illegal: empty queue ('{}') in this context\"). Passing a value to an input argument is an assignment-like context (IEEE 1800-2023 10.8), where {} is an empty queue (10.10); xezim 0.11.3 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_verilator_empty_concatenation_argument.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "container_formals::input_container_from_an_empty_concatenation"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_pattern_format",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/pattern-format.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "string_format::pattern_format",
+        "string_format::pattern_format_keys_and_handles"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_pattern_format",
+    "category": "simulator_unsupported",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 compiles %p of queues and dynamic arrays, but vvp stops with \"$display does not support argument type (116).\" IEEE 1800-2023 21.2.1.6 prints them as assignment patterns.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/pattern-format.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::pattern_format"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_associative_arrays_and_class_queues",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects associative arrays declared with int and string indices (\"Type names are not valid expressions here\") and queues of class handles (\"Queue of type class ... is not yet supported\", \"Class/null r-value not allowed in this context\"), which IEEE 1800-2023 7.8 and 7.10 define.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/pattern-format.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string_format::pattern_format_keys_and_handles",
+        "wide_container_elements::wide_elements_default_to_x",
+        "wide_container_elements::wide_elements_keep_every_bit"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_array_locators",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 does not parse an array method call with a with clause (\"syntax error\", \"Malformed statement\"), and so rejects every locator method that IEEE 1800-2023 7.12 and 7.12.1 define; for the structure elements it also reports \"sorry: Unpacked structs not supported.\". Verilator 5.052 and xezim 0.11.3 compile the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/array-locators-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "array_locators::array_locator_associative",
+        "array_locators::array_locator_class_predicates",
+        "array_locators::array_locator_find",
+        "array_locators::array_locator_fixed",
+        "array_locators::array_locator_fixed_struct_enum",
+        "array_locators::array_locator_four_state",
+        "array_locators::array_locator_index_argument",
+        "array_locators::array_locator_iterator_names",
+        "array_locators::array_locator_min_max_unique",
+        "array_locators::array_locator_struct_elements"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_array_locator_index_argument",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects the index argument of an array method call ('with' function expects only up to one argument) and an omitted iterator argument before it ('with' function expects simple variable name). IEEE 1800-2023 7.12 (Syntax 7-5) permits both and 7.12.4 renames the index querying method; xezim 0.11.3 compiles the case but finds no element.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_array_locator_index_argument.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "array_locators::array_locator_index_argument"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_array_locator_associative_order",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 orders the indices of an associative array with an int index as unsigned: foreach visits 3, 10, -5, find_index returns 3 before -5 and max with (item.index) selects the element at -5. IEEE 1800-2023 7.8.4 orders an integral index signed or unsigned by the signedness of the index type, so -5 comes first and the largest index is 10; xezim 0.11.3 returns empty queues for associative arrays.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_array_locator_associative_order.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "array_locators::array_locator_associative"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_array_locator_fixed_indices",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 gives locator methods of a fixed-size array the positions of its elements from the right bound instead of their indices: find_first_index of int down[3:0] finds the element at index 1 before the one at 2, find_index of byte bytes[2:5] returns 1 and 3 for indices 3 and 5, and item.index never equals 4, and arrays at the bounds of int report index 0 or 1; min of {1, -2, 3, -4} also returns 1. IEEE 1800-2023 7.12.1 returns indices and takes the first element closest to the leftmost index, 7.12.4 makes item.index the index value, and 6.11 makes byte signed; xezim 0.11.3 shares the index errors.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_array_locator_fixed_indices.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "array_locators::array_locator_fixed"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_typename_spelling",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 spells $typename differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (logic signed [0:7] gives logic[0:7], int unsigned gives int, byte unsigned gives byte), writes shortreal as real and bit [3:0][1:0] as bit[1:0][3:0], writes enumeration values in hex separated by semicolons without the base type (enum{R=2'h0;G=2'h2;}) where 20.6.1 writes enum logic[1:0]{R=2'd0,G=2'd2}, drops packed and signed from structs, and writes a variable of a class type parameter as PARAMTYPEDTYPE 'T' and a class as class{}item. Rules b, e and f of 20.6.1 keep each of these; xezim 0.11.3 also deviates and Icarus 13.0 rejects the operands.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_typename_vectors.json",
+      "verification/repros/sv_typename_aggregates.json",
+      "verification/repros/sv_typename_classes.json",
+      "verification/repros/sv_typename_constant.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::typename_aggregates",
+        "system_functions::typename_class_parameters",
+        "system_functions::typename_elaboration_constant",
+        "system_functions::typename_vectors_and_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_typename_operands",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_typename_vectors.json",
+      "verification/repros/sv_typename_aggregates.json",
+      "verification/repros/sv_typename_classes.json",
+      "verification/repros/sv_typename_constant.json",
+      "verification/repros/sv_typename_scopes.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "system_functions::typename_aggregates",
+        "system_functions::typename_class_parameters",
+        "system_functions::typename_elaboration_constant",
+        "system_functions::typename_scopes_and_string_operands",
+        "system_functions::typename_vectors_and_arrays"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_typename_method_call",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects a string method called on the result of $typename ($typename(int).len(): \"Syntax error: Not expecting BASICDTYPE under a ATTROF in dotted expression\"). IEEE 1800-2023 20.6.1 returns a string, 6.16.1 defines len() on strings and A.8.2 permits a system function call as the root of a method call; xezim 0.11.3 compiles the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_typename_scopes.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "system_functions::typename_scopes_and_string_operands"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_increment_in_conditional_operand",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects an increment or decrement operator in an arm of the conditional operator and in the right operand of -> (\"Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\"). IEEE 1800-2023 11.4.2 allows the operators in any expression, and 11.4.7 and 11.4.11 decide when such an operand is evaluated; Icarus 13.0 and xezim 0.11.3 compile both cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_increment_decrement_conditional_operands.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "increment_decrement::increment_decrement_conditional_arms",
+        "increment_decrement::increment_decrement_implication"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_increment_operands",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 rejects an increment or decrement used as a value of a vector narrower than int, an array element or a packed structure member (\"sorry: ++ operation is not yet supported on vector slice.\"), does not support queues and associative arrays in classes, and aborts on ++ of a class property in an expression (\"draw_unary_inc_dec: Assertion `0' failed\"). IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable; Verilator 5.052 and xezim 0.11.3 pass both cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/increment-decrement-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "increment_decrement::increment_decrement_class_members",
+        "increment_decrement::increment_decrement_vectors"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_implication_short_circuit",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 evaluates the right operand of -> when the left one is false, so (i == 0) -> (j++ > 0) increments j. IEEE 1800-2023 11.4.7 does not evaluate the second operand of -> when the first one is logically false; xezim 0.11.3 shares the error and Verilator 5.052 rejects the operator there.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_increment_decrement_conditional_operands.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "increment_decrement::increment_decrement_implication"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_virtual_interfaces",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 does not parse virtual interface declarations (\"syntax error\", \"Invalid module item\" or \"Invalid class item\" at `virtual bus_if v;`), which IEEE 1800-2023 25.9 defines. Verilator 5.052 and xezim 0.11.3 run the simulation cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_virtual_interfaces_icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "virtual_interfaces::always_on_member_edges",
+        "virtual_interfaces::class_call_arguments_and_package_results",
+        "virtual_interfaces::four_state_members",
+        "virtual_interfaces::function_results",
+        "virtual_interfaces::increments_arrays_and_package_variables",
+        "virtual_interfaces::increments_in_expressions",
+        "virtual_interfaces::interface_ports_and_array_elements",
+        "virtual_interfaces::member_pulses_within_one_activation",
+        "virtual_interfaces::member_selects",
+        "virtual_interfaces::mixed_event_controls",
+        "virtual_interfaces::modport_ports_and_constant_sized_members",
+        "virtual_interfaces::multidimensional_and_package_arrays",
+        "virtual_interfaces::null_equality_and_assignment",
+        "virtual_interfaces::package_configuration_database",
+        "virtual_interfaces::package_generic_member_reads",
+        "virtual_interfaces::properties_arguments_and_member_writes",
+        "virtual_interfaces::queue_pops_and_output_arguments",
+        "virtual_interfaces::rejects_another_interface",
+        "virtual_interfaces::rejects_call_results_of_other_types",
+        "virtual_interfaces::rejects_integers_as_class_call_arguments",
+        "virtual_interfaces::rejects_integers_as_constructor_arguments",
+        "virtual_interfaces::rejects_integers_in_arrays_of_virtual_interfaces",
+        "virtual_interfaces::rejects_integers_in_conditional_array_elements",
+        "virtual_interfaces::rejects_modport_ports_to_full_interface",
+        "virtual_interfaces::rejects_modport_to_full_interface",
+        "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
+        "virtual_interfaces::retargets_with_ordinary_events",
+        "virtual_interfaces::type_parameter_values",
+        "virtual_interfaces::waits_on_member_edges",
+        "virtual_interfaces::waits_on_member_levels",
+        "virtual_interfaces::waits_with_guards_signed_members_and_automatic_tasks",
+        "virtual_interfaces::writes_from_instances_of_one_module"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_virtual_interface_wait",
+    "category": "simulator_runtime_limitation",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_virtual_interface_event_verilator.json",
+      "verification/repros/sv_virtual_interface_wait_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "virtual_interfaces::member_pulses_within_one_activation",
+        "virtual_interfaces::mixed_event_controls",
+        "virtual_interfaces::retargets_with_ordinary_events",
+        "virtual_interfaces::waits_on_member_edges",
+        "virtual_interfaces::waits_on_member_levels",
+        "virtual_interfaces::waits_with_guards_signed_members_and_automatic_tasks"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_streaming_concatenation",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog 13.0",
+    "reason": "Icarus 13.0 does not support streaming concatenation: it reports \"sorry: Streaming concatenation not supported.\" for {>>{...}} and {<<{...}}, adds \"not supported in l-values.\" for an unpack target, and rejects a stream with a slice size or a with range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and as assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/streaming-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "streaming::streaming_arrays",
+        "streaming::streaming_combinational",
+        "streaming::streaming_contexts",
+        "streaming::streaming_dynamic_alignment",
+        "streaming::streaming_dynamic_pack",
+        "streaming::streaming_dynamic_unpack",
+        "streaming::streaming_dynamic_with",
+        "streaming::streaming_operand_types",
+        "streaming::streaming_pack_alignment",
+        "streaming::streaming_reorder",
+        "streaming::streaming_unpack"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_with_range",
+    "category": "simulator_unsupported",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 rejects a with range on a stream expression (\"Unsupported: with[] stream expression\" at {>>{up with [1 +: 2]}}, {>>{down with [4]}} and {>>{down with [4:2]}}, and at the dynamic array ranges i_data with [1 +: 3] in a pack and o_data with [0 +: o_len] in an unpack). IEEE 1800-2023 11.4.14.4 (Syntax 11-5) permits a with expression after any one-dimensional unpacked array and in a pack streams only the specified items, here up[1] and up[2], giving 32'h22330000, and the nonexistent-entry value of Table 7-1 (7.4.5) for an index outside byte down [3:0], so down with [4] gives 0 and down with [4:2] gives 32'h00112200; an unpack resizes a dynamic array to the range, which may read o_len unpacked before it. xezim 0.11.3 compiles the cases but ignores the ranges.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_with_range.json",
+      "verification/repros/sv_streaming_dynamic_with.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_arrays",
+        "streaming::streaming_dynamic_with"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_partial_block_unpack",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 unpacks {<< 3 {x, z}} = 8'b1101_0011 with logic [3:0] x, z into x = 4'b0110 and z = 4'b1011: it applies the re-ordering of the pack, 3-bit blocks sliced from the right with a 2-bit last block, to the source, so packing x and z again gives 8'b0111_0101. IEEE 1800-2023 11.4.14.3 makes the unpack the reverse operation of the pack of 11.4.14.2, giving x = 4'b1110 and z = 4'b0110, which pack back to the source; the two orders differ only when the last block is partial. xezim 0.11.3 gives the same values as Verilator.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_partial_block_unpack.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_unpack"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_dynamic_target",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 generates C++ that g++ rejects for d = {<< byte {32'h11223344}} with byte d[]: it assigns the packed constant to the dynamic array (\"no match for 'operator=' (operand types are 'VlQueue<unsigned char>' and 'unsigned int')\"). IEEE 1800-2023 11.4.14 resizes a dynamically sized target to hold the stream, giving four elements 8'h44, 8'h33, 8'h22, 8'h11. Standalone probes also show Verilator right-aligning the stream of a queue in a wider fixed-size target, where 11.4.14 fills with zero bits on the right. xezim 0.11.3 compiles the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_dynamic_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_dynamic_pack"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_empty_queue_operand",
+    "category": "simulator_compile_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 generates C++ that g++ rejects for i = {>>{q, 16'h1234}} with an empty byte q[$] (\"invalid cast from type 'VlQueue<unsigned char>' to type 'IData'\"), and sizes the stream from the fixed operand alone (WIDTHEXPAND, 16 bits). IEEE 1800-2023 11.4.14.1 streams every element of a queue operand, none of an empty one, and 11.4.14 left-aligns the stream in the wider target, giving 32'h12340000. xezim 0.11.3 passes the case.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_dynamic_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_dynamic_alignment"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_streaming_dynamic_unpack",
+    "category": "simulator_internal_error",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 stops with \"Internal Error: ... ../V3Expand.cpp:574: Width mismatch\" at {<< 8 {o_header, o_len, o_data, o_crc}} = pkt, an unpack into a target list holding byte o_data[], and generates a VL_STREAML_RII call with a queue argument, which g++ rejects, for {>> {o_data}} = {<< byte {o_data}}. IEEE 1800-2023 11.4.14.4 and 6.24.3 make the unpack greedy: o_data takes the bytes left after the fixed-size items.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_streaming_dynamic_verilator.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "streaming::streaming_dynamic_unpack"
       ]
     }
   }

@@ -135,16 +135,23 @@ pub enum StmtBase<E, L> {
     WaitImplicit(Vec<StmtBase<E, L>>),
     WaitFork,
     DisableFork,
+    /// Internal region boundary of a concurrent assertion monitor.
+    AssertionRegion {
+        reactive: bool,
+    },
     /// `wait (condition)`: suspend the process until the condition is true
     /// (9.4.3).
     Wait(E),
 }
 
-/// One item of an event control, `[edge] expr`.
+/// One item of an event control, `[edge] expr [iff condition]`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EventItemBase<E> {
     pub edge: EventEdge,
     pub expr: E,
+    /// The `iff` condition: an occurrence of `expr` is an event only if it
+    /// holds when the occurrence happens (9.4.2.3).
+    pub iff: Option<E>,
 }
 
 /// Which transitions of an event expression are events (IEEE 1800-2023
@@ -214,17 +221,40 @@ pub enum ParamDirection {
     Input,
     Output,
     Inout,
+    /// `ref`: the formal names the actual itself (IEEE 1800-2023 13.5.2).
+    Ref,
+    /// `const ref`: a reference the subroutine only reads.
+    ConstRef,
 }
 
 impl ParamDirection {
-    /// Whether the call copies the argument's value in.
+    /// The direction a formal declares with `direction`, `const` (only
+    /// meaningful with `ref`) and `static` (`ref static`).
+    pub fn declared(direction: celox_sv_syntax::Direction, constant: bool) -> Self {
+        match direction {
+            celox_sv_syntax::Direction::Input => ParamDirection::Input,
+            celox_sv_syntax::Direction::Output => ParamDirection::Output,
+            celox_sv_syntax::Direction::Inout => ParamDirection::Inout,
+            celox_sv_syntax::Direction::Ref if constant => ParamDirection::ConstRef,
+            celox_sv_syntax::Direction::Ref => ParamDirection::Ref,
+        }
+    }
+
+    /// Whether the callee may read the actual: the call copies it in, or
+    /// the formal refers to it.
     pub fn is_read(self) -> bool {
         !matches!(self, ParamDirection::Output)
     }
 
-    /// Whether the call writes the actual argument back.
+    /// Whether the callee may change the actual: the call copies the formal
+    /// back, or the formal refers to it.
     pub fn is_written(self) -> bool {
-        !matches!(self, ParamDirection::Input)
+        !matches!(self, ParamDirection::Input | ParamDirection::ConstRef)
+    }
+
+    /// Whether the formal refers to the actual instead of holding a copy.
+    pub fn is_reference(self) -> bool {
+        matches!(self, ParamDirection::Ref | ParamDirection::ConstRef)
     }
 }
 
@@ -370,9 +400,11 @@ impl<E, L> StmtBase<E, L> {
                     .map(|item| EventItemBase {
                         edge: item.edge,
                         expr: fe(item.expr),
+                        iff: item.iff.map(&mut *fe),
                     })
                     .collect(),
             ),
+            StmtBase::AssertionRegion { reactive } => StmtBase::AssertionRegion { reactive },
             StmtBase::WaitFork => StmtBase::WaitFork,
             StmtBase::DisableFork => StmtBase::DisableFork,
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
@@ -491,9 +523,12 @@ impl<E, L> StmtBase<E, L> {
             StmtBase::WaitEvent(items) => {
                 for item in items {
                     fe(&mut item.expr);
+                    if let Some(iff) = &mut item.iff {
+                        fe(iff);
+                    }
                 }
             }
-            StmtBase::WaitFork | StmtBase::DisableFork => {}
+            StmtBase::WaitFork | StmtBase::DisableFork | StmtBase::AssertionRegion { .. } => {}
             StmtBase::Wait(condition) => fe(condition),
             StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
         }
@@ -542,10 +577,22 @@ impl<E, L> StmtBase<E, L> {
 
     /// Visit every statement of this tree, outermost first.
     pub fn walk<'a>(&'a self, f: &mut impl FnMut(&'a StmtBase<E, L>)) {
+        self.walk_scoped(f, true);
+    }
+
+    /// Visit every statement except detached fork children.
+    pub(crate) fn walk_without_detached_children<'a>(
+        &'a self,
+        f: &mut impl FnMut(&'a StmtBase<E, L>),
+    ) {
+        self.walk_scoped(f, false);
+    }
+
+    fn walk_scoped<'a>(&'a self, f: &mut impl FnMut(&'a StmtBase<E, L>), detached: bool) {
         f(self);
         let mut visit = |stmts: &'a [StmtBase<E, L>]| {
             for stmt in stmts {
-                stmt.walk(f);
+                stmt.walk_scoped(f, detached);
             }
         };
         match self {
@@ -572,6 +619,10 @@ impl<E, L> StmtBase<E, L> {
                 visit(step);
                 visit(body);
             }
+            StmtBase::Fork {
+                join: celox_design::ForkJoin::None,
+                ..
+            } if !detached => {}
             StmtBase::Fork { branches, .. } => {
                 for branch in branches {
                     visit(branch);
@@ -619,6 +670,12 @@ pub struct SubroutineParamBase<E, T> {
     pub direction: ParamDirection,
     pub r#type: T,
     pub default: Option<E>,
+    /// The local names of the members of a formal of unpacked structure
+    /// type, in the order of its flat value; empty for other formals and, in
+    /// the body that dispatches a virtual method, for formals passed by
+    /// value. A reference formal binds each to the matching member of its
+    /// actual.
+    pub leaves: Vec<String>,
 }
 
 impl<E, L, T> SubroutineBase<E, L, T> {
@@ -643,6 +700,7 @@ impl<E, L, T> SubroutineBase<E, L, T> {
                     direction: param.direction,
                     r#type: ft(param.r#type),
                     default: param.default.map(&mut *fe),
+                    leaves: param.leaves,
                 })
                 .collect(),
             return_var: self.return_var,

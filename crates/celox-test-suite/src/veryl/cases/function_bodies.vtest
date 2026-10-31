@@ -330,3 +330,64 @@
     (assert_eq q_b count_b)
     (assert_eq q_sum sum)
     (assert_eq q_nested nested)))
+
+;; The RHS of a static partial write must not leak bits into its neighbours
+;; when a clocked caller lowers a conditional function body symbolically.
+(case test_conditional_function_static_partial_not
+  (source "test.veryl" #"
+    module Top(clk: input clock, a: input logic<16>, q: output logic<16>, field: output logic<16>) {
+        function scroll(v: input logic<16>) -> logic<16> {
+            var ret: logic<16>;
+            ret = v;
+            if ret[4:0] == 5'd31 {
+                ret[4:0] = 0;
+                ret[10] = ~ret[10];
+            } else { ret[4:0] = ret[4:0] + 1; }
+            return ret;
+        }
+        function flip_field(v: input logic<16>) -> logic<16> {
+            var ret: logic<16>;
+            ret = v;
+            if v[0] { ret[13:10] = ~ret[13:10]; }
+            else { ret[13:10] = ret[13:10] + 1; }
+            return ret;
+        }
+        always_ff (clk) {
+            q = scroll(a);
+            field = flip_field(a);
+        }
+    }
+  "#)
+  (top Top)
+  (for (input scroll_expected field_expected)
+    (list (0x301f 0x3400 0x0c1f) (0x341f 0x3000 0x081f)
+          (0xffff 0xfbe0 0xc3ff) (0x0000 0x0001 0x0400)
+          (0x3c00 0x3c01 0x0000) (0x8000 0x8001 0x8400))
+    (modify (set a input))
+    (tick clk)
+    (assert_eq q scroll_expected)
+    (assert_eq field field_expected)))
+
+(case test_conditional_function_static_partial_not_four_state
+  (four_state)
+  (source "test.veryl" #"
+    module Top(clk: input clock, a: input logic<16>, q: output logic<16>) {
+        function flip(v: input logic<16>) -> logic<16> {
+            var ret: logic<16>;
+            ret = v;
+            if v[0] { ret[10] = ~ret[10]; }
+            return ret;
+        }
+        always_ff (clk) { q = flip(a); }
+    }
+  "#)
+  (top Top)
+  (modify (set a (fourstate 0xf001 0xc000)))
+  (tick clk)
+  (assert_eq q (fourstate 0xf401 0xc000))
+  (modify (set a (fourstate 0x3001 0x0400)))
+  (tick clk)
+  (assert_eq q (fourstate 0x3401 0x0400))
+  (modify (set a (fourstate 0x3000 0x0400)))
+  (tick clk)
+  (assert_eq q (fourstate 0x3000 0x0400)))

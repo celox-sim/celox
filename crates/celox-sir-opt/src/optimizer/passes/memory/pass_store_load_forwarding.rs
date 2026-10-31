@@ -140,6 +140,11 @@ fn forward_and_simplify(
         // are always inserted after this rewrite, so one lookup is sufficient.
         apply_aliases_to_inst(inst, &aliases);
         match inst {
+            SIRInstruction::ExternCall { func, .. }
+                if celox_sir::extern_abi::native_kernel_index(*func).is_some() =>
+            {
+                known_stores.clear();
+            }
             SIRInstruction::Store(addr, offset, width, src, _triggers, _)
                 if offset.constant_bit_offset().is_some() =>
             {
@@ -467,6 +472,64 @@ mod tests {
             width,
             signed: false,
         }
+    }
+
+    #[test]
+    fn native_kernel_call_invalidates_prior_state_stores() {
+        let mut builder = celox_sir::SIRBuilder::new();
+        let before = builder.alloc_bit(8, false);
+        let after = builder.alloc_bit(8, false);
+        builder.emit(SIRInstruction::Imm(before, SIRValue::new(42u8)));
+        builder.emit(SIRInstruction::Store(
+            address(),
+            SIROffset::Static(0),
+            8,
+            before,
+            Vec::new(),
+            Vec::new(),
+        ));
+        builder.emit(SIRInstruction::ExternCall {
+            dst: None,
+            func: celox_sir::extern_abi::NATIVE_KERNEL_CALL_TAG,
+            args: Vec::new(),
+        });
+        builder.emit(SIRInstruction::Load(
+            after,
+            address(),
+            SIROffset::Static(0),
+            8,
+        ));
+        builder.emit(SIRInstruction::Store(
+            address(),
+            SIROffset::Static(8),
+            8,
+            after,
+            Vec::new(),
+            Vec::new(),
+        ));
+        builder.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = builder.drain();
+        let mut unit = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        };
+        StoreLoadForwardingPass.run(&mut unit, &PassOptions::default());
+        unit.verify_result().unwrap();
+        assert!(
+            unit.blocks
+                .values()
+                .flat_map(|b| &b.instructions)
+                .any(|inst| matches!(inst, SIRInstruction::Load(dst, ..) if *dst == after))
+        );
+        let saved = unit.clone();
+        super::super::pass_eliminate_working_round_trip::eliminate_working_round_trip(
+            &mut unit,
+            &[],
+        );
+        assert_eq!(unit.blocks, saved.blocks);
+        assert!(!super::super::pass_global_store_load_forwarding::promote_eval_apply_working_round_trips(&mut unit));
+        assert_eq!(unit.blocks, saved.blocks);
     }
 
     #[test]

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { clearCurrentReport, saveCurrentReport } from "./ci-rust-reports.mjs";
 import { cargoCommands } from "./run-ci-rust-scope.mjs";
+import { testProfile, workspaceFeatures } from "./run-vtest.mjs";
 
 export const cocotbFilter = 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)';
 
@@ -10,8 +11,8 @@ export const cocotbFilter = 'binary_id(celox-vpi::cocotb_e2e) & test(/^cocotb_/)
 export function cocotbCommands(full, builds) {
   if (full !== "false") return [[
     "nextest", "run", "--locked", "--workspace", "--exclude", "lydite*",
-    "--profile", "ci",
-    "--features", "celox/systemverilog,celox/cranelift,celox/wasm-runtime,celox/wasm-component,celox/veryl-reference,celox-vpi/cranelift,celox-vpi/wasm-runtime,celox-bench/cranelift,celox-test-suite/verilator,celox-test-suite/icarus,celox-test-suite/xezim,celox-test-suite/runtime-cases",
+    "--profile", "ci", "--cargo-profile", testProfile,
+    "--features", workspaceFeatures,
     "--run-ignored", "only", "-E", cocotbFilter,
   ]];
   // Validate all plans first, including ones we do not need to execute.

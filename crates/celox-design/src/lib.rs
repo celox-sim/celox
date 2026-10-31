@@ -211,6 +211,11 @@ pub struct RuntimeEventSite {
     /// deferred assertions.
     #[serde(default)]
     pub deferred: Option<DeferredSite>,
+    /// The last argument is the simulation time at which the site issued
+    /// the event, which a report carries (IEEE 1800-2023 20.10). It is not
+    /// formatted.
+    #[serde(default)]
+    pub timestamp_arg: bool,
     pub arg_widths: Vec<usize>,
     pub arg_signed: Vec<bool>,
     pub arg_is_string: Vec<bool>,
@@ -468,6 +473,12 @@ pub enum ProcessStatus {
     WaitFork,
     /// Terminate all descendants of the calling activation.
     DisableFork,
+    /// A side-effect-free event-expression probe completed; no HDL continuation ran.
+    EventProbe,
+    /// Resume an assertion predicate in Observed after Active/NBA quiescence.
+    AssertionObserved,
+    /// Resume an assertion action in Reactive after every Observed predicate.
+    AssertionReactive,
 }
 
 impl ProcessStatus {
@@ -490,6 +501,9 @@ impl ProcessStatus {
             Self::Local => 13,
             Self::WaitFork => 14,
             Self::DisableFork => 15,
+            Self::EventProbe => 16,
+            Self::AssertionObserved => 17,
+            Self::AssertionReactive => 18,
         }
     }
 
@@ -510,6 +524,9 @@ impl ProcessStatus {
             13 => Some(Self::Local),
             14 => Some(Self::WaitFork),
             15 => Some(Self::DisableFork),
+            16 => Some(Self::EventProbe),
+            17 => Some(Self::AssertionObserved),
+            18 => Some(Self::AssertionReactive),
             _ => None,
         }
     }
@@ -524,6 +541,12 @@ pub enum HostRequestKind {
     Vcd,
     Scan,
     Distribution,
+    Process,
+    // Append new variants: native images persist Serde variant indices.
+    /// Services owned by an explicitly invoked testbench kernel.
+    Testbench,
+    /// Formatting to a string (`$sformatf`).
+    Format,
 }
 
 impl HostRequestKind {
@@ -535,6 +558,9 @@ impl HostRequestKind {
             Self::Vcd => 3,
             Self::Scan => 4,
             Self::Distribution => 5,
+            Self::Process => 6,
+            Self::Testbench => 7,
+            Self::Format => 8,
         };
         (family << 32) | site as u64
     }
@@ -547,11 +573,133 @@ impl HostRequestKind {
             3 => Self::Vcd,
             4 => Self::Scan,
             5 => Self::Distribution,
+            6 => Self::Process,
+            7 => Self::Testbench,
+            8 => Self::Format,
             _ => return None,
         };
         Some((family, request as u32))
     }
 }
+
+/// Operations on the built-in process class (IEEE 1800-2023 9.7) and the
+/// other synchronization objects the scheduler owns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[repr(u32)]
+pub enum ProcessOp {
+    SelfHandle,
+    Status,
+    Kill,
+    Await,
+    Suspend,
+    Resume,
+    Srandom,
+    GetRandstate,
+    SetRandstate,
+    /// Begin evaluation of a level-wait predicate; clear its old observations.
+    Observe,
+    /// `-> e`: unblock the processes waiting for named event `e` (IEEE
+    /// 1800-2023 15.5.1).
+    Trigger,
+    /// `->> e`: trigger `e` in the nonblocking assignment region.
+    TriggerNonblocking,
+    /// `@ e`, `@(e1 or e2)`: block until one of the events is triggered
+    /// (15.5.2).
+    WaitEvent,
+    /// `e.triggered`: whether `e` was triggered in the current time step
+    /// (15.5.3).
+    Triggered,
+    /// `wait(e.triggered)`: block unless `e` was triggered in the current time
+    /// step, until it is.
+    WaitTriggered,
+    /// `new(keyCount)` of a semaphore: its handle (IEEE 1800-2023 15.3.1).
+    SemaphoreNew,
+    /// `s.put(keyCount)`: return keys, unblocking the waiting processes they
+    /// suffice for in arrival order (15.3.2).
+    SemaphorePut,
+    /// `s.get(keyCount)`: obtain keys if they are available, or else wait
+    /// for them behind the processes already waiting (15.3.3).
+    SemaphoreGet,
+    /// `s.try_get(keyCount)`: obtain keys if they are available; 1 if so, 0
+    /// otherwise (15.3.4).
+    SemaphoreTryGet,
+    /// `new(bound)` of a mailbox whose messages have the container layout
+    /// of the second argument: its handle (15.4.1).
+    MailboxNew,
+    /// `m.num()`: the number of messages (15.4.2).
+    MailboxNum,
+    /// `m.put(message)`: 1 when the message was placed; otherwise 0, and the
+    /// process waits until there may be room and then calls it again (15.4.3).
+    MailboxPut,
+    /// `m.try_put(message)`: 1 when the message was placed, 0 when the
+    /// mailbox is full (15.4.4).
+    MailboxTryPut,
+    /// `m.get(message)`: 1 and the first message, removed; otherwise 0, and
+    /// the process waits until there may be one and then calls it again
+    /// (15.4.5).
+    MailboxGet,
+    /// `m.try_get(message)`: 1 and the first message, removed, or 0 when the
+    /// mailbox is empty (15.4.6).
+    MailboxTryGet,
+    /// `m.peek(message)`: like `get` without removing the message (15.4.7).
+    MailboxPeek,
+    /// `m.try_peek(message)`: like `try_get` without removing the message
+    /// (15.4.8).
+    MailboxTryPeek,
+}
+impl ProcessOp {
+    /// Whether it is an operation on a mailbox.
+    pub fn is_mailbox(self) -> bool {
+        matches!(
+            self,
+            Self::MailboxNew
+                | Self::MailboxNum
+                | Self::MailboxPut
+                | Self::MailboxTryPut
+                | Self::MailboxGet
+                | Self::MailboxTryGet
+                | Self::MailboxPeek
+                | Self::MailboxTryPeek
+        )
+    }
+
+    pub fn from_code(code: u32) -> Option<Self> {
+        Some(match code {
+            0 => Self::SelfHandle,
+            1 => Self::Status,
+            2 => Self::Kill,
+            3 => Self::Await,
+            4 => Self::Suspend,
+            5 => Self::Resume,
+            6 => Self::Srandom,
+            7 => Self::GetRandstate,
+            8 => Self::SetRandstate,
+            9 => Self::Observe,
+            10 => Self::Trigger,
+            11 => Self::TriggerNonblocking,
+            12 => Self::WaitEvent,
+            13 => Self::Triggered,
+            14 => Self::WaitTriggered,
+            15 => Self::SemaphoreNew,
+            16 => Self::SemaphorePut,
+            17 => Self::SemaphoreGet,
+            18 => Self::SemaphoreTryGet,
+            19 => Self::MailboxNew,
+            20 => Self::MailboxNum,
+            21 => Self::MailboxPut,
+            22 => Self::MailboxTryPut,
+            23 => Self::MailboxGet,
+            24 => Self::MailboxTryGet,
+            25 => Self::MailboxPeek,
+            26 => Self::MailboxTryPeek,
+            _ => return None,
+        })
+    }
+}
+
+/// Flag in a wait's control word that distinguishes level waits from events.
+/// A resumed suspended level wait must check its predicate immediately.
+pub const PROCESS_LEVEL_WAIT: u64 = 1 << 63;
 
 /// A state slot exchanged with a synchronous host operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -649,11 +797,25 @@ pub enum ProcessKind {
     Regular,
     /// A final procedure runs only when simulation ends (IEEE 1800-2023 9.2.3).
     Final,
+    /// Invoked explicitly by its caller; never enqueued as an initial procedure.
+    Callable,
+}
+
+/// A pure expression evaluated with the storage of one waiting activation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessEventProbe<A> {
+    pub result: A,
+    pub resume: u32,
+    pub inputs: Vec<A>,
+    /// Exclusive probe storage for all lowered stores, including function scratch.
+    pub scratch: Vec<A>,
 }
 
 /// Storage switched when several activations execute the same kernel.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessFrame<A> {
+    /// Number of legal continuation entries in the compiled kernel.
+    pub resume_count: usize,
     /// Compiler temporaries and control slots private to each activation.
     pub private: Vec<A>,
     /// Automatic locals shared with children until the declaration is re-entered.
@@ -661,15 +823,27 @@ pub struct ProcessFrame<A> {
     pub random: A,
     pub seed: u32,
     pub starts_with_event_wait: bool,
+    pub event_probes: Vec<ProcessEventProbe<A>>,
 }
 impl<A> ProcessFrame<A> {
     pub fn map<B>(self, mut map: impl FnMut(A) -> B) -> ProcessFrame<B> {
         ProcessFrame {
+            resume_count: self.resume_count,
             private: self.private.into_iter().map(&mut map).collect(),
             locals: self.locals.into_iter().map(&mut map).collect(),
             random: map(self.random),
             seed: self.seed,
             starts_with_event_wait: self.starts_with_event_wait,
+            event_probes: self
+                .event_probes
+                .into_iter()
+                .map(|probe| ProcessEventProbe {
+                    result: map(probe.result),
+                    resume: probe.resume,
+                    inputs: probe.inputs.into_iter().map(&mut map).collect(),
+                    scratch: probe.scratch.into_iter().map(&mut map).collect(),
+                })
+                .collect(),
         }
     }
 }
@@ -849,6 +1023,58 @@ pub struct WaitSite<A> {
     /// checks a condition at its resume point decides itself whether it
     /// continues.
     pub terms: Vec<(A, CounterKind)>,
+    /// The `iff` condition of each term, or empty when no term has one. An
+    /// occurrence of a term with a gate satisfies the wait only if the gate
+    /// is a known 1 when the occurrence happens (IEEE 1800-2023 9.4.2.3).
+    #[serde(default = "Vec::new")]
+    pub gates: Vec<Option<WaitGate<A>>>,
+}
+
+/// The `iff` condition of a wait term: a signal whose least significant bit
+/// holds it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WaitGate<A> {
+    pub signal: A,
+    /// Both operands are plain variables whose values can be read at an
+    /// assignment boundary, including activation-local variables without counters.
+    pub at_write: bool,
+    /// Counters that the writes of the term's signal bump at the write
+    /// itself, judging the gate there. Activation-local variables instead use
+    /// runtime assignment boundaries. Expressions and continuous/flip-flop
+    /// drivers clear `at_write` and require a settled observation.
+    pub counters: Option<GateCounters<A>>,
+}
+
+/// The occurrences of a gated term's kind that writes caused: `gated` those
+/// while the gate was a known 1, `all` every one. A change of the signal
+/// that neither counted, such as a raw host write, is judged with the gate
+/// when it is detected.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct GateCounters<A> {
+    pub gated: A,
+    pub all: A,
+}
+
+impl<A: Copy> WaitGate<A> {
+    pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> WaitGate<B> {
+        WaitGate {
+            signal: map(self.signal),
+            at_write: self.at_write,
+            counters: self.counters.map(|counters| GateCounters {
+                gated: map(counters.gated),
+                all: map(counters.all),
+            }),
+        }
+    }
+
+    /// The gate's signal and counters.
+    pub fn reads(&self) -> impl Iterator<Item = A> {
+        std::iter::once(self.signal).chain(
+            self.counters
+                .into_iter()
+                .flat_map(|counters| [counters.gated, counters.all]),
+        )
+    }
 }
 
 impl<A: Copy> WaitSite<A> {
@@ -860,7 +1086,26 @@ impl<A: Copy> WaitSite<A> {
                 .iter()
                 .map(|&(signal, kind)| (map(signal), kind))
                 .collect(),
+            gates: self
+                .gates
+                .iter()
+                .map(|gate| gate.as_ref().map(|gate| gate.map(&mut map)))
+                .collect(),
         }
+    }
+
+    /// The gate of term `index`.
+    pub fn gate(&self, index: usize) -> Option<WaitGate<A>> {
+        self.gates.get(index).copied().flatten()
+    }
+
+    /// The signals the runtime reads to judge the wait: its terms' signals,
+    /// gates and gate counters.
+    pub fn reads(&self) -> impl Iterator<Item = A> + '_ {
+        self.terms
+            .iter()
+            .map(|&(signal, _)| signal)
+            .chain(self.gates.iter().flatten().flat_map(WaitGate::reads))
     }
 }
 
@@ -1105,6 +1350,15 @@ pub struct RuntimeSchema<A> {
     /// most one per module instance. Before each round a timed scheduler
     /// stores the current time into each, as [`TIME_SLOT_WIDTH`] bits.
     pub time_slots: Vec<A>,
+    /// Variables of `$sampled` operands and their copies, which hold the
+    /// value of the variable in the Preponed region (IEEE 1800-2023
+    /// 16.5.1): a host copies each variable into its copy when a time slot
+    /// is over, and once before the first.
+    pub sample_shadows: Vec<(A, A)>,
+    /// Variables and copies that start with the variable's value, such as
+    /// the `$past` histories (IEEE 1800-2023 16.9.3): a host copies each
+    /// once before the first time slot.
+    pub initial_copies: Vec<(A, A)>,
     /// The state a compiled scheduler exchanges with the runtime, and the
     /// scheduler itself once one is generated. Present when the design has
     /// process kernels.
@@ -1120,10 +1374,11 @@ pub struct RuntimeSchema<A> {
 /// A combinational settle split into partitions that run only when state
 /// they read changed since they last ran.
 ///
-/// Byte `p` of `flags` is partition `p`'s dirty flag; the byte after the
+/// Byte `p` of `flags` is partition `p`'s dirty flag. The byte after the
 /// last partition's is the untracked byte, set once state may change
 /// without anyone setting flags (a retained raw view), after which every
-/// partition always runs.
+/// partition always runs. The next one says whether the current settle runs
+/// every partition, decided at its start.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SettlePartitions<A> {
     pub flags: A,
@@ -1151,7 +1406,7 @@ pub struct DerivedEdgeUnits<A> {
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
 /// [`SchedulerSlots::current`], [`SchedulerSlots::levels`],
-/// [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
+/// [`SchedulerSlots::unknown_levels`], [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
 /// [`SchedulerSlots::clock_armed`] and every
 /// [`SchedulerSlots::wake`] object, and of each element of
 /// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`].
@@ -1184,8 +1439,14 @@ pub struct SchedulerSlots<A> {
     /// Where a shared combinational settle continues.
     pub cont: A,
     /// Set when state combinational logic reads may have changed since its
-    /// last settle.
+    /// last settle. The caller initializes this before every scheduler run;
+    /// timed runs set it even after a checkpoint restore or partial-slot exit.
     pub dirty: A,
+    /// Set by a caller that observes the design itself (the compiled
+    /// testbench) while it runs the scheduler: a run that reaches its limit
+    /// then leaves a deferred settle pending instead of settling for the
+    /// host.
+    pub defer_limit_settle: A,
     /// The number of time slots the run ran.
     pub count: A,
     /// The kernel running when the run returned, `u64::MAX` for none.
@@ -1193,6 +1454,10 @@ pub struct SchedulerSlots<A> {
     /// The levels of the event signals at the start of the last slot, one
     /// bit per event in event order.
     pub levels: A,
+    /// Which of [`Self::levels`] are unknown (x or z) in a four-state
+    /// design, one bit per event as there; the level's bit then tells x
+    /// from z.
+    pub unknown_levels: A,
     /// The kernels ready to run in the current slot, one bit per kernel in
     /// kernel order.
     pub ready: A,
@@ -1224,9 +1489,11 @@ impl<A> SchedulerSlots<A> {
             finish: map(self.finish),
             cont: map(self.cont),
             dirty: map(self.dirty),
+            defer_limit_settle: map(self.defer_limit_settle),
             count: map(self.count),
             current: map(self.current),
             levels: map(self.levels),
+            unknown_levels: map(self.unknown_levels),
             ready: map(self.ready),
             wake: self.wake.into_iter().map(&mut map).collect(),
             waiting: self.waiting.into_iter().map(&mut map).collect(),
@@ -1248,9 +1515,11 @@ impl<A> SchedulerSlots<A> {
             &self.finish,
             &self.cont,
             &self.dirty,
+            &self.defer_limit_settle,
             &self.count,
             &self.current,
             &self.levels,
+            &self.unknown_levels,
             &self.ready,
             &self.clock_next,
             &self.clock_period,
@@ -1358,6 +1627,8 @@ impl<A> Default for RuntimeSchema<A> {
             host_request_sites: Vec::new(),
             active_commits: Vec::new(),
             time_slots: Vec::new(),
+            sample_shadows: Vec::new(),
+            initial_copies: Vec::new(),
             scheduler: None,
             derived_edges: Vec::new(),
             settle_partitions: None,
@@ -1786,6 +2057,14 @@ pub enum UnaryOp {
     /// Convert a four-state value to two-state form. Unknown bits become zero:
     /// `(value, mask) -> (value & !mask, 0)`.
     ToTwoState,
+    /// The planes of a four-state value as a two-state value of twice its
+    /// width: `(value, mask) -> mask << width | value`. A two-state operand
+    /// has a zero mask plane. The bits move unchanged, in whole 64-bit
+    /// words: the operand width is a nonzero multiple of 64.
+    ToPlanes,
+    /// The four-state value whose planes `ToPlanes` gives: the low half of
+    /// the operand is the value plane and the high half the mask plane.
+    FromPlanes,
     Minus,
     BitNot,
     LogicNot,
@@ -1822,6 +2101,8 @@ impl UnaryOp {
             UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => {
                 operand_width
             }
+            UnaryOp::ToPlanes => operand_width * 2,
+            UnaryOp::FromPlanes => operand_width / 2,
             UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
                 usize::BITS as usize - operand_width.leading_zeros() as usize
             }
@@ -1835,6 +2116,8 @@ impl fmt::Display for UnaryOp {
             UnaryOp::Float { op, precision } => return write!(f, "Float{precision:?}{op:?}"),
             UnaryOp::Ident => "Ident",
             UnaryOp::ToTwoState => "ToTwoState",
+            UnaryOp::ToPlanes => "ToPlanes",
+            UnaryOp::FromPlanes => "FromPlanes",
             UnaryOp::Minus => "Minus",
             UnaryOp::BitNot => "BitNot",
             UnaryOp::LogicNot => "LogicNot",
@@ -2097,6 +2380,9 @@ mod tests {
             HostRequestKind::Vcd,
             HostRequestKind::Scan,
             HostRequestKind::Distribution,
+            HostRequestKind::Process,
+            HostRequestKind::Testbench,
+            HostRequestKind::Format,
         ] {
             for site in [0, 1, u32::MAX] {
                 assert_eq!(
@@ -2105,7 +2391,7 @@ mod tests {
                 );
             }
         }
-        for invalid in [0, u32::MAX as u64, 6u64 << 32, 1u64 << 63] {
+        for invalid in [0, u32::MAX as u64, 9u64 << 32, 1u64 << 63] {
             assert_eq!(HostRequestKind::decode(invalid), None);
         }
         assert_eq!(
@@ -2214,6 +2500,7 @@ mod tests {
             location: None,
             assertion: None,
             deferred: None,
+            timestamp_arg: false,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),

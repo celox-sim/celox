@@ -17,7 +17,8 @@ pub struct SettleObject {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettleLayout {
-    /// One byte per partition, then the untracked byte.
+    /// One byte per partition, then the untracked byte and the byte saying
+    /// whether the current settle runs every partition.
     pub flags_offset: usize,
     pub partitions: usize,
     /// Sorted by `start`, disjoint.
@@ -57,9 +58,9 @@ impl SettleLayout {
         }
     }
 
-    /// The bytes of the flags, the untracked byte included.
+    /// The bytes of the flags, the untracked and the full byte included.
     pub fn flags(&self) -> std::ops::Range<usize> {
-        self.flags_offset..self.flags_offset + self.partitions + 1
+        self.flags_offset..self.flags_offset + self.partitions + 2
     }
 
     /// Run every partition on every settle from now on: a raw view of the

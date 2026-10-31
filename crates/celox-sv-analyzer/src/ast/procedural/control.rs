@@ -33,6 +33,8 @@ enum Job {
         join: celox_design::ForkJoin,
         branches: Vec<Vec<Stmt>>,
         start: usize,
+        sensitivity: usize,
+        parent_body: system_functions::Body,
     },
     IfNext(IfState),
     IfBranch {
@@ -54,6 +56,9 @@ enum Job {
         kind: LoopKind<Expr>,
         init: Vec<Stmt>,
         condition: Option<Expr>,
+        /// Statements that start each iteration (see
+        /// [`BodyBuilder::loop_condition`]).
+        prologue: Vec<Stmt>,
         step: Vec<Stmt>,
         scope: bool,
         start: usize,
@@ -63,7 +68,7 @@ enum Job {
         start: usize,
     },
     Foreach {
-        loops: Vec<(String, i128, i128)>,
+        loops: Vec<ForeachLoop>,
         start: usize,
     },
     /// The end of the statement an `@*` controls, which starts at `start`
@@ -74,6 +79,7 @@ enum Job {
         sensitivity: usize,
     },
     AssertionThen {
+        concurrent: Option<Option<Expr>>,
         condition: Expr,
         keyword: String,
         assertion: celox_design::AssertionSite,
@@ -82,6 +88,7 @@ enum Job {
         start: usize,
     },
     AssertionFinish {
+        concurrent: Option<Option<Expr>>,
         condition: Expr,
         then_body: Vec<Stmt>,
         assertion: celox_design::AssertionSite,
@@ -112,11 +119,11 @@ impl BodyBuilder<'_, '_, '_> {
                 pending.extend(kind.children());
             }
         }
-        let depth = self.scopes.len();
+        let depth = self.names.scopes.len();
         let result = self.native_body_machine(ids);
         // Restore lexical bindings on every diagnostic path, just as the old
         // recursive block/for wrappers did; no native failure is retried.
-        while self.scopes.len() > depth {
+        while self.names.scopes.len() > depth {
             self.pop_scope();
         }
         result
@@ -154,7 +161,14 @@ impl BodyBuilder<'_, '_, '_> {
                                 join,
                                 branches,
                                 start: output.len(),
+                                sensitivity: self.sensitivity_body.len(),
+                                parent_body: self.body,
                             });
+                            // Detached children obey task rules, independently
+                            // of the function/final procedure spawning them.
+                            if join == celox_design::ForkJoin::None {
+                                self.body = system_functions::Body::Initial;
+                            }
                             jobs.push(Job::Enter(id));
                         }
                     } else {
@@ -168,8 +182,21 @@ impl BodyBuilder<'_, '_, '_> {
                     join,
                     mut branches,
                     start,
+                    sensitivity,
+                    parent_body,
                 } => {
+                    self.body = parent_body;
                     let branch = output.split_off(start);
+                    // Folded-away statements still carry syntactic effects,
+                    // but belong to the child, not its function/final parent.
+                    // Preserve that boundary just as for executable branches.
+                    let discarded = self.sensitivity_body.split_off(sensitivity);
+                    if !discarded.is_empty() {
+                        self.sensitivity_body.push(Stmt::Fork {
+                            join,
+                            branches: vec![discarded],
+                        });
+                    }
                     let mut returns = false;
                     for stmt in &branch {
                         stmt.walk(&mut |s| returns |= matches!(s, Stmt::Return(_)));
@@ -191,7 +218,11 @@ impl BodyBuilder<'_, '_, '_> {
                         output.extend(self.block_item_declaration(declaration)?)
                     }
                     StatementKind::Parallel { items, join, .. } => {
-                        self.allow_timing("fork-join block")?;
+                        if join != "join_none"
+                            || matches!(self.body, system_functions::Body::Always)
+                        {
+                            self.allow_timing("fork-join block")?;
+                        }
                         self.push_scope();
                         let join = match join.as_str() {
                             "join" => celox_design::ForkJoin::All,
@@ -217,11 +248,18 @@ impl BodyBuilder<'_, '_, '_> {
                         branches: Vec::new(),
                     })),
                     StatementKind::Loop { kind, body } => {
+                        let mut prologue = Vec::new();
                         let (kind, condition, scope) = match kind {
-                            LoopSyntax::While(value) => {
-                                (LoopKind::While, Some(self.native_value(*value)?), false)
-                            }
+                            LoopSyntax::While(value) => match self.loop_condition(*value)? {
+                                Some(stmts) => {
+                                    prologue = stmts;
+                                    (LoopKind::For, None, false)
+                                }
+                                None => (LoopKind::While, Some(self.native_value(*value)?), false),
+                            },
                             LoopSyntax::Repeat(value) => {
+                                // The count is evaluated once (12.7.2).
+                                output.extend(self.effects(&[*value])?);
                                 (LoopKind::Repeat(self.native_value(*value)?), None, false)
                             }
                             LoopSyntax::Forever => (LoopKind::Forever, None, false),
@@ -235,12 +273,13 @@ impl BodyBuilder<'_, '_, '_> {
                             }
                             LoopSyntax::For(header) => {
                                 self.push_scope();
-                                let (init, condition, step) = self.for_header(header)?;
+                                let header = self.for_header(header)?;
                                 jobs.push(Job::Loop {
                                     kind: LoopKind::For,
-                                    init,
-                                    condition,
-                                    step,
+                                    init: header.init,
+                                    condition: header.condition,
+                                    prologue: header.prologue,
+                                    step: header.steps,
                                     scope: true,
                                     start: output.len(),
                                 });
@@ -262,6 +301,7 @@ impl BodyBuilder<'_, '_, '_> {
                             kind,
                             init: Vec::new(),
                             condition,
+                            prologue,
                             step: Vec::new(),
                             scope,
                             start: output.len(),
@@ -287,6 +327,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 _ => return Err(disagreement()),
                             }
                         };
+                        output.extend(self.effects(&[*value])?);
                         let selector = self.native_value(*value)?;
                         jobs.push(Job::CaseNext(CaseState {
                             id,
@@ -299,8 +340,39 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                     StatementKind::Wait { condition, body } => {
                         self.allow_timing("wait statement")?;
-                        let condition = self.native_value(*condition)?;
-                        output.push(Stmt::Wait(condition));
+                        // `wait(e.triggered)` (IEEE 1800-2023 15.5.3).
+                        if let Some(event) = events::triggered(
+                            self.tree,
+                            self.session,
+                            *condition,
+                            self.tree.declarations(),
+                            &self.dims,
+                        )? {
+                            let event = self.native_value(event)?;
+                            // A level wait also checks the condition again when
+                            // a variable of the design names another event.
+                            // Locals and class properties cannot wake a wait, so
+                            // a wait on them keeps the event it started with.
+                            if self.watched_handle(&event) {
+                                output.extend(self.wait_statements(events::call(
+                                    celox_design::ProcessOp::Triggered,
+                                    vec![event],
+                                ))?);
+                            } else {
+                                output.push(Stmt::Eval(events::call(
+                                    celox_design::ProcessOp::WaitTriggered,
+                                    vec![event],
+                                )));
+                            }
+                        } else {
+                            let condition = self.native_value(*condition)?;
+                            if events::reads_triggered(&condition) {
+                                return Err(unsupported(
+                                    "`triggered` in a wait condition with other operands",
+                                ));
+                            }
+                            output.extend(self.wait_statements(condition)?);
+                        }
                         jobs.push(Job::Enter(*body));
                     }
                     StatementKind::Timing { control, body } => {
@@ -309,6 +381,8 @@ impl BodyBuilder<'_, '_, '_> {
                                 start: output.len(),
                                 sensitivity: self.sensitivity_body.len(),
                             });
+                        } else if let Some(stmts) = self.virtual_event_control(*control)? {
+                            output.extend(stmts);
                         } else {
                             let timing = self.native_timing_control(*control)?;
                             output.push(timing);
@@ -319,17 +393,64 @@ impl BodyBuilder<'_, '_, '_> {
                     // forms retain their established binders and diagnostics.
                     StatementKind::Assertion {
                         keyword,
-                        header: header @ celox_sv_syntax::AssertionHeader::Immediate { .. },
+                        header:
+                            header @ (celox_sv_syntax::AssertionHeader::Immediate { .. }
+                            | celox_sv_syntax::AssertionHeader::Concurrent { .. }),
                         success,
                         failure,
                     } => {
-                        let condition = self.native_assertion_condition(keyword, header)?;
-                        let celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } = header
-                        else {
-                            unreachable!("matched an immediate header");
+                        let (condition, deferred, concurrent) = match header {
+                            celox_sv_syntax::AssertionHeader::Immediate { deferred, .. } => (
+                                self.native_assertion_condition(keyword, header)?,
+                                deferred,
+                                None,
+                            ),
+                            celox_sv_syntax::AssertionHeader::Concurrent {
+                                condition,
+                                disable,
+                                module_item,
+                                ..
+                            } => {
+                                if !module_item {
+                                    return Err(unsupported("procedural concurrent assertion"));
+                                }
+                                if !matches!(keyword.as_str(), "assert" | "assume" | "cover") {
+                                    return Err(unsupported("concurrent assertion directive"));
+                                }
+                                let operand = self.native_value(*condition)?;
+                                assertions::concurrent_operand(&operand)?;
+                                let condition = procedural_truth_condition(Expr::Call {
+                                    callee: Callee::System(SystemFunction::Sampled),
+                                    args: vec![Some(operand)],
+                                    arg_order: Vec::new(),
+                                });
+                                let disable = disable
+                                    .map(|id| self.native_value(id).map(procedural_truth_condition))
+                                    .transpose()?;
+                                if let Some(disable) = &disable {
+                                    assertions::concurrent_operand(disable)?;
+                                }
+                                (condition, &None, Some(disable))
+                            }
+                            _ => unreachable!(),
                         };
                         let statement = native.statement(id);
+                        // The action of a deferred assertion is one
+                        // subroutine call (IEEE 1800-2023 16.4), not a block.
+                        if deferred.is_some()
+                            && success.iter().chain(failure).any(|&action| {
+                                !matches!(
+                                    native.statement(action).kind,
+                                    StatementKind::Empty | StatementKind::Expression(_)
+                                )
+                            })
+                        {
+                            return Err(unsupported(
+                                "deferred assertion action other than one display or severity task call",
+                            ));
+                        }
                         jobs.push(Job::AssertionThen {
+                            concurrent,
                             condition,
                             keyword: keyword.clone(),
                             assertion: celox_design::AssertionSite {
@@ -364,14 +485,38 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Break => output.push(Stmt::Break),
                     StatementKind::Continue => output.push(Stmt::Continue),
                     StatementKind::Return(value) => {
+                        if let Some(id) = value {
+                            output.extend(self.effects(&[*id])?);
+                            // A result of an unpacked array type is assigned
+                            // like any array (IEEE 1800-2023 7.6, 13.4.1).
+                            if let Some(target) = self
+                                .stream_return_shape
+                                .as_ref()
+                                .filter(|shape| !shape.unpacked.is_empty())
+                            {
+                                array_compatibility::check_native_unpacked_assignment(
+                                    self.tree,
+                                    self.session,
+                                    *id,
+                                    target,
+                                    || "return value".into(),
+                                    &self.dims,
+                                )?;
+                            }
+                        }
                         let value = value
                             .map(|id| {
                                 let mut value = expression_binding::bind_value(
                                     id,
                                     native,
                                     self.tree,
+                                    self.session,
                                     &self.dims,
-                                    self.return_shape.as_ref(),
+                                    if expression_binding::is_stream(id, native) {
+                                        self.stream_return_shape.as_ref()
+                                    } else {
+                                        self.return_shape.as_ref()
+                                    },
                                 )?;
                                 self.rename_expr(&mut value);
                                 Ok(value)
@@ -390,6 +535,7 @@ impl BodyBuilder<'_, '_, '_> {
                     output.insert(start, wait);
                 }
                 Job::AssertionThen {
+                    concurrent,
                     condition,
                     keyword,
                     assertion,
@@ -399,6 +545,7 @@ impl BodyBuilder<'_, '_, '_> {
                 } => {
                     let then_body = output.split_off(start);
                     jobs.push(Job::AssertionFinish {
+                        concurrent,
                         condition,
                         then_body,
                         assertion,
@@ -414,6 +561,7 @@ impl BodyBuilder<'_, '_, '_> {
                     }
                 }
                 Job::AssertionFinish {
+                    concurrent,
                     condition,
                     mut then_body,
                     assertion,
@@ -438,11 +586,29 @@ impl BodyBuilder<'_, '_, '_> {
                         &assertion,
                         celox_design::AssertionOutcome::Fail,
                     );
-                    output.push(Stmt::If {
+                    if concurrent.is_some() {
+                        assertions::concurrent_action(&then_body)?;
+                        assertions::concurrent_action(&else_body)?;
+                        // Evaluate every predicate in Observed; neither action can run
+                        // until all the monitors have made that decision.
+                        then_body.insert(0, Stmt::AssertionRegion { reactive: true });
+                        else_body.insert(0, Stmt::AssertionRegion { reactive: true });
+                        output.push(Stmt::AssertionRegion { reactive: false });
+                    }
+                    let decision = Stmt::If {
                         condition,
                         then_body,
                         else_body,
-                    });
+                    };
+                    if let Some(Some(disable)) = concurrent {
+                        output.push(Stmt::If {
+                            condition: disable,
+                            then_body: Vec::new(),
+                            else_body: vec![decision],
+                        });
+                    } else {
+                        output.push(decision);
+                    }
                 }
                 Job::IfNext(state) => {
                     let StatementKind::Conditional {
@@ -462,6 +628,27 @@ impl BodyBuilder<'_, '_, '_> {
                         }
                     } else {
                         let branch = &branches[state.index];
+                        let effects = match branch.predicate.items.as_slice() {
+                            [item] if item.pattern.is_none() => self.effects(&[item.expression])?,
+                            _ => Vec::new(),
+                        };
+                        // The condition of an `else if` is evaluated only
+                        // when the previous ones fail: the rest of the chain
+                        // becomes the else branch.
+                        let state = if effects.is_empty() || state.index == 0 {
+                            state
+                        } else {
+                            jobs.push(Job::IfFinish {
+                                branches: state.branches,
+                                start: output.len(),
+                            });
+                            IfState {
+                                id: state.id,
+                                index: state.index,
+                                branches: Vec::new(),
+                            }
+                        };
+                        output.extend(effects);
                         let condition = self.cond_predicate(&branch.predicate)?;
                         jobs.push(Job::IfBranch {
                             state,
@@ -532,11 +719,13 @@ impl BodyBuilder<'_, '_, '_> {
                     kind,
                     init,
                     condition,
+                    mut prologue,
                     step,
                     scope,
                     start,
                 } => {
-                    let body = output.split_off(start);
+                    prologue.extend(output.split_off(start));
+                    let body = prologue;
                     if scope {
                         self.pop_scope();
                     }
@@ -549,7 +738,37 @@ impl BodyBuilder<'_, '_, '_> {
                     });
                 }
                 Job::DoWhile { native, start } => {
-                    let body = output.split_off(start);
+                    let mut body = output.split_off(start);
+                    if let Some(prologue) = self.loop_condition(native)? {
+                        // `continue` evaluates the condition too (12.8): it
+                        // starts every iteration but the first.
+                        let first = self.hidden(Type::new(TypeKind::Logic)).1;
+                        output.push(Stmt::Assign {
+                            lhs: LValue::Ident(first.clone()),
+                            rhs: Expr::Literal("1'b1".into()),
+                            nonblocking: false,
+                        });
+                        body.insert(
+                            0,
+                            Stmt::If {
+                                condition: Expr::Ident(first.clone()),
+                                then_body: vec![Stmt::Assign {
+                                    lhs: LValue::Ident(first),
+                                    rhs: Expr::Literal("1'b0".into()),
+                                    nonblocking: false,
+                                }],
+                                else_body: prologue,
+                            },
+                        );
+                        output.push(Stmt::Loop {
+                            kind: LoopKind::For,
+                            init: Vec::new(),
+                            condition: None,
+                            step: Vec::new(),
+                            body,
+                        });
+                        continue;
+                    }
                     let condition = self.native_value(native)?;
                     output.push(Stmt::Loop {
                         kind: LoopKind::DoWhile,
@@ -569,7 +788,7 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(output)
     }
     fn native_case_labels(
-        &self,
+        &mut self,
         labels: &[celox_sv_syntax::CaseMatch],
         inside: bool,
     ) -> Result<Vec<CaseLabel<Expr>>, AnalyzerError> {
@@ -599,6 +818,7 @@ mod tests {
     use super::*;
     #[test]
     fn native_scope_jobs_restore_bindings_after_a_typed_leaf_error() {
+        let session = &mut Session::default();
         let tree=crate::source_tree::parse_source("module M;initial begin automatic int outer_value=1;begin automatic int inner_value=2;disable target;end end endmodule",std::path::Path::new("scope-error.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let mut locals = Vec::new();
@@ -612,11 +832,13 @@ mod tests {
             subroutine_directions: &directions,
             automatic: false,
             statics: Vec::new(),
+            explicit_statics: HashSet::default(),
             static_initializers: Vec::new(),
             constant_evaluation: false,
         };
         let mut builder = BodyBuilder::new(
             &tree,
+            session,
             &PackedDimensions::default(),
             &mut state,
             system_functions::Body::Initial,
@@ -629,11 +851,11 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("disable statement"), "{error}");
-        assert_eq!(builder.scopes.len(), 1);
+        assert_eq!(builder.names.scopes.len(), 1);
         for name in ["outer_value", "inner_value"] {
-            assert!(builder.lookup(name).is_none());
+            assert!(builder.names.lookup(name).is_none());
             assert!(builder.dims.get(name).is_none());
-            assert!(!builder.local_constants.contains_key(name));
+            assert!(!builder.names.local_constants.contains_key(name));
         }
     }
 }

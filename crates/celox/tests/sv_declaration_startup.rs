@@ -248,6 +248,45 @@ macro_rules! declaration_backend {
         mod $module {
             use super::*;
 
+            // IEEE 1800-2023 16.5.1: time-zero samples use declaration values.
+            #[test]
+            fn deferred_startup_samples_runtime_initializers_and_restore_keeps_samples() {
+                let source = r#"module Top(output int observed, output int a);
+                    int seed = $test$plusargs("on");
+                    assign a = seed;
+                    initial begin observed = $sampled(seed); #1; $finish; end
+                endmodule"#;
+                for four_state in [false, true] {
+                    let build = |defer| {
+                        Simulation::from_sv_sources(
+                            vec![(source, Path::new("deferred_sample.sv"))],
+                            "Top",
+                        )
+                        .four_state(four_state)
+                        .plusargs(["+on"])
+                        .live_signal(Vec::new(), vec!["seed".into()])
+                        .defer_initialization(defer)
+                        .$build()
+                        .unwrap()
+                    };
+                    let mut deferred = build(true);
+                    deferred.run_until(0).unwrap();
+                    assert_eq!(deferred.get(deferred.signal("observed")), 1u8.into());
+
+                    let mut original = build(false);
+                    let seed = original.signal("seed");
+                    original.modify(|io| io.set(seed, 7u8)).unwrap();
+                    let bytes = original.checkpoint().unwrap().to_bytes().unwrap();
+                    let mut restored = build(true);
+                    // SAFETY: just captured from the same compiled design/options.
+                    let checkpoint = unsafe { restored.checkpoint_from_bytes(&bytes) }.unwrap();
+                    restored.restore(&checkpoint).unwrap();
+                    restored.run_until(0).unwrap();
+                    assert_eq!(restored.get(restored.signal("a")), 7u8.into());
+                    assert_eq!(restored.get(restored.signal("observed")), 1u8.into());
+                }
+            }
+
             #[test]
             fn runtime_declaration_does_not_wake_wildcard() {
                 finishes(
@@ -455,4 +494,28 @@ fn plain_simulator_rejects_initial_kernels() {
         origin.location.as_deref(),
         Some("declaration_plain_simulator.sv:3:3")
     );
+}
+
+#[test]
+fn deferred_declarations_run_on_the_first_step_if_no_checkpoint_is_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    let output = dir.path().join("declaration.log");
+    std::fs::write(&output, b"untouched").unwrap();
+    let source = format!(
+        r#"module Top(output int fd);
+        int opened = $fopen("{}", "w");
+        assign fd = opened;
+        initial begin #1; $finish; end
+    endmodule"#,
+        output.display()
+    );
+    let mut simulation =
+        Simulation::from_sv_sources(vec![(&source, Path::new("deferred.sv"))], "Top")
+            .defer_initialization(true)
+            .build_interpreter()
+            .unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), b"untouched");
+    simulation.run_until(0).unwrap();
+    assert_eq!(std::fs::read(&output).unwrap(), b"");
+    assert_ne!(simulation.get(simulation.signal("fd")), 0u32.into());
 }

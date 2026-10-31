@@ -2,12 +2,24 @@
 use super::*;
 use celox_sv_syntax::{ExprKind, ForeachHeader};
 
+pub(super) enum ForeachLoop {
+    Static(String, i128, i128),
+    Container {
+        array: Expr,
+        index: String,
+        layout: ContainerLayout,
+        status: Option<String>,
+    },
+}
+
 impl BodyBuilder<'_, '_, '_> {
     pub(super) fn native_foreach_indices(
         &mut self,
         header: &ForeachHeader,
-    ) -> Result<Vec<(String, i128, i128)>, AnalyzerError> {
+    ) -> Result<Vec<ForeachLoop>, AnalyzerError> {
         let native = self.tree.declarations();
+        let container =
+            containers::native_type(header.array, native, self.tree, self.session, &self.dims)?;
         let mut array = header.array;
         let mut unit_member = None;
         let array = loop {
@@ -26,6 +38,52 @@ impl BodyBuilder<'_, '_, '_> {
                 _ => return Err(unsupported("foreach array")),
             }
         };
+        if let Some(container) = container {
+            let [Some(variable)] = header.variables.as_slice() else {
+                return Err(unsupported("one-dimensional container foreach index"));
+            };
+            let array = self.native_value(header.array)?;
+            let mut index_type = int_type();
+            let status = if let ContainerKind::Associative {
+                key_width,
+                signed,
+                string,
+                object,
+            } = container.layout.kind
+            {
+                // A process key keeps its type, so the index is a handle
+                // whose methods the body may call.
+                let process = container
+                    .key
+                    .as_ref()
+                    .filter(|key| key.kind() == TypeKind::Process);
+                index_type = if object {
+                    container.key.clone().expect("a class index type")
+                } else if let Some(process) = process {
+                    process.clone()
+                } else if string {
+                    type_binding::builtin_type("string", None).expect("string is a builtin type")
+                } else {
+                    let mut ty = int_type();
+                    ty.is_signed = signed;
+                    ty.packed_ranges[0].left = ConstExpr::Literal((key_width - 1).to_string());
+                    ty
+                };
+                Some(self.declare("$celox_foreach_status", int_type()))
+            } else {
+                None
+            };
+            let index = self.declare(
+                &instances::normalize_identifier(&variable.spelling),
+                index_type,
+            );
+            return Ok(vec![ForeachLoop::Container {
+                array,
+                index,
+                layout: container.layout,
+                status,
+            }]);
+        }
         let variables = header
             .variables
             .iter()

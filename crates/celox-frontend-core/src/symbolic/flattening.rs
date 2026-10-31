@@ -27,29 +27,46 @@ pub(super) fn refine_cyclic_logic_paths(
     unpacked_element_widths: &HashMap<AbsoluteAddr, usize>,
     arena: &mut SLTNodeArena<AbsoluteAddr>,
 ) -> Result<(), SLTNodeFactsError> {
-    // Leave other graph errors to the scheduler's normal diagnostics.
-    let Ok(cyclic) = celox_slt::scheduler::cyclic_logic_paths(paths) else {
-        return Ok(());
-    };
-    if cyclic.is_empty() {
-        return Ok(());
-    }
-    let cyclic: BTreeSet<_> = cyclic.into_iter().collect();
-    let mut refined = Vec::with_capacity(paths.len());
-    for (index, path) in paths.iter().enumerate() {
-        if cyclic.contains(&index) {
-            refined.extend(atomize_logic_paths(
-                std::slice::from_ref(path),
-                boundaries,
-                unpacked_element_widths,
-                arena,
-                SourceCoalescing::ExactRanges,
-            )?);
-        } else {
-            refined.push(path.clone());
+    let mut boundaries = std::borrow::Cow::Borrowed(boundaries);
+    loop {
+        // Leave other graph errors to the scheduler's normal diagnostics.
+        let Ok(cyclic) = celox_slt::scheduler::cyclic_logic_paths(paths) else {
+            return Ok(());
+        };
+        if cyclic.is_empty() {
+            return Ok(());
         }
+        // A projected copy can expose a narrower read of another cyclic
+        // writer. Propagate those endpoints before splitting that writer,
+        // repeating until the cycle disappears or no path changes.
+        let boundaries = boundaries.to_mut();
+        for &index in &cyclic {
+            for source in &paths[index].sources {
+                let points = boundaries.entry(source.id).or_default();
+                points.insert(source.access.lsb);
+                points.insert(source.access.msb + 1);
+            }
+        }
+        let cyclic: BTreeSet<_> = cyclic.into_iter().collect();
+        let mut refined = Vec::with_capacity(paths.len());
+        for (index, path) in paths.iter().enumerate() {
+            if cyclic.contains(&index) {
+                refined.extend(atomize_logic_paths(
+                    std::slice::from_ref(path),
+                    boundaries,
+                    unpacked_element_widths,
+                    arena,
+                    SourceCoalescing::ExactRanges,
+                )?);
+            } else {
+                refined.push(path.clone());
+            }
+        }
+        if refined == *paths {
+            break;
+        }
+        *paths = refined;
     }
-    *paths = refined;
     refine_cyclic_fold_groups(paths, arena)
 }
 
@@ -1274,6 +1291,61 @@ mod tests {
                     .unwrap()
                     .is_empty(),
                 "actual {width}-bit feedback must remain a cycle"
+            );
+        }
+    }
+
+    #[test]
+    fn cyclic_refinement_propagates_read_boundaries_through_copy_chains() {
+        for real_feedback in [false, true] {
+            let mut arena = SLTNodeArena::new();
+            let a = input(if real_feedback { 1 } else { 0 }, &mut arena);
+            let x = input(1, &mut arena);
+            let concat = arena.alloc(SLTNode::Concat(vec![(a, 1), (x, 1)])).unwrap();
+            let mut writer = path(2, concat, &arena);
+            writer.target = LogicPathTarget::Var(VarAtomBase::new(addr(2), 0, 1));
+            let mut paths = vec![writer];
+            // No pre-existing midpoint boundaries on the intermediate copies.
+            // The selected bit must travel backwards through every stage.
+            for id in 3..8 {
+                let expr = arena
+                    .alloc(SLTNode::Input {
+                        variable: addr(id - 1),
+                        signed: false,
+                        index: Vec::new(),
+                        access: BitAccess::new(0, 1),
+                    })
+                    .unwrap();
+                let mut copy = path(id, expr, &arena);
+                copy.target = LogicPathTarget::Var(VarAtomBase::new(addr(id), 0, 1));
+                paths.push(copy);
+            }
+            let selected = arena
+                .alloc(SLTNode::Input {
+                    variable: addr(7),
+                    signed: false,
+                    index: Vec::new(),
+                    access: BitAccess::new(1, 1),
+                })
+                .unwrap();
+            paths.push(path(1, selected, &arena));
+            assert!(
+                !celox_slt::scheduler::cyclic_logic_paths(&paths)
+                    .unwrap()
+                    .is_empty()
+            );
+            refine_cyclic_logic_paths(
+                &mut paths,
+                &HashMap::default(),
+                &HashMap::default(),
+                &mut arena,
+            )
+            .unwrap();
+            assert_eq!(
+                celox_slt::scheduler::cyclic_logic_paths(&paths)
+                    .unwrap()
+                    .is_empty(),
+                !real_feedback
             );
         }
     }

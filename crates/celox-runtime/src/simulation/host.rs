@@ -5,7 +5,7 @@ use fxhash::{FxHashMap, FxHashSet};
 use crate::{
     SignalRef, SimulatorErrorCode,
     backend::SimBackend,
-    timing::{CountedRefs, Halt, Value, read},
+    timing::{CountedRefs, GatedWriteRefs, Halt, Value, read, write_gated},
 };
 
 /// The units a timed step executes: combinational settling, flip-flop
@@ -23,6 +23,15 @@ pub trait UnitExecutor {
     fn run_process(&mut self, index: usize) -> Result<(), Halt> {
         Ok(self.backend_mut().run_process(index)?)
     }
+
+    /// Attribute deferred assertion records to this dynamic process execution.
+    fn enter_deferred_assertion_process(&mut self, _process: usize) {}
+    /// Consume this invocation's records before another execution context runs.
+    fn leave_deferred_assertion_process(&mut self) {}
+    /// A naturally completed process retains its pending assertion reports.
+    fn finish_deferred_assertion_process(&mut self, _process: usize) {}
+    /// Disabling a live process flushes its deferred assertion reports (16.4.4).
+    fn cancel_deferred_assertion_process(&mut self, _process: usize) {}
 
     /// Prepare the declaration-only state before runtime static initializers.
     fn reset_declaration_startup(&mut self) -> Result<(), Halt> {
@@ -138,12 +147,26 @@ pub trait HostBoundary: UnitExecutor {
         Ok(())
     }
 
+    /// Active-region work has drained. Mature Observed deferred assertions
+    /// before entering Reactive, so a later wakeup cannot flush them (16.4.1).
+    fn try_observed_deferred_assertions(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        Ok(())
+    }
+
     /// Called after [`Self::try_finish_timed_step`] when the time slot
     /// `timestamp` is over: no more work is due at that time. A step ends
     /// before its slot does when a process waits for zero time. The
     /// runtime's loop calls it; a host that has work here returns
     /// [`CompiledSlots::None`] from [`Self::compiled_slots`].
     fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
+        Ok(())
+    }
+
+    /// Called before a run or a step moves from `timestamp` to a later time:
+    /// before the step of a later slot, and at the end of a run to a time
+    /// without work. An error ends the run there, as an error of a step
+    /// does, and so does a `$finish` the host ran there.
+    fn try_leave_time(&mut self, _timestamp: u64) -> Result<(), Halt> {
         Ok(())
     }
 }
@@ -178,6 +201,9 @@ impl<T: UnitExecutor + HostBoundary + ?Sized> SimulationExecutor for T {}
 pub struct HostWatch {
     counted: FxHashMap<usize, CountedRefs>,
     waited: FxHashSet<usize>,
+    /// Gated wait terms by the offset of their signal, whose counters a
+    /// write bumps with the gate as the write leaves it.
+    gated: FxHashMap<usize, Vec<GatedWriteRefs>>,
     log: Vec<(SignalRef, Value)>,
 }
 
@@ -189,12 +215,19 @@ impl HostWatch {
                 .map(|refs| (refs.signal.offset, refs))
                 .collect(),
             waited,
+            gated: FxHashMap::default(),
             log: Vec::new(),
         }
     }
 
+    /// Also count the writes of the signals of `gated` terms.
+    pub fn with_gated(mut self, gated: FxHashMap<usize, Vec<GatedWriteRefs>>) -> Self {
+        self.gated = gated;
+        self
+    }
+
     pub fn is_empty(&self) -> bool {
-        self.counted.is_empty() && self.waited.is_empty()
+        self.counted.is_empty() && self.waited.is_empty() && self.gated.is_empty()
     }
 
     /// Run `write`, which writes `signal` in `backend`, and observe it.
@@ -207,7 +240,13 @@ impl HostWatch {
         let counted = self.counted.get(&signal.offset).copied();
         let waited = self.waited.contains(&signal.offset);
         if counted.is_none() && !waited {
-            write(backend);
+            if !self.gated.is_empty()
+                && let Some(gated) = self.gated.get(&signal.offset)
+            {
+                write_gated(backend, signal, gated, write);
+            } else {
+                write(backend);
+            }
             return;
         }
         let old = read(backend, signal);
@@ -215,6 +254,9 @@ impl HostWatch {
         let new = read(backend, signal);
         if let Some(counted) = counted {
             counted.bump(backend, &old, &new);
+        }
+        for term in self.gated.get(&signal.offset).into_iter().flatten() {
+            term.bump(backend, &old, &new);
         }
         if waited && old != new {
             self.log.push((signal, new));

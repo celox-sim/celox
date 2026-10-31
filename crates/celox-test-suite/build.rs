@@ -165,7 +165,9 @@ mod fingerprint {
             ".cargo/config",
         ] {
             let path = workspace.join(name);
-            println!("cargo:rerun-if-changed={}", path.display());
+            // file() registers existing inputs. Registering a missing optional
+            // Cargo config makes Cargo rerun this script on every invocation.
+            // Cargo itself tracks settings that affect compilation.
             if path.exists() {
                 file(&mut hash, &path, name)?;
             }

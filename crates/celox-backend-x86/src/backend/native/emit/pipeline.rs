@@ -228,19 +228,24 @@ fn emit_prepared_eu_inner(
     }
     let regalloc_start = timing.then(crate::timing::now);
     let mut regalloc_trace = trace.as_ref().map(|_| regalloc::RegallocTrace::default());
-    // Unique first-tier spill slots avoid global stack liveness/coloring.
-    // Bound their frame below half the tiered image's reserved headroom;
-    // larger frames fall back to exact slot reuse, including on tiny designs.
-    let baseline_spill_budget = options
-        .baseline
-        .then_some((layout.merged_total_size / 8).max(4096));
+    // The baseline image uses the linear allocator. If it has to fall back
+    // to the optimizing allocator, unique spill slots avoid global stack
+    // liveness/coloring; their frame stays below half the tiered image's
+    // reserved headroom, and larger frames use exact slot reuse.
+    let strategy = if options.baseline {
+        regalloc::RegallocStrategy::Baseline {
+            spill_budget: (layout.merged_total_size / 8).max(4096),
+        }
+    } else {
+        regalloc::RegallocStrategy::Optimizing
+    };
     let ra = regalloc::run_regalloc_for_codegen(
         &mut mfunc,
         label,
         regalloc_trace.as_mut(),
         diagnostics,
         options.native_tick_loop,
-        baseline_spill_budget,
+        strategy,
         is_cancelled,
     )
     .map_err(|error| {
@@ -336,12 +341,19 @@ fn emit_prepared_eu_inner(
     let state_size = options
         .arena_base
         .map_or(semantic_size, |base| base.max(semantic_size));
+    let native_callee_end = [options.arena_base.unwrap_or(0)];
+    let callee_ends = if options.arena_base.is_some() {
+        &native_callee_end[..]
+    } else {
+        &[]
+    };
     let result = if label == "eval_comb_apply_ff" && options.native_tick_loop {
         emit_with_plan_tick_loop(
             &mfunc,
             &ra.assignment,
             ra.spill_frame_size,
             state_size,
+            callee_ends,
             &ssa_destruction,
             check_runtime_events,
         )?
@@ -351,6 +363,7 @@ fn emit_prepared_eu_inner(
             &ra.assignment,
             ra.spill_frame_size,
             state_size,
+            callee_ends,
             &ssa_destruction,
         )?
     };

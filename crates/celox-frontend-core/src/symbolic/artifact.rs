@@ -159,6 +159,12 @@ pub struct SimModule {
     /// The variable through which the module's code reads the simulation
     /// time; see `RuntimeSchema::time_slots`.
     pub time_slot: Option<SourceVarId>,
+    /// Variables and their sampled copies; see
+    /// `RuntimeSchema::sample_shadows`.
+    pub sample_shadows: Vec<(SourceVarId, SourceVarId)>,
+    /// Variables and copies that start with their value; see
+    /// `RuntimeSchema::initial_copies`.
+    pub initial_copies: Vec<(SourceVarId, SourceVarId)>,
 }
 
 /// A nonblocking site whose kernel has two paths, as
@@ -282,6 +288,18 @@ pub struct SymbolicRtl {
     /// [`SimModule::package_bindings`] of other modules refer to its
     /// variables.
     pub packages: Vec<(String, ModuleId)>,
+    /// Initial values that differ between the instances of a module, such as
+    /// the id of an interface instance for virtual interfaces.
+    pub instance_values: Vec<InstanceValue>,
+}
+
+/// The initial value of a variable of one instance.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstanceValue {
+    /// The instance, as in [`crate::InstancePath`].
+    pub path: Vec<(String, usize)>,
+    pub variable: SourceVarId,
+    pub value: num_bigint::BigUint,
 }
 
 #[derive(Clone)]

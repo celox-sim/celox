@@ -9,16 +9,23 @@
 //! Expressions are lowered through SLT, which keeps their width and
 //! four-state semantics identical to the combinational lowering.
 
+mod containers;
 mod file_io;
+mod format;
 mod fread;
+mod locators;
 mod objects;
+mod process;
+mod references;
 mod scan;
+mod streams;
 mod strings;
 
 use super::procedural::*;
 use super::*;
 use celox_design::{
-    CounterKind, DeferredSite, NbaPosition, NbaSite, SPARSE_WORKING_REGION, WaitSite,
+    CounterKind, DeferredSite, EVENT_COUNTER_WIDTH, GateCounters, NbaPosition, NbaSite,
+    SPARSE_WORKING_REGION, WaitGate, WaitSite,
 };
 use celox_frontend_core::process::{NBA_POSITION_WIDTH, ProcessKernelBuilder, ProcessKernelError};
 use celox_sir::{RegisterId, RegisterType};
@@ -68,6 +75,8 @@ pub(super) struct Ff<'p, 'a> {
     /// Loop variables of unrolled loops and their literal values.
     overlay: HashMap<String, (String, i128)>,
     active_calls: Vec<String>,
+    // Detached children have their own function timing context.
+    timing_call_boundary: usize,
     element_widths: HashMap<Addr, usize>,
     unrolled: usize,
     /// Read-modify-write views of a variable's working value: alias -> var.
@@ -85,7 +94,16 @@ pub(super) struct Ff<'p, 'a> {
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
     forked: bool,
+    /// Whether [`Self::freeze_lvalue`] keeps its copies in the activation
+    /// frame of a forked process.
+    frame_positions: bool,
+    process_control: bool,
+    process_predicate: bool,
     frame_locals: Vec<SourceVarId>,
+    event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
+    unobserved_function_writes: HashSet<SourceVarId>,
+    observe_blocking_assignments: bool,
+    implicit_write_depth: usize,
     /// The index of the process being lowered among the module's kernels.
     process: usize,
     /// The wait sites of the process, by local index.
@@ -102,6 +120,33 @@ pub(super) struct Ff<'p, 'a> {
     /// The flush-point site of a process with deferred assertions, whose
     /// queue their actions wait in.
     flush_site: Option<u32>,
+    /// The clock that the sampled value functions of the process infer
+    /// (IEEE 1800-2023 16.14.6).
+    inferred_clock: Option<Clock>,
+    /// The `$past` histories of the process.
+    history: Vec<History>,
+}
+
+/// The clock of an edge-triggered process.
+pub(super) struct Clock {
+    /// The clock signal.
+    pub signal: String,
+    /// Whether a tick is a rising edge.
+    pub rising: bool,
+    /// The clock is the only event of the process, so every run is a tick.
+    pub alone: bool,
+}
+
+/// The sampled values of variable `name` at the previous ticks of the clock
+/// of a process: `chain[k - 1]` holds the value `k` ticks ago, counting
+/// only the ticks at which the gate held.
+struct History {
+    name: String,
+    gate: Option<sv::ir::Expr>,
+    /// The hidden variable that holds the gate's value at the tick, before
+    /// the body runs.
+    gate_value: Option<String>,
+    chain: Vec<String>,
 }
 
 fn stable(var_id: SourceVarId) -> Addr {
@@ -143,6 +188,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             functions: Vec::new(),
             overlay: HashMap::default(),
             active_calls: Vec::new(),
+            timing_call_boundary: 0,
             element_widths,
             unrolled: 0,
             aliases: HashMap::default(),
@@ -152,7 +198,14 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             forked: false,
+            frame_positions: false,
+            process_control: false,
+            process_predicate: false,
             frame_locals: Vec::new(),
+            event_probes: Vec::new(),
+            unobserved_function_writes: HashSet::default(),
+            observe_blocking_assignments: false,
+            implicit_write_depth: 0,
             direct: false,
             input_occurrences: true,
             process: 0,
@@ -161,7 +214,407 @@ impl<'p, 'a> Ff<'p, 'a> {
             host_request_sites: Vec::new(),
             nba_switches: Vec::new(),
             flush_site: None,
+            inferred_clock: None,
+            history: Vec::new(),
         }
+    }
+
+    /// Lower an edge-triggered process with the clock its sampled value
+    /// functions infer, if any.
+    pub fn with_inferred_clock(mut self, clock: Option<Clock>) -> Self {
+        self.inferred_clock = clock;
+        self
+    }
+
+    /// The operand of `$sampled` (IEEE 1800-2023 16.9.3) with each static
+    /// variable read through its sampled copy. Automatic variables and the
+    /// lowering's own temporaries keep their current value (16.5.1). A
+    /// combinational process stays sensitive to the variables themselves,
+    /// whose changes run it, not to their copies: it is lowered as a gated
+    /// unit that keeps the value it last computed.
+    fn sampled(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let [Some(operand)] = args else {
+            return Err(unsupported("operand of `$sampled`"));
+        };
+        // A sampled value function in the operand would read the sampled
+        // copies instead of its history.
+        let mut nested = Vec::new();
+        collect_calls(operand, &mut nested);
+        if nested.iter().any(|(callee, _)| {
+            matches!(
+                callee,
+                sv::ir::Callee::System(
+                    sv::ir::SystemFunction::Past
+                        | sv::ir::SystemFunction::Rose
+                        | sv::ir::SystemFunction::Fell
+                        | sv::ir::SystemFunction::Stable
+                        | sv::ir::SystemFunction::Changed
+                )
+            )
+        }) {
+            return Err(unsupported(
+                "`$sampled` of an operand that calls a sampled value function",
+            ));
+        }
+        let operand = self.propagate(operand);
+        let mut names = HashSet::default();
+        expr_idents(&operand, &mut names);
+        let mut renames = HashMap::default();
+        for name in names {
+            let Some(id) = self.m.id(&name) else {
+                continue;
+            };
+            if self.m.is_hidden(id) {
+                continue;
+            }
+            if self.m.var(id).value_kind.is_handle() {
+                return Err(unsupported("$sampled of a string or class handle"));
+            }
+            renames.insert(name, self.m.sampled_copy(id));
+        }
+        Ok(rename_idents(&operand, &renames))
+    }
+
+    /// Declare the `$past` histories that the sampled value functions of
+    /// `body`, and of the subroutines it calls, read, as nonblocking targets
+    /// of the process. A subroutine's calls infer the clock of the process
+    /// that calls it.
+    fn declare_history(&mut self, body: &[sv::ir::Stmt]) -> Result<(), sv::AnalyzerError> {
+        use sv::ir::SystemFunction;
+        let mut calls = Vec::new();
+        for stmt in body {
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+        }
+        // The calls after these are in subroutines the body calls.
+        let body_calls = calls.len();
+        let mut visited = HashSet::default();
+        let mut index = 0;
+        while index < calls.len() {
+            if let (sv::ir::Callee::Subroutine(name), args) = calls[index].clone()
+                && let Some(subroutine) = self.m.subroutine(&name).cloned()
+            {
+                // The defaults of omitted arguments run at the call.
+                default_calls(&subroutine, &args, &mut calls);
+                if visited.insert(name) {
+                    for stmt in &subroutine.body {
+                        stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+                    }
+                }
+            }
+            index += 1;
+        }
+        for (position, (callee, args)) in calls.into_iter().enumerate() {
+            let sv::ir::Callee::System(
+                function @ (SystemFunction::Past
+                | SystemFunction::Rose
+                | SystemFunction::Fell
+                | SystemFunction::Stable
+                | SystemFunction::Changed),
+            ) = callee
+            else {
+                continue;
+            };
+            if self.inferred_clock.is_none() {
+                return Err(unsupported(format!(
+                    "`{function}` outside an edge-triggered process whose clock it infers"
+                )));
+            }
+            let (depth, gate) = past_depth_and_gate(function, &args)?;
+            let Some(Some(operand)) = args.first() else {
+                return Err(unsupported(format!("operand of `{function}`")));
+            };
+            // The process evaluates the gate before its body runs, outside
+            // the subroutine: there the gate can read only module variables,
+            // not the subroutine's arguments or locals.
+            if position >= body_calls
+                && let Some(gate) = &gate
+            {
+                let mut names = HashSet::default();
+                expr_idents(gate, &mut names);
+                if names
+                    .iter()
+                    .any(|name| self.m.id(name).is_none_or(|id| self.m.is_hidden(id)))
+                {
+                    return Err(unsupported(format!(
+                        "`{function}` in a subroutine with a gate that reads the subroutine's arguments or locals"
+                    )));
+                }
+            }
+            // The history of a nested call would need its own chain.
+            let mut nested = Vec::new();
+            collect_calls(operand, &mut nested);
+            if nested.iter().any(|(callee, _)| {
+                matches!(
+                    callee,
+                    sv::ir::Callee::System(
+                        SystemFunction::Past
+                            | SystemFunction::Rose
+                            | SystemFunction::Fell
+                            | SystemFunction::Stable
+                            | SystemFunction::Changed
+                    )
+                )
+            }) {
+                return Err(unsupported(format!(
+                    "`{function}` of an operand that calls a sampled value function other than `$sampled`"
+                )));
+            }
+            // The histories hold variables: the result of a call, which can
+            // read the time or state the operand does not name, has none.
+            if nested.iter().any(|(callee, _)| {
+                !matches!(callee, sv::ir::Callee::System(SystemFunction::Sampled))
+            }) {
+                return Err(unsupported(format!(
+                    "`{function}` of an operand that calls a function"
+                )));
+            }
+            let mut names = HashSet::default();
+            expr_idents(operand, &mut names);
+            let mut names: Vec<_> = names.into_iter().collect();
+            names.sort();
+            for name in names {
+                let Some(id) = self.m.id(&name) else {
+                    continue;
+                };
+                if self.m.is_hidden(id) {
+                    continue;
+                }
+                if self.m.var(id).value_kind.is_handle() {
+                    return Err(unsupported(format!(
+                        "`{function}` of a string or class handle"
+                    )));
+                }
+                // A history moves one tick back with one nonblocking copy
+                // of the variable, which an unpacked array has no form of.
+                if !self.m.var(id).array_dims.is_empty() {
+                    return Err(unsupported(format!("`{function}` of an unpacked array")));
+                }
+                let index = match self
+                    .history
+                    .iter()
+                    .position(|history| history.name == name && history.gate == gate)
+                {
+                    Some(index) => index,
+                    None => {
+                        self.history.push(History {
+                            name: name.clone(),
+                            gate: gate.clone(),
+                            gate_value: None,
+                            chain: Vec::new(),
+                        });
+                        self.history.len() - 1
+                    }
+                };
+                while self.history[index].chain.len() < depth {
+                    let register = self.m.history_copy(id);
+                    // A hidden variable is no target of its own: the
+                    // history is state the process commits at each tick.
+                    self.record_target(&sv::ir::LValue::Ident(register.clone()), false);
+                    let copy = self.m.id(&register).expect("a new history register");
+                    let width = self.m.var(copy).width;
+                    self.targets.push((copy, BitAccess::new(0, width - 1)));
+                    self.history[index].chain.push(register);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The operand of `$past` (IEEE 1800-2023 16.9.3) evaluated over the
+    /// sampled values of its variables `depth` ticks ago.
+    fn past(
+        &self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let (depth, gate) = past_depth_and_gate(function, args)?;
+        let Some(Some(operand)) = args.first() else {
+            return Err(unsupported(format!("operand of `{function}`")));
+        };
+        let operand = self.propagate(operand);
+        let mut names = HashSet::default();
+        expr_idents(&operand, &mut names);
+        let mut renames = HashMap::default();
+        for name in names {
+            if self.m.id(&name).is_none_or(|id| self.m.is_hidden(id)) {
+                continue;
+            }
+            // `declare_history` declared the histories of the process body;
+            // a call elsewhere, as in a subroutine, has no clock.
+            let history = self
+                .history
+                .iter()
+                .find(|history| {
+                    history.name == name && history.gate == gate && history.chain.len() >= depth
+                })
+                .ok_or_else(|| {
+                    unsupported(format!(
+                        "`{function}` outside an edge-triggered process whose clock it infers"
+                    ))
+                })?;
+            renames.insert(name, history.chain[depth - 1].clone());
+        }
+        Ok(rename_idents(&operand, &renames))
+    }
+
+    /// `$rose`, `$fell`, `$stable` or `$changed` (IEEE 1800-2023 16.9.3): the
+    /// sampled value of the operand against its value at the previous tick,
+    /// with case equality for integral values and numeric equality for reals.
+    /// A change from or to X counts. `$rose` and
+    /// `$fell` look at the least significant bit.
+    fn value_change(
+        &mut self,
+        function: sv::ir::SystemFunction,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr, SystemFunction};
+        let current = self.sampled(args)?;
+        let past = self.past(function, args)?;
+        // Resolve nested $sampled calls before inspecting the operand's type.
+        let current = self.hoist(&current)?;
+        let past = self.hoist(&past)?;
+        let real = floating::precision(&current, self.m.variables, self.m.name_to_id).is_some();
+        let binary = |left: Expr, op, right: Expr| Expr::Binary {
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        };
+        let bit = |value: Expr| binary(value, BinaryOp::BitAnd, Expr::Literal("1'b1".into()));
+        let literal = |text: &str| Expr::Literal(text.into());
+        Ok(match function {
+            SystemFunction::Rose | SystemFunction::Fell => {
+                let level = if function == SystemFunction::Rose {
+                    "1'b1"
+                } else {
+                    "1'b0"
+                };
+                binary(
+                    binary(bit(past), BinaryOp::NeCase, literal(level)),
+                    BinaryOp::LogicAnd,
+                    binary(bit(current), BinaryOp::EqCase, literal(level)),
+                )
+            }
+            SystemFunction::Stable => binary(
+                current,
+                if real { BinaryOp::Eq } else { BinaryOp::EqCase },
+                past,
+            ),
+            _ => binary(
+                current,
+                if real { BinaryOp::Ne } else { BinaryOp::NeCase },
+                past,
+            ),
+        })
+    }
+
+    /// The `$past` updates at the end of an evaluation, a tick of the
+    /// process's clock: each history moves one tick back and takes the
+    /// sampled value, where its gate holds at the tick.
+    fn update_history(&mut self) -> Result<bool, sv::AnalyzerError> {
+        use sv::ir::{Expr, LValue, Stmt};
+        let sampled = |expr: Expr| Expr::Call {
+            callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
+            args: vec![Some(expr)],
+            arg_order: Vec::new(),
+        };
+        let mut stmts = Vec::new();
+        if self.history.is_empty() {
+            return Ok(true);
+        }
+        for history in &self.history {
+            let mut updates: Vec<Stmt> = history
+                .chain
+                .windows(2)
+                .map(|pair| Stmt::Assign {
+                    lhs: LValue::Ident(pair[1].clone()),
+                    rhs: Expr::Ident(pair[0].clone()),
+                    nonblocking: true,
+                })
+                .collect();
+            updates.push(Stmt::Assign {
+                lhs: LValue::Ident(history.chain[0].clone()),
+                rhs: sampled(Expr::Ident(history.name.clone())),
+                nonblocking: true,
+            });
+            match &history.gate_value {
+                None => stmts.extend(updates),
+                Some(gate) => stmts.push(Stmt::If {
+                    condition: Expr::Ident(gate.clone()),
+                    then_body: updates,
+                    else_body: Vec::new(),
+                }),
+            }
+        }
+        // A run for another event, such as an asynchronous reset, is no
+        // tick: the clock has kept the level it had before the slot.
+        let clock = self
+            .inferred_clock
+            .as_ref()
+            .expect("histories have a clock");
+        if !clock.alone {
+            use sv::ir::BinaryOp::{EqCase, LogicAnd, LogicOr, NeCase};
+            let to = Expr::Literal(if clock.rising { "1'b1" } else { "1'b0" }.into());
+            let from = Expr::Literal(if clock.rising { "1'b0" } else { "1'b1" }.into());
+            // Edge events inspect only the least significant bit (9.4.2).
+            let signal = Expr::Resize {
+                expr: Box::new(Expr::Ident(clock.signal.clone())),
+                width: 1,
+                signed: false,
+            };
+            let old = sampled(signal.clone());
+            let compare = |left: Expr, op, right: Expr| Expr::Binary {
+                left: Box::new(left),
+                op,
+                right: Box::new(right),
+            };
+            // Table 9-2: leaving the opposite known level for X/Z is an
+            // edge too, as is arriving at the target level from X/Z.
+            let tick = compare(
+                compare(
+                    compare(old.clone(), EqCase, from.clone()),
+                    LogicAnd,
+                    compare(signal.clone(), NeCase, from),
+                ),
+                LogicOr,
+                compare(
+                    compare(old, NeCase, to.clone()),
+                    LogicAnd,
+                    compare(signal, EqCase, to),
+                ),
+            );
+            stmts = vec![Stmt::If {
+                condition: tick,
+                then_body: stmts,
+                else_body: Vec::new(),
+            }];
+        }
+        self.exec_block(&stmts)
+    }
+
+    /// Evaluate the gate of each `$past` history before the body runs. The
+    /// gate is the `iff` of the clocking event, which is evaluated at the
+    /// tick (IEEE 1800-2023 9.4.2.3), not after the body's assignments.
+    fn capture_history_gates(&mut self) -> Result<(), sv::AnalyzerError> {
+        use sv::ir::{BinaryOp, Expr};
+        for index in 0..self.history.len() {
+            let Some(gate) = self.history[index].gate.clone() else {
+                continue;
+            };
+            // Its truth, which keeps an unknown gate unknown, as `if` reads it.
+            let truth = Expr::Binary {
+                left: Box::new(gate),
+                op: BinaryOp::Ne,
+                right: Box::new(Expr::Literal("1'b0".into())),
+            };
+            let value = self.eval(&truth, Some((1, false)))?;
+            let (temp, name) = self.m.temp("gate", 1, false, true);
+            self.store(temp, SIROffset::Static(0), 1, value);
+            self.history[index].gate_value = Some(name);
+        }
+        Ok(())
     }
 
     /// Whether `stmts`, or a subroutine they call, including in timing
@@ -230,6 +683,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             location: None,
             assertion: None,
             deferred: Some(DeferredSite::FlushPoint),
+            timestamp_arg: false,
             arg_widths: Vec::new(),
             arg_signed: Vec::new(),
             arg_is_string: Vec::new(),
@@ -379,6 +833,13 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut assigned = HashSet::default();
         let mut visited = HashSet::default();
         while let Some((callee, args)) = calls.pop() {
+            if let sv::ir::Callee::Object(op) = &callee {
+                assigned.extend(
+                    written_object_arguments(op, &args)
+                        .iter()
+                        .filter_map(|lhs| self.m.id(lhs.name())),
+                );
+            }
             let sv::ir::Callee::Subroutine(name) = callee else {
                 continue;
             };
@@ -439,6 +900,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
         }
         while let Some((callee, args)) = calls.pop() {
+            if let sv::ir::Callee::Object(op) = &callee {
+                for lhs in written_object_arguments(op, &args) {
+                    self.record_target(&lhs, true);
+                }
+            }
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     use sv::ir::SystemFunction;
@@ -447,6 +913,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                         | SystemFunction::ScopeRandomizeEnum
                         | SystemFunction::Urandom
                         | SystemFunction::UrandomRange => {
+                            self.urandom_state();
+                        }
+                        SystemFunction::Process(_) => {
                             self.urandom_state();
                         }
                         SystemFunction::Random if args.is_empty() => {
@@ -467,7 +936,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
-                | sv::ir::Callee::Checked { .. } => continue,
+                | sv::ir::Callee::Checked { .. }
+                | sv::ir::Callee::Lookup { .. }
+                | sv::ir::Callee::Stream(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -517,11 +988,32 @@ impl<'p, 'a> Ff<'p, 'a> {
                 stable(*id)
             }
         };
+        if !self.m.four_state {
+            // Node IDs are topological. Cache exact comparisons before mapping
+            // their parents, reusing the existing graph/loop remapper.
+            for (index, expression) in arena.iter().enumerate() {
+                if let SLTNode::Binary(left, op @ (BinaryOp::EqCase | BinaryOp::NeCase), right) =
+                    expression
+                {
+                    let left = arena
+                        .get(*left)
+                        .map_addr(*left, arena, &mut mapped_arena, &mut cache, &map)
+                        .map_err(slt_error)?;
+                    let right = arena
+                        .get(*right)
+                        .map_addr(*right, arena, &mut mapped_arena, &mut cache, &map)
+                        .map_err(slt_error)?;
+                    let equal = super::case_equality::compare(&mut mapped_arena, left, *op, right)
+                        .map_err(slt_error)?;
+                    cache.insert(NodeId(index), equal);
+                }
+            }
+        }
         let mapped = arena
             .get(node)
             .map_addr(node, arena, &mut mapped_arena, &mut cache, &map)
             .map_err(slt_error)?;
-        let lowerer = SLTToSIRLowerer::new(self.m.four_state)
+        let mut lowerer = SLTToSIRLowerer::new(self.m.four_state)
             .with_unpacked_input_types(&mapped_arena, &self.element_widths);
         let mut lower_cache = HashMap::default();
         Ok(lowerer.lower(&mut self.b, mapped, &mapped_arena, &mut lower_cache))
@@ -715,12 +1207,13 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Run `then_f` and `else_f` where the arms of a conditional operator
     /// are evaluated; an ambiguous condition evaluates both (IEEE 1800-2023
-    /// 11.4.11).
-    fn mux_arms<A, B>(
+    /// 11.4.11). Both arms are passed `state`.
+    fn mux_arms<S, A, B>(
         &mut self,
         condition: &sv::ir::Expr,
-        then_f: impl FnOnce(&mut Self) -> Result<A, sv::AnalyzerError>,
-        else_f: impl FnOnce(&mut Self) -> Result<B, sv::AnalyzerError>,
+        state: &mut S,
+        then_f: impl FnOnce(&mut Self, &mut S) -> Result<A, sv::AnalyzerError>,
+        else_f: impl FnOnce(&mut Self, &mut S) -> Result<B, sv::AnalyzerError>,
     ) -> Result<(A, B), sv::AnalyzerError> {
         if self.m.four_state {
             let mut arena = SLTNodeArena::new();
@@ -733,8 +1226,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             let else_cond = slt_or(&mut arena, &mut consts, not_truth, unknown)?;
             let then_cond = self.lower_slt(&arena, then_cond)?;
             let else_cond = self.lower_slt(&arena, else_cond)?;
-            let then_result = self.when(then_cond, then_f)?;
-            let else_result = self.when(else_cond, else_f)?;
+            let then_result = self.when(then_cond, |this| then_f(this, state))?;
+            let else_result = self.when(else_cond, |this| else_f(this, state))?;
             return Ok((then_result, else_result));
         }
         let (truth, _) = self.eval_truth(condition)?;
@@ -747,10 +1240,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             false_block: (else_block, Vec::new()),
         });
         self.b.switch_to_block(then_block);
-        let then_result = then_f(self)?;
+        let then_result = then_f(self, state)?;
         self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.b.switch_to_block(else_block);
-        let else_result = else_f(self)?;
+        let else_result = else_f(self, state)?;
         self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.b.switch_to_block(join);
         Ok((then_result, else_result))
@@ -779,8 +1272,25 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 let mut lowered = Vec::with_capacity(args.len());
                 for arg in args {
-                    let arg = self.hoist_const(arg, calls)?;
-                    lowered.push(expr_from_const_expr(&arg).ok_or_else(|| {
+                    // Sampled/history functions must resolve their operands
+                    // before nested calls hide the original inputs behind
+                    // temporaries holding current-slot values.
+                    let arg = if matches!(
+                        callee,
+                        sv::ir::Callee::System(
+                            sv::ir::SystemFunction::Sampled
+                                | sv::ir::SystemFunction::Past
+                                | sv::ir::SystemFunction::Rose
+                                | sv::ir::SystemFunction::Fell
+                                | sv::ir::SystemFunction::Stable
+                                | sv::ir::SystemFunction::Changed
+                        )
+                    ) {
+                        arg.clone()
+                    } else {
+                        self.hoist_const(arg, calls)?
+                    };
+                    lowered.push(expr_from_const_expr_with_calls(&arg, true).ok_or_else(|| {
                         unsupported(format!("argument of `{callee}` in a select"))
                     })?);
                 }
@@ -789,8 +1299,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                     callee: callee.clone(),
                     args: lowered.into_iter().map(Some).collect(),
                 };
-                let sv::ir::Expr::Ident(result) = self.hoist(&call)? else {
-                    return Err(unsupported(format!("call of `{callee}` in a select")));
+                let result = match self.hoist(&call)? {
+                    sv::ir::Expr::Ident(result) => result,
+                    // A sampled/history operand can retain any expression
+                    // shape (including a resize inserted for the index).
+                    // Evaluate it only after its references are resolved.
+                    hoisted => {
+                        let value = self.eval(&hoisted, None)?;
+                        let width = self.b.register(&value).width();
+                        let (temp, name) = self.m.temp("select", width, false, true);
+                        self.store(temp, SIROffset::Static(0), width, value);
+                        name
+                    }
                 };
                 let result = ConstExpr::Ident(result);
                 calls.push((expr.clone(), result.clone()));
@@ -865,11 +1385,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                         }
                         // `calls` is shared by both arms, which run one after
                         // the other.
-                        let calls = std::cell::RefCell::new(calls);
                         self.mux_arms(
                             &operand(&condition)?,
-                            |this| this.hoist_const(then_expr, &mut calls.borrow_mut()),
-                            |this| this.hoist_const(else_expr, &mut calls.borrow_mut()),
+                            calls,
+                            |this, calls| this.hoist_const(then_expr, calls),
+                            |this, calls| this.hoist_const(else_expr, calls),
                         )?
                     } else {
                         ((**then_expr).clone(), (**else_expr).clone())
@@ -900,6 +1420,23 @@ impl<'p, 'a> Ff<'p, 'a> {
             *msb = self.hoist_const(msb, &mut calls)?;
         }
         Ok(lvalue)
+    }
+
+    /// A copy of a position for [`Self::freeze_const`].
+    fn position_temp(
+        &mut self,
+        width: usize,
+        signed: bool,
+        is_4state: bool,
+    ) -> Result<(SourceVarId, String), sv::AnalyzerError> {
+        let (temp, name) = self.m.temp("position", width, signed, is_4state);
+        if self.frame_positions && self.forked {
+            let slot = self.frame_locals.len();
+            self.frame_locals.push(temp);
+            self.with_kernel(|kernel| kernel.local(slot))
+                .map_err(kernel_error)?;
+        }
+        Ok((temp, name))
     }
 
     /// `lvalue` with the variables its select positions read replaced by
@@ -940,7 +1477,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let variable = self.m.var(id);
                 let (width, signed, is_4state) =
                     (variable.width, variable.signed, variable.is_4state);
-                let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
+                let (temp, temp_name) = self.position_temp(width, signed, is_4state)?;
                 let value = self.eval(&sv::ir::Expr::Ident(name.clone()), Some((width, signed)))?;
                 self.store(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
@@ -965,7 +1502,13 @@ impl<'p, 'a> Ff<'p, 'a> {
                 };
                 let value = self.eval(&read, None)?;
                 let width = self.b.register(&value).width();
-                let (temp, temp_name) = self.m.temp("position", width, *signed, is_4state);
+                let (temp, temp_name) = self.position_temp(width, *signed, is_4state)?;
+                // A frame slot starts a new block: read the bits there.
+                let value = if self.frame_positions && self.forked {
+                    self.eval(&read, None)?
+                } else {
+                    value
+                };
                 self.store(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
             }
@@ -982,8 +1525,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     lsb: bit,
                     signed: false,
                 };
+                let (temp, temp_name) = self.position_temp(1, false, is_4state)?;
                 let value = self.eval(&read, Some((1, false)))?;
-                let (temp, temp_name) = self.m.temp("position", 1, false, is_4state);
                 self.store(temp, SIROffset::Static(0), 1, value);
                 ConstExpr::Ident(temp_name)
             }
@@ -1046,13 +1589,35 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// Execute the user subroutine calls of an expression and replace each by
     /// a hidden variable holding its result.
     fn hoist(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        self.implicit_write_depth += 1;
+        let result = self.hoist_inner(expr);
+        self.implicit_write_depth -= 1;
+        result
+    }
+
+    fn hoist_inner(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         use sv::ir::Expr;
         if !self.m.calls(expr) {
             return Ok(expr.clone());
         }
         Ok(match expr {
             Expr::Call {
-                callee: sv::ir::Callee::Checked { width, signed },
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Process(op)),
+                args,
+                ..
+            } if op.is_mailbox() => self.mailbox_call(*op, args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Process(op)),
+                args,
+                ..
+            } => self.process_call(*op, args)?,
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::Checked {
+                        width,
+                        signed,
+                        check,
+                    },
                 args,
                 ..
             } => {
@@ -1063,9 +1628,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     sv::ir::SystemTask::Assert,
                     &[
                         sv::ir::SystemTaskArg::Expr(condition.clone()),
-                        sv::ir::SystemTaskArg::Str(
-                            "tagged union member does not match the active tag".into(),
-                        ),
+                        sv::ir::SystemTaskArg::Str(check.message().into()),
                     ],
                     None,
                     None,
@@ -1073,6 +1636,36 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let (_, name) = self.m.temp("tagged_member", *width, *signed, true);
                 self.assign(&sv::ir::LValue::Ident(name.clone()), value)?;
                 Expr::Ident(name)
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
+                args,
+                ..
+            } => {
+                let operand = self.sampled(args)?;
+                self.hoist(&operand)?
+            }
+            Expr::Call {
+                callee: sv::ir::Callee::System(function @ sv::ir::SystemFunction::Past),
+                args,
+                ..
+            } => {
+                let operand = self.past(*function, args)?;
+                self.hoist(&operand)?
+            }
+            Expr::Call {
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Rose
+                        | sv::ir::SystemFunction::Fell
+                        | sv::ir::SystemFunction::Stable
+                        | sv::ir::SystemFunction::Changed),
+                    ),
+                args,
+                ..
+            } => {
+                let change = self.value_change(*function, args)?;
+                self.hoist(&change)?
             }
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fread),
@@ -1110,7 +1703,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 callee: sv::ir::Callee::Object(op),
                 args,
                 ..
-            } => self.object_call(op, args)?,
+            } => match &**op {
+                sv::ir::ObjectOp::Container { op, layout } => {
+                    self.container_call(*op, *layout, args)?
+                }
+                sv::ir::ObjectOp::Locator(locator) => self.locator(*locator, args)?,
+                sv::ir::ObjectOp::Concat(concat) => self.container_concat(concat, args)?,
+                sv::ir::ObjectOp::Stream(op) => self.stream_call(op, args)?,
+                _ => self.object_call(op, args)?,
+            },
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,
@@ -1285,8 +1886,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let condition = self.hoist(condition)?;
                 let (then_expr, else_expr) = self.mux_arms(
                     &condition,
-                    |this| this.hoist(then_expr),
-                    |this| this.hoist(else_expr),
+                    &mut (),
+                    |this, ()| this.hoist(then_expr),
+                    |this, ()| this.hoist(else_expr),
                 )?;
                 Expr::Mux {
                     condition: Box::new(condition),
@@ -1409,8 +2011,17 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             arg_order.to_vec()
         };
+        // A register would not survive a host request in a later actual:
+        // each actual before the last one that can make a request is kept, as
+        // its C type, in a temporary until the call.
+        let last_request = positions.iter().rposition(|&position| {
+            args.get(position)
+                .and_then(Option::as_ref)
+                .is_some_and(|arg| self.m.makes_host_request(arg))
+        });
+        let mut kept = Vec::new();
         // Evaluate actuals in source order, then pass registers in C formal order.
-        for position in positions {
+        for (index, position) in positions.into_iter().enumerate() {
             let argument = import.arguments().get(position).ok_or_else(|| {
                 unsupported(format!("argument position of DPI-C function `{name}`"))
             })?;
@@ -1423,6 +2034,24 @@ impl<'p, 'a> Ff<'p, 'a> {
             let r#type = argument.r#type();
             let arg = self.hoist(arg)?;
             let value = self.eval(&arg, Some((r#type.width(), r#type.is_signed())))?;
+            let register = self.dpi_register(value, r#type);
+            if last_request.is_some_and(|last| index < last) {
+                let four_state = matches!(self.b.register(&register), RegisterType::Logic { .. });
+                let (temp, name) =
+                    self.m
+                        .temp("dpi_input", r#type.width(), r#type.is_signed(), four_state);
+                self.store(temp, SIROffset::Static(0), r#type.width(), register);
+                kept.push((position, name));
+            } else {
+                registers[position] = Some(register);
+            }
+        }
+        for (position, name) in kept {
+            let r#type = import.arguments()[position].r#type();
+            let value = self.eval(
+                &sv::ir::Expr::Ident(name),
+                Some((r#type.width(), r#type.is_signed())),
+            )?;
             registers[position] = Some(self.dpi_register(value, r#type));
         }
         let registers = registers
@@ -2267,11 +2896,73 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(Expr::Ident(ret_name))
     }
 
+    /// Heap helpers emit several registers before their call. Materialize
+    /// operands first so an operand's synchronous host request cannot leave
+    /// those registers live across a kernel return. Preserve formal sizing and
+    /// handle roots, including an object receiver captured before side effects.
+    fn heap_operand(
+        &mut self,
+        expr: &sv::ir::Expr,
+        context: Option<(usize, bool)>,
+        kind: Option<celox_design::ValueKind>,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let expr = self.hoist(expr)?;
+        let value_kind = kind.unwrap_or_else(|| {
+            if let sv::ir::Expr::Ident(name) = &expr {
+                self.m
+                    .id(name)
+                    .and_then(|id| self.m.variables.get(&id))
+                    .map(|v| v.value_kind)
+                    .unwrap_or(celox_design::ValueKind::Bits)
+            } else if self.m.expr_is_string(&expr) {
+                celox_design::ValueKind::StrRef
+            } else {
+                celox_design::ValueKind::Bits
+            }
+        });
+        let float = self.m.expr_float_precision(&expr);
+        let signed = context.map_or_else(|| self.expr_signed(&expr), |(_, signed)| signed);
+        let value = self.eval(&expr, context)?;
+        let register = self.b.register(&value);
+        let width = register.width();
+        let four_state = matches!(register, celox_sir::RegisterType::Logic { .. });
+        let (id, name) = self.m.temp("heap_operand", width, signed, four_state);
+        let variable = self.m.variables.get_mut(&id).unwrap();
+        variable.value_kind = value_kind;
+        variable.float = float;
+        self.store(id, SIROffset::Static(0), width, value);
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// The input `value` of formal `id`, or with `keep` the name of a
+    /// temporary of the formal's type that holds it across a later host
+    /// request.
+    fn kept_input(
+        &mut self,
+        id: SourceVarId,
+        value: RegisterId,
+        keep: bool,
+    ) -> Result<RegisterId, String> {
+        if !keep {
+            return Ok(value);
+        }
+        let formal = self.m.var(id);
+        let (width, signed, value_kind, float) =
+            (formal.width, formal.signed, formal.value_kind, formal.float);
+        let four_state = matches!(self.b.register(&value), RegisterType::Logic { .. });
+        let (temp, name) = self.m.temp("input", width, signed, four_state);
+        let variable = self.m.variables.get_mut(&temp).unwrap();
+        variable.value_kind = value_kind;
+        variable.float = float;
+        self.store(temp, SIROffset::Static(0), width, value);
+        Err(name)
+    }
+
     /// The value of `expr` now, in a temporary of its type.
     fn keep_argument(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         let signed = self.expr_signed(expr);
         let float = floating::precision(expr, self.m.variables, self.m.name_to_id);
-        let handle = reads_string_variable(expr, self.m.variables, self.m.name_to_id);
+        let handle = self.m.expr_is_string(expr);
         let value = self.eval(expr, None)?;
         let register = self.b.register(&value).clone();
         let width = register.width();
@@ -2376,6 +3067,21 @@ impl<'p, 'a> Ff<'p, 'a> {
     }
 
     fn store(&mut self, id: SourceVarId, offset: SIROffset, width: usize, value: RegisterId) {
+        // Intrinsic and subroutine expression copy-outs, including seed and
+        // plusargs actuals, bypass statement lowering. They cannot introduce
+        // observation yields while caller registers are live. Record the
+        // resolved destination here so a later probe cannot silently miss it.
+        if self.observe_blocking_assignments
+            && self.kernel.is_some()
+            && (self.implicit_write_depth != 0
+                || self.active_calls.iter().any(|name| {
+                    self.m
+                        .subroutine(name)
+                        .is_some_and(|subroutine| !subroutine.is_task)
+                }))
+        {
+            self.unobserved_function_writes.insert(id);
+        }
         let value = if let Some((enabled, forced)) = self.m.force_controls(id) {
             let condition = self.b.alloc_bit(1, false);
             self.b.emit(SIRInstruction::Load(
@@ -2449,10 +3155,23 @@ impl<'p, 'a> Ff<'p, 'a> {
         lhs: &sv::ir::LValue,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        self.assign_value(lhs, rhs, true)
+    }
+
+    /// Assign `rhs` to `lhs`; `convert` turns an integral value assigned to
+    /// a string variable into its bytes. The parts of a concatenation target
+    /// take the bits of the value instead: a part that is a string is a
+    /// member of an unpacked structure, and its bits are a handle.
+    fn assign_value(
+        &mut self,
+        lhs: &sv::ir::LValue,
+        rhs: &sv::ir::Expr,
+        convert: bool,
+    ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
         let lhs = self.hoist_lvalue(&lhs)?;
         let converted = match self.m.id(lhs.name()) {
-            Some(id) if matches!(lhs, sv::ir::LValue::Ident(_)) => {
+            Some(id) if convert && matches!(lhs, sv::ir::LValue::Ident(_)) => {
                 self.string_conversion(id, rhs.clone())
             }
             _ => rhs.clone(),
@@ -2919,9 +3638,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut arena = SLTNodeArena::new();
         let node = self.expr_slt(rhs, Some((total, signed)), &mut arena)?;
         let node = coerce_node_width(&mut arena, node, Some(total), signed).map_err(slt_error)?;
-        // Capture the value before any part is written.
-        let (temp, temp_name) = self.m.temp("concat", total, false, true);
+        // Capture the value before any part is written, in a temporary of
+        // the value's state kind.
         let value = self.lower_slt(&arena, node)?;
+        let four_state = matches!(self.b.register(&value), RegisterType::Logic { .. });
+        let (temp, temp_name) = self.m.temp("concat", total, false, four_state);
         self.store(temp, SIROffset::Static(0), total, value);
         let mut lsb = total;
         for (part, width) in parts.iter().zip(widths) {
@@ -2932,7 +3653,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
                 signed: false,
             };
-            self.assign(part, &slice)?;
+            self.assign_value(part, &slice, false)?;
         }
         Ok(())
     }
@@ -2949,6 +3670,27 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(true)
     }
 
+    /// Publish each blocking assignment before the next statement, without
+    /// switching the writer or releasing deferred join_none children.
+    fn observe_assignment(&mut self, targets: &[sv::ir::LValue]) -> Result<(), sv::AnalyzerError> {
+        if !self.forked || !self.observe_blocking_assignments || self.kernel.is_none() {
+            return Ok(());
+        }
+        let in_function = self.active_calls.iter().any(|name| {
+            self.m
+                .subroutine(name)
+                .is_some_and(|subroutine| !subroutine.is_task)
+        });
+        if in_function || self.implicit_write_depth != 0 {
+            self.unobserved_function_writes
+                .extend(targets.iter().filter_map(|target| self.m.id(target.name())));
+        } else {
+            self.with_kernel(ProcessKernelBuilder::yield_now)
+                .map_err(kernel_error)?;
+        }
+        Ok(())
+    }
+
     fn jump(&mut self, target: BlockId) {
         self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
     }
@@ -2961,11 +3703,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 | sv::ir::Stmt::WaitImplicit(_)
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
-            || self.active_calls.iter().any(|name| {
-                self.m
-                    .subroutine(name)
-                    .is_some_and(|subroutine| !subroutine.is_task)
-            }))
+            || self
+                .active_calls
+                .iter()
+                .skip(self.timing_call_boundary)
+                .any(|name| {
+                    self.m
+                        .subroutine(name)
+                        .is_some_and(|subroutine| !subroutine.is_task)
+                }))
         {
             return Err(unsupported("timed task call outside a suspendable process"));
         }
@@ -2988,10 +3734,12 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             sv::ir::Stmt::Assign { lhs, rhs, .. } => {
                 self.assign(lhs, rhs)?;
+                self.observe_assignment(std::slice::from_ref(lhs))?;
                 Ok(true)
             }
             sv::ir::Stmt::AssignConcat { parts, rhs, .. } => {
                 self.assign_concat(parts, rhs)?;
+                self.observe_assignment(parts)?;
                 Ok(true)
             }
             sv::ir::Stmt::Delay {
@@ -3012,6 +3760,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             sv::ir::Stmt::Wait(condition) => {
                 self.wait_level(condition)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::AssertionRegion { reactive } => {
+                self.with_kernel(|kernel| kernel.assertion_region(*reactive))
+                    .map_err(kernel_error)?;
                 Ok(true)
             }
             sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork => {
@@ -3043,12 +3796,15 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let loops = std::mem::take(&mut self.loops);
                 let functions = std::mem::take(&mut self.functions);
                 let overlay = std::mem::take(&mut self.overlay);
+                let timing_boundary = self.timing_call_boundary;
+                self.timing_call_boundary = self.active_calls.len();
                 for (entry, branch) in entries.into_iter().zip(branches) {
                     self.b.switch_to_block(entry);
                     if self.exec_block(branch)? {
                         self.with_kernel(ProcessKernelBuilder::complete);
                     }
                 }
+                self.timing_call_boundary = timing_boundary;
                 self.loops = loops;
                 self.functions = functions;
                 self.overlay = overlay;
@@ -3184,7 +3940,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args,
                 site,
                 assertion,
-            } => self.system_task(*task, args, site.as_ref(), assertion.as_ref()),
+            } => {
+                // System-task output writes (including readmem) have their own
+                // lowering. Until they expose safe per-update boundaries, a
+                // watched automatic destination is rejected like expression
+                // copy-out rather than losing intermediate changes.
+                self.implicit_write_depth += 1;
+                let result = self.system_task(*task, args, site.as_ref(), assertion.as_ref());
+                self.implicit_write_depth -= 1;
+                result
+            }
         }
     }
 
@@ -3328,11 +4093,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::SystemTaskArg::Expr(expr) => {
                     let expr = expr.clone();
                     let signed = self.expr_signed(&expr);
-                    arg_is_handle.push(reads_string_variable(
-                        &expr,
-                        self.m.variables,
-                        self.m.name_to_id,
-                    ));
+                    arg_is_handle.push(self.m.expr_is_string(&expr));
                     arg_float_precision.push(floating::precision(
                         &expr,
                         self.m.variables,
@@ -3363,6 +4124,18 @@ impl<'p, 'a> Ff<'p, 'a> {
                     return Err(unsupported(format!("empty argument of `{task}`")));
                 }
             }
+        }
+        // A report carries the time it is issued at (IEEE 1800-2023 20.10).
+        let timestamp_arg = matches!(kind, SystemTaskKind::Message(_) | SystemTaskKind::Fatal);
+        if timestamp_arg {
+            let time = sv::ir::Expr::Ident(self.m.time_slot());
+            let reg = self.eval(&time, None)?;
+            arg_widths.push(self.b.register(&reg).width());
+            arg_signed.push(false);
+            arg_is_string.push(false);
+            arg_float_precision.push(None);
+            arg_is_handle.push(false);
+            regs.push(reg);
         }
         // Argument effects happen before branching, and the condition register
         // retains the value it had before those effects.
@@ -3397,6 +4170,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             location: report_location(site),
             assertion: assertion_site.cloned(),
             deferred,
+            timestamp_arg,
             arg_widths,
             arg_signed,
             arg_is_string,
@@ -3546,7 +4320,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         step: &[sv::ir::Stmt],
         body: &[sv::ir::Stmt],
     ) -> Result<bool, sv::AnalyzerError> {
-        if let sv::ir::LoopKind::For = kind
+        if !(self.observe_blocking_assignments && self.kernel.is_some())
+            && let sv::ir::LoopKind::For = kind
             && let Some(canonical) = canonical_for_loop(init, condition, step)
             && self
                 .m
@@ -3867,8 +4642,16 @@ impl<'p, 'a> Ff<'p, 'a> {
         // another process can enter the same task while this one is suspended.
         // Static formals/locals deliberately keep their module-wide addresses.
         let mut activation = Vec::new();
-        if self.kernel.is_some() && subroutine.is_task {
+        if self.kernel.is_some() && (subroutine.is_task || self.forked) {
             for name in &subroutine.automatic_locals {
+                // A reference formal, or a member of one, has no storage of
+                // its own.
+                if subroutine.params.iter().any(|param| {
+                    param.direction.is_reference()
+                        && (&param.name == name || param.leaves.contains(name))
+                }) {
+                    continue;
+                }
                 let original = self
                     .m
                     .id(name)
@@ -3905,16 +4688,98 @@ impl<'p, 'a> Ff<'p, 'a> {
         // read a formal of an enclosing call of another subroutine.
         let mut outputs = Vec::new();
         let mut inputs = Vec::new();
+        let mut references = Vec::new();
+        let mut aliases = Vec::new();
+        let mut property_outputs = Vec::new();
         let positions: Vec<_> = if arg_order.is_empty() {
             (0..subroutine.params.len()).collect()
         } else {
             arg_order.to_vec()
         };
-        for position in positions {
+        // The objects and positions that references capture come first (the
+        // order of evaluation of arguments is undefined, IEEE 1800-2023
+        // 13.5): keeping one in a forked activation's frame starts a new
+        // resume point, which no evaluated input may span.
+        for &position in &positions {
+            let Some(param) = subroutine
+                .params
+                .get(position)
+                .filter(|param| param.direction.is_reference())
+            else {
+                continue;
+            };
+            let id = self
+                .m
+                .id(&param.name)
+                .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+            let actual = args
+                .get(position)
+                .cloned()
+                .flatten()
+                .or_else(|| param.default.clone());
+            if param.leaves.is_empty() {
+                match self.reference(name, param, actual)? {
+                    Reference::Variable(target) => {
+                        references.push((param.name.clone(), id, target));
+                    }
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
+                continue;
+            }
+            // Each member of a formal of unpacked structure type refers to
+            // the matching member of the actual, which the analyzer binds as
+            // the concatenation of its members.
+            let parts = match actual {
+                Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts,
+                _ => {
+                    return Err(unsupported(format!(
+                        "ref argument `{}` of `{name}`",
+                        param.source_name
+                    )));
+                }
+            };
+            for (leaf, part) in param.leaves.iter().zip(parts) {
+                let id = self
+                    .m
+                    .id(leaf)
+                    .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+                let member = sv::ir::SubroutineParam {
+                    name: leaf.clone(),
+                    leaves: Vec::new(),
+                    default: None,
+                    ..param.clone()
+                };
+                match self.reference(name, &member, Some(part))? {
+                    Reference::Variable(target) => references.push((leaf.clone(), id, target)),
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
+            }
+        }
+        // An input evaluates into a register, which a host request in a later
+        // input, a default included, would lose: each input before the last
+        // one that can make a request is kept, converted to its formal, in a
+        // temporary until the formals are written.
+        let last_request = positions.iter().rposition(|&position| {
+            subroutine.params.get(position).is_some_and(|param| {
+                param.direction.is_read()
+                    && !param.direction.is_reference()
+                    && args
+                        .get(position)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| param.default.clone())
+                        .is_some_and(|actual| self.m.makes_host_request(&actual))
+            })
+        });
+        for (index, position) in positions.into_iter().enumerate() {
+            let keep = last_request.is_some_and(|last| index < last);
             let param = subroutine
                 .params
                 .get(position)
                 .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
+            if param.direction.is_reference() {
+                continue;
+            }
             let id = self
                 .m
                 .id(&param.name)
@@ -3928,15 +4793,28 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let reference = actual
                     .as_ref()
                     .ok_or_else(|| unsupported("missing output argument"))?;
-                let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
-                    unsupported(format!(
-                        "output argument `{}` of `{name}`",
-                        param.source_name
-                    ))
-                })?;
-                let guards = tagged_actual_guards(reference);
-                self.check_tagged_guards(&guards)?;
-                outputs.push((param.name.clone(), id, lvalues, guards));
+                // A reference formal bound to a class property, forwarded:
+                // its object was evaluated when the reference was made.
+                if let Some(store) =
+                    forwarded_property(reference, sv::ir::Expr::Ident(param.name.clone()))
+                {
+                    property_outputs.push(store);
+                } else if let Some(stores) = forwarded_members(reference, &param.name) {
+                    property_outputs.extend(stores);
+                } else {
+                    let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
+                        unsupported(format!(
+                            "output argument `{}` of `{name}`",
+                            param.source_name
+                        ))
+                    })?;
+                    let guards = tagged_actual_guards(reference);
+                    self.check_tagged_guards(&guards)?;
+                    // The members of an unpacked structure take the formal's
+                    // bits, even a single string or handle member.
+                    let concat = matches!(reference, sv::ir::Expr::Concat(_));
+                    outputs.push((param.name.clone(), id, lvalues, guards, concat));
+                }
             }
             if param.direction.is_read() {
                 let actual = actual.ok_or_else(|| {
@@ -3986,20 +4864,31 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, node))
                         .map_err(slt_error)?;
                 }
-                inputs.push((id, self.lower_slt(&arena, node)?));
+                let value = self.lower_slt(&arena, node)?;
+                inputs.push((id, self.kept_input(id, value, keep)));
             } else if !subroutine.persistent_locals.contains(&param.name)
                 && (self.kernel.is_none()
                     || !subroutine.is_task
                     || subroutine.automatic_locals.contains(&param.name))
             {
                 let value = self.default_reg(id);
-                inputs.push((id, value));
+                inputs.push((id, self.kept_input(id, value, keep)));
             }
         }
         for (id, value) in inputs {
+            let value = match value {
+                Ok(value) => value,
+                Err(name) => self.eval(&sv::ir::Expr::Ident(name), None)?,
+            };
             let width = self.m.var(id).width;
             let offset = sv_memory_offset(self.m.var(id), 0, width);
             self.store(id, offset, width, value);
+        }
+        // The body names each reference formal's actual itself, so its reads
+        // and writes are those of the actual, also across suspensions of a
+        // task and through any other name of it (IEEE 1800-2023 13.5.2).
+        for (formal, _, target) in &references {
+            self.m.name_to_id.insert(formal.clone(), *target);
         }
         if let Some(return_var) = &subroutine.return_var {
             let id = self
@@ -4016,29 +4905,206 @@ impl<'p, 'a> Ff<'p, 'a> {
             return_var: subroutine.return_var.clone(),
             loop_depth: self.loops.len(),
         });
+        let mut body = subroutine.body;
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let constant = |position: &sv::ir::ConstExpr| {
+            sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
+        };
+        self.split_property_concats(&mut body, &aliases);
+        for alias in &aliases {
+            body = alias.rewrite(body, &constant)?;
+        }
         self.active_calls.push(name.to_string());
-        let falls = self.exec_block(&subroutine.body);
+        let falls = self.exec_block(&body);
         self.active_calls.pop();
         self.functions.pop();
+        for (formal, original, _) in references {
+            self.m.name_to_id.insert(formal, original);
+        }
         if falls? {
             self.jump(return_block);
         }
         self.b.switch_to_block(return_block);
-        for (formal, id, lvalues, guards) in outputs {
+        for (formal, id, lvalues, guards, concat) in outputs {
             self.check_tagged_guards(&guards)?;
             let signed = self.m.var(id).signed;
-            if let [lvalue] = lvalues.as_slice() {
+            if let [lvalue] = lvalues.as_slice()
+                && !concat
+            {
                 self.assign(lvalue, &sv::ir::Expr::Ident(formal))?;
             } else {
                 let _ = signed;
-                let parts = lvalues;
-                self.assign_concat(&parts, &sv::ir::Expr::Ident(formal))?;
+                self.assign_concat(&lvalues, &sv::ir::Expr::Ident(formal))?;
             }
+            self.observe_assignment(&lvalues)?;
         }
+        for store in property_outputs {
+            self.exec_block(&[store])?;
+        }
+        let result = subroutine.return_var.as_ref().map(|name| {
+            if activation.iter().any(|(local, _)| local == name) {
+                self.m.var(self.m.id(name).unwrap()).path[0].clone()
+            } else {
+                name.clone()
+            }
+        });
         for (name, original) in activation {
             self.m.name_to_id.insert(name, original);
         }
-        Ok(subroutine.return_var.clone())
+        Ok(result)
+    }
+
+    /// Rewrite each assignment in `body` to a concatenation that has members
+    /// of a structure reference formal bound to a class property, which
+    /// [`references::Alias::rewrite`] stores one property at a time: the
+    /// concatenation writes temporaries in their place, so every position
+    /// of its other parts is taken before any write, and each property is
+    /// then stored from its temporary.
+    fn split_property_concats(&mut self, body: &mut [sv::ir::Stmt], aliases: &[references::Alias]) {
+        let properties: HashSet<&str> = aliases
+            .iter()
+            .filter(|alias| matches!(alias.target, references::Target::Property { .. }))
+            .map(|alias| alias.formal.as_str())
+            .collect();
+        if properties.is_empty() {
+            return;
+        }
+        for stmt in body {
+            stmt.walk_mut(&mut |stmt| {
+                let sv::ir::Stmt::AssignConcat {
+                    parts,
+                    nonblocking,
+                    ..
+                } = stmt
+                else {
+                    return;
+                };
+                if !parts.iter().any(|part| properties.contains(part.name())) {
+                    return;
+                }
+                let nonblocking = *nonblocking;
+                let mut stores = Vec::new();
+                for part in parts.iter_mut() {
+                    if !matches!(part, sv::ir::LValue::Ident(name) if properties.contains(name.as_str()))
+                    {
+                        continue;
+                    }
+                    // A select of a member is left to the rewrite to reject.
+                    let Ok(width) = self.lvalue_width(part) else {
+                        continue;
+                    };
+                    let (_, temp) = self.m.temp("ref_member", width, false, self.m.four_state);
+                    let member = std::mem::replace(part, sv::ir::LValue::Ident(temp.clone()));
+                    stores.push(sv::ir::Stmt::Assign {
+                        lhs: member,
+                        rhs: sv::ir::Expr::Ident(temp),
+                        nonblocking,
+                    });
+                }
+                if stores.is_empty() {
+                    return;
+                }
+                let assignment = std::mem::replace(stmt, sv::ir::Stmt::Break);
+                stores.insert(0, assignment);
+                *stmt = sv::ir::Stmt::If {
+                    condition: sv::ir::Expr::Literal("1'b1".into()),
+                    then_body: stores,
+                    else_body: Vec::new(),
+                };
+            });
+        }
+    }
+
+    /// What reference formal `param` of `name` refers to for a call with
+    /// `actual`. The object of a property is evaluated here, at the call.
+    fn reference(
+        &mut self,
+        name: &str,
+        param: &sv::ir::SubroutineParam,
+        actual: Option<sv::ir::Expr>,
+    ) -> Result<Reference, sv::AnalyzerError> {
+        match actual {
+            Some(sv::ir::Expr::Ident(actual)) => self
+                .m
+                .id(&actual)
+                .map(Reference::Variable)
+                .ok_or_else(|| unsupported(format!("reference to `{actual}`"))),
+            Some(sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                args,
+                ..
+            }) if matches!(*op, sv::ir::ObjectOp::Load(_)) => {
+                let sv::ir::ObjectOp::Load(field) = *op else {
+                    unreachable!()
+                };
+                let [Some(object)] = args.as_slice() else {
+                    return Err(unsupported("class property receiver"));
+                };
+                let (handle, handle_name) = self.m.temp(references::OBJECT_TEMP, 32, false, false);
+                self.m.variables.get_mut(&handle).unwrap().value_kind =
+                    celox_design::ValueKind::ObjRef;
+                // A forked activation keeps its own object.
+                if self.forked {
+                    let slot = self.frame_locals.len();
+                    self.frame_locals.push(handle);
+                    self.with_kernel(|kernel| kernel.local(slot))
+                        .map_err(kernel_error)?;
+                }
+                let object = self.handle(object)?;
+                self.store(handle, SIROffset::Static(0), 32, object);
+                Ok(Reference::Alias(Box::new(references::Alias {
+                    formal: param.name.clone(),
+                    source_name: param.source_name.clone(),
+                    target: references::Target::Property {
+                        handle: handle_name,
+                        field,
+                    },
+                })))
+            }
+            // An element of a fixed-size unpacked array, which the analyzer
+            // has checked: its index is evaluated at the call.
+            Some(actual @ sv::ir::Expr::Select { .. }) => {
+                let signed = self.expr_signed(&actual);
+                let element = match lvalue_from_expr(&actual).as_deref() {
+                    Some([element @ sv::ir::LValue::Select { .. }]) => element.clone(),
+                    _ => {
+                        return Err(unsupported(format!(
+                            "ref argument `{}` of `{name}`",
+                            param.source_name
+                        )));
+                    }
+                };
+                let element = self.hoist_lvalue(&element)?;
+                // A forked activation keeps its own copies of the positions.
+                self.frame_positions = true;
+                let element = self.freeze_lvalue(element);
+                self.frame_positions = false;
+                let element = element?;
+                let width = self.m.var(self.m.id(&param.name).expect("a formal")).width;
+                let total = self
+                    .m
+                    .var(self.m.id(element.name()).expect("an array"))
+                    .width;
+                Ok(Reference::Alias(Box::new(references::Alias {
+                    formal: param.name.clone(),
+                    source_name: param.source_name.clone(),
+                    target: references::Target::Element {
+                        element: Box::new(element),
+                        signed,
+                        width,
+                        total,
+                    },
+                })))
+            }
+            Some(_) => Err(unsupported(format!(
+                "ref argument `{}` of `{name}` bound to a structure member",
+                param.source_name
+            ))),
+            None => Err(unsupported(format!(
+                "missing argument `{}` of `{name}`",
+                param.source_name
+            ))),
+        }
     }
 
     // -------------------------------------------------------------- process
@@ -4376,6 +5442,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         mut self,
         body: &[sv::ir::Stmt],
     ) -> Result<FfProcessUnits, sv::AnalyzerError> {
+        self.declare_history(body)?;
         let mut visited = HashSet::default();
         self.scan(body, &mut visited);
         // A variable only this process's nonblocking assignments write here,
@@ -4555,7 +5622,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args: Vec::new(),
             });
         }
-        if self.exec_block(&body)? {
+        self.capture_history_gates()?;
+        if self.exec_block(&body)? && self.update_history()? {
             self.b.seal_block(SIRTerminator::Return);
         }
         let mut eval = seal_drained(self.b);
@@ -5235,6 +6303,7 @@ impl Ff<'_, '_> {
         body: &[sv::ir::Stmt],
         slots: ProcessSlots<SourceVarId>,
         process: usize,
+        final_process: bool,
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
         let starts_with_event_wait = slots.requires_timed_simulation;
@@ -5243,43 +6312,203 @@ impl Ff<'_, '_> {
             m: &ProcModule<'_>,
             body: &[sv::ir::Stmt],
             visited: &mut HashSet<String>,
+            defaults: &mut HashSet<(String, usize)>,
+        ) -> bool {
+            let mut found = false;
+            let mut calls = Vec::new();
+            for stmt in body {
+                stmt.walk(&mut |stmt| {
+                    found |= matches!(stmt, sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork);
+                    stmt_calls(stmt, &mut calls);
+                    match stmt {
+                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
+                        sv::ir::Stmt::WaitEvent(items) => {
+                            for item in items {
+                                collect_calls(&item.expr, &mut calls);
+                            }
+                        }
+                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
+                        _ => {}
+                    }
+                });
+            }
+            if found {
+                return true;
+            }
+            while let Some((callee, args)) = calls.pop() {
+                let sv::ir::Callee::Subroutine(name) = callee else {
+                    continue;
+                };
+                let Some(subroutine) = m.subroutine(&name) else {
+                    continue;
+                };
+                for (position, param) in subroutine.params.iter().enumerate() {
+                    if matches!(args.get(position), None | Some(None))
+                        && let Some(default) = &param.default
+                        && defaults.insert((name.clone(), position))
+                    {
+                        collect_calls(default, &mut calls);
+                    }
+                }
+                if visited.insert(name) && has_fork(m, &subroutine.body, visited, defaults) {
+                    return true;
+                }
+            }
+            false
+        }
+        // Only kernels containing the new activation-local compound waits
+        // need per-assignment observation. Plain fork kernels keep their
+        // existing suspension count and execution cost.
+        fn has_activation_event(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            visited: &mut HashSet<String>,
         ) -> bool {
             let mut found = false;
             let mut calls = Vec::new();
             for stmt in body {
                 stmt.walk(&mut |stmt| match stmt {
-                    sv::ir::Stmt::Fork { .. } | sv::ir::Stmt::WaitFork => found = true,
+                    sv::ir::Stmt::WaitEvent(items) => {
+                        found |= items.iter().any(|item| {
+                            item.iff.is_some() || !matches!(&item.expr, sv::ir::Expr::Ident(_))
+                        });
+                    }
                     sv::ir::Stmt::Call { name, .. } => calls.push(name.clone()),
                     _ => {}
                 });
+                stmt.clone().visit_mut(
+                    &mut |expr| collect_call_names(expr, &mut calls),
+                    &mut |_| {},
+                    &mut |_| {},
+                );
             }
-            found
-                || calls.into_iter().any(|name| {
-                    visited.insert(name.clone())
-                        && m.subroutine(&name)
-                            .is_some_and(|sub| has_fork(m, &sub.body, visited))
-                })
+            if found {
+                return true;
+            }
+            while let Some(name) = calls.pop() {
+                if !visited.insert(name.clone()) {
+                    continue;
+                }
+                if let Some(sub) = m.subroutine(&name) {
+                    for param in &sub.params {
+                        if let Some(default) = &param.default {
+                            collect_call_names(default, &mut calls);
+                        }
+                    }
+                    if has_activation_event(m, &sub.body, visited) {
+                        return true;
+                    }
+                }
+            }
+            false
         }
-        self.forked = has_fork(self.m, body, &mut HashSet::default());
+        self.observe_blocking_assignments =
+            has_activation_event(self.m, body, &mut HashSet::default());
+        fn has_process(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            visited: &mut HashSet<String>,
+            defaults: &mut HashSet<(String, usize)>,
+        ) -> bool {
+            let mut calls = Vec::new();
+            for stmt in body {
+                stmt.walk(&mut |stmt| {
+                    stmt_calls(stmt, &mut calls);
+                    match stmt {
+                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
+                        sv::ir::Stmt::WaitEvent(items) => {
+                            for item in items {
+                                collect_calls(&item.expr, &mut calls);
+                            }
+                        }
+                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
+                        _ => {}
+                    }
+                });
+            }
+            while let Some((callee, args)) = calls.pop() {
+                match callee {
+                    sv::ir::Callee::System(sv::ir::SystemFunction::Process(_)) => return true,
+                    sv::ir::Callee::Subroutine(name) => {
+                        let Some(sub) = m.subroutine(&name) else {
+                            continue;
+                        };
+                        for (position, param) in sub.params.iter().enumerate() {
+                            if matches!(args.get(position), None | Some(None))
+                                && let Some(default) = &param.default
+                                && defaults.insert((name.clone(), position))
+                            {
+                                collect_calls(default, &mut calls);
+                            }
+                        }
+                        if visited.insert(name) && has_process(m, &sub.body, visited, defaults) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+        self.process_control = has_process(
+            self.m,
+            body,
+            &mut HashSet::default(),
+            &mut HashSet::default(),
+        );
+        self.forked = has_fork(
+            self.m,
+            body,
+            &mut HashSet::default(),
+            &mut HashSet::default(),
+        );
+        // Finals share one process RNG even when a particular body only
+        // draws random values and never exposes process::self().
+        self.forked |= self.process_control || final_process;
         // Forks reached through inlined tasks also need per-activation random state.
         if self.forked {
             self.urandom_state();
         }
         let mut kernel = ProcessKernelBuilder::new(slots);
-        if self.forked && self.has_deferred_assertions(body, &mut HashSet::default()) {
-            return Err(unsupported(
-                "deferred assertions in a process with fork-join",
-            ));
-        }
         if let Some(site) = self.deferred_flush_site(body) {
             kernel.flush_deferred_at(site);
         }
         std::mem::swap(&mut self.b, kernel.builder());
         self.kernel = Some(kernel);
         self.exec_block(body)?;
+        if !self.observe_blocking_assignments && !self.event_probes.is_empty() {
+            return Err(unsupported(
+                "activation-local event expression without assignment observation boundaries",
+            ));
+        }
+        let implicit_probe_write = self.event_probes.iter().any(|probe| {
+            probe
+                .inputs
+                .iter()
+                .any(|input| self.unobserved_function_writes.contains(input))
+        });
+        let implicit_gate_write = self.wait_sites.iter().any(|site| {
+            site.terms
+                .iter()
+                .zip(&site.gates)
+                .any(|(&(signal, _), gate)| {
+                    gate.is_some_and(|gate| {
+                        gate.at_write
+                            && gate.counters.is_none()
+                            && (self.unobserved_function_writes.contains(&signal)
+                                || self.unobserved_function_writes.contains(&gate.signal))
+                    })
+                })
+        });
+        if implicit_probe_write || implicit_gate_write {
+            return Err(unsupported(
+                "implicit write to an activation-local event operand without an observation boundary",
+            ));
+        }
         let mut kernel = self.kernel.take().expect("lowering a process kernel");
         std::mem::swap(&mut self.b, kernel.builder());
         let slots = kernel.slots();
+        let resume_count = kernel.resume_count();
         let mut unit = kernel.build();
         prune_unreachable_blocks(&mut unit);
         let frame = self.forked.then(|| {
@@ -5288,8 +6517,10 @@ impl Ff<'_, '_> {
             private
                 .retain(|id| !self.frame_locals.contains(id) && Some(*id) != self.m.id(TIME_SLOT));
             celox_design::ProcessFrame {
+                resume_count,
                 private,
                 locals: self.frame_locals,
+                event_probes: self.event_probes,
                 random: self.random.as_ref().unwrap().0,
                 seed: self.random_seed,
                 starts_with_event_wait,
@@ -5878,9 +7109,10 @@ impl Ff<'_, '_> {
     /// control samples as it begins.
     fn wait_event(&mut self, items: &[sv::ir::EventItem]) -> Result<(), sv::AnalyzerError> {
         let mut terms = Vec::new();
+        let mut gates = Vec::new();
         let mut samples = Vec::new();
-        self.event_terms(items, &mut terms, &mut samples)?;
-        self.suspend_on(terms, samples)
+        self.event_terms(items, &mut terms, &mut gates, &mut samples)?;
+        self.suspend_on(terms, gates, samples)
     }
 
     /// `@*` (IEEE 1800-2023 9.4.2.2): wait for a change of a variable that
@@ -5923,19 +7155,22 @@ impl Ff<'_, '_> {
             .map(|name| sv::ir::EventItem {
                 edge: sv::ir::EventEdge::Any,
                 expr: sv::ir::Expr::Ident(name),
+                iff: None,
             })
             .collect();
+        let mut gates = vec![None; terms.len()];
         let mut samples = Vec::new();
-        self.event_terms(&locals, &mut terms, &mut samples)?;
-        self.suspend_on(terms, samples)
+        self.event_terms(&locals, &mut terms, &mut gates, &mut samples)?;
+        self.suspend_on(terms, gates, samples)
     }
 
-    /// The counter terms of `items` and the samples the process takes of
-    /// their expressions before it suspends.
+    /// The counter terms of `items`, their `iff` gates, and the samples the
+    /// process takes of their expressions before it suspends.
     fn event_terms(
         &mut self,
         items: &[sv::ir::EventItem],
         terms: &mut Vec<(SourceVarId, CounterKind)>,
+        gates: &mut Vec<Option<WaitGate<SourceVarId>>>,
         samples: &mut Vec<(String, sv::ir::Expr)>,
     ) -> Result<(), sv::AnalyzerError> {
         for item in items {
@@ -5951,12 +7186,14 @@ impl Ff<'_, '_> {
             {
                 return Err(sv::AnalyzerError::RealEdgeEvent { edge });
             }
+            let mut variable = false;
             let id = match &expr {
                 sv::ir::Expr::Ident(name) => match self.m.id(name) {
                     Some(id)
                         if !self.m.is_hidden(id)
                             || (self.forked && self.frame_locals.contains(&id)) =>
                     {
+                        variable = self.m.var(id).array_dims.is_empty();
                         id
                     }
                     Some(_) => self.event_expression(&expr, samples)?,
@@ -5966,29 +7203,51 @@ impl Ff<'_, '_> {
                 },
                 _ => self.event_expression(&expr, samples)?,
             };
-            match item.edge {
-                sv::ir::EventEdge::Any => terms.push((id, CounterKind::Changes)),
-                sv::ir::EventEdge::Pos => terms.push((id, CounterKind::Rises)),
-                sv::ir::EventEdge::Neg => terms.push((id, CounterKind::Falls)),
-                sv::ir::EventEdge::Both => {
-                    terms.push((id, CounterKind::Rises));
-                    terms.push((id, CounterKind::Falls));
-                }
+            let gate = match &item.iff {
+                Some(iff) => Some(self.event_gate(iff, samples)?),
+                None => None,
+            };
+            let kinds: &[CounterKind] = match item.edge {
+                sv::ir::EventEdge::Any => &[CounterKind::Changes],
+                sv::ir::EventEdge::Pos => &[CounterKind::Rises],
+                sv::ir::EventEdge::Neg => &[CounterKind::Falls],
+                sv::ir::EventEdge::Both => &[CounterKind::Rises, CounterKind::Falls],
+            };
+            for &kind in kinds {
+                terms.push((id, kind));
+                gates.push(gate.map(|(signal, gate_variable)| {
+                    WaitGate {
+                        signal,
+                        at_write: variable && gate_variable,
+                        // Shared module storage has counters; activation-local
+                        // operands are read at each process assignment boundary.
+                        counters: (variable
+                            && gate_variable
+                            && !self.m.is_hidden(id)
+                            && !self.m.is_hidden(signal))
+                        .then(|| self.gate_counters()),
+                    }
+                }));
             }
         }
         Ok(())
     }
 
-    /// Suspend until one of `terms` counts, after taking `samples`.
+    /// Suspend until one of `terms` counts while its gate in `gates` holds,
+    /// after taking `samples`.
     fn suspend_on(
         &mut self,
         terms: Vec<(SourceVarId, CounterKind)>,
+        mut gates: Vec<Option<WaitGate<SourceVarId>>>,
         samples: Vec<(String, sv::ir::Expr)>,
     ) -> Result<(), sv::AnalyzerError> {
         for (target, value) in samples {
             self.assign(&sv::ir::LValue::Ident(target), &value)?;
         }
-        let site = self.wait_site(terms);
+        if gates.iter().all(Option::is_none) {
+            gates.clear();
+        }
+        let site = self.wait_site(terms, gates);
         self.with_kernel(|kernel| -> Result<(), ProcessKernelError> {
             kernel.suspend_wait(site)?;
             let woken = kernel.builder().alloc_bit(1, false);
@@ -5999,6 +7258,64 @@ impl Ff<'_, '_> {
             Ok(())
         })
         .map_err(kernel_error)
+    }
+
+    /// The signal whose least significant bit is the `iff` condition `iff`
+    /// of an event item (IEEE 1800-2023 9.4.2.3): a one-bit variable itself,
+    /// or the variable `$event[k]` of the condition's truth value. Its
+    /// operands are not terms of the wait; the runtime reads it when it
+    /// detects an occurrence.
+    fn event_gate(
+        &mut self,
+        iff: &sv::ir::Expr,
+        samples: &mut Vec<(String, sv::ir::Expr)>,
+    ) -> Result<(SourceVarId, bool), sv::AnalyzerError> {
+        let iff = self.propagate(iff);
+        if let sv::ir::Expr::Ident(name) = &iff
+            && let Some(id) = self.m.id(name)
+            && (!self.m.is_hidden(id) || self.forked && self.frame_locals.contains(&id))
+            && self.m.var(id).width == 1
+            && self.m.var(id).float.is_none()
+            && self.m.var(id).array_dims.is_empty()
+        {
+            return Ok((id, true));
+        }
+        let not = |expr| sv::ir::Expr::Unary {
+            op: sv::ir::UnaryOp::LogicNot,
+            expr: Box::new(expr),
+        };
+        Ok((self.event_expression(&not(not(iff)), samples)?, false))
+    }
+
+    /// The counters of a new gated term ([`GateCounters`]): `$event[k]`
+    /// counts the occurrences while the gate holds, `$event[k].all` all
+    /// of them.
+    fn gate_counters(&mut self) -> GateCounters<SourceVarId> {
+        let index = self.m.next_event_index();
+        let counter = SvVariable {
+            float: None,
+            path: Vec::new(),
+            width: EVENT_COUNTER_WIDTH,
+            signed: false,
+            is_4state: false,
+            packed_ranges: vec![(EVENT_COUNTER_WIDTH as i128 - 1, 0)],
+            array_dims: Vec::new(),
+            unpacked_ranges: Vec::new(),
+            domain_kind: DomainKind::Other,
+            kind: VariableKind::Variable,
+            type_kind: PortTypeKind::Bit,
+            source: None,
+            hidden: true,
+            force_control: None,
+            value_kind: Default::default(),
+            sampled_from: None,
+            history_of: None,
+        };
+        let (gated, _) = self.m.event_variable(index, None, counter.clone());
+        let (all, _) = self
+            .m
+            .event_variable(index, Some("all".to_string()), counter);
+        GateCounters { gated, all }
     }
 
     /// The variable `$event[k]` of a new event expression `expr`, with its
@@ -6042,9 +7359,7 @@ impl Ff<'_, '_> {
             .collect();
         locals.sort_unstable();
         if self.forked && locals.iter().any(|(_, id)| self.frame_locals.contains(id)) {
-            return Err(unsupported(
-                "compound event expression reading a fork-shared automatic variable",
-            ));
+            return self.activation_event_expression(expr, width, signed, float);
         }
         // Another call can copy a new argument into a static formal while
         // the process waits, which a copy taken now would not see.
@@ -6076,6 +7391,8 @@ impl Ff<'_, '_> {
                 source: None,
                 hidden: true,
                 force_control: None,
+                sampled_from: None,
+                history_of: None,
                 value_kind: Default::default(),
             },
         );
@@ -6103,6 +7420,190 @@ impl Ff<'_, '_> {
             }],
         ));
         Ok(event)
+    }
+
+    /// An activation-local expression cannot use a module-wide continuous
+    /// proxy. Give it a pure dispatch entry and retain only its sampled result
+    /// in the waiter's existing baseline.
+    fn activation_event_expression(
+        &mut self,
+        expr: &sv::ir::Expr,
+        width: usize,
+        signed: bool,
+        float: Option<celox_sir::FloatPrecision>,
+    ) -> Result<SourceVarId, sv::AnalyzerError> {
+        let mut names = HashSet::default();
+        expr_idents(expr, &mut names);
+        subroutine_reads(self.m, expr, &mut names);
+        if names.iter().any(|name| {
+            self.m
+                .id(name)
+                .is_some_and(|id| self.is_static_task_formal(id))
+        }) {
+            return Err(unsupported(
+                "event expression reading a static task argument",
+            ));
+        }
+        let mut inputs: Vec<_> = names
+            .iter()
+            .filter_map(|name| self.m.id(name))
+            .filter(|id| !self.m.is_hidden(*id) || self.frame_locals.contains(id))
+            .collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        if inputs.iter().any(|id| !self.frame_locals.contains(id)) {
+            return Err(unsupported(
+                "activation-local event expression reading a non-automatic variable",
+            ));
+        }
+        let (result, name) = self.m.temp("event_probe", width, signed, float.is_none());
+        self.m.variables.get_mut(&result).unwrap().float = float;
+        // Isolate expression code so every clobbered scratch slot can be
+        // audited, including function formals declared before this kernel.
+        let saved_builder = std::mem::take(&mut self.b);
+        let kernel = self.kernel.take();
+        let direct = std::mem::replace(&mut self.direct, true);
+        let lowered = self.assign(&sv::ir::LValue::Ident(name.clone()), expr);
+        self.direct = direct;
+        self.kernel = kernel;
+        let expression_builder = std::mem::replace(&mut self.b, saved_builder);
+        lowered?;
+        let mut unit = seal_builder(expression_builder);
+        let mut scratch = Vec::new();
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            match instruction {
+                SIRInstruction::Store(address, _, _, _, triggers, captures) => {
+                    if address.region != STABLE_REGION
+                        || !triggers.is_empty()
+                        || !captures.is_empty()
+                    {
+                        return Err(unsupported("event expression with observable stores"));
+                    }
+                    scratch.push(address.var_id);
+                }
+                SIRInstruction::Commit(..)
+                | SIRInstruction::RuntimeEvent { .. }
+                | SIRInstruction::CombCaptureEvent { .. }
+                | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                | SIRInstruction::ExternCall { .. } => {
+                    return Err(unsupported("event expression with runtime effects"));
+                }
+                SIRInstruction::Imm(..)
+                | SIRInstruction::Binary(..)
+                | SIRInstruction::Unary(..)
+                | SIRInstruction::Load(..)
+                | SIRInstruction::Concat(..)
+                | SIRInstruction::Slice(..)
+                | SIRInstruction::Mux(..) => {}
+            }
+        }
+        scratch.sort_unstable();
+        scratch.dedup();
+        // Function formals and temporaries may predate this process frame.
+        // Give the probe exclusive storage, so instrumentation of the normal
+        // function cannot add observable counters or capture hooks here.
+        let mut copies = HashMap::default();
+        for id in &mut scratch {
+            if *id == result {
+                continue;
+            }
+            if !self.m.is_hidden(*id) || self.frame_locals.contains(id) {
+                return Err(unsupported("event expression modifying persistent state"));
+            }
+            let variable = self.m.var(*id).clone();
+            let (copy, copy_name) = self.m.temp(
+                "event_scratch",
+                variable.width,
+                variable.signed,
+                variable.is_4state,
+            );
+            self.m.variables.insert(
+                copy,
+                SvVariable {
+                    path: vec![copy_name],
+                    ..variable
+                },
+            );
+            copies.insert(*id, copy);
+            *id = copy;
+        }
+        for block in unit.blocks.values_mut() {
+            for instruction in &mut block.instructions {
+                *instruction = instruction.map_addr(|address| Addr {
+                    var_id: copies
+                        .get(&address.var_id)
+                        .copied()
+                        .unwrap_or(address.var_id),
+                    ..*address
+                });
+            }
+        }
+        // AST names alone cannot expose implicit receivers or generated
+        // aliases. Validate the complete lowered read set after remapping.
+        for instruction in unit.blocks.values().flat_map(|block| &block.instructions) {
+            if let SIRInstruction::Load(_, address, _, _) = instruction
+                && (address.region != STABLE_REGION
+                    || !(self.frame_locals.contains(&address.var_id)
+                        || scratch.contains(&address.var_id)))
+            {
+                return Err(unsupported(
+                    "activation-local event expression reading non-automatic storage",
+                ));
+            }
+        }
+        inputs = unit
+            .blocks
+            .values()
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Load(_, address, _, _)
+                    if self.frame_locals.contains(&address.var_id) =>
+                {
+                    Some(address.var_id)
+                }
+                _ => None,
+            })
+            .collect();
+        inputs.sort_unstable();
+        inputs.dedup();
+        let targets: Vec<_> = scratch
+            .iter()
+            .map(|&id| VarAtomBase::new(id, 0, self.m.var(id).width - 1))
+            .collect();
+        let widths = scratch
+            .iter()
+            .map(|&id| (id, self.m.var(id).width))
+            .collect();
+        if super::comb_retention::reads_prior_state(&unit, &targets, &widths) {
+            return Err(unsupported(
+                "activation-local event expression retaining function scratch state",
+            ));
+        }
+        if super::comb_retention::retains_state(
+            &unit,
+            &[VarAtomBase::new(result, 0, width - 1)],
+            &widths,
+        ) {
+            return Err(unsupported(
+                "activation-local event expression without a definite result",
+            ));
+        }
+        let (previous, resume) = self
+            .with_kernel(ProcessKernelBuilder::begin_event_probe)
+            .map_err(kernel_error)?;
+        self.b.inline_execution_unit(&unit);
+        self.with_kernel(|kernel| kernel.end_event_probe(previous));
+        self.event_probes.push(celox_design::ProcessEventProbe {
+            result,
+            resume,
+            inputs,
+            scratch,
+        });
+        // Use the identical pure code for the initial baseline too. Lowering
+        // the call again as ordinary process code could allocate activation
+        // cells or suspend inside a function's temporary declarations.
+        self.b.inline_execution_unit(&unit);
+        Ok(result)
     }
 
     /// Whether `id` is a static formal of a task, which keeps one
@@ -6135,6 +7636,11 @@ impl Ff<'_, '_> {
         }) {
             return Err(unsupported("wait condition reading a static task argument"));
         }
+        // A write of a class property does not wake a waiting process yet, so
+        // a condition that reads one would never be checked again.
+        if let Some(op) = heap_read(self.m, condition) {
+            return Err(unsupported(format!("{op} in a wait condition")));
+        }
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
@@ -6146,11 +7652,16 @@ impl Ff<'_, '_> {
             ids.into_iter()
                 .map(|id| (id, CounterKind::Changes))
                 .collect(),
+            Vec::new(),
         );
         // Keep the kernel available while evaluating the predicate: functions
         // may perform synchronous process control such as disable fork.
         let direct = std::mem::replace(&mut self.direct, true);
+        let predicate = std::mem::replace(&mut self.process_predicate, true);
         let result = (|| {
+            if self.process_control {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
             let (holds, _) = self.eval_truth(condition)?;
             let join = self.b.new_block();
             let wait = self.b.new_block();
@@ -6160,8 +7671,18 @@ impl Ff<'_, '_> {
                 false_block: (wait, Vec::new()),
             });
             self.b.switch_to_block(wait);
-            self.with_kernel(|kernel| kernel.suspend_wait(site))
-                .map_err(kernel_error)?;
+            let process_control = self.process_control;
+            self.with_kernel(|kernel| {
+                if process_control {
+                    kernel.suspend_level_wait(site)
+                } else {
+                    kernel.suspend_wait(site)
+                }
+            })
+            .map_err(kernel_error)?;
+            if self.process_control {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
             let (holds, _) = self.eval_truth(condition)?;
             self.with_kernel(|kernel| kernel.wake_if(holds));
             self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
@@ -6169,16 +7690,22 @@ impl Ff<'_, '_> {
             Ok(())
         })();
         self.direct = direct;
+        self.process_predicate = predicate;
         result
     }
 
     /// Declare a wait site of the process with the given terms and return
     /// its local index.
-    fn wait_site(&mut self, terms: Vec<(SourceVarId, CounterKind)>) -> u32 {
+    fn wait_site(
+        &mut self,
+        terms: Vec<(SourceVarId, CounterKind)>,
+        gates: Vec<Option<WaitGate<SourceVarId>>>,
+    ) -> u32 {
         let index = self.wait_sites.len() as u32;
         self.wait_sites.push(WaitSite {
             process: self.process,
             terms,
+            gates,
         });
         index
     }
@@ -6319,6 +7846,7 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
         for param in &subroutine.params {
             if let Some(default) = &param.default {
                 expr_idents(default, names);
+                collect_call_names(default, &mut pending);
             }
         }
         for stmt in &subroutine.body {
@@ -6340,6 +7868,66 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
     }
 }
 
+/// The name of an operation in `expr` that reads the class object heap,
+/// directly or through the functions it calls: a class property, or the
+/// random mode of one. Container contents are values of their handles. The
+/// default of an argument counts only where a call omits the argument.
+fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    let mut pending = vec![expr.clone()];
+    let mut calls = Vec::new();
+    let mut visited = HashSet::default();
+    let mut defaults = HashSet::default();
+    loop {
+        while let Some(expr) = pending.pop() {
+            let mut found = None;
+            expr_calls(&expr, &mut |callee| {
+                if let sv::ir::Callee::Object(op) = callee
+                    && matches!(
+                        **op,
+                        sv::ir::ObjectOp::Load(_)
+                            | sv::ir::ObjectOp::ModeGet(..)
+                            | sv::ir::ObjectOp::ConstraintModeGet(_)
+                    )
+                {
+                    found.get_or_insert(op.to_string());
+                }
+                false
+            });
+            if let Some(op) = found {
+                return Some(op);
+            }
+            collect_calls(&expr, &mut calls);
+        }
+        let (callee, args) = calls.pop()?;
+        let sv::ir::Callee::Subroutine(name) = callee else {
+            continue;
+        };
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        for (position, param) in subroutine.params.iter().enumerate() {
+            if matches!(args.get(position), None | Some(None))
+                && let Some(default) = &param.default
+                && defaults.insert((name.clone(), position))
+            {
+                pending.push(default.clone());
+            }
+        }
+        if !visited.insert(name) {
+            continue;
+        }
+        for stmt in &subroutine.body {
+            let mut stmt = stmt.clone();
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+            stmt.visit_mut(
+                &mut |expr| pending.push(expr.clone()),
+                &mut |_| {},
+                &mut |_| {},
+            );
+        }
+    }
+}
+
 /// The name of a call in `expr` that has an effect or reads the state of the
 /// simulation, directly or through the functions it calls: an event
 /// expression must be a value of the variables it reads.
@@ -6347,12 +7935,12 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     let mut pending = vec![expr.clone()];
     let mut visited = HashSet::default();
     while let Some(expr) = pending.pop() {
-        let callees = std::cell::RefCell::new(Vec::new());
-        expr_calls(&expr, &|callee| {
-            callees.borrow_mut().push(callee.clone());
+        let mut callees = Vec::new();
+        expr_calls(&expr, &mut |callee| {
+            callees.push(callee.clone());
             false
         });
-        for callee in callees.into_inner() {
+        for callee in callees {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     if function.reads_simulation_state() {
@@ -6360,8 +7948,25 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                     }
                     continue;
                 }
-                // A string operation is a value of its operands.
-                sv::ir::Callee::String(_) => continue,
+                // A string operation or lookup is a value of its operands.
+                sv::ir::Callee::String(_)
+                | sv::ir::Callee::Lookup { .. }
+                | sv::ir::Callee::Stream(_) => continue,
+                // Container contents are immutable: reading an element is a
+                // value of the container handle and index, unlike a class
+                // property that can change without its handle changing.
+                // A record of a structure element is immutable as well.
+                sv::ir::Callee::Object(op)
+                    if matches!(
+                        *op,
+                        sv::ir::ObjectOp::Container {
+                            op: sv::ir::ContainerOp::Get,
+                            ..
+                        } | sv::ir::ObjectOp::Unbox(_)
+                    ) || matches!(*op, sv::ir::ObjectOp::Load(field) if field.nullable) =>
+                {
+                    continue;
+                }
                 // A property can change without the handle changing.
                 sv::ir::Callee::Object(op) => return Some(op.to_string()),
                 sv::ir::Callee::Checked { .. } => return Some("tagged union access".into()),
@@ -6411,6 +8016,8 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                         arg_order: arg_order.clone(),
                     }),
                     sv::ir::Stmt::DisableFork
+                    | sv::ir::Stmt::WaitFork
+                    | sv::ir::Stmt::Fork { .. }
                     | sv::ir::Stmt::SystemTask { .. }
                     | sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
@@ -6569,14 +8176,12 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
 
 /// The names of the user subroutines `expr` calls.
 fn collect_call_names(expr: &sv::ir::Expr, names: &mut Vec<String>) {
-    let called = std::cell::RefCell::new(Vec::new());
-    expr_calls(expr, &|callee| {
+    expr_calls(expr, &mut |callee| {
         if let Some(name) = callee.subroutine() {
-            called.borrow_mut().push(name.to_string());
+            names.push(name.to_string());
         }
         false
     });
-    names.extend(called.into_inner());
 }
 
 fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {
@@ -6854,4 +8459,99 @@ fn force_reads(expr: &sv::ir::Expr, m: &ProcModule<'_>) -> sv::ir::Expr {
                 .collect(),
         },
     }
+}
+
+/// The depth and the gate of a `$past` call, or of the comparison a
+/// value change function makes with the previous tick.
+fn past_depth_and_gate(
+    function: sv::ir::SystemFunction,
+    args: &[Option<sv::ir::Expr>],
+) -> Result<(usize, Option<sv::ir::Expr>), sv::AnalyzerError> {
+    if function != sv::ir::SystemFunction::Past {
+        return Ok((1, None));
+    }
+    let depth = match args.get(1) {
+        None | Some(None) => 1,
+        Some(Some(depth)) => {
+            let mut depth = depth;
+            while let sv::ir::Expr::Resize { expr, .. } = depth {
+                depth = expr;
+            }
+            literal_usize(depth)
+                .filter(|&depth| depth >= 1)
+                .ok_or_else(|| {
+                    unsupported("number of ticks of `$past` other than a positive constant")
+                })?
+        }
+    };
+    Ok((depth, args.get(2).cloned().flatten()))
+}
+
+/// What a reference formal names during an inlined call.
+enum Reference {
+    Variable(SourceVarId),
+    Alias(Box<references::Alias>),
+}
+
+/// The store that copies `value` back into the class property that `actual`
+/// reads through the object of a reference formal (see
+/// [`references::Alias`]), when it is such a read.
+fn forwarded_property(actual: &sv::ir::Expr, value: sv::ir::Expr) -> Option<sv::ir::Stmt> {
+    let sv::ir::Expr::Call {
+        callee: sv::ir::Callee::Object(op),
+        args,
+        ..
+    } = actual
+    else {
+        return None;
+    };
+    let (sv::ir::ObjectOp::Load(field), [Some(sv::ir::Expr::Ident(handle))]) =
+        (&**op, args.as_slice())
+    else {
+        return None;
+    };
+    handle.starts_with(references::OBJECT_TEMP).then(|| {
+        sv::ir::Stmt::Eval(sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(Box::new(sv::ir::ObjectOp::Store(*field))),
+            args: vec![Some(sv::ir::Expr::Ident(handle.clone())), Some(value)],
+            arg_order: Vec::new(),
+        })
+    })
+}
+
+/// The stores that copy the members of formal `formal` of unpacked
+/// structure type back into the class properties that `actual`, the members
+/// of a structure reference formal bound to a property, read.
+fn forwarded_members(actual: &sv::ir::Expr, formal: &str) -> Option<Vec<sv::ir::Stmt>> {
+    let sv::ir::Expr::Concat(parts) = actual else {
+        return None;
+    };
+    let widths = parts
+        .iter()
+        .map(|part| match part {
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                ..
+            } => match **op {
+                sv::ir::ObjectOp::Load(field) => Some(field.width as usize),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut lsb = widths.iter().sum::<usize>();
+    parts
+        .iter()
+        .zip(widths)
+        .map(|(part, width)| {
+            lsb -= width;
+            let bits = sv::ir::Expr::Select {
+                expr: Box::new(sv::ir::Expr::Ident(formal.to_owned())),
+                msb: sv::ir::ConstExpr::Literal((lsb + width - 1).to_string()),
+                lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
+                signed: false,
+            };
+            forwarded_property(part, bits)
+        })
+        .collect()
 }

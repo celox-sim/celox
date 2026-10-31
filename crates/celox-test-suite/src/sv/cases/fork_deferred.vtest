@@ -1,0 +1,138 @@
+(group fork_deferred (category sequential))
+
+; A wait resumption flushes one child's reports, never its sibling's.
+(case sibling_wait_queues_are_independent
+ (source "siblings.sv" #"module Top;
+ bit go;
+ task automatic worker(input bit flush_this);
+  assert #0 (0) else $display("observed %0d", flush_this);
+  assert final (0) else $display("final %0d", flush_this);
+  if (flush_this) wait(go); else #1;
+ endtask
+ initial begin
+  go=0;
+  fork worker(0); worker(1); join_none
+  #0; go=1; #2;
+ end
+endmodule"#)
+ (top Top) (run_until 2)
+ (expect_output "observed 0\nfinal 0\n"))
+
+(case sibling_event_queues_are_independent
+ (source "siblings_event.sv" #"module Top;
+ bit go;
+ task automatic worker(input bit flush_this);
+  assert #0 (0) else $display("observed %0d", flush_this);
+  assert final (0) else $display("final %0d", flush_this);
+  if (flush_this) @(posedge go); else #1;
+ endtask
+ initial begin
+  go=0;
+  fork worker(0); worker(1); join_none
+  #0; go=1; #2;
+ end
+endmodule"#)
+ (top Top) (run_until 2)
+ (expect_output "observed 0\nfinal 0\n"))
+
+(case child_flush_does_not_inherit_parent_reports
+ (source "parent.sv" #"module Top;
+ bit go;
+ initial begin
+  go=0;
+  assert #0 (1) $display("parent observed");
+  assert final (1) $display("parent final");
+  fork begin wait(go); end join_none
+  #0; go=1;
+ end
+endmodule"#)
+ (top Top) (run_until 1)
+ (expect_output "parent observed\nparent final\n"))
+
+(case disable_fork_flushes_live_children_only
+ (source "cancel.sv" #"module Top;
+ initial begin
+  assert #0 (1) $display("parent");
+  fork
+   begin assert #0 (0) else $display("cancelled"); #5; end
+   begin assert final (1) $display("completed"); end
+  join_none
+  #0; disable fork;
+ end
+endmodule"#)
+ (top Top) (run_until 1)
+ (expect_output "parent\ncompleted\n"))
+
+(case reused_slot_cannot_flush_completed_reports
+ (source "reused.sv" #"module Top;
+ bit go;
+ initial begin
+  go=0;
+  fork begin assert #0 (1) $display("completed"); end join
+  fork begin wait(go); end join_none
+  #0; go=1; #1;
+ end
+endmodule"#)
+ (top Top) (run_until 1)
+ (expect_output "completed\n"))
+
+(case zero_delay_is_not_a_flush_point
+ (source "delay.sv" #"module Top;
+ initial fork
+  begin
+   assert #0 (1) $display("observed");
+   assert final (1) $display("final");
+   #0;
+  end
+ join
+endmodule"#)
+ (top Top) (run_until 1)
+ (expect_output "observed\nfinal\n"))
+
+(case repeated_static_site_keeps_completed_reports
+ (source "repeated.sv" #"module Top(input int count);
+ initial begin
+  wait(count > 0);
+  for (int i=0; i<count; i++) begin
+   fork
+    automatic int copy=i;
+    begin assert #0 (1) $display("copy %0d", copy); end
+   join
+  end
+ end
+endmodule"#)
+ (top Top) (run_until 0) (modify (set count 3)) (run_until 1)
+ (expect_output "copy 0\ncopy 1\ncopy 2\n"))
+
+(case four_state_arguments_are_captured_before_child_exit
+ (four_state)
+ (source "captured.sv" #"module Top;
+ initial fork
+  begin
+   automatic logic [3:0] value=4'b10xz;
+   assert #0 (1) $display("observed %b", value);
+   assert final (1) $display("final %b", value);
+   #0; value=0;
+  end
+ join
+endmodule"#)
+ (top Top) (run_until 1)
+ (expect_output "observed 10xz\nfinal 10xz\n"))
+
+; Observed reports mature before Reactive program code can wake the child.
+; The same wakeup still flushes its not-yet-matured Final report.
+(case reactive_wakeup_preserves_mature_observed_only
+ (source "reactive.sv" #"module Top;
+ bit go;
+ Driver driver(go);
+ initial fork begin
+  assert #0 (1) $display("observed");
+  assert final (1) $display("final");
+  wait(go);
+ end join
+endmodule
+program Driver(output bit go);
+ initial begin go=1; #10; end
+endprogram"#)
+ (top Top) (run_until 1)
+ (expect_output "observed\n"))

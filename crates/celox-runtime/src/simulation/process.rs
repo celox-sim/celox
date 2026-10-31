@@ -128,10 +128,22 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         let kernel = self.restore_activation(executor.backend_mut(), process);
+        if let Some(activation) = self.process_state.activations.get_mut(process) {
+            activation.control.level_wait = false;
+        }
         let result = self.run_activation(executor, current_time, process, kernel, returns);
         self.save_activation(executor.backend(), process);
         if matches!(result, Ok(false)) {
             self.release_children(process);
+            // A false reevaluation remains at the same wait. Announcing it
+            // as a state change can make mutual status observers wake forever.
+            let pending = executor
+                .backend()
+                .get_as::<u8>(self.model.processes[process].status)
+                == ProcessStatus::Pending.code();
+            if !pending {
+                self.process_changed(process);
+            }
         }
         self.retire_activation(process);
         result
@@ -149,7 +161,10 @@ impl<B: SimBackend> SimulationState<B> {
         E: SimulationExecutor<Backend = B>,
     {
         {
-            executor.run_process(kernel)?;
+            executor.enter_deferred_assertion_process(process);
+            let result = executor.run_process(kernel);
+            executor.leave_deferred_assertion_process();
+            result?;
             let status: u8 = executor
                 .backend()
                 .get_as(self.model.processes[process].status);
@@ -177,17 +192,29 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 Some(ProcessStatus::Done) => {
                     self.end_activation(process);
+                    executor.finish_deferred_assertion_process(process);
                     if self.model.processes[process].program.is_some() {
                         self.program_kernel_ended(executor.backend())?;
                     }
                 }
                 Some(ProcessStatus::Exit) => {
                     self.exit_program(executor.backend_mut(), process)?;
+                    let program = self.model.processes[process].program;
+                    for (index, candidate) in self.model.processes.iter().enumerate() {
+                        if candidate.program == program {
+                            executor.finish_deferred_assertion_process(index);
+                        }
+                    }
                     self.program_kernel_ended(executor.backend())?;
                 }
                 Some(ProcessStatus::Finish) => return Err(Halt::Finish),
                 Some(ProcessStatus::Wait | ProcessStatus::Pending) => {
-                    let site = delay() as usize;
+                    let word = delay();
+                    let site = (word & !celox_design::PROCESS_LEVEL_WAIT) as usize;
+                    if let Some(activation) = self.process_state.activations.get_mut(process) {
+                        activation.control.level_wait =
+                            word & celox_design::PROCESS_LEVEL_WAIT != 0;
+                    }
                     self.register_waiter(executor.backend(), process, site)?;
                 }
                 Some(ProcessStatus::Fork) => {
@@ -198,7 +225,9 @@ impl<B: SimBackend> SimulationState<B> {
                 }
                 Some(ProcessStatus::WaitFork) => return Ok(self.wait_for_children(process)),
                 Some(ProcessStatus::DisableFork) => {
-                    self.disable_children(process);
+                    for child in self.disable_children(process) {
+                        executor.cancel_deferred_assertion_process(child);
+                    }
                     return Ok(true);
                 }
                 Some(ProcessStatus::Local) => {
@@ -213,6 +242,12 @@ impl<B: SimBackend> SimulationState<B> {
                     self.charge(*returns, Some(process))?;
                     return Ok(true);
                 }
+                Some(ProcessStatus::AssertionObserved) => {
+                    self.process_state.observed.insert(process);
+                }
+                Some(ProcessStatus::AssertionReactive) => {
+                    self.process_state.reactive.insert(process);
+                }
                 Some(ProcessStatus::HostRequest) => {
                     let (kind, index) = HostRequestKind::decode(delay())
                         .ok_or(SimulatorErrorCode::InternalError)?;
@@ -222,7 +257,16 @@ impl<B: SimBackend> SimulationState<B> {
                         .filter(|site| site.kind == kind)
                         .nth(index as usize)
                         .ok_or(SimulatorErrorCode::InternalError)?;
-                    executor.host_request(request, current_time)?;
+                    if kind == HostRequestKind::Process {
+                        let request = request.clone();
+                        *returns += 1;
+                        self.charge(*returns, Some(process))?;
+                        return self.process_request(executor, current_time, process, &request);
+                    }
+                    executor.enter_deferred_assertion_process(process);
+                    let result = executor.host_request(request, current_time);
+                    executor.leave_deferred_assertion_process();
+                    result?;
                     *returns += 1;
                     self.charge(*returns, Some(process))?;
                     return Ok(true);
@@ -242,7 +286,9 @@ impl<B: SimBackend> SimulationState<B> {
                     self.charge(*returns, Some(process))?;
                     return Ok(true);
                 }
-                None => return Err(SimulatorErrorCode::InternalError.into()),
+                Some(ProcessStatus::EventProbe) | None => {
+                    return Err(SimulatorErrorCode::InternalError.into());
+                }
             }
             Ok(false)
         }
@@ -289,7 +335,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // one, the check following the settle sees them: a settle
                 // does not write what processes write.
                 if again || !self.region_ready(reactive).is_empty() {
-                    self.observe_driven(executor.backend());
+                    self.observe_driven_unsettled(executor.backend_mut())?;
                 }
                 if !again {
                     break;
@@ -297,6 +343,34 @@ impl<B: SimBackend> SimulationState<B> {
             }
         }
         Ok(true)
+    }
+
+    pub(super) fn run_observed_assertions<E>(
+        &mut self,
+        executor: &mut E,
+        time: u64,
+    ) -> Result<(), Halt>
+    where
+        E: SimulationExecutor<Backend = B>,
+    {
+        let mut returns = 0;
+        while let Some(&process) = self.process_state.observed.first() {
+            self.charge_pass()?;
+            self.process_state.observed.remove(&process);
+            loop {
+                match self.run_process(executor, time, process, &mut returns) {
+                    Ok(true) => continue,
+                    Ok(false) => break,
+                    Err(halt) => {
+                        if matches!(halt, Halt::Stop) {
+                            self.process_state.observed.insert(process);
+                        }
+                        return Err(halt);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     /// The processes ready in the Reactive region if `reactive`, otherwise in
@@ -316,6 +390,7 @@ impl<B: SimBackend> SimulationState<B> {
         let program = self.model.processes[process]
             .program
             .ok_or(SimulatorErrorCode::InternalError)?;
+        let mut ended = Vec::new();
         for index in 0..self.model.processes.len() {
             let refs = &self.model.processes[index];
             if refs.program != Some(program) {
@@ -323,7 +398,15 @@ impl<B: SimBackend> SimulationState<B> {
             }
             backend.set(refs.status, ProcessStatus::Done.code());
             if let Some(activation) = self.process_state.activations.get_mut(index) {
+                if activation.live {
+                    ended.push(index);
+                }
                 activation.live = false;
+                activation.control.suspended = None;
+                activation.control.awaiting = None;
+                activation.control.observes.clear();
+                activation.control.observed_events.clear();
+                activation.control.level_wait = false;
                 activation.pending.clear();
                 activation.join = None;
             }
@@ -338,12 +421,17 @@ impl<B: SimBackend> SimulationState<B> {
             .retain(|std::cmp::Reverse((_, index))| {
                 model.processes[*index].program != Some(program)
             });
+        // Notify after the whole program is dead so awakened observers see
+        // the terminal state of every sibling and descendant, not just the caller.
+        for index in ended {
+            self.process_changed(index);
+        }
         Ok(())
     }
 
     /// A program kernel ended. Once every program kernel has, the simulation
     /// ends with an implicit `$finish` (IEEE 1800-2023 24.3).
-    fn program_kernel_ended(&self, backend: &B) -> Result<(), Halt> {
+    pub(super) fn program_kernel_ended(&self, backend: &B) -> Result<(), Halt> {
         let done = ProcessStatus::Done.code();
         let all_done = self.model.program_processes.iter().all(|&process| {
             self.process_state
@@ -410,10 +498,10 @@ impl<B: SimBackend> SimulationState<B> {
                 // host's view of the state, and what the settle derived.
                 entry = false;
                 if !self.process_state.waiters.is_empty() {
-                    self.observe(executor.backend(), None);
+                    self.observe_settled(executor.backend_mut())?;
                 }
             } else {
-                self.observe_driven(executor.backend());
+                self.observe_driven(executor.backend_mut())?;
             }
             if round.reactive {
                 // The Reactive region is empty: the Re-Inactive region's
@@ -429,9 +517,9 @@ impl<B: SimBackend> SimulationState<B> {
                     self.process_state.reactive.extend(inactive);
                     continue;
                 }
-                if self.publish_re_nba(executor, round) {
+                if self.publish_re_nba(executor, round)? {
                     self.settle_pass(executor, round)?;
-                    self.observe_driven(executor.backend());
+                    self.observe_driven(executor.backend_mut())?;
                     continue;
                 }
                 return Ok(());
@@ -447,7 +535,7 @@ impl<B: SimBackend> SimulationState<B> {
                 if self.active_commit_triggered(executor.backend(), round)
                     && self.evaluate_before_inactive(executor, current_time, round)?
                 {
-                    self.observe_driven(executor.backend());
+                    self.observe_driven(executor.backend_mut())?;
                     continue;
                 }
                 return Ok(());
@@ -458,7 +546,7 @@ impl<B: SimBackend> SimulationState<B> {
                 // Their blocking results are updates of the active region:
                 // the waits they wake and the domains their edges trigger run
                 // before the inactive region (IEEE 1800-2023 4.5).
-                self.observe_driven(executor.backend());
+                self.observe_driven(executor.backend_mut())?;
                 if !self.process_state.ready.is_empty()
                     || !executor.backend().get_triggered_bits().is_empty()
                 {

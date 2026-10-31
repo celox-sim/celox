@@ -11,7 +11,7 @@ impl SLTToSIRLowerer {
     /// unordered in its dependency graph; this method rechecks every local
     /// property needed by the joint loop itself.
     pub fn lower_fold_groups_jointly<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         roots: &[NodeId],
         arena: &SLTNodeArena<A>,
@@ -52,7 +52,7 @@ impl SLTToSIRLowerer {
         for (&root, result) in roots.iter().zip(results) {
             let previous = cache.insert(root, result);
             debug_assert!(previous.is_none());
-            self.cache_insert_log.borrow_mut().push(root);
+            self.cache_insert_log.push(root);
         }
         true
     }
@@ -314,7 +314,7 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn lower_bound<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         bound: &SLTLoopBound,
         _canonical_width: usize,
@@ -420,7 +420,7 @@ impl SLTToSIRLowerer {
         'env,
         A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
     >(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
@@ -639,10 +639,8 @@ impl SLTToSIRLowerer {
         // environment.  Keep the local CSE results, but remove their tracking
         // records before returning to the caller's global cache transaction.
         self.cache_insert_log
-            .borrow_mut()
             .truncate(local_cache_transaction.node_insertions);
         self.region_slice_cache_insert_log
-            .borrow_mut()
             .truncate(local_cache_transaction.region_slice_insertions);
 
         let next_remaining = builder.alloc_bit(remaining_width, false);
@@ -699,7 +697,7 @@ impl SLTToSIRLowerer {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn lower_for_fold<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
@@ -1169,7 +1167,7 @@ impl SLTToSIRLowerer {
     }
 
     fn lower_for_effects<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
@@ -1192,7 +1190,7 @@ impl SLTToSIRLowerer {
                 continue;
             };
             let emit = |builder: &mut SIRBuilder<A>,
-                        this: &Self,
+                        this: &mut Self,
                         cache: &mut crate::HashMap<NodeId, RegisterId>| {
                 let args = args
                     .iter()

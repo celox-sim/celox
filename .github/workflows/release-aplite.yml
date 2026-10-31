@@ -1,0 +1,70 @@
+name: Aplite Release Management
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'crates/aplite/**'
+      - '.release-please-aplite-manifest.json'
+      - 'release-please-aplite-config.json'
+      - '.github/workflows/release-aplite.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: release-management-aplite
+  cancel-in-progress: false
+
+permissions: {}
+
+jobs:
+  release-please:
+    name: Update Aplite release pull request
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-actions: write
+          permission-contents: write
+          permission-issues: write
+          permission-pull-requests: write
+          permission-workflows: write
+
+      - name: Check whether the release pull request is frozen
+        id: release-pr
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        shell: bash
+        run: |
+          pull_requests="$(gh pr list \
+            --repo "$GITHUB_REPOSITORY" \
+            --state open --base master \
+            --head release-please--branches--master--components--aplite \
+            --json isCrossRepository,labels)"
+          frozen="$(jq -r 'any(.[]; .isCrossRepository == false and any(.labels[]; .name == "merge-ready" or .name == "queued"))' <<< "$pull_requests")"
+          echo "frozen=$frozen" >> "$GITHUB_OUTPUT"
+
+      - name: Create release or update release pull request
+        id: release
+        uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ steps.release-token.outputs.token }}
+          config-file: release-please-aplite-config.json
+          manifest-file: .release-please-aplite-manifest.json
+          skip-github-pull-request: ${{ steps.release-pr.outputs.frozen == 'true' }}
+
+      - name: Queue Aplite publication
+        if: steps.release.outputs['crates/aplite--release_created'] == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_TAG: ${{ steps.release.outputs['crates/aplite--tag_name'] }}
+        shell: bash
+        run: |
+          if [[ ! "$RELEASE_TAG" =~ ^aplite-v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Expected an Aplite stable release tag." >&2
+            exit 1
+          fi
+          gh workflow run publish-aplite.yml --repo "$GITHUB_REPOSITORY" --ref "$RELEASE_TAG"

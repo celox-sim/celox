@@ -1,11 +1,15 @@
 use super::*;
-use std::cell::Cell;
 
-thread_local! {
-    /// Calls made on this thread, which is the one running the generated code.
-    static CALLS: Cell<u64> = const { Cell::new(0) };
+fn weighted(args: &[u64]) -> u64 {
+    args.iter()
+        .enumerate()
+        .map(|(index, value)| (index as u64 + 1).wrapping_mul(*value))
+        .fold(0, u64::wrapping_add)
 }
 
+/// Counts the call in the word `a0` points to and returns a weighted sum of
+/// its arguments after overwriting every register an AAPCS64 callee may
+/// change.
 #[allow(clippy::too_many_arguments)]
 extern "C" fn weighted_sum(
     a0: u64,
@@ -19,7 +23,8 @@ extern "C" fn weighted_sum(
     a8: u64,
     a9: u64,
 ) -> u64 {
-    CALLS.set(CALLS.get() + 1);
+    // SAFETY: the test passes the address of a call counter it owns as `a0`.
+    unsafe { *(a0 as *mut u64) += 1 };
     // Overwrite every register an AAPCS64 callee may change, other than the
     // result register and the platform register x18.
     // SAFETY: the block writes only registers declared as clobbered.
@@ -53,11 +58,7 @@ extern "C" fn weighted_sum(
             out("v28") _, out("v29") _, out("v30") _, out("v31") _,
         );
     }
-    [a0, a1, a2, a3, a4, a5, a6, a7, a8, a9]
-        .iter()
-        .enumerate()
-        .map(|(index, value)| (index as u64 + 1).wrapping_mul(*value))
-        .fold(0, u64::wrapping_add)
+    weighted(&[a0, a1, a2, a3, a4, a5, a6, a7, a8, a9])
 }
 
 /// Values start after the state header, whose extern table slot the test
@@ -134,18 +135,21 @@ fn extern_calls_preserve_live_values(tick_loop: bool) {
 
     let table = [weighted_sum as *const () as usize];
     let table_slot = celox_state_layout::STATE_HEADER_EXTERN_FUNCTIONS_ADDR_OFFSET;
-    let values = (0..LIVE as u64)
+    // The first argument of each call points to that call's counter.
+    let mut calls = [0u64; 2];
+    let mut values = (0..LIVE as u64)
         .map(|index| 0x0101_0101_0000_0000 * (index + 1) + index)
         .collect::<Vec<_>>();
+    values[0] = &raw mut calls[0] as u64;
+    values[10] = &raw mut calls[1] as u64;
     for (index, value) in values.iter().enumerate() {
         let offset = BASE + index * 8;
         state[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
     }
     state[table_slot..table_slot + 8].copy_from_slice(&(table.as_ptr() as u64).to_le_bytes());
 
-    let calls = CALLS.get();
     assert_eq!(unsafe { (jit.fn_ptr)(state.as_mut_ptr()) }, 0);
-    assert_eq!(CALLS.get(), calls + 2);
+    assert_eq!(calls, [1, 1]);
     for (index, value) in values.iter().enumerate() {
         let offset = BASE + (LIVE as usize + index) * 8;
         assert_eq!(
@@ -157,9 +161,6 @@ fn extern_calls_preserve_live_values(tick_loop: bool) {
     let offset = BASE + 2 * LIVE as usize * 8;
     assert_eq!(
         u64::from_le_bytes(state[offset..offset + 8].try_into().unwrap()),
-        weighted_sum(
-            values[0], values[1], values[2], values[3], values[4], values[5], values[6], values[7],
-            values[8], values[9],
-        )
+        weighted(&values[..10])
     );
 }

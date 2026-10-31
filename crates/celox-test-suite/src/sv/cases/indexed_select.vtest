@@ -2185,3 +2185,75 @@
     (assert_eq b2 (? (> cycle 1) (* (- cycle 1) 17) 0))
     (assert_eq a4 (? (> cycle 3) (* (- cycle 3) 17) 0))
     (assert_eq b4 (? (> cycle 3) (* (- cycle 3) 17) 0))))
+
+(case disjoint_single_bit_array_drivers
+  (source "single_bit_drivers.sv" #"
+    module Top #(parameter BASE=0)(input logic signed [31:0] index, input logic [2:0] value,
+        output wire [2:0] q);
+      logic [BASE:BASE] ready[3];
+      for (genvar n=0; n<3; n=n+1) begin : lanes
+        always_comb begin
+          ready[n] = '0;
+          ready[n][index] = value[n];
+        end
+        assign q[n] = ready[n][BASE];
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set index 0) (set value 5))
+  (assert_eq q 5)
+  (modify (set value 2))
+  (assert_eq q 2)
+  (modify (set value 0))
+  (assert_eq q 0)
+  (modify (set value 7))
+  (assert_eq q 7))
+
+(case disjoint_shifted_single_bit_array_drivers
+  (source "single_bit_drivers.sv" #"
+    module Top #(parameter BASE=7)(input logic signed [31:0] index, input logic [2:0] value,
+        output wire [2:0] q);
+      logic [BASE:BASE] ready[3];
+      for (genvar n=0; n<3; n=n+1) begin : lanes
+        always_comb begin
+          ready[n] = '0;
+          ready[n][index] = value[n];
+        end
+        assign q[n] = ready[n][BASE];
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set index 7) (set value 5))
+  (assert_eq q 5)
+  (modify (set value 2))
+  (assert_eq q 2)
+  (modify (set value 0))
+  (assert_eq q 0)
+  (modify (set value 7))
+  (assert_eq q 7))
+
+(case disjoint_negative_single_bit_array_drivers
+  (source "single_bit_drivers.sv" #"
+    module Top #(parameter BASE=-2)(input logic signed [31:0] index, input logic [2:0] value,
+        output wire [2:0] q);
+      logic [BASE:BASE] ready[3];
+      for (genvar n=0; n<3; n=n+1) begin : lanes
+        always_comb begin
+          ready[n] = '0;
+          ready[n][index] = value[n];
+        end
+        assign q[n] = ready[n][BASE];
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set index (trunc 32 -2)) (set value 5))
+  (assert_eq q 5)
+  (modify (set value 2))
+  (assert_eq q 2)
+  (modify (set value 0))
+  (assert_eq q 0)
+  (modify (set value 7))
+  (assert_eq q 7))

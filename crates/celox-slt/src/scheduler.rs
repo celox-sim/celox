@@ -856,7 +856,7 @@ where
 }
 
 fn lower_logic_path_expr<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
@@ -878,7 +878,7 @@ fn lower_logic_path_expr<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
 }
 
 fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     node: NodeId,
@@ -907,7 +907,7 @@ fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
 }
 
 fn pre_lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     node: NodeId,
@@ -942,7 +942,7 @@ fn static_access_offset<Addr: Eq + Hash>(
 }
 
 fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
@@ -1024,6 +1024,7 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                 return;
             }
             let emit = |builder: &mut SIRBuilder<Addr>,
+                        lowerer: &mut crate::SLTToSIRLowerer,
                         lower_cache: &mut HashMap<NodeId, RegisterId>| {
                 let regs = args
                     .iter()
@@ -1059,19 +1060,19 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                 // Values first lowered inside the guarded block do not
                 // dominate the join; later paths must not reuse them.
                 let dominating_cache = lower_cache.clone();
-                emit(builder, lower_cache);
+                emit(builder, lowerer, lower_cache);
                 *lower_cache = dominating_cache;
                 builder.seal_block(SIRTerminator::Jump(done_block, vec![]));
                 builder.switch_to_block(done_block);
             } else {
-                emit(builder, lower_cache);
+                emit(builder, lowerer, lower_cache);
             }
         }
     }
 }
 
 fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
@@ -1108,7 +1109,7 @@ fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + D
 
 #[allow(clippy::too_many_arguments)]
 fn emit_scheduled_guard_region<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     condition: NodeId,
     paths: &[usize],
@@ -1147,9 +1148,9 @@ fn emit_scheduled_guard_region<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Di
         .filter_map(|node| lower_cache.get(node).copied().map(|value| (*node, value)))
         .collect::<Vec<_>>();
 
-    let emit_arm = |builder: &mut SIRBuilder<Addr>,
-                    lower_cache: &mut HashMap<NodeId, RegisterId>,
-                    take_true: bool| {
+    let mut emit_arm = |builder: &mut SIRBuilder<Addr>,
+                        lower_cache: &mut HashMap<NodeId, RegisterId>,
+                        take_true: bool| {
         let mut inserted = Vec::new();
         for &path in paths {
             let (_, then_expr, else_expr) = scheduled_root_mux(&input[path], arena)
@@ -2240,7 +2241,7 @@ fn best_weighted_fold_family<Addr: Clone + Eq + Hash>(
 fn jointly_lower_fold_group_families<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     indices: &[usize],
     schedule_index: &FoldGroupScheduleIndex<Addr>,
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
@@ -2312,7 +2313,7 @@ fn prepare_atomic_fold_group_results<Addr: Clone + Eq + Ord + Hash + Debug + Cop
     indices: &[usize],
     input: &[LogicPath<Addr>],
     fold_group_schedule_index: &FoldGroupScheduleIndex<Addr>,
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
@@ -2423,6 +2424,14 @@ pub struct ScheduleResult<Addr> {
     /// The partitions of a partitioned settle, in schedule order; empty when
     /// the schedule runs as one pass.
     pub partitions: Vec<SettlePartition<Addr>>,
+    /// The targets of the paths that keep state from one settle to the next:
+    /// paths that read a previous value or loop, and guarded processes.
+    /// Every other path computes what it stores from its inputs alone (a
+    /// bit-level order may still load a range before the bits it needs are
+    /// stored, and then discards the stale bits). `None` when that is not
+    /// known per path: capture events, and partitioned settles, whose flags
+    /// keep what changed since the last one.
+    pub stateful_targets: Option<Vec<VarAtomBase<Addr>>>,
 }
 
 /// Request to split a combinational schedule into partitions that run only
@@ -2431,8 +2440,12 @@ pub struct ScheduleResult<Addr> {
 /// Byte `p` of `flags`, a two-state object, is partition `p`'s dirty flag:
 /// the settle runs the partition only when it is not zero, and clears it.
 /// A partition that runs sets the flags of the partitions reading what it
-/// writes; every other writer of state a partition reads must set its flag
-/// too ([`SettlePartition::reads`]).
+/// changed; every other writer of state a partition reads must set its flag
+/// too ([`SettlePartition::reads`]). Byte `N` (for `N` partitions) is the
+/// untracked byte, which runs every partition on every settle. Byte `N + 1`
+/// is computed when the settle starts: it runs every partition of this
+/// settle when the untracked byte or enough flags are set, and the
+/// partitions then skip comparing what they wrote.
 #[derive(Clone, Copy, Debug)]
 pub struct SettlePartitioning<Addr> {
     pub flags: Addr,
@@ -2735,7 +2748,7 @@ fn flush_pending_fold_paths<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Displ
     pending: &mut Vec<usize>,
     input: &[LogicPath<Addr>],
     fold_group_schedule_index: &FoldGroupScheduleIndex<Addr>,
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
@@ -3478,7 +3491,6 @@ struct WorkLoweringContext<'a, Addr: Clone + Eq + Hash> {
     fold_group_schedule_index: &'a FoldGroupScheduleIndex<Addr>,
     unpacked_element_widths: &'a HashMap<Addr, usize>,
     direct_ff_writes_by_action: &'a [Vec<VarAtomBase<Addr>>],
-    lowerer: &'a crate::SLTToSIRLowerer,
     four_state: bool,
     /// Start a new execution unit when one grows past [`EU_BLOCK_LIMIT`].
     /// Shared comb/FF lowering keeps one unit because its staged FF state
@@ -3516,6 +3528,10 @@ struct WatchedChunk<Addr> {
     offset: SIROffset,
     width: usize,
     readers: Vec<usize>,
+    /// The readers at or before the partition in the schedule: the only ones
+    /// marked when the settle runs every partition, since the others run
+    /// after it in the same settle.
+    earlier: Vec<usize>,
 }
 
 /// The widest chunk of a written object compared at once.
@@ -3812,6 +3828,11 @@ fn plan_settle_partitions<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display
                         ),
                         width: chunk,
                         readers: targets.clone(),
+                        earlier: targets
+                            .iter()
+                            .copied()
+                            .filter(|&reader| reader <= partition)
+                            .collect(),
                     });
                 }
             }
@@ -3873,6 +3894,7 @@ fn whole_variable_copy<Addr: Clone + Eq + Hash + Copy>(
 /// builder. Register numbers and the expression cache are local to it.
 struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
     context: &'a WorkLoweringContext<'a, Addr>,
+    lowerer: &'a mut crate::SLTToSIRLowerer,
     builder: SIRBuilder<Addr>,
     lower_cache: HashMap<NodeId, RegisterId>,
     dep_memo: HashMap<NodeId, HashSet<Addr>>,
@@ -3893,9 +3915,13 @@ struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
 }
 
 impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a, Addr> {
-    fn new(context: &'a WorkLoweringContext<'a, Addr>) -> Self {
+    fn new(
+        context: &'a WorkLoweringContext<'a, Addr>,
+        lowerer: &'a mut crate::SLTToSIRLowerer,
+    ) -> Self {
         Self {
             context,
+            lowerer,
             builder: SIRBuilder::new(),
             lower_cache: HashMap::default(),
             dep_memo: HashMap::default(),
@@ -3910,15 +3936,160 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         }
     }
 
-    /// Open partition `index`: run it only when its flag or the untracked
-    /// byte (`untracked`) is set, and clear its flag. Values computed before
-    /// it may be reused inside, but not the other way round, so the
-    /// expression cache starts over.
+    /// Start a settle of `count` partitions. Skip publication comparisons
+    /// when every partition will run anyway, or an untracked raw view requires
+    /// a full settle. A fraction of dirty flags is not a cost estimate: a
+    /// clean partition can contain most of the program's work.
+    fn begin_settle(&mut self, flags: Addr, count: usize) {
+        let all = self.builder.alloc_bit(count * 8, false);
+        self.builder.emit(SIRInstruction::Load(
+            all,
+            flags,
+            SIROffset::Static(0),
+            count * 8,
+        ));
+        let count_width = UnaryOp::PopCount.result_width(count * 8);
+        let dirty = self.builder.alloc_bit(count_width, false);
+        self.builder
+            .emit(SIRInstruction::Unary(dirty, UnaryOp::PopCount, all));
+        let threshold = self.builder.alloc_bit(count_width, false);
+        self.builder
+            .emit(SIRInstruction::Imm(threshold, SIRValue::new(count as u64)));
+        let busy = self.builder.alloc_bit(1, false);
+        self.builder.emit(SIRInstruction::Binary(
+            busy,
+            dirty,
+            BinaryOp::GeU,
+            threshold,
+        ));
+        let untracked = self.builder.alloc_bit(8, false);
+        self.builder.emit(SIRInstruction::Load(
+            untracked,
+            flags,
+            SIROffset::Static(count * 8),
+            8,
+        ));
+        let zero = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+        let raw = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(SIRInstruction::Binary(raw, untracked, BinaryOp::Ne, zero));
+        let full = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(SIRInstruction::Binary(full, busy, BinaryOp::Or, raw));
+        let one = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+        let byte = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Mux(byte, full, one, zero));
+        self.builder.emit(SIRInstruction::Store(
+            flags,
+            SIROffset::Static((count + 1) * 8),
+            8,
+            byte,
+            Vec::new(),
+            Vec::new(),
+        ));
+    }
+
+    /// Whether the settle of `count` partitions runs every partition.
+    fn settle_is_full(&mut self, flags: Addr, count: usize) -> RegisterId {
+        let byte = self.builder.alloc_bit(8, false);
+        self.builder.emit(SIRInstruction::Load(
+            byte,
+            flags,
+            SIROffset::Static((count + 1) * 8),
+            8,
+        ));
+        let zero = self.builder.alloc_bit(8, false);
+        self.builder
+            .emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+        let full = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(SIRInstruction::Binary(full, byte, BinaryOp::Ne, zero));
+        full
+    }
+
+    /// Compare each chunk with its value before the partition ran (`old`),
+    /// and set the flags of its `readers` when it changed: one change bit per
+    /// reader set, then one flag update per reader.
+    fn mark_changed_readers(
+        &mut self,
+        flags: Addr,
+        one: RegisterId,
+        chunks: Vec<(&WatchedChunk<Addr>, &[usize], RegisterId)>,
+    ) {
+        let mut set_changes: Vec<(&[usize], RegisterId)> = Vec::new();
+        for (chunk, readers, old) in chunks {
+            let new = self.builder.alloc_logic(chunk.width);
+            self.builder.emit(SIRInstruction::Load(
+                new,
+                chunk.object,
+                chunk.offset.clone(),
+                chunk.width,
+            ));
+            // Both planes: an X turning into a known value is a change.
+            let changed = self.builder.alloc_bit(1, false);
+            self.builder
+                .emit(SIRInstruction::Binary(changed, old, BinaryOp::NeCase, new));
+            match set_changes.iter_mut().find(|(set, _)| *set == readers) {
+                Some((_, any)) => {
+                    let both = self.builder.alloc_bit(1, false);
+                    self.builder
+                        .emit(SIRInstruction::Binary(both, *any, BinaryOp::Or, changed));
+                    *any = both;
+                }
+                None => set_changes.push((readers, changed)),
+            }
+        }
+        let mut reader_changes: BTreeMap<usize, RegisterId> = BTreeMap::new();
+        for (readers, changed) in set_changes {
+            for &reader in readers {
+                let any = match reader_changes.get(&reader).copied() {
+                    Some(any) => {
+                        let both = self.builder.alloc_bit(1, false);
+                        self.builder
+                            .emit(SIRInstruction::Binary(both, any, BinaryOp::Or, changed));
+                        both
+                    }
+                    None => changed,
+                };
+                reader_changes.insert(reader, any);
+            }
+        }
+        for (reader, changed) in reader_changes {
+            let flag = self.builder.alloc_bit(8, false);
+            self.builder.emit(SIRInstruction::Load(
+                flag,
+                flags,
+                SIROffset::Static(reader * 8),
+                8,
+            ));
+            let marked = self.builder.alloc_bit(8, false);
+            self.builder
+                .emit(SIRInstruction::Mux(marked, changed, one, flag));
+            self.builder.emit(SIRInstruction::Store(
+                flags,
+                SIROffset::Static(reader * 8),
+                8,
+                marked,
+                Vec::new(),
+                Vec::new(),
+            ));
+        }
+    }
+
+    /// Open partition `index` of `count`: run it only when its flag or the
+    /// full byte is set, and clear its flag. Values computed before it may
+    /// be reused inside, but not the other way round, so the expression
+    /// cache starts over.
     fn begin_partition(
         &mut self,
         flags: Addr,
         index: usize,
-        untracked: usize,
+        count: usize,
         partition: &PlannedPartition<Addr>,
     ) {
         self.flush_pending_folds();
@@ -3938,7 +4109,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             self.builder.emit(SIRInstruction::Load(
                 all,
                 flags,
-                SIROffset::Static(untracked * 8),
+                SIROffset::Static((count + 1) * 8),
                 8,
             ));
             let flag = self.builder.alloc_bit(8, false);
@@ -3984,48 +4155,49 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
         }
     }
 
-    /// Close a partition: set the flags of the partitions reading what it
-    /// changed, then join the path that skipped it.
-    fn end_partition(&mut self, flags: Addr, partition: &PlannedPartition<Addr>) {
+    /// Close a partition of a settle of `count`: set the flags of the
+    /// partitions reading what it changed, then join the path that skipped
+    /// it.
+    fn end_partition(&mut self, flags: Addr, count: usize, partition: &PlannedPartition<Addr>) {
         self.flush_pending_folds();
         if !partition.watched.is_empty() {
             let one = self.builder.alloc_bit(8, false);
             self.builder
                 .emit(SIRInstruction::Imm(one, SIRValue::new(1u64)));
             let old = std::mem::take(&mut self.partition_old);
-            for (chunk, old) in partition.watched.iter().zip(old) {
-                let new = self.builder.alloc_logic(chunk.width);
-                self.builder.emit(SIRInstruction::Load(
-                    new,
-                    chunk.object,
-                    chunk.offset.clone(),
-                    chunk.width,
-                ));
-                // Both planes: an X turning into a known value is a change.
-                let changed = self.builder.alloc_bit(1, false);
-                self.builder
-                    .emit(SIRInstruction::Binary(changed, old, BinaryOp::NeCase, new));
-                for &reader in &chunk.readers {
-                    let flag = self.builder.alloc_bit(8, false);
-                    self.builder.emit(SIRInstruction::Load(
-                        flag,
-                        flags,
-                        SIROffset::Static(reader * 8),
-                        8,
-                    ));
-                    let marked = self.builder.alloc_bit(8, false);
-                    self.builder
-                        .emit(SIRInstruction::Mux(marked, changed, one, flag));
-                    self.builder.emit(SIRInstruction::Store(
-                        flags,
-                        SIROffset::Static(reader * 8),
-                        8,
-                        marked,
-                        Vec::new(),
-                        Vec::new(),
-                    ));
-                }
-            }
+            let full = self.settle_is_full(flags, count);
+            let skip = self.builder.new_block();
+            let compare = self.builder.new_block();
+            let join = self.builder.new_block();
+            self.builder.seal_block(SIRTerminator::Branch {
+                cond: full,
+                true_block: (skip, Vec::new()),
+                false_block: (compare, Vec::new()),
+            });
+            // Every partition runs in this settle: only the earlier readers
+            // need their flags, for the next one.
+            self.builder.switch_to_block(skip);
+            let earlier: Vec<_> = partition
+                .watched
+                .iter()
+                .zip(&old)
+                .filter(|(chunk, _)| !chunk.earlier.is_empty())
+                .map(|(chunk, &old)| (chunk, chunk.earlier.as_slice(), old))
+                .collect();
+            self.mark_changed_readers(flags, one, earlier);
+            self.builder
+                .seal_block(SIRTerminator::Jump(join, Vec::new()));
+            self.builder.switch_to_block(compare);
+            let all = partition
+                .watched
+                .iter()
+                .zip(&old)
+                .map(|(chunk, &old)| (chunk, chunk.readers.as_slice(), old))
+                .collect();
+            self.mark_changed_readers(flags, one, all);
+            self.builder
+                .seal_block(SIRTerminator::Jump(join, Vec::new()));
+            self.builder.switch_to_block(join);
         }
         if !partition.marks.is_empty() {
             let one = self.builder.alloc_bit(8, false);
@@ -4058,7 +4230,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             &mut self.pending_fold_indices,
             context.input,
             context.fold_group_schedule_index,
-            context.lowerer,
+            self.lowerer,
             &mut self.builder,
             context.arena,
             &mut self.lower_cache,
@@ -4081,7 +4253,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             &mut self.inverse_dep_memo,
         );
         emit_logic_path_store(
-            context.lowerer,
+            self.lowerer,
             &mut self.builder,
             path,
             context.arena,
@@ -4114,7 +4286,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             ScheduledWork::GuardedComb { condition, paths } => {
                 self.flush_pending_folds();
                 emit_scheduled_guard_region(
-                    context.lowerer,
+                    self.lowerer,
                     &mut self.builder,
                     *condition,
                     paths,
@@ -4280,7 +4452,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                     let path = &input[idx];
                     let Some(target) = path.target.var() else {
                         emit_logic_path_store(
-                            context.lowerer,
+                            self.lowerer,
                             &mut self.builder,
                             path,
                             context.arena,
@@ -4316,7 +4488,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                     );
                     // b. Compute the new value
                     let new_val_reg = lower_logic_path_expr(
-                        context.lowerer,
+                        self.lowerer,
                         &mut self.builder,
                         path,
                         context.arena,
@@ -4502,13 +4674,40 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         ff.as_deref().map(|lowering| lowering.summaries()),
     )
     .map_err(ClockSortError::Scheduler)?;
+    let component = &prepared.component_by_path;
+    let looping: HashSet<usize> = prepared
+        .adj
+        .iter()
+        .enumerate()
+        .flat_map(|(v, successors)| {
+            successors
+                .iter()
+                .filter(move |&&u| component[u] == component[v])
+                .flat_map(move |&u| [u, v])
+        })
+        .collect();
+    let stateful_targets = prepared
+        .input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| match &path.target {
+            LogicPathTarget::CombCaptureEvent { .. } => Some(None),
+            LogicPathTarget::Process { target, .. } => Some(Some(*target)),
+            LogicPathTarget::Var(target)
+                if !path.previous_sources.is_empty() || looping.contains(&index) =>
+            {
+                Some(Some(*target))
+            }
+            LogicPathTarget::Var(_) => None,
+        })
+        .collect::<Option<Vec<_>>>();
     let direct_ff_writes = prepared
         .direct_ff_writes_by_action
         .iter()
         .flatten()
         .copied()
         .collect();
-    let lowerer = crate::SLTToSIRLowerer::new(four_state)
+    let mut lowerer = crate::SLTToSIRLowerer::new(four_state)
         .with_unpacked_input_types(arena, unpacked_element_widths);
     let context = WorkLoweringContext {
         input: &prepared.input,
@@ -4520,11 +4719,10 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         fold_group_schedule_index: &prepared.fold_group_schedule_index,
         unpacked_element_widths,
         direct_ff_writes_by_action: &prepared.direct_ff_writes_by_action,
-        lowerer: &lowerer,
         four_state,
         split_large_units: ff.is_none(),
     };
-    let mut lowering = WorkLowering::new(&context);
+    let mut lowering = WorkLowering::new(&context, &mut lowerer);
     if let Some(ff_lowering) = ff.as_deref_mut() {
         ff_lowering
             .begin(&mut lowering.builder, &prepared.direct_ff_writes_by_action)
@@ -4547,7 +4745,13 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         if let Some((plan, flags)) = &plan {
             if let Some(partition) = plan.first_work.iter().position(|&first| first == index) {
                 if partition > 0 {
-                    lowering.end_partition(*flags, &plan.partitions[partition - 1]);
+                    lowering.end_partition(
+                        *flags,
+                        plan.partitions.len(),
+                        &plan.partitions[partition - 1],
+                    );
+                } else {
+                    lowering.begin_settle(*flags, plan.partitions.len());
                 }
                 lowering.begin_partition(
                     *flags,
@@ -4567,7 +4771,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
     if let Some((plan, flags)) = &plan
         && let Some(last) = plan.partitions.last()
     {
-        lowering.end_partition(*flags, last);
+        lowering.end_partition(*flags, plan.partitions.len(), last);
     }
     // Flush the final exact grouped-fold run after the SCC loop.
     lowering.flush_pending_folds();
@@ -4576,6 +4780,8 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
             .finish(&mut lowering.builder, &prepared.direct_ff_writes_by_action)
             .map_err(ClockSortError::Lowering)?;
     }
+    // Partition flags carry what changed from one settle to the next.
+    let stateful_targets = stateful_targets.filter(|_| plan.is_none());
     Ok(ScheduleResult {
         execution_units: lowering.finish(),
         runtime_errors,
@@ -4592,6 +4798,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     .collect()
             })
             .unwrap_or_default(),
+        stateful_targets,
     })
 }
 
@@ -5279,8 +5486,9 @@ mod tests {
             ]
         );
         assert!(result.partitions.iter().all(|partition| !partition.pinned));
-        // Each partition loads its own flag and the untracked-writes flag
-        // after them, and sets its reader's when it changed what it wrote.
+        // The settle starts by reading the untracked byte (24) to decide the
+        // full byte (32). Each partition loads its own flag and the full
+        // byte, and sets its reader's flag when it changed what it wrote.
         let mut loaded = Vec::new();
         let mut stored = Vec::new();
         let mut compares = 0;
@@ -5302,11 +5510,13 @@ mod tests {
         }
         loaded.sort_unstable();
         stored.sort_unstable();
-        // Guards of 0, 8 and 16, the untracked byte for each, and the
-        // readers' flags of partitions 1 and 2 before a conditional mark.
-        assert_eq!(loaded, vec![0, 8, 8, 16, 16, 24, 24, 24]);
-        // The clears of all three flags, and the marks of partitions 1 and 2.
-        assert_eq!(stored, vec![0, 8, 8, 16, 16]);
+        // Guards of 0, 8 and 16, the readers' flags of partitions 1 and 2
+        // before a conditional mark, the untracked byte, and the full byte
+        // for the three guards and the two partitions that compare.
+        assert_eq!(loaded, vec![0, 8, 8, 16, 16, 24, 32, 32, 32, 32, 32]);
+        // The clears of all three flags, the marks of partitions 1 and 2,
+        // and the full byte.
+        assert_eq!(stored, vec![0, 8, 8, 16, 16, 32]);
         // 11 and 12 are compared before their readers are marked.
         assert_eq!(compares, 2);
     }
@@ -5814,7 +6024,7 @@ mod tests {
             &[0, 1],
             &paths,
             &schedule_index,
-            &SLTToSIRLowerer::new(false),
+            &mut SLTToSIRLowerer::new(false),
             &mut builder,
             &arena,
             &mut cache,

@@ -1,0 +1,55 @@
+{
+  "specification": "IEEE 1800-2023 18.6.3, 18.7",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052",
+      "case": "class::constrained_randomize_inline",
+      "status": "runtime_error",
+      "log": "%Warning-UNSATCONSTR: <target>/sv-verilator/class/constrained_randomize_inline/source_0.sv:6: Unsatisfied constraint: 'constraint c { x < 10; }'\n%Warning-UNSATCONSTR: <target>/sv-verilator/class/constrained_randomize_inline/source_0.sv:16: Unsatisfied constraint: 'if (p.randomize() with { x == 12; }) $fatal(1, \"lost class constraint\");'\n[0] %Fatal: source_0.sv:17: Assertion failed in TOP.celox_suite_tb.dut: inline hooks\n%Error: <target>/sv-verilator/class/constrained_randomize_inline/source_0.sv:17: Verilog $stop\nAborting...\n"
+    },
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052",
+      "case": "class::constrained_randomize_inline_inheritance",
+      "status": "runtime_error",
+      "log": "%Warning-UNSATCONSTR: <target>/sv-verilator/class/constrained_randomize_inline_inheritance/source_0.sv:9: Unsatisfied constraint: 'constraint c { x == 9; }'\n%Warning-UNSATCONSTR: <target>/sv-verilator/class/constrained_randomize_inline_inheritance/source_0.sv:16: Unsatisfied constraint: 'if (!(b.randomize() with { x == 2; })) $fatal(1, \"base inline scope\");'\n[0] %Fatal: source_0.sv:16: Assertion failed in TOP.celox_suite_tb.dut: base inline scope\n%Error: <target>/sv-verilator/class/constrained_randomize_inline_inheritance/source_0.sv:16: Verilog $stop\nAborting...\n"
+    },
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052",
+      "source": "sv_inline_constraint_scope.sv",
+      "command": "verilator --binary --timing -Wno-fatal --top-module top --Mdir <build> sv_inline_constraint_scope.sv; <build>/Vtop",
+      "status": "runtime_error",
+      "log": "%Warning-UNSATCONSTR: crates/celox-test-suite/verification/repros/sv_inline_constraint_scope.sv:8: Unsatisfied constraint: 'constraint c { x == 9; }'\n%Warning-UNSATCONSTR: crates/celox-test-suite/verification/repros/sv_inline_constraint_scope.sv:15: Unsatisfied constraint: 'if (!(b.randomize() with { x == 2; })) $fatal(1, \"static inline scope\");'\n[0] %Fatal: sv_inline_constraint_scope.sv:15: Assertion failed in top: static inline scope\n%Error: crates/celox-test-suite/verification/repros/sv_inline_constraint_scope.sv:15: Verilog $stop\nAborting...\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus 13.0",
+      "case": "class::constrained_randomize_inline",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:6: sorry: Constraint declarations not supported.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:13: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:13: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:14: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:13: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:16: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:16: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:18: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:18: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:18: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:18: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:18: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:18: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:20: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:20: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:22: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:22: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:22: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:22: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:24: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:24: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:24: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:24: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:24: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline/source_0.sv:24: error: Malformed statement\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus 13.0",
+      "case": "class::constrained_randomize_inline_inheritance",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:9: sorry: Constraint declarations not supported.\n<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:16: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:16: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:16: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:16: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:18: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:18: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:18: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_inheritance/source_0.sv:18: error: Malformed conditional expression.\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus 13.0",
+      "case": "class::constrained_randomize_inline_basic",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:5: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:5: sorry: Constraint declarations not supported.\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:6: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:6: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:6: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:6: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:13: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:13: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:13: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:13: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:13: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:13: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:16: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:16: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:18: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:18: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:18: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_basic/source_0.sv:18: error: Malformed conditional expression.\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus 13.0",
+      "case": "class::constrained_randomize_inline_package_instances",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inline_package_instances/source_0.sv:5: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_package_instances/source_0.sv:5: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_package_instances/source_0.sv:5: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_package_instances/source_0.sv:5: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_package_instances/source_0.sv:14: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_package_instances/source_0.sv:14: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_package_instances/source_0.sv:14: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_package_instances/source_0.sv:14: error: Malformed conditional expression.\n"
+    }
+  ]
+}

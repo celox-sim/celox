@@ -314,6 +314,9 @@ fn simulation_restore_rewinds_time_and_clocks() {
     sim.add_clock("clk", 10, 5);
     timed_trace(&mut sim, 100);
     let checkpoint = sim.checkpoint().unwrap();
+    let bytes = checkpoint.to_bytes().unwrap();
+    // SAFETY: this is the unchanged encoding of this simulation's checkpoint.
+    let checkpoint = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
     assert_eq!(checkpoint.time(), sim.time());
     let expected = timed_trace(&mut sim, 400);
     sim.restore(&checkpoint).unwrap();
@@ -364,4 +367,64 @@ fn simulation_restore_refuses_to_rewind_vcd_until_switched() {
     sim.run_until(60).unwrap();
     sim.flush_vcd().unwrap();
     assert_eq!(std::fs::read_to_string(&second).unwrap(), vcd);
+}
+
+#[cfg(feature = "systemverilog")]
+mod persisted_core {
+    use std::path::Path;
+    const SOURCE: &str = r#"
+module Top(output int value, output string text);
+ timeunit 1ns; timeprecision 1ns;
+ initial begin
+   text = "checkpoint";
+   fork
+     begin #2; value += 3; text = {text, "-child"}; end
+     begin #4; value += 7; end
+   join
+   #1; value += 10;
+ end
+endmodule
+"#;
+    macro_rules! case {
+        ($name:ident, $build:ident) => {
+            #[test]
+            fn $name() {
+                let build = || {
+                    celox::Simulation::from_sv_sources(
+                        vec![(SOURCE, Path::new("persisted.sv"))],
+                        "Top",
+                    )
+                    .$build()
+                    .unwrap()
+                };
+                let mut source = build();
+                source.run_until(1).unwrap();
+                let bytes = source.checkpoint().unwrap().to_bytes().unwrap();
+                source.run_until(6).unwrap();
+                let expected = source.capture_state().unwrap();
+                let mut restored = build();
+                // SAFETY: unchanged bytes from the same build's checkpoint encoder.
+                let checkpoint = unsafe { restored.checkpoint_from_bytes(&bytes) }.unwrap();
+                restored.restore(&checkpoint).unwrap();
+                assert_eq!(restored.time(), 1);
+                restored.run_until(6).unwrap();
+                assert_eq!(restored.capture_state().unwrap(), expected);
+                for length in [0, 8, 23, bytes.len() - 1] {
+                    assert!(unsafe { restored.checkpoint_from_bytes(&bytes[..length]) }.is_err());
+                }
+                let mut corrupt = bytes.clone();
+                *corrupt.last_mut().unwrap() ^= 1;
+                assert!(unsafe { restored.checkpoint_from_bytes(&corrupt) }.is_err());
+            }
+        };
+    }
+    case!(interpreter, build_interpreter);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    case!(native, build_native);
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    case!(tiered, build_tiered);
+    #[cfg(feature = "cranelift")]
+    case!(cranelift, build_cranelift);
+    #[cfg(feature = "wasm-runtime")]
+    case!(wasm, build_wasm);
 }

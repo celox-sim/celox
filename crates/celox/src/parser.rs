@@ -334,6 +334,7 @@ pub(crate) fn finalize_scheduled_rtl(
         component_libraries,
         component_file_base,
         testbench_random_seed,
+        four_state,
         diagnostics,
     )
     .and_then(|(sir, runtime)| {
@@ -361,6 +362,7 @@ pub(crate) fn project_scheduled_rtl(
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
     testbench_random_seed: Option<u64>,
+    four_state: bool,
     diagnostics: &crate::RuntimeDiagnostics,
 ) -> Result<(crate::ir::SirProgram, crate::ir::RuntimeProgram), ParserError> {
     apply_fused_optimization_hints(
@@ -369,7 +371,7 @@ pub(crate) fn project_scheduled_rtl(
         diagnostics,
     )?;
     scheduled.scheduled.inject_triggers();
-    let testbench = if let Some(testbench_source) = testbench_source {
+    let mut testbench = if let Some(testbench_source) = testbench_source {
         testbench_source.component_libraries = component_libraries;
         testbench_source.component_file_base = component_file_base;
         crate::testbench_compile::project_observability(
@@ -386,10 +388,41 @@ pub(crate) fn project_scheduled_rtl(
     } else {
         None
     };
-    let (sir, mut runtime) =
+    let (mut sir, mut runtime) =
         RuntimeProgram::from_scheduled(scheduled.scheduled).map_err(|error| {
             ParserError::illegal_context("runtime design projection", error.to_string(), None)
         })?;
+    if let Some(testbench) = &mut testbench {
+        crate::testbench_compile::lower_expressions(&mut sir, &mut runtime, testbench, four_state)
+            .and_then(|()| {
+                testbench.fold_clock_waits();
+                crate::testbench_compile::lower_processes(
+                    &mut sir,
+                    &mut runtime,
+                    testbench,
+                    four_state,
+                )
+            })
+            .map_err(|error| ParserError::illegal_context("testbench SIR lowering", error, None))?;
+    }
+    // TB expressions and processes are appended after symbolic scheduling.
+    // Keep its per-process control arrays aligned with the final kernel list.
+    if let Some(scheduler) = &mut runtime.runtime_schema.scheduler {
+        while scheduler.slots.wake.len() < runtime.runtime_schema.processes.len() {
+            scheduler
+                .slots
+                .wake
+                .push(runtime.design.allocate_testbench_slot(64, false));
+            scheduler
+                .slots
+                .waiting
+                .push(runtime.design.allocate_testbench_slot(8, false));
+            scheduler
+                .slots
+                .baseline
+                .push(runtime.design.allocate_testbench_slot(8, false));
+        }
+    }
     runtime.testbench = testbench;
     dump_addr_map_if_requested(&runtime, diagnostics);
     Ok((sir, runtime))
@@ -591,6 +624,7 @@ pub fn parse_sv(
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
     sv_timescale: Option<crate::SvTimescale>,
+    legacy_empty_reductions: bool,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -619,7 +653,7 @@ pub fn parse_sv(
             trace.is_some().then_some(&mut frontend_trace),
             config.allow_inferred_latches,
             warnings,
-            diagnostic_policy.sv_options(sv_timescale),
+            diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions),
             force_signals,
         )
         .map_err(|error| match error {
@@ -629,7 +663,7 @@ pub fn parse_sv(
     if let Some(trace) = trace.as_deref_mut() {
         trace.absorb_frontend(frontend_trace);
     }
-    finalize_scheduled_rtl(
+    let mut program = finalize_scheduled_rtl(
         scheduled,
         None,
         four_state,
@@ -641,7 +675,43 @@ pub fn parse_sv(
         testbench_random_seed,
         component_libraries,
         component_file_base,
-    )
+    )?;
+    let paths = program
+        .runtime
+        .design
+        .instances()
+        .filter_map(|instance| {
+            let scopes = sv_reflection_scope_segments(&instance.display_path);
+            (scopes != instance.display_path).then_some((instance.id, scopes))
+        })
+        .collect();
+    program.runtime.design.set_reflection_instance_paths(paths);
+    Ok(program)
+}
+
+/// Split only SystemVerilog hierarchy separators. Escaped identifiers retain
+/// their spelling and whitespace terminator (IEEE 1800-2023 5.6.1).
+#[cfg(feature = "systemverilog")]
+fn sv_reflection_scope_segments(segments: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for segment in segments {
+        let mut start = 0;
+        let mut escaped = false;
+        for (index, character) in segment.char_indices() {
+            if escaped {
+                if character.is_ascii_whitespace() {
+                    escaped = false;
+                }
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '.' {
+                result.push(segment[start..index].to_string());
+                start = index + 1;
+            }
+        }
+        result.push(segment[start..].to_string());
+    }
+    result
 }
 
 /// An analyzer error as a parser error: a construct the analyzer does not
@@ -695,6 +765,7 @@ pub fn parse_mixed(
     diagnostics: &crate::RuntimeDiagnostics,
     diagnostic_policy: &crate::DiagnosticPolicy,
     sv_timescale: Option<crate::SvTimescale>,
+    legacy_empty_reductions: bool,
     preserve_element_storage_layout: bool,
     testbench_random_seed: Option<u64>,
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
@@ -845,7 +916,7 @@ pub fn parse_mixed(
                 &requests,
                 config.allow_inferred_latches,
                 &mut warnings,
-                diagnostic_policy.sv_options(sv_timescale),
+                diagnostic_policy.sv_options(sv_timescale, legacy_empty_reductions),
             );
         let external = match external {
             Ok(external) => external,
@@ -1101,6 +1172,7 @@ mod fused_hint_tests {
                 .into_iter()
                 .collect(),
                 merge_comb_apply: true,
+                eval_comb_stateful: None,
                 eval_only_ffs: Default::default(),
                 apply_ffs: Default::default(),
                 parallel: None,
@@ -1131,5 +1203,29 @@ mod fused_hint_tests {
                 .instructions
                 .is_empty()
         );
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod sv_scope_tests {
+    use super::sv_reflection_scope_segments;
+
+    #[test]
+    fn lexical_scopes_preserve_escaped_dots_and_instance_paths() {
+        let slash = char::from(92u8);
+        let generated = format!("bank[2].{slash}literal.with.dots .u");
+        let leaf = format!("{slash}leaf.with.dots");
+        let source = vec![generated.clone(), leaf.clone()];
+        let scopes = sv_reflection_scope_segments(&source);
+        assert_eq!(
+            scopes,
+            vec![
+                "bank[2]".to_string(),
+                format!("{slash}literal.with.dots "),
+                "u".to_string(),
+                leaf
+            ]
+        );
+        assert_eq!(scopes.join("."), source.join("."));
     }
 }

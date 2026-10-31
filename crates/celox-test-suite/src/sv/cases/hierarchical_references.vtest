@@ -544,3 +544,73 @@
   (top Top)
   (run_to_finish)
   (expect_output "fff8\n"))
+
+
+(case reads_upward_interface_members_in_each_parent
+  (source "upward_interface_members.sv" #"
+    interface Bus #(parameter int W=8); logic [W-1:0] data; endinterface
+    module Reader #(parameter int W=8)(output wire [W-1:0] y);
+      assign y = ancestor_bus.data;
+    endmodule
+    module Parent #(parameter int W=8)(input logic [W-1:0] d, output wire [W-1:0] y);
+      Bus #(.W(W)) ancestor_bus();
+      assign ancestor_bus.data = d;
+      Reader #(.W(W)) reader(.y(y));
+    endmodule
+    module Top(input logic [15:0] a, b,
+               output wire [7:0] left, right, output wire [15:0] wide);
+      Parent p0(a[7:0], left);
+      Parent p1(b[7:0], right);
+      Parent #(.W(16)) p2(a, wide);
+    endmodule
+  "#)
+  (top Top)
+  (for (a b) (list (0 0xff) (0x1234 0xabcd) (0xffff 0))
+    (modify (set a a) (set b b))
+    (assert_eq left (trunc 8 a))
+    (assert_eq right (trunc 8 b))
+    (assert_eq wide a)))
+
+(case writes_upward_interface_members_through_an_intermediate_module
+  (source "upward_interface_writes.sv" #"
+    interface Bus; logic [7:0] data; endinterface
+    module Writer(input logic clk, input logic [7:0] d);
+      always_ff @(posedge clk) ancestor_bus.data <= d;
+    endmodule
+    module Relay(input logic clk, input logic [7:0] d);
+      Writer writer(clk, d);
+    endmodule
+    module Parent(input logic clk, input logic [7:0] d, output wire [7:0] q);
+      Bus ancestor_bus();
+      Relay relay(clk, d);
+      assign q = ancestor_bus.data;
+    endmodule
+    module Top(input logic clk, input logic [7:0] a,b, output wire [7:0] left,right);
+      Parent p0(clk, a, left);
+      Parent p1(clk, b, right);
+    endmodule
+  "#)
+  (top Top)
+  (for (a b) (list (0x12 0x34) (0xff 0) (0x56 0xa5))
+    (modify (set a a) (set b b))
+    (tick clk)
+    (assert_eq left a)
+    (assert_eq right b)))
+
+(case upward_interface_members_do_not_alias_formal_interface_ports
+  (source "upward_and_formal_interfaces.sv" #"
+    interface Bus; logic v; modport sink(input v); endinterface
+    module Child(Bus.sink port_bus, output wire q);
+      assign q = ancestor_bus.v ^ port_bus.v;
+    endmodule
+    module Top(input logic a,b, output wire q);
+      Bus ancestor_bus(), actual_bus();
+      assign ancestor_bus.v = a;
+      assign actual_bus.v = b;
+      Child child(actual_bus, q);
+    endmodule
+  "#)
+  (top Top)
+  (for (a b) (list (0 0) (0 1) (1 0) (1 1))
+    (modify (set a a) (set b b))
+    (assert_eq q (^ a b))))

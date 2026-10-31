@@ -31,18 +31,6 @@ jobs:
       - name: Dispatch Lydite core validation on develop
         run: gh workflow run lydite-checks.yml --repo "$GITHUB_REPOSITORY" --ref develop
 
-  # heliodor-bench.yml schedules the stable master lane directly. Dispatch the
-  # develop ref here for the small pinned/HEAD Linux boot compatibility gates.
-  queue-heliodor-develop:
-    name: Queue develop Linux boot compatibility
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Dispatch the Veryl HEAD compatibility lane
-        shell: bash
-        run: gh workflow run heliodor-bench.yml --repo "$GITHUB_REPOSITORY" --ref develop
-
   queue:
     name: Queue ${{ matrix.channel }}
     runs-on: ubuntu-latest

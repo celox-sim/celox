@@ -1,0 +1,957 @@
+(group virtual_interfaces (category hierarchy))
+
+(case properties_arguments_and_member_writes
+  ; A class reaches an interface instance through a virtual interface
+  ; property set by its constructor (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+    logic valid;
+endinterface
+class Driver;
+    virtual bus_if vif;
+    function new(virtual bus_if v);
+        vif = v;
+    endfunction
+    function void drive(logic [7:0] value);
+        vif.data = value;
+        vif.valid <= 1;
+    endfunction
+    function logic [7:0] sample();
+        return vif.data;
+    endfunction
+endclass
+module Top(output logic [7:0] a, output logic [7:0] b, output logic [7:0] seen, output bit done);
+    logic clk = 0;
+    bus_if left(clk);
+    bus_if right(clk);
+    assign a = left.data;
+    assign b = right.data;
+    initial begin
+        automatic Driver l = new(left);
+        automatic Driver r = new(right);
+        l.drive(8'h12);
+        r.drive(8'h34);
+        r.vif.data += 1;
+        seen = l.sample();
+        #1 done = left.valid && right.valid;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq a 0x12) (assert_eq b 0x35) (assert_eq seen 0x12) (assert_eq done 1))
+
+(case null_equality_and_assignment
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+    modport mon(input data);
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if first(clk);
+    bus_if second(clk);
+    virtual bus_if v;
+    virtual bus_if w;
+    virtual bus_if.mon m;
+    initial begin
+        $display("%0d", v == null);
+        v = first;
+        w = second;
+        m = v;
+        $display("%0d %0d %0d %0d", v != null, v == first, v == w, m == first);
+        w = v;
+        w.data = 8'h5a;
+        $display("%h %0d", first.data, m.data == 8'h5a);
+        v = null;
+        $display("%0d", v == null);
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "1\n1 1 0 1\n5a 1\n1\n"))
+
+(case interface_ports_and_array_elements
+  ; A module's interface port denotes the instance connected to it, and an
+  ; element of an array of instances is an instance of its own.
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+module Child(bus_if port);
+    virtual bus_if v;
+    initial begin
+        v = port;
+        v.data = 8'h21;
+    end
+endmodule
+module Top(output logic [7:0] first, output logic [7:0] second, output logic [7:0] third);
+    logic clk = 0;
+    bus_if lanes[2](clk);
+    bus_if extra(clk);
+    Child child(lanes[1]);
+    virtual bus_if queue[$];
+    virtual bus_if fixed[2];
+    assign first = lanes[0].data;
+    assign second = lanes[1].data;
+    assign third = extra.data;
+    initial begin
+        fixed[0] = lanes[0];
+        fixed[1] = extra;
+        queue.push_back(fixed[1]);
+        #1 fixed[0].data = 8'h10;
+        queue[0].data = 8'h30;
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq first 0x10) (assert_eq second 0x21) (assert_eq third 0x30))
+
+(case four_state_members
+  (four_state)
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [3:0] data;
+endinterface
+class Probe;
+    virtual bus_if vif;
+endclass
+module Top;
+    logic clk = 0;
+    bus_if bus(clk);
+    initial begin
+        automatic Probe p = new;
+        p.vif = bus;
+        $display("%b", p.vif.data);
+        p.vif.data = 4'b10xz;
+        $display("%b %b", bus.data, p.vif.data);
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "xxxx\n10xz 10xz\n"))
+
+(case function_results
+  ; A function returns a virtual interface, which is assigned and compared
+  ; like a variable of its type (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if first(clk);
+    bus_if second(clk);
+    virtual bus_if v;
+    function automatic virtual bus_if pick(bit which);
+        if (which) return second;
+        return first;
+    endfunction
+    initial begin
+        v = pick(1);
+        v.data = 8'h66;
+        $display("%h %0d %0d", second.data, v == pick(1), v == pick(0));
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "66 1 0\n"))
+
+(case rejects_call_results_of_other_types
+  ; A function result is assignment compatible with a virtual interface only
+  ; if it is a virtual interface of the same interface (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+endinterface
+module Top;
+    virtual bus_if v;
+    function automatic int number();
+        return 1;
+    endfunction
+    initial v = number();
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case modport_ports_and_constant_sized_members
+  ; A port declared with a modport is assignable to a virtual interface of
+  ; that modport (IEEE 1800-2023 25.5, 25.9), and a member may be sized by
+  ; a constant of the interface.
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    localparam int W = 12;
+    logic [W-1:0] data;
+    modport mon(input data);
+endinterface
+module Child(bus_if.mon p, output logic [11:0] seen);
+    virtual bus_if.mon m;
+    initial begin
+        m = p;
+        #1 seen = m.data;
+    end
+endmodule
+module Top(output logic [11:0] seen);
+    logic clk = 0;
+    bus_if bus(clk);
+    Child child(bus, seen);
+    initial bus.data = 12'habc;
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (assert_eq seen 0xabc))
+
+(case rejects_modport_ports_to_full_interface
+  ; A port declared with a modport is a view restricted to it, which a
+  ; virtual interface without that modport may not hold (IEEE 1800-2023
+  ; 25.5, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+    modport mon(input data);
+endinterface
+module Child(bus_if.mon p);
+    virtual bus_if v;
+    initial v = p;
+endmodule
+module Top;
+    logic clk = 0;
+    bus_if bus(clk);
+    Child child(bus);
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case rejects_integers_in_arrays_of_virtual_interfaces
+  ; An element of an array of virtual interfaces holds a virtual interface,
+  ; not an integer (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+endinterface
+module Top;
+    virtual bus_if handles[2];
+    initial handles[0] = 1;
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case member_selects
+  ; Bit- and part-selects apply to the member of the instance a virtual
+  ; interface denotes, in reads and in writes (IEEE 1800-2023 25.9, 11.5.1).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+    logic [3:0] flags [2];
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if v;
+    initial begin
+        a.data = 8'h00;
+        b.data = 8'hc5;
+        v = b;
+        $display("%b %h %h", v.data[0], v.data[7:4], v.data[3 -: 2]);
+        v.data[1] = 1'b1;
+        v.data[7:4] = 4'h9;
+        v.data[3:0] += 4'h1;
+        v = a;
+        v.data[6] <= 1'b1;
+        #1 $display("%h %h", a.data, b.data);
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (expect_output "1 c 1\n40 98\n"))
+
+(case rejects_integers_in_conditional_array_elements
+  ; Each branch of a conditional assigned to an element of an array of
+  ; virtual interfaces may be its value (IEEE 1800-2023 25.9, 11.4.11).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+endinterface
+module Top;
+    bit flag = 1;
+    virtual bus_if handles[2];
+    initial handles[0] = flag ? 1 : null;
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case increments_arrays_and_package_variables
+  ; An increment writes the member of the instance a virtual interface
+  ; denotes, an array of virtual interfaces is copied whole, and a package
+  ; may declare a virtual interface variable (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+package handles_pkg;
+    virtual bus_if shared;
+endpackage
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if v;
+    virtual bus_if w;
+    virtual bus_if src[2];
+    virtual bus_if dst[2];
+    initial begin
+        a.data = 8'h10;
+        b.data = 8'h20;
+        v = a;
+        w = b;
+        v.data++;
+        w.data--;
+        $display("%h %h", a.data, b.data);
+        src[0] = a;
+        src[1] = b;
+        dst = src;
+        handles_pkg::shared = dst[1];
+        $display("%h %0d", handles_pkg::shared.data, dst[0] == a);
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "11 1f\n1f 1\n"))
+
+(case multidimensional_and_package_arrays
+  ; A member is reached through an element of a multidimensional array of
+  ; virtual interfaces and of a package array of them (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+package handles_pkg;
+    virtual bus_if shared[2];
+endpackage
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if grid[2][2];
+    initial begin
+        grid[0][1] = a;
+        grid[1][0] = b;
+        handles_pkg::shared[1] = grid[1][0];
+        grid[0][1].data = 8'h12;
+        handles_pkg::shared[1].data = 8'h34;
+        grid[1][0].data++;
+        $display("%h %h %h %h", a.data, b.data, grid[0][1].data, handles_pkg::shared[1].data);
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "12 35 12 35\n"))
+
+(case class_call_arguments_and_package_results
+  ; A virtual interface is passed to a constructor and to methods, copied out
+  ; of an output formal with a modport, and returned by a package function
+  ; (IEEE 1800-2023 25.9, 13.5, 26.3).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+    modport mon(input data);
+endinterface
+package handles_pkg;
+    virtual bus_if shared;
+    function automatic virtual bus_if get();
+        return shared;
+    endfunction
+endpackage
+class Driver;
+    virtual bus_if v;
+    function new(virtual bus_if x);
+        v = x;
+    endfunction
+    function void set(virtual bus_if x);
+        v = x;
+    endfunction
+    function void get(output virtual bus_if.mon m);
+        m = v;
+    endfunction
+endclass
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if v;
+    virtual bus_if.mon m;
+    Driver d;
+    initial begin
+        d = new(a);
+        d.v.data = 8'h11;
+        d.set(b);
+        d.get(m);
+        b.data = 8'h22;
+        handles_pkg::shared = a;
+        v = handles_pkg::get();
+        v.data++;
+        $display("%h %h %0d %0d", a.data, m.data, d.v == b, v == handles_pkg::get());
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "12 22 1 1\n"))
+
+(case rejects_integers_as_class_call_arguments
+  ; A method's virtual interface formal receives only a virtual interface of
+  ; its interface; an integer is not one (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+endinterface
+class Driver;
+    virtual bus_if v;
+    function void set(virtual bus_if x);
+        v = x;
+    endfunction
+endclass
+module Top;
+    Driver d;
+    initial begin
+        d = new;
+        d.set(1);
+    end
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case rejects_integers_as_constructor_arguments
+  ; A constructor's virtual interface formal receives only a virtual
+  ; interface of its interface; an integer is not one (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+endinterface
+class Driver;
+    virtual bus_if v;
+    function new(virtual bus_if x);
+        v = x;
+    endfunction
+endclass
+module Top;
+    Driver d;
+    initial d = new(1);
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case writes_from_instances_of_one_module
+  ; Each instance of one module writes its own interface instance through
+  ; a virtual interface (IEEE 1800-2023 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+module Child(input logic clk, input logic [7:0] value, output logic [7:0] seen);
+    bus_if local_if(clk);
+    virtual bus_if v;
+    assign seen = local_if.data;
+    initial v = local_if;
+    always @(posedge clk) v.data = value;
+endmodule
+module Top;
+    logic clk = 0;
+    logic [7:0] seen0;
+    logic [7:0] seen1;
+    Child c0(clk, 8'h0a, seen0);
+    Child c1(clk, 8'h0b, seen1);
+    initial begin
+        #1 clk = 1;
+        #1 $display("%h %h", seen0, seen1);
+    end
+endmodule
+"#)
+  (top Top) (run_until 5)
+  (expect_output "0a 0b\n"))
+
+(case rejects_virtual_interfaces_as_integral_references
+  ; A ref formal requires an actual of an equivalent type, and an integral
+  ; type is not equivalent to a virtual interface (IEEE 1800-2023 13.5.2,
+  ; 6.22.2, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+endinterface
+module Top;
+    virtual bus_if v;
+    task automatic forge(ref bit [31:0] x);
+        x = 1;
+    endtask
+    initial forge(v);
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case increments_in_expressions
+  ; Increments and decrements in expressions update the member of the
+  ; instance a virtual interface denotes (IEEE 1800-2023 11.4.2, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    virtual bus_if v;
+    int x;
+    int y;
+    initial begin
+        a.data = 8'h10;
+        v = a;
+        x = v.data++;
+        y = --v.data;
+        x += v.data++;
+        $display("%h %0d %0d", a.data, x, y);
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "11 32 16\n"))
+
+(case queue_pops_and_output_arguments
+  ; An element popped from a queue of virtual interfaces is a virtual
+  ; interface, and an output formal is copied out to its actual, here one
+  ; restricted to a modport (IEEE 1800-2023 25.9, 7.10.2, 13.5).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+    modport mon(input data);
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if q[$];
+    virtual bus_if v;
+    virtual bus_if.mon m;
+    int size;
+    bit same;
+    task get(output virtual bus_if x);
+        x = b;
+    endtask
+    initial begin
+        a.data = 8'h1a;
+        b.data = 8'h2b;
+        q.push_back(a);
+        q.push_back(b);
+        v = q.pop_back();
+        get(m);
+        size = q.size();
+        same = v == q.pop_front();
+        $display("%h %h %0d %0d", v.data, m.data, size, same);
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "2b 2b 1 0\n"))
+
+(case rejects_another_interface
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+endinterface
+interface other_if(input logic clk);
+    logic data;
+endinterface
+module Top;
+    logic clk = 0;
+    other_if other(clk);
+    virtual bus_if v;
+    virtual other_if o;
+    initial begin
+        o = other;
+        v = o;
+    end
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case rejects_modport_to_full_interface
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic data;
+    modport mon(input data);
+endinterface
+module Top;
+    virtual bus_if v;
+    virtual bus_if.mon m;
+    initial v = m;
+endmodule
+"#)
+  (top Top)
+  (expect reject))
+
+(case waits_on_member_edges
+  ; Processes wait on the clocks of the instances that static virtual
+  ; interface variables denote (IEEE 1800-2023 25.9). The variable is an
+  ; operand of the event expression: retargeting it from an instance whose
+  ; clock is 0 to one whose clock is 1 is a positive edge (9.4.2).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+module Top;
+    logic fast = 0;
+    logic slow = 0;
+    always #1 fast = ~fast;
+    always #4 slow = ~slow;
+    logic low = 0;
+    logic high = 1;
+    bus_if a(fast);
+    bus_if b(slow);
+    bus_if lo(low);
+    bus_if hi(high);
+    virtual bus_if va;
+    virtual bus_if vb;
+    virtual bus_if moved;
+    task run(logic [7:0] value, int cycles);
+        repeat (cycles) @(posedge va.clk);
+        va.data <= value;
+    endtask
+    initial begin
+        va = a;
+        vb = b;
+        moved = lo;
+        a.data = 0;
+        b.data = 0;
+        fork
+            begin run(8'h11, 2); $display("a %0d %h", $time, a.data); end
+            begin repeat (2) @(posedge vb.clk); vb.data <= 8'h22; $display("b %0d %h", $time, b.data); end
+            begin @(posedge moved.clk); $display("moved %0d", $time); end
+            begin #2 moved = hi; #1 moved = lo; end
+        join
+        #1 $display("%h %h", a.data, b.data);
+    end
+endmodule
+"#)
+  (top Top) (run_until 20)
+  (expect_output "moved 2\na 3 00\nb 12 00\n11 22\n"))
+
+(case waits_on_member_levels
+  ; A static virtual interface variable is watched: changing it during the
+  ; wait re-evaluates the condition (IEEE 1800-2023 9.4.2, 9.4.3).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic ready;
+    logic [7:0] data;
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if watched;
+    virtual bus_if other;
+    initial begin
+        a.ready = 0;
+        b.ready = 0;
+        a.data = 0;
+        b.data = 0;
+        other = b;
+        watched = a;
+        fork
+            begin wait (other.ready && other.data == 8'h42); $display("other %0d", $time); end
+            begin wait (watched.ready); $display("module %0d", $time); end
+            begin #3 watched = b; end
+            begin #5 b.ready = 1; #5 b.data = 8'h42; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 20)
+  (expect_output "module 5\nother 10\n"))
+
+(case waits_with_guards_signed_members_and_automatic_tasks
+  ; The process evaluates a wait condition, so a read through a null
+  ; handle that the condition guards against is not an error; a signed
+  ; member compares as signed; and an automatic task waits on a static
+  ; virtual interface variable as any process does (IEEE 1800-2023 9.4.3,
+  ; 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic ready;
+    logic signed [7:0] data;
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    virtual bus_if vif;
+    virtual bus_if other;
+    task automatic run();
+        @(posedge vif.clk);
+        $display("auto %0d", $time);
+    endtask
+    initial begin
+        a.ready = 0;
+        a.data = 0;
+        other = a;
+        fork
+            begin wait (vif == null ? 1'b0 : vif.ready); $display("guard %0d", $time); end
+            begin wait (other.data < 0); $display("signed %0d", $time); end
+            begin #1 vif = a; run(); end
+            begin #2 clk = 1; #1 a.ready = 1; #1 a.data = -3; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (expect_output "auto 2\nguard 3\nsigned 4\n"))
+
+(case mixed_event_controls
+  ; Items through virtual interfaces mix with ordinary items, which keep
+  ; their counted edges, write-time iff conditions, local and real operands;
+  ; and an enclosing @* reads only the statements, not the nested control's
+  ; handles and members (IEEE 1800-2023 9.4.2, 9.4.2.2, 9.4.2.3, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk); endinterface
+module Top;
+    logic low = 0;
+    logic tick = 0;
+    always #1 tick = ~tick;
+    bus_if quiet(low);
+    bus_if ticking(tick);
+    virtual bus_if vif;
+    virtual bus_if clocked;
+    logic pulse = 0;
+    logic clk = 0;
+    logic en = 1;
+    real r = 0.0;
+    logic [7:0] data = 0;
+    task automatic on_reset(input bit reset);
+        @(posedge vif.clk or posedge reset);
+        $display("reset %0d", $time);
+    endtask
+    always @* begin
+        @(posedge clocked.clk);
+        $display("out %0d %h", $time, data);
+    end
+    initial begin
+        vif = quiet;
+        clocked = ticking;
+        fork
+            begin @(posedge vif.clk or posedge pulse); $display("pulse %0d", $time); end
+            begin @(posedge clk iff en or posedge vif.clk); $display("iff %0d", $time); end
+            begin @(vif.clk or r); $display("real %0d", $time); end
+            on_reset(1'b0);
+            begin #1 pulse = 1; pulse = 0; #1 clk = 1; en = 0; #1 r = 0.5; #1 data = 8'haa; end
+        join_none
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (expect_output "pulse 1\niff 2\nreal 3\nout 5 aa\n"))
+
+(case member_pulses_within_one_activation
+  ; A pulse that one activation writes to the member a virtual interface
+  ; selects is an event, and one written to another instance is none
+  ; (IEEE 1800-2023 9.4.2, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic pulse = 0;
+endinterface
+module Top;
+    logic clk = 0;
+    bus_if a(clk);
+    bus_if b(clk);
+    virtual bus_if vif;
+    initial begin
+        vif = a;
+        @(posedge vif.pulse);
+        $display("pulse %0d", $time);
+    end
+    initial begin
+        #1 b.pulse = 1;
+        b.pulse = 0;
+        #1 a.pulse = 1;
+        a.pulse = 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 5)
+  (expect_output "pulse 2\n"))
+
+(case always_on_member_edges
+  ; An edge-sensitive always may wait on a member through a virtual
+  ; interface; it runs as a process. The handle's initializer runs before
+  ; any process starts (IEEE 1800-2023 6.8, 9.2.2, 9.4.2, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk); endinterface
+module Top;
+    logic tick = 0;
+    always #2 tick = ~tick;
+    bus_if ticking(tick);
+    virtual bus_if vif = ticking;
+    int rises = 0;
+    int edges = 0;
+    always @(posedge vif.clk) rises++;
+    always @(negedge vif.clk or posedge vif.clk) edges++;
+    initial #7 $display("%0d %0d", rises, edges);
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (expect_output "2 3\n"))
+
+(case retargets_with_ordinary_events
+  ; Retargeting a handle to an instance whose clock is high after the old
+  ; instance's clock fell is a positive edge of the selection, and an
+  ; ordinary item's event in the same activation as a retarget is kept
+  ; (IEEE 1800-2023 9.4.2, 25.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk); endinterface
+module Top;
+    logic ca = 1;
+    logic cb = 1;
+    logic lo1 = 0;
+    logic lo2 = 0;
+    bus_if a(ca);
+    bus_if b(cb);
+    bus_if c(lo1);
+    bus_if d(lo2);
+    virtual bus_if vif;
+    virtual bus_if wif;
+    logic pulse = 0;
+    initial begin
+        // After time 0, whose interface port connections race with the
+        // processes (IEEE 1800-2023 4.7).
+        #1 vif = a;
+        wif = c;
+        fork
+            begin @(posedge vif.clk); $display("retarget %0d", $time); end
+            begin @(posedge wif.clk or posedge pulse); $display("pulse %0d", $time); end
+            begin #1 ca = 0; #1 vif = b; end
+            begin #1 pulse = 1; wif = d; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 6)
+  (expect_output "pulse 2\nretarget 3\n"))
+(case type_parameter_values
+  ; A virtual interface type is a class type parameter value, told apart
+  ; from the number that holds it, as with `uvm_config_db#(virtual bus_if)`.
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+module Top;
+    class Db #(type T = int);
+        static T values[string];
+        static function void set(string name, T value);
+            values[name] = value;
+        endfunction
+        static function bit get(string name, output T value);
+            if (!values.exists(name)) return 0;
+            value = values[name];
+            return 1;
+        endfunction
+    endclass
+    class Monitor;
+        virtual bus_if vif;
+        function void connect();
+            virtual bus_if found;
+            if (Db#(virtual bus_if)::get("bus", found)) vif = found;
+        endfunction
+    endclass
+    logic clk = 0;
+    bus_if bus(clk);
+    initial begin
+        automatic Monitor m = new;
+        automatic bit [31:0] number;
+        bus.data = 8'h99;
+        Db#(virtual bus_if)::set("bus", bus);
+        Db#(bit [31:0])::set("bus", 7);
+        void'(Db#(bit [31:0])::get("bus", number));
+        m.connect();
+        $display("%0d %h %0d", number, m.vif.data, Db#(virtual bus_if)::values.size());
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (expect_output "7 99 1\n"))
+
+(case package_generic_member_reads
+  ; A package class specialized from a module with a virtual interface type
+  ; argument reads a member through an argument of that type (IEEE
+  ; 1800-2023 25.9, 8.25).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+package p;
+    class reader #(type T = int);
+        static function logic [7:0] read(T v);
+            return v.data;
+        endfunction
+    endclass
+endpackage
+module Top;
+    import p::*;
+    logic clk = 0;
+    bus_if bus(clk);
+    initial begin
+        bus.data = 8'h5d;
+        #1 $display("%h", reader#(virtual bus_if)::read(bus));
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (expect_output "5d\n"))
+
+(case package_configuration_database
+  ; A module stores virtual interfaces in the static array of a package
+  ; class specialized with a virtual interface type, as
+  ; `uvm_config_db#(virtual bus_if)` does, and another process gets one back
+  ; and writes through it; a specialization with another type argument keeps
+  ; its own storage (IEEE 1800-2023 25.9, 8.25, 8.9).
+  (source "virtual_interfaces.sv" #"
+interface bus_if(input logic clk);
+    logic [7:0] data;
+endinterface
+package cfg_pkg;
+    class config_db #(type T = int);
+        static T values[string];
+        static function void set(string name, T value);
+            values[name] = value;
+        endfunction
+        static function bit get(string name, output T value);
+            if (!values.exists(name)) return 0;
+            value = values[name];
+            return 1;
+        endfunction
+    endclass
+endpackage
+module Top;
+    import cfg_pkg::*;
+    logic clk = 0;
+    bus_if bus(clk);
+    bus_if other(clk);
+    virtual bus_if found;
+    int number;
+    initial begin
+        config_db#(virtual bus_if)::set("bus", bus);
+        config_db#(virtual bus_if)::set("other", other);
+        config_db#(int)::set("bus", 7);
+    end
+    initial begin
+        #1 bus.data = 8'h3c;
+        if (config_db#(virtual bus_if)::get("bus", found)) found.data += 1;
+        void'(config_db#(int)::get("bus", number));
+        $display("%h %0d %0d", bus.data, number, config_db#(virtual bus_if)::values.size());
+    end
+endmodule
+"#)
+  (top Top) (run_until 1)
+  (expect_output "3d 7 2\n"))

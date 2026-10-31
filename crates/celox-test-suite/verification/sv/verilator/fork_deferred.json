@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "fork_deferred::child_flush_does_not_inherit_parent_reports",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:6:10: ../V3Ast.h:1113: AstNode is not of expected type, but instead has type 'IF'\n                                               : ... note: In instance 'celox_suite_tb.dut'\n    6 |    begin assert final (1) $display(\"completed\"); end\n      |          ^~~~~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::disable_fork_flushes_live_children_only",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "fork_deferred::four_state_arguments_are_captured_before_child_exit",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_deferred::reactive_wakeup_preserves_mature_observed_only at 138:2: expect_output: expected [111, 98, 115, 101, 114, 118, 101, 100, 10], got [111, 98, 115, 101, 114, 118, 101, 100, 10, 102, 105, 110, 97, 108, 10]",
+      "expectation": "Simulation",
+      "name": "fork_deferred::reactive_wakeup_preserves_mature_observed_only",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 139; see <case>/build.log\n%Error: Verilator internal fault, sorry. Suggest trying --debug --gdbbt\n%Error: Command Failed ulimit -s unlimited 2>/dev/null; exec /nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator_bin --cc --exe --build -j 1 --vpi --public-flat-rw --timing --assert --coverage-user -Wno-fatal --x-initial 0 --x-assign 0 --prefix Vdut --top-module celox_suite_tb --Mdir <case>/obj -CFLAGS -O0 -MAKEFLAGS OPT_FAST=-O0\\ OPT_SLOW=-O0 <case>/timescale.sv <case>/source_0.sv <case>/testbench.sv <case>/harness.cpp\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::repeated_static_site_keeps_completed_reports",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 139; see <case>/build.log\n%Error: Verilator internal fault, sorry. Suggest trying --debug --gdbbt\n%Error: Command Failed ulimit -s unlimited 2>/dev/null; exec /nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator_bin --cc --exe --build -j 1 --vpi --public-flat-rw --timing --assert --coverage-user -Wno-fatal --x-initial 0 --x-assign 0 --prefix Vdut --top-module celox_suite_tb --Mdir <case>/obj -CFLAGS -O0 -MAKEFLAGS OPT_FAST=-O0\\ OPT_SLOW=-O0 <case>/timescale.sv <case>/source_0.sv <case>/testbench.sv <case>/harness.cpp\n",
+      "expectation": "Simulation",
+      "name": "fork_deferred::reused_slot_cannot_flush_completed_reports",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_deferred::sibling_event_queues_are_independent at 36:2: expect_output: expected [111, 98, 115, 101, 114, 118, 101, 100, 32, 48, 10, 102, 105, 110, 97, 108, 32, 48, 10], got [111, 98, 115, 101, 114, 118, 101, 100, 32, 48, 10, 102, 105, 110, 97, 108, 32, 48, 10, 111, 98, 115, 101, 114, 118, 101, 100, 32, 49, 10, 102, 105, 110, 97, 108, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "fork_deferred::sibling_event_queues_are_independent",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_deferred::sibling_wait_queues_are_independent at 19:2: expect_output: expected [111, 98, 115, 101, 114, 118, 101, 100, 32, 48, 10, 102, 105, 110, 97, 108, 32, 48, 10], got [111, 98, 115, 101, 114, 118, 101, 100, 32, 48, 10, 102, 105, 110, 97, 108, 32, 48, 10, 111, 98, 115, 101, 114, 118, 101, 100, 32, 49, 10, 102, 105, 110, 97, 108, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "fork_deferred::sibling_wait_queues_are_independent",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "fork_deferred::zero_delay_is_not_a_flush_point",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

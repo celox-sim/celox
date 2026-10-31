@@ -1366,6 +1366,7 @@ fn lower_statements(
                             (source_id(term.signal), kind)
                         })
                         .collect(),
+                    gates: Vec::new(),
                 });
                 // The runtime resumes the process at the first occurrence
                 // after the wait began; no condition is left to check.
@@ -1390,6 +1391,7 @@ fn lower_statements(
                         .into_iter()
                         .map(|signal| (signal, CounterKind::Changes))
                         .collect(),
+                    gates: Vec::new(),
                 });
                 let mut error = None;
                 kernel.wait_level(index, |builder| {
@@ -1972,6 +1974,8 @@ pub fn lower_frontend_artifact(
         nba_switches: Vec::new(),
         host_request_sites: Vec::new(),
         time_slot: None,
+        sample_shadows: Vec::new(),
+        initial_copies: Vec::new(),
     };
     let symbolic = SymbolicRtl {
         modules: [(module_id, sim_module.clone())].into_iter().collect(),
@@ -1980,6 +1984,7 @@ pub fn lower_frontend_artifact(
             .collect(),
         root_id: module_id,
         packages: Vec::new(),
+        instance_values: Vec::new(),
     };
     let external = ExternalHierarchy {
         modules: [(

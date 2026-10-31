@@ -261,7 +261,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // sinking transform remains independent and can consume either an
         // original branch or a branch introduced above.
 
-        let Ok(cfg) = SirCfg::analyze(eu) else {
+        let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
             return;
         };
         let uses = collect_uses(eu);
@@ -533,7 +533,7 @@ fn split_branch_live_ranges(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
 /// destination must remain in an acyclic region: sinking a loop-invariant
 /// value into a loop would trade one evaluation for one per iteration.
 fn sink_pure_values_to_use_dominators(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return;
     };
     let uses = collect_uses(eu);
@@ -652,7 +652,7 @@ struct PredicatedLiveOutPlan {
 /// makes its conditional availability explicit, after which ordinary sinking
 /// can place the complete producer DAG below the shared guards.
 fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_structure(eu) else {
         return false;
     };
     let uses = collect_uses(eu);
@@ -962,7 +962,7 @@ struct IncomingPhiEdge {
 /// each incoming edge are sufficient to prove those operands dead without
 /// enumerating paths.
 fn prune_control_dead_phi_operands(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return false;
     };
     let uses = collect_uses(eu);
@@ -1137,7 +1137,7 @@ pub(in crate::optimizer) fn eliminate_dead_control_regions(
     loop {
         prune_dead_block_parameters(eu);
         super::pass_vectorize_concat::remove_dead_definitions(eu);
-        let Ok(cfg) = SirCfg::analyze(eu) else {
+        let Ok(cfg) = SirCfg::analyze_structure(eu) else {
             return;
         };
         let uses = collect_uses(eu);
@@ -1323,7 +1323,7 @@ fn remove_dead_edge_arguments(
 /// priority checks even though the whole decision region and its phi are only
 /// needed by the final normal leaf.
 fn sink_deferred_value_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_structure(eu) else {
         return;
     };
     let uses = collect_uses(eu);
@@ -1610,7 +1610,7 @@ fn distribute_prefix_phi_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) ->
         incoming: Vec<(BlockId, Vec<RegisterId>)>,
     }
 
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return false;
     };
     let mut plans = Vec::new();
@@ -1720,7 +1720,7 @@ fn distribute_prefix_phi_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) ->
 /// introduced by this pass are the desired predecessors, and a global fixed
 /// point would needlessly reshape unrelated CFG.
 fn merge_single_predecessor_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return;
     };
     let mut claimed = HashSet::default();
@@ -1830,7 +1830,7 @@ fn replace_register_uses_in_terminator(
 }
 
 fn sink_deferred_value_diamonds(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_structure(eu) else {
         return;
     };
     let uses = collect_uses(eu);
@@ -2073,6 +2073,15 @@ fn apply_deferred_value_diamond(
 }
 
 fn form_coupled_store_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    form_coupled_store_regions_verified_by(eu, verify_coupled_store_batch);
+}
+
+/// [`form_coupled_store_regions`] with the batch check passed in, so tests
+/// can observe how often it runs.
+fn form_coupled_store_regions_verified_by(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    verify: impl FnOnce(&ExecutionUnit<RegionedAbsoluteAddr>),
+) {
     let uses = collect_uses(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
@@ -2129,6 +2138,14 @@ fn form_coupled_store_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
         apply_coupled_store_plan(eu, plan, next_block, &mut reg_counter);
         next_block += consumed;
     }
+    // Plans belong to distinct original blocks and were collected before any
+    // mutation. Check the completed batch once rather than rescanning every
+    // unrelated definition after each local rewrite.
+    verify(eu);
+}
+
+fn verify_coupled_store_batch(eu: &ExecutionUnit<RegionedAbsoluteAddr>) {
+    debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
 fn best_coupled_store_plan(
@@ -2714,7 +2731,6 @@ fn apply_coupled_store_plan(
     for value in dead_mux_values {
         eu.register_map.remove(&value);
     }
-    debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
 fn form_same_predicate_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
@@ -4559,6 +4575,102 @@ mod tests {
         assert_eq!(after.entry_block_id, before.entry_block_id);
         assert_eq!(after.register_map, before.register_map);
         assert_eq!(after.blocks, before.blocks);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn coupled_store_batches_verify_once_and_preserve_all_stores() {
+        const COUNT: usize = 16;
+        let mut registers = HashMap::from_iter([
+            (RegisterId(0), bit(1)),
+            (RegisterId(1), bit(8)),
+            (RegisterId(2), bit(8)),
+        ]);
+        let mut blocks = HashMap::default();
+        for lane in 0..COUNT {
+            let base = 3 + lane * 11;
+            let reg = |offset| RegisterId(base + offset);
+            for offset in 0..11 {
+                registers.insert(reg(offset), bit(8));
+            }
+            let mut instructions = vec![SIRInstruction::Binary(
+                reg(0),
+                RegisterId(1),
+                BinaryOp::Mul,
+                RegisterId(1),
+            )];
+            for offset in 1..7 {
+                instructions.push(SIRInstruction::Binary(
+                    reg(offset),
+                    reg(offset - 1),
+                    BinaryOp::Mul,
+                    RegisterId(1),
+                ));
+            }
+            instructions.extend([
+                SIRInstruction::Imm(reg(7), SIRValue::new(85u8)),
+                SIRInstruction::Binary(reg(8), reg(6), BinaryOp::Add, RegisterId(2)),
+                SIRInstruction::Mux(reg(9), RegisterId(0), reg(6), reg(7)),
+                SIRInstruction::Mux(reg(10), RegisterId(0), reg(8), reg(7)),
+                SIRInstruction::Store(
+                    address(100 + lane * 2),
+                    SIROffset::Static(0),
+                    8,
+                    reg(9),
+                    vec![],
+                    vec![],
+                ),
+                SIRInstruction::Store(
+                    address(101 + lane * 2),
+                    SIROffset::Static(0),
+                    8,
+                    reg(10),
+                    vec![],
+                    vec![],
+                ),
+            ]);
+            insert_block(
+                &mut blocks,
+                lane,
+                if lane == 0 {
+                    vec![RegisterId(0), RegisterId(1), RegisterId(2)]
+                } else {
+                    vec![]
+                },
+                instructions,
+                if lane + 1 == COUNT {
+                    SIRTerminator::Return
+                } else {
+                    SIRTerminator::Jump(BlockId(lane + 1), vec![])
+                },
+            );
+        }
+        let mut eu = ExecutionUnit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map: registers,
+        };
+        eu.verify_result().unwrap();
+        let before = eu.clone();
+        let mut verifications = 0;
+        form_coupled_store_regions_verified_by(&mut eu, |eu| {
+            verifications += 1;
+            verify_coupled_store_batch(eu);
+        });
+        assert_eq!(verifications, 1);
+        assert_eq!(
+            eu.blocks.len(),
+            COUNT * 4,
+            "every independent store group should be transformed"
+        );
+        eu.verify_result().unwrap();
+        for condition in [0, 1] {
+            for input in [0, 1] {
+                let expected = execute_with_inputs(&before, condition, input, 7);
+                let actual = execute_with_inputs(&eu, condition, input, 7);
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]

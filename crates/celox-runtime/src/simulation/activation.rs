@@ -8,8 +8,40 @@ use crate::{
 };
 use celox_design::ForkJoin;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ProcessControl {
+    pub exposed: bool,
+    pub random: Option<u64>,
+    pub killed: bool,
+    pub suspended: Option<SuspendedProcess>,
+    pub awaiting: Option<usize>,
+    pub observes: Vec<usize>,
+    pub level_wait: bool,
+    /// The named events the process is blocked on.
+    #[serde(default)]
+    pub events: Vec<u32>,
+    /// The named events whose `triggered` state the predicate of its level
+    /// wait read: a trigger of one checks the predicate again.
+    #[serde(default)]
+    pub observed_events: Vec<u32>,
+    /// The semaphore whose keys the process is blocked on.
+    #[serde(default)]
+    pub semaphore: Option<u32>,
+    /// The mailbox the process waits to put into or take from.
+    #[serde(default)]
+    pub mailbox: Option<u32>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SuspendedProcess {
+    pub runnable: bool,
+    pub wake_time: Option<u64>,
+    pub wait_word: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Activation {
+    #[serde(default)]
+    pub control: ProcessControl,
     pub kernel: usize,
     pub parent: Option<usize>,
     pub private: Vec<Value>,
@@ -21,6 +53,7 @@ pub struct Activation {
 impl Activation {
     fn root(kernel: usize) -> Self {
         Self {
+            control: ProcessControl::default(),
             kernel,
             parent: None,
             private: Vec::new(),
@@ -140,6 +173,8 @@ impl<B: SimBackend> SimulationState<B> {
             let mut child = self.process_state.activations[process].clone();
             seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
             child.private[random] = ((u64::from(seed) | (1 << 32)).into(), 0u8.into());
+            child.control = ProcessControl::default();
+            child.live = true;
             child.parent = Some(process);
             child.pending.clear();
             child.join = None;
@@ -147,6 +182,7 @@ impl<B: SimBackend> SimulationState<B> {
             child.private[status] = (0u8.into(), 0u8.into());
             let reusable = (self.kernel_count..self.process_state.activations.len()).find(|&id| {
                 !self.process_state.activations[id].live
+                    && !self.process_state.activations[id].control.exposed
                     && !self
                         .process_state
                         .activations
@@ -217,9 +253,9 @@ impl<B: SimBackend> SimulationState<B> {
 
     /// Follow ancestry through completed parents too (IEEE 1800-2023 9.6.3).
     /// Remove scheduler entries before releasing IDs for reuse.
-    pub(super) fn disable_children(&mut self, process: usize) {
+    pub(super) fn disable_children(&mut self, process: usize) -> Vec<usize> {
         if self.process_state.activations.is_empty() {
-            return;
+            return Vec::new();
         }
         let mut cancelled = vec![false; self.process_state.activations.len()];
         let mut pending = vec![process];
@@ -231,15 +267,26 @@ impl<B: SimBackend> SimulationState<B> {
                 }
             }
         }
+        let live_cancelled: Vec<usize> = cancelled
+            .iter()
+            .enumerate()
+            .filter_map(|(id, &cancelled)| {
+                (cancelled && self.process_state.activations[id].live).then_some(id)
+            })
+            .collect();
         let state = &mut self.process_state;
         for (id, activation) in state.activations.iter_mut().enumerate() {
             activation.pending.retain(|&child| !cancelled[child]);
             if cancelled[id] {
+                activation.control.killed |= activation.live;
+                activation.control.suspended = None;
+                activation.control.awaiting = None;
                 activation.live = false;
                 activation.join = None;
                 state.waiters.remove(id);
                 state.ready.remove(&id);
                 state.reactive.remove(&id);
+                state.observed.remove(&id);
                 state.inactive.remove(&id);
                 state.re_inactive.remove(&id);
             }
@@ -252,6 +299,10 @@ impl<B: SimBackend> SimulationState<B> {
                 self.retire_activation(id);
             }
         }
+        for &id in &live_cancelled {
+            self.process_changed(id);
+        }
+        live_cancelled
     }
 
     pub(super) fn end_activation(&mut self, process: usize) {
@@ -270,18 +321,31 @@ impl<B: SimBackend> SimulationState<B> {
                     parent.join = None;
                     let id = self.process_state.activations[process].parent.unwrap();
                     let state = &mut self.process_state;
-                    wake_in_region(
-                        &self.model.processes,
-                        &mut state.ready,
-                        &mut state.reactive,
-                        id,
-                    );
+                    if state.activations[id].live
+                        && state.activations[id].control.suspended.is_none()
+                    {
+                        wake_in_region(
+                            &self.model.processes,
+                            &mut state.ready,
+                            &mut state.reactive,
+                            id,
+                        );
+                    }
                 }
             }
         }
     }
 
     pub(super) fn retire_activation(&mut self, process: usize) {
+        if self
+            .process_state
+            .activations
+            .get(process)
+            .is_some_and(|activation| !activation.live)
+        {
+            self.cancel_semaphore_wait(process);
+            self.cancel_mailbox_wait(process);
+        }
         let mut next = Some(process);
         while let Some(id) = next {
             let has_children = self
@@ -294,6 +358,20 @@ impl<B: SimBackend> SimulationState<B> {
             };
             if activation.live {
                 break;
+            }
+            if activation.control.exposed
+                && !activation.private.is_empty()
+                && let Some(frame) = &self.model.processes[id].frame
+                && let Some(index) = frame.private.iter().position(|s| *s == frame.random)
+            {
+                activation.control.random = Some(
+                    activation.private[index]
+                        .0
+                        .to_u64_digits()
+                        .first()
+                        .copied()
+                        .unwrap_or(0),
+                );
             }
             activation.private.clear();
             activation.locals.clear();
@@ -377,3 +455,62 @@ pub(super) fn activation_value<'a>(
         .position(|&slot| slot == signal)
         .and_then(|index| activation.private.get(index))
 }
+
+/// Evaluate one pure dispatch entry without exposing another activation's
+/// frame or committing any probe temporary back into its persistent state.
+pub(super) fn event_probe<B: SimBackend>(
+    backend: &mut B,
+    refs: &crate::timing::ProcessRefs,
+    activation: &Activation,
+    cells: &[Value],
+    probe: &celox_design::ProcessEventProbe<SignalRef>,
+) -> Result<Value, Halt> {
+    let frame = refs
+        .frame
+        .as_ref()
+        .ok_or(SimulatorErrorCode::InternalError)?;
+    let mut slots: Vec<_> = frame
+        .private
+        .iter()
+        .chain(&frame.locals)
+        .chain(&probe.scratch)
+        .copied()
+        .collect();
+    slots.extend([refs.resume, refs.status, refs.delay, probe.result]);
+    let mut saved = Vec::new();
+    for slot in slots {
+        if !saved.iter().any(|(old, _)| *old == slot) {
+            saved.push((slot, read(backend, slot)));
+        }
+    }
+    for (&slot, value) in frame.private.iter().zip(&activation.private) {
+        write(backend, slot, value);
+    }
+    for (&slot, cell) in frame.locals.iter().zip(&activation.locals) {
+        if let Some(cell) = cell {
+            write(backend, slot, &cells[*cell]);
+        }
+    }
+    backend.set(refs.resume, probe.resume);
+    let result = backend
+        .run_process(activation.kernel)
+        .map_err(Halt::from)
+        .and_then(|()| {
+            let status: u8 = backend.get_as(refs.status);
+            if status != celox_design::ProcessStatus::EventProbe.code() {
+                return Err(SimulatorErrorCode::Runtime {
+                    message: "event-expression probe did not return through its pure entry".into(),
+                    signals: Vec::new(),
+                }
+                .into());
+            }
+            Ok(read(backend, probe.result))
+        });
+    for (slot, value) in saved {
+        write(backend, slot, &value);
+    }
+    result
+}
+
+#[cfg(test)]
+mod tests;

@@ -51,10 +51,33 @@ fn analyzed_info(design: &Design) -> Option<DesignInfo> {
         .map(|source| celox_sv_analyzer::ParsedSource::parse(&source.text, &source.path))
         .collect::<std::result::Result<Vec<_>, _>>()
         .ok()?;
+    let parsed = sources.iter().collect::<Vec<_>>();
+    // A design with virtual interface types is analyzed with the interfaces
+    // they name; the ports do not depend on the instances.
+    let texts = design
+        .sources
+        .iter()
+        .map(|source| (source.text.as_str(), source.path.as_path()))
+        .collect::<Vec<_>>();
+    let options = celox_sv_analyzer::AnalysisOptions {
+        virtual_interfaces: celox_sv_analyzer::VirtualInterfaces::declarations_of(
+            &texts,
+            &parsed,
+            &Default::default(),
+        )
+        .ok()?,
+        ..Default::default()
+    };
     let packages =
-        celox_sv_analyzer::ParsedSource::analyze_packages(&sources.iter().collect::<Vec<_>>())
+        celox_sv_analyzer::ParsedSource::analyze_packages_with_options(&parsed, None, options)
             .ok()?;
+    let mut interfaces = celox_sv_analyzer::ModuleInterfaces::default();
+    for source in &sources {
+        interfaces.extend(source.module_interfaces().clone());
+    }
     let mut modules: Vec<Module> = Vec::new();
+    // The package class specializations the modules share.
+    let mut analysis = packages.design();
     for source in &sources {
         for name in source.module_names() {
             let overrides = if name == &design.top {
@@ -72,9 +95,23 @@ fn analyzed_info(design: &Design) -> Option<DesignInfo> {
                 Default::default()
             };
             let result = if design.timed {
-                source.analyze_module_declarations(name, &overrides, &packages)
+                source.analyze_module_declarations_with_interfaces(
+                    name,
+                    &overrides,
+                    &interfaces,
+                    &packages,
+                    &mut analysis,
+                )
             } else {
-                source.analyze_module(name, &overrides, &[], &[], &Default::default(), &packages)
+                source.analyze_module(
+                    name,
+                    &overrides,
+                    &[],
+                    &[],
+                    &interfaces,
+                    &packages,
+                    &mut analysis,
+                )
             };
             if let Ok(ir) = result {
                 modules.extend(ir.modules().iter().cloned());
@@ -204,4 +241,18 @@ pub fn suite() -> Suite {
 /// The command-line runner of `verify-sv-verilator` and `verify-sv-icarus`.
 pub fn run(tool: Tool) -> Result<()> {
     crate::verification::run(tool, &suite(), &SvFrontend)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn foreign_generic_multisource_case_has_declaration_metadata() {
+        let case = crate::sv::case("class::foreign_generic_multiple_user_classes").unwrap();
+        let info = super::design_info(&case.design())
+            .expect("cross-file instances retain their module contracts");
+        assert_eq!(
+            info.outputs,
+            ["first", "second", "first_count", "second_count"]
+        );
+    }
 }

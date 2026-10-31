@@ -25,7 +25,7 @@ def write(path, value):
 
 def capture_provenance(out, checker):
     root = selected.ROOT
-    scope = ['../Cargo.toml', '../Cargo.lock', '../crates/lydite-ir', '../crates/lydite', '../crates/lydite-celox', '../crates/lydite-solver', '../crates/lydite-syntax', '../crates/lydite-verify',
+    scope = ['../Cargo.toml', '../Cargo.lock', '../crates/aplite', '../crates/lydite-ir', '../crates/lydite', '../crates/lydite-celox', '../crates/lydite-solver', '../crates/lydite-syntax', '../crates/lydite-verify',
              'audit/veryl_scaling', 'audit/lemma_candidates',
              'conformance/veryl-symbolic', '../.github/workflows/lydite-checks.yml',
              'examples/build_pipeline.py', 'examples/build_branch_pipeline.py',

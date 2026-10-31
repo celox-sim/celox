@@ -72,10 +72,10 @@ impl Prefix<'_> {
             .or(self.primitive.as_ref())
             .is_some_and(|ty| ty.kind == TypeKind::Bit)
     }
-    pub fn scalar_width(&self, state: &AnalysisState) -> Option<usize> {
+    pub fn scalar_width(&self, functions: &const_functions::ConstantFunctions) -> Option<usize> {
         self.primitive
             .as_ref()
-            .and_then(|ty| expr_type_from_type(state, ty, &HashMap::default()))
+            .and_then(|ty| expr_type_from_type(functions, ty, &HashMap::default()))
             .map(|ty| ty.width)
     }
     pub fn signed_element_depth(&self) -> Option<usize> {
@@ -90,11 +90,17 @@ impl Prefix<'_> {
     pub fn ranges(
         &self,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         env: &HashMap<String, i128>,
         aliases: &HashMap<String, Type>,
     ) -> Converted<Vec<PackedRange>> {
-        let mut ranges =
-            constant_binding::packed_ranges(&self.data.packed_dimensions, tree, env, aliases)?;
+        let mut ranges = constant_binding::packed_ranges(
+            &self.data.packed_dimensions,
+            tree,
+            session,
+            env,
+            aliases,
+        )?;
         if let Some(base) = self.alias.as_ref().or(self.primitive.as_ref()) {
             ranges.extend(base.packed_ranges.iter().cloned());
         }

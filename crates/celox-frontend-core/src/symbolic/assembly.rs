@@ -12,11 +12,11 @@ use crate::{
 };
 use celox_design::{
     BitAccess, CombDerivedClock, CounterKind, CounterSlots, DomainKind, ElaboratedDesign,
-    EventTopology, EventWatch, ExternFunction, GateOp, HostRequestSite, InitialStateData,
-    InitialStateValue, InstanceId, ModuleId, NbaSite, ProcessSlots, RegionedAbsoluteAddrBase,
-    RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo, RuntimeEventKind, RuntimeEventSite,
-    RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId, TriggerSet, VarAtomBase,
-    VariableMetadata, WORKING_REGION, WaitSite,
+    EventTopology, EventWatch, ExternFunction, GateCounters, GateOp, HostRequestSite,
+    InitialStateData, InitialStateValue, InstanceId, ModuleId, NbaSite, ProcessSlots,
+    RegionedAbsoluteAddrBase, RegionedStateAddr, RuntimeCombObserver, RuntimeErrorInfo,
+    RuntimeEventKind, RuntimeEventSite, RuntimeSchema, STABLE_REGION, StateAddr, StateObjectId,
+    TriggerSet, VarAtomBase, VariableMetadata, WORKING_REGION, WaitSite,
 };
 use celox_sir::{
     BasicBlock, ExecutionUnit, LaneUnit, ParallelSirProgram, SIRInstruction, SIROffset,
@@ -859,6 +859,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         module_names,
         root_id,
         packages,
+        instance_values,
     } = symbolic;
     let time_precision = modules
         .values()
@@ -995,11 +996,29 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             )
             .collect();
         let counted = counted_signals(&timing, &event_addresses);
+        // A combinational process writing the signal or the gate of a gated
+        // wait keeps its procedural order (IEEE 1800-2023 9.4.2.3).
+        let gated: HashSet<AbsoluteAddr> = timing
+            .wait_sites
+            .iter()
+            .flat_map(|site| {
+                site.terms
+                    .iter()
+                    .zip(&site.gates)
+                    .filter_map(|(&(signal, _), gate)| {
+                        gate.as_ref()
+                            .filter(|gate| gate.at_write)
+                            .map(|gate| [signal, gate.signal])
+                    })
+            })
+            .flatten()
+            .collect();
         choose_comb_alternatives(
             bindings,
             &instance_modules,
             &modules,
             &counted,
+            &gated,
             &mut comb_blocks,
         );
         // Count sensitivity occurrences before any optimizer can coalesce
@@ -1066,6 +1085,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 offset: offset.clone(),
                 four_state,
                 counters: vec![(CounterKind::Changes, counter)],
+                gated: Vec::new(),
             }
         }
         let stable = |address| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, address);
@@ -1140,6 +1160,33 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 });
             }
         }
+        let ff_written: HashSet<AbsoluteAddr> = eval_apply_ffs
+            .values()
+            .chain(eval_only_ffs.values())
+            .chain(apply_ffs.values())
+            .flatten()
+            .chain(
+                parallel_ff_units
+                    .values()
+                    .flatten()
+                    .flat_map(|(_, part)| [&part.evaluate, &part.apply]),
+            )
+            .chain(
+                split_commits
+                    .values()
+                    .flatten()
+                    .flatten()
+                    .flat_map(|split| [&split.active, &split.nba]),
+            )
+            .flat_map(|unit| unit.blocks.values())
+            .flat_map(|block| &block.instructions)
+            .filter_map(|instruction| match instruction {
+                SIRInstruction::Store(destination, ..)
+                | SIRInstruction::Commit(_, destination, ..) => Some(destination.absolute_addr()),
+                _ => None,
+            })
+            .collect();
+        let gated = gated_terms(&mut timing, &comb_blocks, &ff_written);
         let ff_units = eval_apply_ffs
             .values_mut()
             .chain(eval_only_ffs.values_mut())
@@ -1161,6 +1208,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         let counted = instrument_counted_signals(
             &timing,
             counted,
+            &gated,
             &variables,
             four_state,
             &mut processes,
@@ -1193,6 +1241,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                         .into_iter()
                         .map(|kind| (kind, regioned(STABLE_REGION, slots.counter(kind))))
                         .collect(),
+                    gated: Vec::new(),
                 };
                 (signal, (pass, code))
             })
@@ -1665,6 +1714,16 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         tracing::debug!("[flatten] scheduler::sort: {:?}", s.elapsed());
     }
     runtime_errors.extend(schedule.runtime_errors);
+    let eval_comb_stateful = schedule.stateful_targets.as_ref().map(|targets| {
+        targets
+            .iter()
+            .map(|target| RegionedAbsoluteAddr {
+                region: STABLE_REGION,
+                instance_id: target.id.instance_id,
+                var_id: target.id.var_id,
+            })
+            .collect::<Vec<_>>()
+    });
     let stable_unit = |eu: ExecutionUnit<AbsoluteAddr>| ExecutionUnit {
         entry_block_id: eu.entry_block_id,
         blocks: eu
@@ -1879,10 +1938,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             split_commits,
             &comb_sources,
             processes.iter().map(|process| &process.kernel),
-            timing
-                .wait_sites
-                .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
+            timing.wait_sites.iter().flat_map(WaitSite::reads),
             &events,
             &clock_domains,
         );
@@ -1960,6 +2016,26 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(bound_initials)
         .map(|(_, init)| init)
         .collect();
+    for value in instance_values {
+        let instance_id = *expanded.get(&InstancePath(value.path)).ok_or_else(|| {
+            ParserError::illegal_context(
+                "instance value",
+                "a value of an instance that does not exist".to_string(),
+                None,
+            )
+        })?;
+        let width = modules[&instance_modules[&instance_id]].variables[&value.variable]
+            .metadata
+            .width;
+        initial_memory_values.push(InitialStateValue {
+            address: bindings.locate(instance_id, value.variable),
+            data: InitialStateData::Packed {
+                value: value.value,
+                mask: BigUint::default(),
+                written_mask: (BigUint::from(1u8) << width) - 1u8,
+            },
+        });
+    }
     if let Some(settle) = &settle_flags {
         // Every partition runs at the first settle.
         let partitions = settle_partitions.len();
@@ -1971,7 +2047,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             data: InitialStateData::Packed {
                 value,
                 mask: BigUint::default(),
-                written_mask: (BigUint::from(1u8) << ((partitions + 1) * 8)) - 1u8,
+                written_mask: (BigUint::from(1u8) << ((partitions + 2) * 8)) - 1u8,
             },
         });
     }
@@ -2063,7 +2139,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             let mut observed: HashSet<AbsoluteAddr> = timing
                 .wait_sites
                 .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal))
+                .flat_map(WaitSite::reads)
                 .chain(timing.counter_slots.iter().map(|slots| slots.signal))
                 .chain(
                     clock_domains
@@ -2135,12 +2211,15 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         nba_sites,
         host_request_sites,
         time_slots,
+        sample_shadows,
+        initial_copies,
         ..
     } = timing;
     let source_sir = SirProgram {
         eval_apply_ffs,
         eval_comb_apply_ffs,
         merge_comb_apply,
+        eval_comb_stateful,
         eval_only_ffs,
         apply_ffs,
         eval_comb,
@@ -2386,6 +2465,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .collect();
     let active_commits: Vec<StateAddr> = active_commits.into_iter().map(project).collect();
     let time_slots: Vec<StateAddr> = time_slots.into_iter().map(project).collect();
+    let sample_shadows: Vec<(StateAddr, StateAddr)> = sample_shadows
+        .into_iter()
+        .map(|(variable, copy)| (project(variable), project(copy)))
+        .collect();
+    let initial_copies: Vec<(StateAddr, StateAddr)> = initial_copies
+        .into_iter()
+        .map(|(variable, copy)| (project(variable), project(copy)))
+        .collect();
     let root_instance = expanded[&InstancePath(Vec::new())];
     let settle_partitions = settle_flags.map(|settle| {
         let mut marks: HashMap<StateAddr, BTreeSet<u32>> = HashMap::default();
@@ -2436,11 +2523,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .map(|(_, counter)| counter)
                 .collect::<Vec<_>>()
         })
-        .chain(
-            wait_sites
-                .iter()
-                .flat_map(|site| site.terms.iter().map(|(signal, _)| *signal)),
-        )
+        .chain(wait_sites.iter().flat_map(WaitSite::reads))
         .chain(
             nba_sites
                 .iter()
@@ -2509,6 +2592,13 @@ pub fn schedule_symbolic_rtl_reporting_loops(
                 .flat_map(|(source, counter)| [source.id, *counter]),
         );
     }
+    // The host copies each sampled variable into its copy.
+    timing_read_roots.extend(
+        sample_shadows
+            .iter()
+            .chain(&initial_copies)
+            .flat_map(|&(variable, copy)| [variable, copy]),
+    );
     // A package variable's state object maps back to the package's own
     // variable, not to one of its aliases.
     let state_to_source = source_to_state
@@ -2561,6 +2651,8 @@ pub fn schedule_symbolic_rtl_reporting_loops(
             host_request_sites,
             active_commits,
             time_slots,
+            sample_shadows,
+            initial_copies,
             scheduler,
             derived_edges: Vec::new(),
             settle_partitions,
@@ -2585,7 +2677,14 @@ pub fn schedule_symbolic_rtl_reporting_loops(
 /// [`SettlePartitionMode::Estimated`] partitions.
 const MIN_PARTITIONED_SETTLE_COST: usize = 20_000;
 /// Expression nodes per partition of an estimated partitioned settle.
-const SETTLE_PARTITION_COST: usize = 2_000;
+const SETTLE_PARTITION_COST: usize = 16_000;
+/// Bound flag tests, publication checks, and their compiler analyses on large
+/// designs instead of growing the number of partitions with every source node.
+const TARGET_ESTIMATED_SETTLE_PARTITIONS: usize = 64;
+
+fn estimated_settle_partition_cost(cost: usize) -> usize {
+    SETTLE_PARTITION_COST.max(cost.div_ceil(TARGET_ESTIMATED_SETTLE_PARTITIONS))
+}
 
 /// The cost per partition of a partitioned settle of `comb_blocks`, or
 /// `None` to keep one pass.
@@ -2615,20 +2714,21 @@ fn settle_partitioning(
                 .iter()
                 .map(|path| scheduler::path_cost(arena, path))
                 .sum();
-            (cost >= MIN_PARTITIONED_SETTLE_COST).then_some(SETTLE_PARTITION_COST)
+            (cost >= MIN_PARTITIONED_SETTLE_COST).then(|| estimated_settle_partition_cost(cost))
         }
     }
 }
 
 /// Declare the flags of a settle of `partitions` partitions, one byte each
-/// plus the untracked byte, as a hidden variable of the top module.
+/// plus the untracked and the full byte, as a hidden variable of the top
+/// module.
 fn declare_settle_flags(
     modules: &mut HashMap<ModuleId, SimModule>,
     root: ModuleId,
     var_id: SourceVarId,
     partitions: usize,
 ) {
-    let width = (partitions + 1) * 8;
+    let width = (partitions + 2) * 8;
     let variables = &mut modules.get_mut(&root).expect("top module").variables;
     variables.insert(
         var_id,
@@ -2699,9 +2799,11 @@ fn declare_scheduler_slots(
         finish: declare("finish".into(), FLAG),
         cont: declare("cont".into(), FLAG),
         dirty: declare("dirty".into(), FLAG),
+        defer_limit_settle: declare("defer_limit_settle".into(), FLAG),
         count: declare("count".into(), TIME),
         current: declare("current".into(), TIME),
         levels: declare("levels".into(), TIME),
+        unknown_levels: declare("unknown_levels".into(), TIME),
         ready: declare("ready".into(), TIME),
         wake: (0..process_count)
             .map(|index| declare(format!("wake[{index}]"), TIME))
@@ -4112,6 +4214,8 @@ struct TimingMetadata {
     nba_sites: Vec<NbaSite<AbsoluteAddr>>,
     host_request_sites: Vec<HostRequestSite<AbsoluteAddr>>,
     time_slots: Vec<AbsoluteAddr>,
+    sample_shadows: Vec<(AbsoluteAddr, AbsoluteAddr)>,
+    initial_copies: Vec<(AbsoluteAddr, AbsoluteAddr)>,
     nba_switches: Vec<NbaSwitch<AbsoluteAddr>>,
 }
 
@@ -4434,6 +4538,8 @@ fn relocate_timing(
         nba_sites: Vec::new(),
         host_request_sites: Vec::new(),
         time_slots: Vec::new(),
+        sample_shadows: Vec::new(),
+        initial_copies: Vec::new(),
         nba_switches: Vec::new(),
     };
     for (&instance, module) in instances {
@@ -4469,6 +4575,18 @@ fn relocate_timing(
                     }),
             );
         metadata.time_slots.extend(module.time_slot.map(locate));
+        metadata.sample_shadows.extend(
+            module
+                .sample_shadows
+                .iter()
+                .map(|&(variable, copy)| (locate(variable), locate(copy))),
+        );
+        metadata.initial_copies.extend(
+            module
+                .initial_copies
+                .iter()
+                .map(|&(variable, copy)| (locate(variable), locate(copy))),
+        );
         metadata.nba_switches.extend(
             module
                 .nba_switches
@@ -4554,6 +4672,7 @@ fn choose_comb_alternatives(
     instance_modules: &HashMap<InstanceId, ModuleId>,
     modules: &HashMap<ModuleId, SimModule>,
     counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    gated: &HashSet<AbsoluteAddr>,
     comb_blocks: &mut Vec<LogicPath<AbsoluteAddr>>,
 ) {
     let mut imperative = HashSet::default();
@@ -4561,10 +4680,13 @@ fn choose_comb_alternatives(
     for (&instance, module) in instance_modules {
         for alternative in &modules[module].comb_alternatives {
             let locate = |var_id| bindings.locate(instance, var_id);
-            if alternative
-                .candidates
+            if alternative.candidates.iter().any(|&candidate| {
+                let candidate = locate(candidate);
+                counted.contains_key(&candidate)
+            }) || alternative
+                .targets
                 .iter()
-                .any(|&candidate| counted.contains_key(&locate(candidate)))
+                .any(|target| gated.contains(&locate(target.id)))
             {
                 for target in &alternative.targets {
                     symbolic
@@ -4593,18 +4715,136 @@ fn choose_comb_alternatives(
     });
 }
 
+/// A term with a gate counter (IEEE 1800-2023 9.4.2.3): the kind of its
+/// signal's occurrences, the gate, and the counters a write bumps.
+type GatedTerm = (CounterKind, AbsoluteAddr, GateCounters<AbsoluteAddr>);
+
+/// The gated terms whose counters the writes of their signal bump, by
+/// signal. A gate counts at the write only when the signal and the gate are
+/// variables that process kernels, combinational processes, the runtime or
+/// the host write: a continuous assignment is a scheduled evaluation (4.7),
+/// and a flip-flop publishes its writes after the process evaluated them
+/// (#1830). The other gates lose their counters, so the runtime reads them
+/// when it detects the occurrence.
+fn gated_terms(
+    timing: &mut TimingMetadata,
+    comb_blocks: &[LogicPath<AbsoluteAddr>],
+    ff_written: &HashSet<AbsoluteAddr>,
+) -> HashMap<AbsoluteAddr, Vec<GatedTerm>> {
+    let continuous: HashSet<AbsoluteAddr> = comb_blocks
+        .iter()
+        .filter_map(|path| match &path.target {
+            LogicPathTarget::Var(target) => Some(target.id),
+            _ => None,
+        })
+        .collect();
+    let mut gated: HashMap<AbsoluteAddr, Vec<GatedTerm>> = HashMap::default();
+    for site in &mut timing.wait_sites {
+        for (&(signal, kind), gate) in site.terms.iter().zip(&mut site.gates) {
+            let Some(gate) = gate else {
+                continue;
+            };
+            if ff_written.contains(&signal)
+                || continuous.contains(&signal)
+                || continuous.contains(&gate.signal)
+            {
+                gate.counters = None;
+                gate.at_write = false;
+                continue;
+            }
+            let Some(counters) = gate.counters else {
+                continue;
+            };
+            gated
+                .entry(signal)
+                .or_default()
+                .push((kind, gate.signal, counters));
+        }
+    }
+    gated
+}
+
+/// The code that counts the writes of `signal` in its `counted` counters
+/// and the counters of its `gated` terms, each object addressed through
+/// `address`, or `None` if nothing counts them.
+fn watch_code<A>(
+    signal: AbsoluteAddr,
+    counted: &BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    gated: &HashMap<AbsoluteAddr, Vec<GatedTerm>>,
+    variables: &HashMap<AbsoluteAddr, (usize, bool)>,
+    four_state: bool,
+    address: impl Fn(AbsoluteAddr) -> A,
+) -> Option<crate::watch::WatchCode<A>> {
+    let slots = counted.get(&signal);
+    let terms = gated.get(&signal);
+    if slots.is_none() && terms.is_none() {
+        return None;
+    }
+    let (width, is_4state) = variables[&signal];
+    Some(crate::watch::WatchCode {
+        signal: address(signal),
+        offset: celox_sir::SIROffset::Static(0),
+        width,
+        four_state: four_state && is_4state,
+        counters: slots
+            .into_iter()
+            .flat_map(|slots| {
+                CounterKind::ALL
+                    .into_iter()
+                    .map(|kind| (kind, address(slots.counter(kind))))
+            })
+            .collect(),
+        gated: terms
+            .into_iter()
+            .flatten()
+            .map(|&(kind, gate, counters)| crate::watch::GatedCode {
+                kind,
+                gate: address(gate),
+                gate_four_state: four_state && variables[&gate].1,
+                gated: address(counters.gated),
+                all: address(counters.all),
+            })
+            .collect(),
+    })
+}
+
 /// Instrument the process kernels, combinational process units and
-/// flip-flop units that write a `counted` signal, and return `counted`; no
-/// other unit changes.
+/// flip-flop units that write a `counted` signal, and the process kernels
+/// and combinational process units that write the signal of a `gated` term,
+/// and return `counted`; no other unit changes.
 fn instrument_counted_signals<'u>(
     timing: &TimingMetadata,
     counted: BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>>,
+    gated: &HashMap<AbsoluteAddr, Vec<GatedTerm>>,
     variables: &HashMap<AbsoluteAddr, (usize, bool)>,
     four_state: bool,
     processes: &mut [RelocatedProcess],
     comb_blocks: &mut [LogicPath<AbsoluteAddr>],
     ff_units: impl Iterator<Item = &'u mut ExecutionUnit<RegionedAbsoluteAddr>>,
 ) -> BTreeMap<AbsoluteAddr, CounterSlots<AbsoluteAddr>> {
+    if counted.is_empty() && gated.is_empty() {
+        return counted;
+    }
+    let code = |signal: AbsoluteAddr, address: &dyn Fn(AbsoluteAddr) -> RegionedAbsoluteAddr| {
+        watch_code(signal, &counted, gated, variables, four_state, address)
+    };
+    let code_comb = |signal: AbsoluteAddr| {
+        watch_code(signal, &counted, gated, variables, four_state, |var| var)
+    };
+    let stable = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
+    for process in processes {
+        crate::watch::instrument_unit(&mut process.kernel, |address| {
+            if address.region != STABLE_REGION {
+                return None;
+            }
+            code(address.absolute_addr(), &stable)
+        });
+    }
+    for path in comb_blocks {
+        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
+            crate::watch::instrument_unit(unit, |address| code_comb(*address));
+        }
+    }
     if counted.is_empty() {
         return counted;
     }
@@ -4613,44 +4853,6 @@ fn instrument_counted_signals<'u>(
         let (width, is_4state) = variables[&signal];
         Some((slots, width, four_state && is_4state))
     };
-    for process in processes {
-        crate::watch::instrument_unit(&mut process.kernel, |address| {
-            if address.region != STABLE_REGION {
-                return None;
-            }
-            let (slots, width, four_state) = code(address.absolute_addr())?;
-            let stable =
-                |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
-            Some(crate::watch::WatchCode {
-                signal: stable(slots.signal),
-                offset: celox_sir::SIROffset::Static(0),
-                width,
-                four_state,
-                counters: CounterKind::ALL
-                    .into_iter()
-                    .map(|kind| (kind, stable(slots.counter(kind))))
-                    .collect(),
-            })
-        });
-    }
-    for path in comb_blocks {
-        if let LogicPathTarget::Process { unit, .. } = &mut path.target {
-            crate::watch::instrument_unit(unit, |address| {
-                let (slots, width, four_state) = code(*address)?;
-                Some(crate::watch::WatchCode {
-                    signal: slots.signal,
-                    offset: celox_sir::SIROffset::Static(0),
-                    width,
-                    four_state,
-                    counters: CounterKind::ALL
-                        .into_iter()
-                        .map(|kind| (kind, slots.counter(kind)))
-                        .collect(),
-                })
-            });
-        }
-    }
-    let stable = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, var);
     let working = |var: AbsoluteAddr| RegionedAbsoluteAddr::from_absolute_addr(WORKING_REGION, var);
     let watch = |signal: AbsoluteAddr| {
         let (slots, width, four_state) = code(signal)?;
@@ -4663,6 +4865,7 @@ fn instrument_counted_signals<'u>(
                 .into_iter()
                 .map(|kind| (kind, stable(slots.counter(kind))))
                 .collect(),
+            gated: Vec::new(),
         })
     };
     // A flip-flop writes its next state, and a commit publishes it. Repeated
@@ -6267,5 +6470,26 @@ mod tests {
         }
         // The cases find copies, beyond the 4 initial probes each.
         assert!(copied > 50 * 4 + 50, "{copied} probes");
+    }
+}
+
+#[cfg(test)]
+mod estimated_settle_budget_tests {
+    use super::*;
+
+    #[test]
+    fn estimated_guard_count_stays_bounded_as_the_program_grows() {
+        for cost in [
+            20_000,
+            100_000,
+            1_000_000,
+            3_000_000,
+            100_000_000,
+            usize::MAX,
+        ] {
+            let target = estimated_settle_partition_cost(cost);
+            assert!(target >= SETTLE_PARTITION_COST);
+            assert!(cost.div_ceil(target) <= TARGET_ESTIMATED_SETTLE_PARTITIONS);
+        }
     }
 }

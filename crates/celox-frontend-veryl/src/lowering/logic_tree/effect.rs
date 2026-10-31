@@ -104,6 +104,7 @@ fn register_comb_runtime_event_site<'a>(
         location: None,
         assertion: None,
         deferred: None,
+        timestamp_arg: false,
         arg_widths: value_args
             .iter()
             .map(|arg| arg.0.comptime().r#type.total_width().unwrap_or(1))
@@ -2025,7 +2026,8 @@ fn collect_function_body_effects(
             iter_store.insert(id, loop_store);
         }
         iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-        let _loop_range = super::LoopRangeScope::enter(arena, for_stmt);
+        let mut loop_range = super::LoopRangeScope::enter(arena, for_stmt);
+        let arena = &mut *loop_range;
         let iter_store_before = iter_store.fork();
 
         let observer_start = collector.observers.len();
@@ -2949,7 +2951,8 @@ fn collect_dynamic_for_effects(
         iter_store.insert(id, loop_store);
     }
     iter_store.insert(for_stmt.var_id, RangeStore::new(None, loop_width));
-    let _loop_range = super::LoopRangeScope::enter(arena, for_stmt);
+    let mut loop_range = super::LoopRangeScope::enter(arena, for_stmt);
+    let arena = &mut *loop_range;
     let observer_start = collector.observers.len();
     let saved = collector.loop_effects.take();
     collector.loop_effects = Some(Vec::new());

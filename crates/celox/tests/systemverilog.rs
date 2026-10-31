@@ -103,6 +103,8 @@ macro_rules! sv_backends {
 
 #[path = "frontends/systemverilog/always_comb.rs"]
 mod always_comb;
+#[path = "frontends/systemverilog/array_locators.rs"]
+mod array_locators;
 #[path = "frontends/systemverilog/binary_file_io.rs"]
 mod binary_file_io;
 #[path = "frontends/systemverilog/class.rs"]
@@ -121,6 +123,8 @@ mod generate;
 mod hierarchical_references;
 #[path = "frontends/systemverilog/hierarchy.rs"]
 mod hierarchy;
+#[path = "frontends/systemverilog/increment_decrement.rs"]
+mod increment_decrement;
 #[path = "frontends/systemverilog/indexed_select.rs"]
 mod indexed_select;
 #[path = "frontends/systemverilog/interfaces.rs"]
@@ -143,8 +147,12 @@ mod realtime;
 mod review_regressions;
 #[path = "frontends/systemverilog/scan.rs"]
 mod scan;
+#[path = "frontends/systemverilog/streaming.rs"]
+mod streaming;
 #[path = "frontends/systemverilog/string.rs"]
 mod string;
+#[path = "frontends/systemverilog/string_format.rs"]
+mod string_format;
 #[path = "frontends/systemverilog/suite.rs"]
 mod suite;
 #[path = "frontends/systemverilog/synthesizable.rs"]
@@ -250,3 +258,38 @@ mod unions;
 
 #[path = "frontends/systemverilog/tagged_unions.rs"]
 mod tagged_unions;
+
+#[path = "frontends/systemverilog/references.rs"]
+mod references;
+
+#[path = "frontends/systemverilog/virtual_interfaces.rs"]
+mod virtual_interfaces;
+
+#[path = "frontends/systemverilog/wide_class_properties.rs"]
+mod wide_class_properties;
+
+#[path = "frontends/systemverilog/property_selects.rs"]
+mod property_selects;
+
+#[path = "frontends/systemverilog/wide_container_elements.rs"]
+mod wide_container_elements;
+
+#[path = "frontends/systemverilog/container_formals.rs"]
+mod container_formals;
+
+#[path = "frontends/systemverilog/events.rs"]
+mod events;
+
+#[path = "frontends/systemverilog/semaphores.rs"]
+mod semaphores;
+
+#[path = "frontends/systemverilog/mailboxes.rs"]
+mod mailboxes;
+
+#[path = "frontends/systemverilog/containers.rs"]
+mod containers;
+
+#[path = "frontends/systemverilog/concurrent_assertions.rs"]
+mod concurrent_assertions;
+#[path = "frontends/systemverilog/unpacked_structs.rs"]
+mod unpacked_structs;

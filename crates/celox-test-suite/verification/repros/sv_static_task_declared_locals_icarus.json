@@ -1,0 +1,29 @@
+{
+  "case": "timing::timed_task_declared_static_locals_are_shared",
+  "source": "src/sv/cases/timing.vtest",
+  "standard": "IEEE 1800-2023 6.21 permits a `static` declaration in an automatic task, and makes it one variable for every call; 8.6 makes class methods automatic, so a class task keeps state the same way; 26.3 and 8.23 permit the package-scoped task call tick_pkg::tick(b) and the class-scoped call Counter#(1)::bump(c1). The two ticks give 1 and 2, as do the two bumps.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary --timing, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "`timescale 1ns/1ns\npackage tick_pkg;\n  task automatic tick(output int r);\n    static int n = 0;\n    #1;\n    n++;\n    r = n;\n  endtask\nendpackage\nmodule Top;\n  import tick_pkg::*;\n  class Counter #(int STEP = 1);\n    static task bump(output int r);\n      static int n = 0;\n      #1;\n      n += STEP;\n      r = n;\n    endtask\n  endclass\n  int a, b, c1, c2;\n  initial tick(a);\n  initial tick_pkg::tick(b);\n  initial Counter#(1)::bump(c1);\n  initial Counter#(1)::bump(c2);\n  initial #5 $display(\"a+b=%0d c1+c2=%0d\", a + b, c1 + c2);\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "a+b=3 c1+c2=3\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:4: sorry: Overriding the default variable lifetime is not yet supported.\nrepro.sv:12: syntax error\nrepro.sv:12: error: Invalid module item.\nrepro.sv:13: syntax error\nrepro.sv:13: error: Invalid module item.\nrepro.sv:15: syntax error\nrepro.sv:15: error: Invalid module item.\nrepro.sv:16: syntax error\nrepro.sv:16: error: Invalid module instantiation\nrepro.sv:17: error: Invalid module instantiation\nrepro.sv:20: error: Invalid module item.\nrepro.sv:22: syntax error\nrepro.sv:22: error: Malformed statement\nrepro.sv:23: syntax error\nrepro.sv:23: error: Malformed statement\nrepro.sv:24: syntax error\nrepro.sv:24: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "a+b=3 c1+c2=3\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "a+b=3 c1+c2=3\n"
+    }
+  ]
+}

@@ -9,9 +9,12 @@
 use super::*;
 mod assertions;
 mod control;
+mod effects;
 mod final_procedures;
 mod foreach;
-mod randomization;
+use foreach::ForeachLoop;
+pub(super) mod randomization;
+pub(super) mod references;
 pub(super) mod timed_tasks;
 mod timing;
 use crate::procedural::{
@@ -48,38 +51,134 @@ pub(super) struct BodyState<'a> {
     /// The locals declared with a static lifetime: their unique names and
     /// types.
     pub statics: Vec<(String, Type)>,
+    /// The statics declared with the `static` keyword.
+    pub explicit_statics: HashSet<String>,
     /// Function static declarations initialized once at time zero.
     pub static_initializers: Vec<Stmt>,
     /// Constant calls get a fresh frame, even for static declarations (13.4.3).
     pub constant_evaluation: bool,
 }
 
+/// The statements and condition of a `for` loop header. A condition with
+/// increment or decrement operators is the `prologue` of each iteration
+/// instead (see [`BodyBuilder::loop_condition`]).
+struct ForHeader {
+    init: Vec<Stmt>,
+    condition: Option<Expr>,
+    prologue: Vec<Stmt>,
+    steps: Vec<Stmt>,
+}
+
 /// Converts the statements of one procedural body.
 pub(super) struct BodyBuilder<'s, 't, 'a> {
     tree: &'t AnalysisContext<'t>,
+    pub(super) session: &'s mut Session,
     dims: PackedDimensions,
-    scopes: Vec<Scope>,
+    names: Names,
     state: &'s mut BodyState<'a>,
     type_aliases: HashMap<String, Type>,
-    /// The values of the local parameters declared in the body.
-    local_constants: HashMap<String, String>,
     /// The kind of body, for the system tasks it may call.
     body: system_functions::Body,
     /// Whether the body's variables are automatic by default.
     automatic: bool,
     task_timing: bool,
     return_shape: Option<VariableDimensions>,
+    /// The shape of any return type, which a returned stream is aligned to
+    /// (IEEE 1800-2023 11.4.14).
+    stream_return_shape: Option<VariableDimensions>,
     pub(super) sensitivity_body: Vec<Stmt>,
+}
+
+/// The names a body declares: its scopes of locals, innermost last, and
+/// the values of its local parameters.
+pub(super) struct Names {
+    scopes: Vec<Scope>,
+    /// The values of the local parameters declared in the body.
+    local_constants: HashMap<String, String>,
+}
+
+impl Names {
+    fn lookup(&self, source: &str) -> Option<&str> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(entry) = scope
+                .entries
+                .iter()
+                .rev()
+                .find(|entry| entry.source == source)
+            {
+                // A parameter in an inner block also hides an outer variable.
+                return entry.unique.as_deref();
+            }
+        }
+        None
+    }
+
+    fn rename_name(&self, name: &mut String) {
+        if let Some(unique) = self.lookup(name) {
+            *name = unique.to_string();
+        }
+    }
+
+    /// The literal value of a local parameter that `name` refers to.
+    fn local_constant(&self, name: &str) -> Option<&String> {
+        if self.lookup(name).is_some() {
+            return None;
+        }
+        self.local_constants.get(name)
+    }
+
+    fn rename_const(&self, expr: &mut ConstExpr) {
+        rename_const_idents(expr, &mut |name| self.rename_ident(name));
+    }
+
+    fn rename_expr(&self, expr: &mut Expr) {
+        rename_expr_idents(expr, &mut |name| self.rename_ident(name));
+    }
+
+    /// Rename a referenced local, or return the value of a local parameter.
+    fn rename_ident(&self, name: &mut String) -> Option<String> {
+        match self.local_constant(name) {
+            Some(value) => Some(value.clone()),
+            None => {
+                self.rename_name(name);
+                None
+            }
+        }
+    }
+
+    fn rename_lvalue(&self, lvalue: &mut LValue) {
+        match lvalue {
+            LValue::Ident(name) => self.rename_name(name),
+            LValue::Select {
+                name,
+                msb,
+                lsb,
+                array_slice_width,
+                ..
+            } => {
+                self.rename_name(name);
+                self.rename_const(msb);
+                self.rename_const(lsb);
+                if let Some(width) = array_slice_width {
+                    self.rename_const(width);
+                }
+            }
+        }
+    }
 }
 
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
-        randomizable: !r#type.is_enum || r#type.enum_values.is_some(),
-        enum_values: r#type.enum_values.clone(),
+        container: r#type.container.clone(),
+        randomizable: r#type.container.is_none()
+            && (!r#type.is_enum || r#type.enum_domain.is_some()),
+        enum_domain: r#type.enum_domain.clone(),
+        packed_enum: r#type.packed_enum,
         real: matches!(r#type.kind(), TypeKind::Real | TypeKind::Shortreal),
         string: matches!(r#type.kind(), TypeKind::String),
         class: r#type.class().map(str::to_owned),
+        virtual_interface: r#type.virtual_interface.clone(),
         packed: dimensions::signal_packed_dimension_widths(r#type.packed_ranges()),
         unpacked: unpacked_dimension_widths(r#type.unpacked_ranges()),
         signed: r#type.is_signed(),
@@ -90,9 +189,13 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
                 | TypeKind::Shortreal
                 | TypeKind::String
                 | TypeKind::Object
+                | TypeKind::Process
+                | TypeKind::Event
         ),
         members: r#type.members.clone(),
         signed_element_depth: r#type.signed_element_depth,
+        unpacked_struct: r#type.unpacked_struct.clone(),
+        declared: type_names::Declared::new(r#type),
     }
 }
 
@@ -114,11 +217,171 @@ pub(super) fn scoped_type(mut r#type: Type, const_env: &HashMap<String, i128>) -
     r#type
 }
 
+/// Run `epilogue` at each `return` in `body`. A returned value is first
+/// stored in the result variable `result`, so the epilogue sees the effects
+/// of evaluating it.
+fn before_returns(body: &mut Vec<Stmt>, epilogue: &[Stmt], result: Option<&str>) {
+    let mut pending = vec![body];
+    while let Some(stmts) = pending.pop() {
+        let mut index = 0;
+        while index < stmts.len() {
+            if let Stmt::Return(value) = &mut stmts[index] {
+                let mut exit = Vec::new();
+                if let (Some(value), Some(result)) = (value.take(), result) {
+                    exit.push(Stmt::Assign {
+                        lhs: LValue::Ident(result.to_owned()),
+                        rhs: value,
+                        nonblocking: false,
+                    });
+                    stmts[index] = Stmt::Return(Some(Expr::Ident(result.to_owned())));
+                }
+                exit.extend(epilogue.iter().cloned());
+                let count = exit.len();
+                stmts.splice(index..index, exit);
+                index += count + 1;
+                continue;
+            }
+            index += 1;
+        }
+        for stmt in stmts.iter_mut() {
+            match stmt {
+                Stmt::If {
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    pending.push(then_body);
+                    pending.push(else_body);
+                }
+                Stmt::Case { items, default, .. } => {
+                    pending.extend(items.iter_mut().map(|item| &mut item.body));
+                    pending.extend(default.as_mut());
+                }
+                Stmt::Loop {
+                    init, step, body, ..
+                } => {
+                    pending.push(init);
+                    pending.push(step);
+                    pending.push(body);
+                }
+                // A `return` in a forked branch ends only that branch.
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Apply `rename` to each identifier of `expr`; one for which it returns a
+/// literal is replaced by that literal.
+pub(super) fn rename_const_idents(
+    expr: &mut ConstExpr,
+    rename: &mut impl FnMut(&mut String) -> Option<String>,
+) {
+    match expr {
+        ConstExpr::Ident(name) => {
+            if let Some(value) = rename(name) {
+                *expr = ConstExpr::Literal(value);
+            }
+        }
+        ConstExpr::Literal(_) => {}
+        ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+            rename_const_idents(expr, rename);
+            rename_const_idents(msb, rename);
+            rename_const_idents(lsb, rename);
+        }
+        ConstExpr::Select { expr, bit } => {
+            rename_const_idents(expr, rename);
+            rename_const_idents(bit, rename);
+        }
+        ConstExpr::Function { args, .. } => {
+            args.iter_mut()
+                .for_each(|arg| rename_const_idents(arg, rename));
+        }
+        ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+            rename_const_idents(expr, rename)
+        }
+        ConstExpr::Binary { left, right, .. } => {
+            rename_const_idents(left, rename);
+            rename_const_idents(right, rename);
+        }
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rename_const_idents(condition, rename);
+            rename_const_idents(then_expr, rename);
+            rename_const_idents(else_expr, rename);
+        }
+    }
+}
+
+/// [`rename_const_idents`] for an expression and the positions it selects.
+pub(super) fn rename_expr_idents(
+    expr: &mut Expr,
+    rename: &mut impl FnMut(&mut String) -> Option<String>,
+) {
+    match expr {
+        Expr::Ident(name) => {
+            if let Some(value) = rename(name) {
+                *expr = Expr::Literal(value);
+            }
+        }
+        Expr::Literal(_) => {}
+        Expr::Select { expr, msb, lsb, .. } => {
+            rename_expr_idents(expr, rename);
+            rename_const_idents(msb, rename);
+            rename_const_idents(lsb, rename);
+        }
+        Expr::Concat(parts) => parts
+            .iter_mut()
+            .for_each(|part| rename_expr_idents(part, rename)),
+        Expr::RepeatConcat { count, parts } => {
+            rename_const_idents(count, rename);
+            parts
+                .iter_mut()
+                .for_each(|part| rename_expr_idents(part, rename));
+        }
+        Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => rename_expr_idents(expr, rename),
+        Expr::Binary { left, right, .. } => {
+            rename_expr_idents(left, rename);
+            rename_expr_idents(right, rename);
+        }
+        Expr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            rename_expr_idents(condition, rename);
+            rename_expr_idents(then_expr, rename);
+            rename_expr_idents(else_expr, rename);
+        }
+        Expr::Call { args, .. } => args
+            .iter_mut()
+            .flatten()
+            .for_each(|arg| rename_expr_idents(arg, rename)),
+        Expr::Inside { expr, items } => {
+            rename_expr_idents(expr, rename);
+            for item in items {
+                match item {
+                    InsideItem::Value(value) => rename_expr_idents(value, rename),
+                    InsideItem::Range { low, high } => {
+                        rename_expr_idents(low, rename);
+                        rename_expr_idents(high, rename);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The `int` type of a loop variable declared by `foreach`.
 pub(super) fn int_type() -> Type {
     Type {
+        container: None,
         is_enum: false,
-        enum_values: None,
+        enum_domain: None,
+        packed_enum: false,
         kind: TypeKind::Bit,
         is_signed: true,
         packed_ranges: vec![PackedRange::new(
@@ -129,43 +392,77 @@ pub(super) fn int_type() -> Type {
         members: Vec::new(),
         signed_element_depth: None,
         class: None,
+        virtual_interface: None,
+        unpacked_struct: None,
+        spelling: type_names::Spelling::keyword("int"),
+    }
+}
+
+impl Drop for BodyBuilder<'_, '_, '_> {
+    fn drop(&mut self) {
+        self.flush_locator_locals();
     }
 }
 
 impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     pub(super) fn new(
         tree: &'t AnalysisContext<'t>,
+        session: &'s mut Session,
         dims: &PackedDimensions,
         state: &'s mut BodyState<'a>,
         body: system_functions::Body,
     ) -> Self {
-        let type_aliases = dims.type_aliases.clone();
+        let type_aliases = (*dims.type_aliases).clone();
         let automatic = state.automatic;
+        let mut dims = dims.clone();
+        dims.locator_locals = Some(locators::LocalSink::new(*state.counter));
         Self {
             automatic,
             task_timing: false,
             return_shape: None,
+            stream_return_shape: None,
             sensitivity_body: Vec::new(),
             tree,
-            dims: dims.clone(),
-            scopes: vec![Scope {
-                entries: Vec::new(),
-            }],
+            session,
+            dims,
+            names: Names {
+                scopes: vec![Scope {
+                    entries: Vec::new(),
+                }],
+                local_constants: HashMap::default(),
+            },
             state,
             type_aliases,
-            local_constants: HashMap::default(),
             body,
         }
     }
 
+    /// Declare the locals that the array locator methods of the bound
+    /// expressions use (see [`locators`]).
+    pub(super) fn flush_locator_locals(&mut self) {
+        if let Some(sink) = &self.dims.locator_locals {
+            for local in sink.take() {
+                // A call bound again declares the same locals.
+                if !self
+                    .state
+                    .locals
+                    .iter()
+                    .any(|known| known.name == local.name)
+                {
+                    self.state.locals.push(local);
+                }
+            }
+        }
+    }
+
     fn push_scope(&mut self) {
-        self.scopes.push(Scope {
+        self.names.scopes.push(Scope {
             entries: Vec::new(),
         });
     }
 
     fn pop_scope(&mut self) {
-        let Some(scope) = self.scopes.pop() else {
+        let Some(scope) = self.names.scopes.pop() else {
             return;
         };
         for entry in scope.entries.into_iter().rev() {
@@ -178,10 +475,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             match entry.shadowed_literal {
                 Some(value) => {
-                    self.local_constants.insert(entry.source.clone(), value);
+                    self.names
+                        .local_constants
+                        .insert(entry.source.clone(), value);
                 }
                 None => {
-                    self.local_constants.remove(&entry.source);
+                    self.names.local_constants.remove(&entry.source);
                 }
             }
             match entry.shadowed_parameter_value {
@@ -231,11 +530,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 scoped_type(r#type, &self.dims.const_env),
                 &const_functions::Environment {
                     constants: &*self.dims.const_env,
-                    functions: &self.tree.state.const_functions,
+                    functions: &self.tree.functions,
                 },
             ),
         });
-        self.scopes
+        self.names
+            .scopes
             .last_mut()
             .expect("a body always has a scope")
             .entries
@@ -262,7 +562,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     (key, value)
                 })
                 .collect(),
-            shadowed_literal: self.local_constants.remove(source),
+            shadowed_literal: self.names.local_constants.remove(source),
             shadowed_parameter_value: self.dims.parameter_values.remove(source),
             shadowed_dimensions: self.dims.remove(source),
             shadowed_signedness: self.dims.expression_signedness.remove(source),
@@ -275,9 +575,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// it (IEEE 1800-2023 8.9).
     fn enter_class_scope(&mut self, class: &classes::Class) {
         self.dims.class_scope = Some(class.name.clone());
-        for property in &class.properties {
-            let entry = self.take_binding(&property.name, None, 0);
-            self.scopes
+        // The name of a property of unpacked structure type, whose members
+        // are properties named by their member paths, is hidden too.
+        let aggregates = class
+            .aggregates
+            .iter()
+            .filter(|aggregate| !aggregate.name.contains('.'))
+            .map(|aggregate| aggregate.name.as_str());
+        for name in class
+            .properties
+            .iter()
+            .map(|property| property.name.as_str())
+            .chain(aggregates)
+        {
+            let entry = self.take_binding(name, None, 0);
+            self.names
+                .scopes
                 .last_mut()
                 .expect("a body always has a scope")
                 .entries
@@ -301,7 +614,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.dims
                 .expression_signedness
                 .insert(property.name.clone(), property.r#type.is_signed());
-            self.scopes
+            self.names
+                .scopes
                 .last_mut()
                 .expect("a body always has a scope")
                 .entries
@@ -309,167 +623,45 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
-    fn lookup(&self, source: &str) -> Option<&str> {
-        for scope in self.scopes.iter().rev() {
-            if let Some(entry) = scope
-                .entries
-                .iter()
-                .rev()
-                .find(|entry| entry.source == source)
-            {
-                // A parameter in an inner block also hides an outer variable.
-                return entry.unique.as_deref();
-            }
-        }
-        None
-    }
-
-    fn rename_name(&self, name: &mut String) {
-        if let Some(unique) = self.lookup(name) {
-            *name = unique.to_string();
-        }
-    }
-
-    /// The literal value of a local parameter that `name` refers to.
-    fn local_constant(&self, name: &str) -> Option<&String> {
-        if self.lookup(name).is_some() {
-            return None;
-        }
-        self.local_constants.get(name)
-    }
-
-    fn rename_const(&self, expr: &mut ConstExpr) {
-        match expr {
-            ConstExpr::Ident(name) => match self.local_constant(name) {
-                Some(value) => *expr = ConstExpr::Literal(value.clone()),
-                None => self.rename_name(name),
-            },
-            ConstExpr::Literal(_) => {}
-            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                self.rename_const(expr);
-                self.rename_const(msb);
-                self.rename_const(lsb);
-            }
-            ConstExpr::Select { expr, bit } => {
-                self.rename_const(expr);
-                self.rename_const(bit);
-            }
-            ConstExpr::Function { args, .. } => {
-                args.iter_mut().for_each(|arg| self.rename_const(arg));
-            }
-            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
-                self.rename_const(expr)
-            }
-            ConstExpr::Binary { left, right, .. } => {
-                self.rename_const(left);
-                self.rename_const(right);
-            }
-            ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.rename_const(condition);
-                self.rename_const(then_expr);
-                self.rename_const(else_expr);
-            }
-        }
-    }
-
     fn rename_expr(&self, expr: &mut Expr) {
-        match expr {
-            Expr::Ident(name) => match self.local_constant(name) {
-                Some(value) => *expr = Expr::Literal(value.clone()),
-                None => self.rename_name(name),
-            },
-            Expr::Literal(_) => {}
-            Expr::Select { expr, msb, lsb, .. } => {
-                self.rename_expr(expr);
-                self.rename_const(msb);
-                self.rename_const(lsb);
-            }
-            Expr::Concat(parts) => parts.iter_mut().for_each(|part| self.rename_expr(part)),
-            Expr::RepeatConcat { count, parts } => {
-                self.rename_const(count);
-                parts.iter_mut().for_each(|part| self.rename_expr(part));
-            }
-            Expr::Resize { expr, .. } | Expr::Unary { expr, .. } => self.rename_expr(expr),
-            Expr::Binary { left, right, .. } => {
-                self.rename_expr(left);
-                self.rename_expr(right);
-            }
-            Expr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => {
-                self.rename_expr(condition);
-                self.rename_expr(then_expr);
-                self.rename_expr(else_expr);
-            }
-            Expr::Call { args, .. } => args
-                .iter_mut()
-                .flatten()
-                .for_each(|arg| self.rename_expr(arg)),
-            Expr::Inside { expr, items } => {
-                self.rename_expr(expr);
-                for item in items {
-                    match item {
-                        InsideItem::Value(value) => self.rename_expr(value),
-                        InsideItem::Range { low, high } => {
-                            self.rename_expr(low);
-                            self.rename_expr(high);
-                        }
-                    }
-                }
-            }
-        }
+        self.names.rename_expr(expr);
     }
 
     fn rename_lvalue(&self, lvalue: &mut LValue) {
-        match lvalue {
-            LValue::Ident(name) => self.rename_name(name),
-            LValue::Select {
-                name,
-                msb,
-                lsb,
-                array_slice_width,
-                ..
-            } => {
-                self.rename_name(name);
-                self.rename_const(msb);
-                self.rename_const(lsb);
-                if let Some(width) = array_slice_width {
-                    self.rename_const(width);
-                }
-            }
-        }
+        self.names.rename_lvalue(lvalue);
     }
 
-    fn native_value(&self, id: celox_sv_syntax::ExprId) -> Result<Expr, AnalyzerError> {
-        let mut value =
-            expression_binding::value(id, self.tree.declarations(), self.tree, &self.dims)?;
+    fn native_value(&mut self, id: celox_sv_syntax::ExprId) -> Result<Expr, AnalyzerError> {
+        let mut value = expression_binding::value(
+            id,
+            self.tree.declarations(),
+            self.tree,
+            self.session,
+            &self.dims,
+        )?;
         self.rename_expr(&mut value);
         Ok(value)
     }
 
     fn native_lvalue(
-        &self,
+        &mut self,
         id: celox_sv_syntax::ExprId,
     ) -> Result<(LValue, LValue), AnalyzerError> {
         let lowered = expression_binding::variable_lvalue(
             id,
             self.tree.declarations(),
             self.tree,
+            self.session,
             &self.dims,
         )?;
+        virtual_interfaces::check_target(&lowered)?;
         let mut renamed = lowered.clone();
         self.rename_lvalue(&mut renamed);
         Ok((lowered, renamed))
     }
 
     /// The parts of a concatenated assignment target, most significant first.
-    fn concat_lvalue(&self, root: celox_sv_syntax::ExprId) -> Converted<Option<Vec<LValue>>> {
+    fn concat_lvalue(&mut self, root: celox_sv_syntax::ExprId) -> Converted<Option<Vec<LValue>>> {
         let native = self.tree.declarations();
         let celox_sv_syntax::ExprKind::Concatenation(parts) = &native.expression(root).kind else {
             return Ok(None);
@@ -480,16 +672,28 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             if let celox_sv_syntax::ExprKind::Concatenation(items) = &native.expression(id).kind {
                 pending.extend(items.iter().rev().copied());
             } else {
-                if expression_binding::member_context(id, native, self.tree, &self.dims)?
-                    .is_some_and(|(guards, _)| !guards.is_empty())
+                if expression_binding::member_context(
+                    id,
+                    native,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                )?
+                .is_some_and(|(guards, _)| !guards.is_empty())
                 {
                     return Err(unsupported(
                         "concatenation assignment to a tagged union member",
                     ));
                 }
                 self.reject_tagged_integral_target(id)?;
-                let mut target =
-                    expression_binding::variable_lvalue(id, native, self.tree, &self.dims)?;
+                let mut target = expression_binding::variable_lvalue(
+                    id,
+                    native,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                )?;
+                virtual_interfaces::check_target(&target)?;
                 self.rename_lvalue(&mut target);
                 parts.push(target);
             }
@@ -498,12 +702,47 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     fn assignment_value(
-        &self,
+        &mut self,
         op: &str,
         nonblocking: bool,
         native: (celox_sv_syntax::ExprId, celox_sv_syntax::ExprId),
     ) -> Result<Stmt, AnalyzerError> {
         let (left, right) = native;
+        if containers::element_member(
+            left,
+            self.tree.declarations(),
+            self.tree,
+            self.session,
+            &self.dims,
+        )?
+        .is_some()
+        {
+            return Err(unsupported(
+                "assignment to a member of a dynamic container element",
+            ));
+        }
+        if let Some(mut stmt) = containers::set(
+            left,
+            right,
+            op,
+            nonblocking,
+            self.tree,
+            self.session,
+            &self.dims,
+        )? {
+            if let Stmt::Eval(expr) = &mut stmt {
+                self.rename_expr(expr);
+            }
+            return Ok(stmt);
+        }
+        if let Some(mut stmts) = self.stream_assignment(op, nonblocking, left, right)? {
+            if let [stmt] = stmts.as_mut_slice() {
+                return Ok(std::mem::replace(stmt, Stmt::Break));
+            }
+            return Err(unsupported(
+                "streaming concatenation of dynamically sized data in this assignment",
+            ));
+        }
         if let Some(parts) = self.concat_lvalue(left)? {
             if op != "=" {
                 return Err(unsupported("compound assignment to a concatenation"));
@@ -517,23 +756,63 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if op == "="
             && let Some(target) = array_compatibility::native_unpacked_shape(
                 left,
-                self.tree.declarations(),
+                self.tree,
+                self.session,
                 &self.dims,
             )
         {
             array_compatibility::check_native_unpacked_assignment(
-                &self.tree.state,
+                self.tree,
+                self.session,
                 right,
-                self.tree.declarations(),
                 &target,
                 || "assignment".into(),
                 &self.dims,
+            )?;
+        }
+        // A virtual interface is assigned or compared, not computed with
+        // (IEEE 1800-2023 25.9).
+        if op != "="
+            && let Some(ty) = virtual_interfaces::native_type(
+                self.tree,
+                self.session,
+                left,
+                self.tree.declarations(),
+                &self.dims,
+            )
+        {
+            return Err(virtual_interfaces::arithmetic(op, &ty));
+        }
+        // An element of an array or a container of virtual interfaces is
+        // given no target type below, so it is checked here (25.9).
+        if op == "="
+            && let Some(ty) = virtual_interfaces::native_type(
+                self.tree,
+                self.session,
+                left,
+                self.tree.declarations(),
+                &self.dims,
+            )
+        {
+            virtual_interfaces::check_assignment(
+                self.tree,
+                self.session,
+                right,
+                self.tree.declarations(),
+                &self.dims,
+                &ty,
             )?;
         }
         if let Some(stmt) = self.string_character_assignment(op, nonblocking, left, right)? {
             return Ok(stmt);
         }
         if let Some(stmt) = self.property_assignment(op, nonblocking, left, right)? {
+            return Ok(stmt);
+        }
+        if let Some(stmt) = self.virtual_member_assignment(op, nonblocking, left, right)? {
+            return Ok(stmt);
+        }
+        if let Some(stmt) = self.aggregate_assignment(op, nonblocking, left, right)? {
             return Ok(stmt);
         }
         if op != "=" {
@@ -543,6 +822,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if op != "="
             && expression_binding::native_string(
                 self.tree,
+                self.session,
                 left,
                 self.tree.declarations(),
                 &self.dims,
@@ -554,6 +834,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             left,
             self.tree.declarations(),
             self.tree,
+            self.session,
             &self.dims,
         )?;
         let mut rhs = if op == "="
@@ -564,6 +845,23 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 right,
                 self.tree.declarations(),
                 self.tree,
+                self.session,
+                &self.dims,
+                Some(&shape),
+            )?
+        } else if op == "="
+            && matches!(written, LValue::Select { .. })
+            && expression_binding::is_stream(right, self.tree.declarations())
+            && let Some(shape) =
+                dimensions::operand_shape(left, self.tree, self.session, &self.dims)?
+        {
+            // A stream fills the selected type, whose position may be known
+            // only at run time (IEEE 1800-2023 11.4.14).
+            expression_binding::bind_value(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
                 &self.dims,
                 Some(&shape),
             )?
@@ -573,12 +871,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.tree.declarations(),
                 &written,
                 self.tree,
+                self.session,
                 &self.dims,
             )?
         } else {
-            let value =
-                expression_binding::value(right, self.tree.declarations(), self.tree, &self.dims)?;
-            assignment_op_expr(&self.tree.state, &written, op, value, &self.dims)?
+            let value = expression_binding::value(
+                right,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+            )?;
+            assignment_op_expr(self.tree, self.session, &written, op, value, &self.dims)?
         };
         // Preserve assignment sizing before checked accesses introduce a temporary
         // (IEEE 1800-2023 11.8.2), using the selected destination width.
@@ -593,10 +897,10 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .as_ref()
             .is_some_and(|(guards, _)| !guards.is_empty())
         {
-            rhs = coerce_procedural_assignment_rhs(&self.tree.state, rhs, &written, &self.dims);
+            rhs = coerce_procedural_assignment_rhs(self.tree, rhs, &written, &self.dims);
         }
         if let Some((guards, _)) = member_context {
-            rhs = packed_structs::checked_value(guards, rhs, &self.tree.state, &self.dims)?;
+            rhs = packed_structs::checked_value(guards, rhs, self.tree, &self.dims)?;
         }
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
@@ -606,10 +910,57 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         })
     }
 
+    /// An assignment to a whole variable or member of unpacked structure
+    /// type, which writes each of its leaf variables (IEEE 1800-2023 7.2).
+    fn aggregate_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Result<Option<Stmt>, AnalyzerError> {
+        let Ok(written) = expression_binding::variable_lvalue(
+            left,
+            self.tree.declarations(),
+            self.tree,
+            self.session,
+            &self.dims,
+        ) else {
+            return Ok(None);
+        };
+        let LValue::Ident(name) = &written else {
+            return Ok(None);
+        };
+        let Some(mut parts) = unpacked_structs::targets(name, &self.dims) else {
+            return Ok(None);
+        };
+        if op != "=" {
+            return Err(unsupported(format!(
+                "operator `{op}` on an unpacked structure"
+            )));
+        }
+        let mut rhs = expression_binding::expression(
+            right,
+            self.tree.declarations(),
+            &written,
+            self.tree,
+            self.session,
+            &self.dims,
+        )?;
+        unpacked_structs::check_assignment(name, right, self.tree, self.session, &self.dims)?;
+        parts.iter_mut().for_each(|part| self.rename_lvalue(part));
+        self.rename_expr(&mut rhs);
+        Ok(Some(Stmt::AssignConcat {
+            parts,
+            rhs,
+            nonblocking,
+        }))
+    }
+
     /// `str[i] = c`, which replaces one character like `str.putc(i, c)`
     /// (IEEE 1800-2023 6.16.2).
     fn string_character_assignment(
-        &self,
+        &mut self,
         op: &str,
         nonblocking: bool,
         left: celox_sv_syntax::ExprId,
@@ -625,7 +976,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         else {
             return Ok(None);
         };
-        if !expression_binding::native_string(self.tree, *expression, native, &self.dims) {
+        if !expression_binding::native_string(
+            self.tree,
+            self.session,
+            *expression,
+            native,
+            &self.dims,
+        ) {
             return Ok(None);
         }
         let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
@@ -636,8 +993,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 "operator `{op}` on a string character"
             )));
         }
-        let index = expression_binding::value(index, native, self.tree, &self.dims)?;
-        let character = expression_binding::value(right, native, self.tree, &self.dims)?;
+        let index = expression_binding::value(index, native, self.tree, self.session, &self.dims)?;
+        let character =
+            expression_binding::value(right, native, self.tree, self.session, &self.dims)?;
         self.string_update(
             *expression,
             StringOp::Putc,
@@ -647,10 +1005,290 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         .map(Some)
     }
 
+    /// Fold the arguments of a display or write task after its first format
+    /// into that format when a later string literal is a further format: a
+    /// string literal that no conversion consumes continues the format, and
+    /// a value without a conversion of its own is written in the radix of the
+    /// task (IEEE 1800-2023 21.2.1.1).
+    fn merge_display_formats(
+        &self,
+        task: SystemTask,
+        args: &mut Vec<SystemTaskArg<Expr>>,
+        ids: &mut Vec<Option<celox_sv_syntax::ExprId>>,
+    ) {
+        let (SystemTask::Display(radix)
+        | SystemTask::Write(radix)
+        | SystemTask::Fdisplay(radix)
+        | SystemTask::Fwrite(radix)) = task
+        else {
+            return;
+        };
+        let Some(start) = template_index(task, args) else {
+            return;
+        };
+        let Some(SystemTaskArg::Str(first)) = args.get(start) else {
+            return;
+        };
+        let mut text = first.clone();
+        let mut pending = format_conversions(&text).len();
+        let mut later_format = false;
+        for arg in &args[start + 1..] {
+            match arg {
+                SystemTaskArg::Str(literal) if pending == 0 => {
+                    later_format = true;
+                    pending = format_conversions(literal).len();
+                    text.push_str(literal);
+                }
+                _ if pending > 0 => pending -= 1,
+                SystemTaskArg::Expr(value) => text.push_str(&default_conversion(
+                    expression_binding::string_value(value, &self.dims),
+                    expression_binding::real_value(value, &self.dims),
+                    radix,
+                )),
+                SystemTaskArg::Str(_) => unreachable!("an unconsumed literal is a format"),
+                SystemTaskArg::Empty => text.push_str(&default_conversion(false, false, radix)),
+            }
+        }
+        if !later_format {
+            return;
+        }
+        // The values keep their places; the further formats are folded into
+        // the first one.
+        let mut pending = format_conversions(first).len();
+        let mut kept = vec![SystemTaskArg::Str(text)];
+        let mut kept_ids = vec![ids.get(start).copied().flatten()];
+        for (position, arg) in args.iter().enumerate().skip(start + 1) {
+            match arg {
+                SystemTaskArg::Str(literal) if pending == 0 => {
+                    pending = format_conversions(literal).len();
+                }
+                arg => {
+                    pending = pending.saturating_sub(1);
+                    kept.push(arg.clone());
+                    kept_ids.push(ids.get(position).copied().flatten());
+                }
+            }
+        }
+        args.truncate(start);
+        args.extend(kept);
+        ids.truncate(start);
+        ids.extend(kept_ids);
+    }
+
+    /// Rewrite each `%p` of the format of a display or write task into a
+    /// conversion of the value it prints (IEEE 1800-2023 21.2.1.6).
+    fn rewrite_display_patterns(
+        &mut self,
+        task: SystemTask,
+        args: &mut [SystemTaskArg<Expr>],
+        ids: &[Option<celox_sv_syntax::ExprId>],
+    ) -> Result<(), AnalyzerError> {
+        let Some(template) = template_index(task, args) else {
+            return Ok(());
+        };
+        let Some(SystemTaskArg::Str(text)) = args.get(template) else {
+            return Ok(());
+        };
+        if !expression_binding::has_pattern(text.as_bytes()) {
+            return Ok(());
+        }
+        let text = text.clone();
+        let native = self.tree.declarations();
+        let rewritten = expression_binding::rewrite_template(text.as_bytes(), |index| {
+            let position = template + 1 + index;
+            Ok(match args.get_mut(position) {
+                Some(SystemTaskArg::Expr(value)) => {
+                    let id = ids
+                        .get(position)
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| unsupported("omitted %p argument"))?;
+                    let pattern = expression_binding::format_pattern(
+                        self.tree,
+                        self.session,
+                        id,
+                        value,
+                        native,
+                        &self.dims,
+                    )?;
+                    let (conversion, argument) = expression_binding::format_pattern_argument(
+                        pattern,
+                        std::mem::replace(value, Expr::Literal("0".into())),
+                        &self.dims,
+                    );
+                    *value = argument;
+                    conversion
+                }
+                // A string literal prints in quotes.
+                Some(SystemTaskArg::Str(literal)) => {
+                    *literal = format!("\\\"{literal}\\\"");
+                    b"%s"
+                }
+                Some(SystemTaskArg::Empty) | None => b"%0d",
+            })
+        })?;
+        args[template] = SystemTaskArg::Str(
+            String::from_utf8(rewritten).map_err(|_| unsupported("non-UTF-8 format"))?,
+        );
+        Ok(())
+    }
+
+    /// `output = value` for the string `value` of `$sformat`, which assigns
+    /// its output as a string literal is assigned (IEEE 1800-2023 21.3.3,
+    /// 5.9).
+    fn format_assignment(
+        &mut self,
+        output: celox_sv_syntax::ExprId,
+        value: Expr,
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
+        let native = self.tree.declarations();
+        let property = expression_binding::object_property(
+            self.tree,
+            self.session,
+            output,
+            native,
+            &self.dims,
+        )?;
+        let string = match &property {
+            Some((property, _)) => {
+                property.field.handle == Some(system_functions::HandleProperty::String)
+            }
+            None => expression_binding::native_string(
+                self.tree,
+                self.session,
+                output,
+                native,
+                &self.dims,
+            ),
+        };
+        // An integral output takes the string as a string literal assigned
+        // to it (IEEE 1800-2023 21.3.3, 5.9): its characters right-justified,
+        // the leftmost ones dropped when they do not fit, zeros on the left.
+        let (mut stmts, value) = if string {
+            (Vec::new(), value)
+        } else {
+            self.string_bits(output, value)?
+        };
+        if let Some((property, receiver)) = property {
+            let handle = expression_binding::object_receiver(
+                self.tree,
+                self.session,
+                receiver,
+                native,
+                &self.dims,
+            )?;
+            stmts.push(self.property_store(&property, handle, "=", value)?);
+            return Ok(stmts);
+        }
+        let (_, lhs) = self.native_lvalue(output)?;
+        let mut rhs = value;
+        self.rename_expr(&mut rhs);
+        stmts.push(Stmt::Assign {
+            lhs,
+            rhs,
+            nonblocking: false,
+        });
+        Ok(stmts)
+    }
+
+    /// The statements that put the bits of string `value` into a hidden
+    /// local of the integral type of `output`, and that local: each
+    /// character in turn shifts in from the right, so the last ones remain.
+    fn string_bits(
+        &mut self,
+        output: celox_sv_syntax::ExprId,
+        value: Expr,
+    ) -> Result<(Vec<Stmt>, Expr), AnalyzerError> {
+        let current = expression_binding::value(
+            output,
+            self.tree.declarations(),
+            self.tree,
+            self.session,
+            &self.dims,
+        )?;
+        if expression_binding::real_value(&current, &self.dims) {
+            return Err(unsupported("`$sformat` output that is not a string"));
+        }
+        let ty = dimensions::bound_bits_type(self.tree, &current, &self.dims)
+            .ok_or_else(|| unsupported("`$sformat` output that is not a string"))?;
+        let mut bits = Type::new(TypeKind::Logic);
+        if ty.width > 1 {
+            bits.packed_ranges = vec![PackedRange::new(
+                ConstExpr::Literal((ty.width - 1).to_string()),
+                ConstExpr::Literal("0".into()),
+            )];
+        }
+        let (text_source, text) =
+            self.hidden(type_binding::builtin_type("string", None).expect("a builtin type"));
+        let (bits_source, bits) = self.hidden(bits);
+        let (_, index) =
+            self.hidden(type_binding::builtin_type("int", None).expect("a builtin type"));
+        let _ = text_source;
+        let mut value = value;
+        self.rename_expr(&mut value);
+        let string = |op, args: Vec<Expr>| expression_binding::string_call(op, args);
+        let character = Expr::Binary {
+            left: Box::new(string(
+                StringOp::Getc,
+                vec![Expr::Ident(text.clone()), Expr::Ident(index.clone())],
+            )),
+            op: BinaryOp::BitAnd,
+            right: Box::new(Expr::Literal("8'hff".into())),
+        };
+        let stmts = vec![
+            Stmt::Assign {
+                lhs: LValue::Ident(text.clone()),
+                rhs: value,
+                nonblocking: false,
+            },
+            Stmt::Assign {
+                lhs: LValue::Ident(bits.clone()),
+                rhs: Expr::Literal("0".into()),
+                nonblocking: false,
+            },
+            Stmt::Loop {
+                kind: LoopKind::For,
+                init: vec![Stmt::Assign {
+                    lhs: LValue::Ident(index.clone()),
+                    rhs: Expr::Literal("0".into()),
+                    nonblocking: false,
+                }],
+                condition: Some(Expr::Binary {
+                    left: Box::new(Expr::Ident(index.clone())),
+                    op: BinaryOp::Lt,
+                    right: Box::new(string(StringOp::Len, vec![Expr::Ident(text.clone())])),
+                }),
+                step: vec![Stmt::Assign {
+                    lhs: LValue::Ident(index.clone()),
+                    rhs: Expr::Binary {
+                        left: Box::new(Expr::Ident(index.clone())),
+                        op: BinaryOp::Add,
+                        right: Box::new(Expr::Literal("1".into())),
+                    },
+                    nonblocking: false,
+                }],
+                body: vec![Stmt::Assign {
+                    lhs: LValue::Ident(bits.clone()),
+                    rhs: Expr::Binary {
+                        left: Box::new(Expr::Binary {
+                            left: Box::new(Expr::Ident(bits.clone())),
+                            op: BinaryOp::Shl,
+                            right: Box::new(Expr::Literal("8".into())),
+                        }),
+                        op: BinaryOp::BitOr,
+                        right: Box::new(character),
+                    },
+                    nonblocking: false,
+                }],
+            },
+        ];
+        Ok((stmts, Expr::Ident(bits_source)))
+    }
+
     /// An assignment to a property of a class object: `h.p = v`, or `p = v`
     /// inside a method of its class (IEEE 1800-2023 8.5).
     fn property_assignment(
-        &self,
+        &mut self,
         op: &str,
         nonblocking: bool,
         left: celox_sv_syntax::ExprId,
@@ -658,39 +1296,66 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     ) -> Result<Option<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
         let Some((property, receiver)) =
-            expression_binding::object_property(self.tree, left, native, &self.dims)?
+            expression_binding::object_property(self.tree, self.session, left, native, &self.dims)?
         else {
             return Ok(None);
         };
         if nonblocking {
             return Err(unsupported("nonblocking assignment to a class property"));
         }
-        let handle = expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
+        let handle = expression_binding::object_receiver(
+            self.tree,
+            self.session,
+            receiver,
+            native,
+            &self.dims,
+        )?;
         let target = dimensions_from_type(&property.r#type);
-        let bind = |right| {
-            expression_binding::bind_value(right, native, self.tree, &self.dims, Some(&target))
+        let bind = |session: &mut Session, right| {
+            expression_binding::bind_value(
+                right,
+                native,
+                self.tree,
+                session,
+                &self.dims,
+                Some(&target),
+            )
         };
+        if let Some(container) = property.r#type.container.as_deref() {
+            if op != "=" {
+                return Err(unsupported("compound assignment to a container property"));
+            }
+            let value =
+                containers::assignment(right, self.tree, self.session, &self.dims, container)?;
+            return self.property_store(&property, handle, op, value).map(Some);
+        }
         let mut value = match property.r#type.class() {
             Some(class) if op == "=" => {
                 match expression_binding::object_constructor(
-                    self.tree, right, native, &self.dims, class,
+                    self.tree,
+                    self.session,
+                    right,
+                    native,
+                    &self.dims,
+                    class,
                 )? {
                     Some(call) => call,
                     None => {
                         expression_binding::check_handle_assignment(
                             self.tree,
+                            self.session,
                             right,
                             native,
                             &self.dims,
                             class,
                             || format!("assignment to property `{}`", property.name),
                         )?;
-                        bind(right)?
+                        bind(self.session, right)?
                     }
                 }
             }
-            _ if op == "=" => bind(right)?,
-            _ => expression_binding::value(right, native, self.tree, &self.dims)?,
+            _ if op == "=" => bind(self.session, right)?,
+            _ => expression_binding::value(right, native, self.tree, self.session, &self.dims)?,
         };
         if property.field.handle == Some(system_functions::HandleProperty::String) {
             if op != "=" {
@@ -699,6 +1364,110 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             value = expression_binding::string_operand(value, &self.dims);
         }
         self.property_store(&property, handle, op, value).map(Some)
+    }
+
+    /// An assignment to a member of the interface instance that a virtual
+    /// interface denotes, `h.m = v` or `h.m <= v` (IEEE 1800-2023 25.9).
+    fn virtual_member_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Result<Option<Stmt>, AnalyzerError> {
+        let native = self.tree.declarations();
+        let (handle, ty, member, selected) = match virtual_interfaces::native_member(
+            self.tree,
+            self.session,
+            left,
+            native,
+            &self.dims,
+        ) {
+            Some((handle, ty, member)) => (handle, ty, member, None),
+            None => match virtual_interfaces::native_selected_member(
+                self.tree,
+                self.session,
+                left,
+                native,
+                &self.dims,
+            ) {
+                // The select is bound against the member's template.
+                Some((handle, ty, member)) => {
+                    let lowered = expression_binding::variable_lvalue(
+                        left,
+                        native,
+                        self.tree,
+                        self.session,
+                        &self.dims,
+                    )?;
+                    let mut renamed = lowered.clone();
+                    self.rename_lvalue(&mut renamed);
+                    (handle, ty, member, Some((lowered, renamed)))
+                }
+                None => return Ok(None),
+            },
+        };
+        let (found, _) = virtual_interfaces::member(self.session, &ty, &member)?;
+        virtual_interfaces::check_write(self.session, &ty, &member)?;
+        if found.is_net {
+            return Err(unsupported(format!(
+                "procedural assignment to net `{member}` through a virtual interface"
+            )));
+        }
+        let target = dimensions_from_type(&found.r#type);
+        let mut value = match (&selected, op) {
+            (Some((written, _)), "=") => expression_binding::expression(
+                right,
+                native,
+                written,
+                self.tree,
+                self.session,
+                &self.dims,
+            )?,
+            (None, "=") => expression_binding::bind_value(
+                right,
+                native,
+                self.tree,
+                self.session,
+                &self.dims,
+                Some(&target),
+            )?,
+            _ => expression_binding::value(right, native, self.tree, self.session, &self.dims)?,
+        };
+        let mut handle =
+            expression_binding::value(handle, native, self.tree, self.session, &self.dims)?;
+        self.rename_expr(&mut handle);
+        self.rename_expr(&mut value);
+        let template = virtual_interfaces::template(&ty.interface, &member);
+        let stmt =
+            virtual_interfaces::dispatch(self.session, handle, &ty, &member, |session, signal| {
+                let lhs = match &selected {
+                    Some((_, lhs @ LValue::Select { name, .. })) if *name == template => {
+                        let mut lhs = lhs.clone();
+                        if let LValue::Select { name, .. } = &mut lhs {
+                            *name = signal;
+                        }
+                        lhs
+                    }
+                    Some(_) => {
+                        return Err(unsupported(format!(
+                            "assignment to a select of `{member}` through a virtual interface"
+                        )));
+                    }
+                    None => LValue::Ident(signal),
+                };
+                let rhs = if op == "=" {
+                    value.clone()
+                } else {
+                    assignment_op_expr(self.tree, session, &lhs, op, value.clone(), &self.dims)?
+                };
+                Ok(vec![Stmt::Assign {
+                    lhs,
+                    rhs,
+                    nonblocking,
+                }])
+            })?;
+        Ok(Some(stmt))
     }
 
     /// `h.p op value`: a store of `value` into property `property` of the
@@ -746,13 +1515,52 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// unqualified `m(args)` inside a method of its class (IEEE 1800-2023
     /// 8.10).
     fn method_call_statement(
-        &self,
+        &mut self,
         root: celox_sv_syntax::ExprId,
     ) -> Result<Option<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
         if let Some(mut call) =
-            expression_binding::object_rand_mode_call(self.tree, root, native, &self.dims, true)?
+            processes::value(self.tree, self.session, root, native, &self.dims, true)?
         {
+            self.rename_expr(&mut call);
+            return Ok(Some(Stmt::Eval(call)));
+        }
+        if let Some(mut call) =
+            semaphores::value(self.tree, self.session, root, native, &self.dims, true)?
+        {
+            self.rename_expr(&mut call);
+            let stmt = Stmt::Eval(call);
+            if events::blocks(&stmt) {
+                self.allow_timing("semaphore get")?;
+            }
+            return Ok(Some(stmt));
+        }
+        if let Some(mut call) =
+            mailboxes::value(self.tree, self.session, root, native, &self.dims, true)?
+        {
+            self.rename_expr(&mut call);
+            let stmt = Stmt::Eval(call);
+            if events::blocks(&stmt) {
+                self.allow_timing("mailbox put, get or peek")?;
+            }
+            return Ok(Some(stmt));
+        }
+        if let Some(mut call) = expression_binding::object_constraint_mode_call(
+            self.tree,
+            self.session,
+            root,
+            native,
+            &self.dims,
+            true,
+        )?
+        .or(expression_binding::object_rand_mode_call(
+            self.tree,
+            self.session,
+            root,
+            native,
+            &self.dims,
+            true,
+        )?) {
             self.rename_expr(&mut call);
             return Ok(Some(match call {
                 Expr::Call {
@@ -769,23 +1577,40 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
         let call = match native.expression(root).kind {
             celox_sv_syntax::ExprKind::Call { expression, .. } => {
-                if expression_binding::object_method(self.tree, expression, native, &self.dims)?
-                    .is_none()
+                if expression_binding::object_method(
+                    self.tree,
+                    self.session,
+                    expression,
+                    native,
+                    &self.dims,
+                )?
+                .is_none()
                 {
                     return Ok(None);
                 }
-                expression_binding::value(root, native, self.tree, &self.dims)?
+                expression_binding::value(root, native, self.tree, self.session, &self.dims)?
             }
             _ => {
-                let Some((name, formals, receiver)) =
-                    expression_binding::object_method(self.tree, root, native, &self.dims)?
+                let Some((name, formals, receiver)) = expression_binding::object_method(
+                    self.tree,
+                    self.session,
+                    root,
+                    native,
+                    &self.dims,
+                )?
                 else {
                     return Ok(None);
                 };
                 let mut args = match receiver {
-                    expression_binding::ObjectReceiver::Handle(receiver) => vec![Some(
-                        expression_binding::value(receiver, native, self.tree, &self.dims)?,
-                    )],
+                    expression_binding::ObjectReceiver::Handle(receiver) => {
+                        vec![Some(expression_binding::value(
+                            receiver,
+                            native,
+                            self.tree,
+                            self.session,
+                            &self.dims,
+                        )?)]
+                    }
                     expression_binding::ObjectReceiver::This => {
                         vec![Some(expression_binding::object_this())]
                     }
@@ -798,7 +1623,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     return Err(unsupported("srandom requires a seed argument"));
                 }
                 args.resize(
-                    formals + usize::from(receiver != expression_binding::ObjectReceiver::Static),
+                    formals.len()
+                        + usize::from(receiver != expression_binding::ObjectReceiver::Static),
                     None,
                 );
                 Expr::Call {
@@ -828,21 +1654,30 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// `string = op(string, args)`: a method that updates the string it is
     /// called on.
     fn string_update(
-        &self,
+        &mut self,
         string: celox_sv_syntax::ExprId,
         op: StringOp,
         args: Vec<Expr>,
         nonblocking: bool,
     ) -> Result<Stmt, AnalyzerError> {
         let native = self.tree.declarations();
-        if let Some((property, receiver)) =
-            expression_binding::object_property(self.tree, string, native, &self.dims)?
-        {
+        if let Some((property, receiver)) = expression_binding::object_property(
+            self.tree,
+            self.session,
+            string,
+            native,
+            &self.dims,
+        )? {
             if nonblocking {
                 return Err(unsupported("nonblocking assignment to a class property"));
             }
-            let handle =
-                expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
+            let handle = expression_binding::object_receiver(
+                self.tree,
+                self.session,
+                receiver,
+                native,
+                &self.dims,
+            )?;
             let receiver = (op == StringOp::Putc).then(|| {
                 classes::object_call(
                     system_functions::ObjectOp::Load(property.field),
@@ -875,8 +1710,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         })
     }
 
-    fn reject_tagged_integral_target(&self, root: celox_sv_syntax::ExprId) -> Converted<()> {
-        if dimensions::operand_shape(root, self.tree, &self.dims)?.is_some_and(|ty| {
+    fn reject_tagged_integral_target(&mut self, root: celox_sv_syntax::ExprId) -> Converted<()> {
+        if dimensions::operand_shape(root, self.tree, self.session, &self.dims)?.is_some_and(|ty| {
             ty.members
                 .first()
                 .is_some_and(packed_structs::PackedMember::is_tagged)
@@ -886,58 +1721,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         Ok(())
     }
 
-    fn inc_or_dec(&self, root: celox_sv_syntax::ExprId) -> Result<Stmt, AnalyzerError> {
+    /// The statements of `id` used as a statement, when it is an increment
+    /// or decrement.
+    fn update_statement(&mut self, id: celox_sv_syntax::ExprId) -> Converted<Option<Vec<Stmt>>> {
         let celox_sv_syntax::ExprKind::Unary {
             operator,
             expression,
             ..
-        } = &self.tree.declarations().expression(root).kind
+        } = &self.tree.declarations().expression(id).kind
         else {
-            return Err(unsupported("increment or decrement expression"));
+            return Ok(None);
         };
-        let op = match operator.as_str() {
-            "++" => "+=",
-            "--" => "-=",
-            _ => return Err(unsupported("increment or decrement operator")),
-        };
-        let native = self.tree.declarations();
-        if let Some((property, receiver)) =
-            expression_binding::object_property(self.tree, *expression, native, &self.dims)?
-        {
-            if property.field.handle.is_some() {
-                return Err(unsupported(format!("operator `{operator}` on a handle")));
-            }
-            let handle =
-                expression_binding::object_receiver(self.tree, receiver, native, &self.dims)?;
-            return self.property_store(&property, handle, op, Expr::Literal("1".into()));
+        if !matches!(operator.as_str(), "++" | "--") {
+            return Ok(None);
         }
-        self.reject_tagged_integral_target(*expression)?;
-        let (written, lhs) = self.native_lvalue(*expression)?;
-        let mut rhs = assignment_op_expr(
-            &self.tree.state,
-            &written,
-            op,
-            Expr::Literal("1".into()),
-            &self.dims,
-        )?;
-        if let Some((guards, _)) =
-            expression_binding::member_context(*expression, native, self.tree, &self.dims)?
-        {
-            rhs = packed_structs::checked_value(guards, rhs, &self.tree.state, &self.dims)?;
-        }
-        self.rename_expr(&mut rhs);
-        Ok(Stmt::Assign {
-            lhs,
-            rhs,
-            nonblocking: false,
-        })
+        let increment = operator == "++";
+        let mut stmts = self.effects(&[*expression])?;
+        self.update(id, *expression, None, increment, &mut stmts)?;
+        Ok(Some(stmts))
     }
 
     fn native_statement_leaf(
         &mut self,
         statement: &celox_sv_syntax::StatementKind,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
-        use celox_sv_syntax::{ExprKind, StatementKind};
+        use celox_sv_syntax::StatementKind;
         match statement {
             StatementKind::Assignment {
                 left,
@@ -955,25 +1763,76 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         "native assignment operator mode disagrees".into(),
                     ));
                 }
-                Ok(vec![self.assignment_value(
+                let mut stmts = self.effects(&[*left, *right])?;
+                if let Some(assignment) = self.stream_assignment(
+                    if *nonblocking { "=" } else { operator },
+                    *nonblocking,
+                    *left,
+                    *right,
+                )? {
+                    stmts.extend(assignment);
+                    return Ok(stmts);
+                }
+                if let Some(assignment) =
+                    self.aggregate_property_assignment(operator, *nonblocking, *left, *right)?
+                {
+                    stmts.extend(assignment);
+                    return Ok(stmts);
+                }
+                if let Some(assignment) =
+                    self.property_select_assignment(operator, *nonblocking, *left, *right)?
+                {
+                    stmts.extend(assignment);
+                    return Ok(stmts);
+                }
+                stmts.push(self.assignment_value(
                     if *nonblocking { "=" } else { operator },
                     *nonblocking,
                     (*left, *right),
-                )?])
+                )?);
+                Ok(stmts)
             }
-            StatementKind::Expression(id) => match &self.tree.declarations().expression(*id).kind {
-                ExprKind::Unary { operator, .. } if matches!(operator.as_str(), "++" | "--") => {
-                    Ok(vec![self.inc_or_dec(*id)?])
+            StatementKind::Expression(id) => {
+                if let Some(stmts) = self.update_statement(*id)? {
+                    return Ok(stmts);
                 }
-                _ => self.subroutine_call_statement(*id),
-            },
+                let mut stmts = self.effects(&[*id])?;
+                stmts.extend(self.subroutine_call_statement(*id)?);
+                Ok(stmts)
+            }
             StatementKind::Assertion { .. } => Err(unsupported("concurrent assertion")),
             StatementKind::WaitFork => {
                 self.allow_timing("wait fork statement")?;
                 Ok(vec![Stmt::WaitFork])
             }
             StatementKind::WaitOrder { .. } => Err(unsupported("wait order statement")),
-            StatementKind::EventTrigger(_) => Err(unsupported("event trigger")),
+            StatementKind::EventTrigger {
+                nonblocking,
+                control,
+                target,
+            } => {
+                if control.is_some() {
+                    return Err(unsupported("delayed nonblocking event trigger"));
+                }
+                if !events::is_handle(
+                    self.tree,
+                    self.session,
+                    *target,
+                    self.tree.declarations(),
+                    &self.dims,
+                ) {
+                    return Err(unsupported(
+                        "event trigger of a value that is not a named event",
+                    ));
+                }
+                let event = self.native_value(*target)?;
+                let op = if *nonblocking {
+                    celox_design::ProcessOp::TriggerNonblocking
+                } else {
+                    celox_design::ProcessOp::Trigger
+                };
+                Ok(vec![Stmt::Eval(events::call(op, vec![event]))])
+            }
             StatementKind::ProceduralAssign(_) | StatementKind::ProceduralRelease(_) => {
                 Err(unsupported("procedural continuous assignment"))
             }
@@ -1043,6 +1902,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let signals = type_binding::local_signals(
             native,
             self.tree,
+            self.session,
             &self.dims.const_env,
             &self.type_aliases,
             None,
@@ -1061,7 +1921,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             // A declaration may not repeat a name of its own scope, such as
             // a subroutine argument (IEEE 1800-2023 6.21).
-            let scope = self.scopes.last().expect("a body always has a scope");
+            let scope = self.names.scopes.last().expect("a body always has a scope");
             if scope
                 .entries
                 .iter()
@@ -1072,8 +1932,22 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     signal.name()
                 )));
             }
+            let automatic = match native.lifetime.as_deref() {
+                Some("automatic") => true,
+                Some("static") => false,
+                _ => self.automatic,
+            };
             let init = match assignment.value {
                 Some(root) => {
+                    let effects = self.effects(&[root])?;
+                    // A static variable is initialized once, before any
+                    // process starts (IEEE 1800-2023 6.21).
+                    if !automatic && !effects.is_empty() {
+                        return Err(unsupported(
+                            "increment or decrement in a static variable initializer",
+                        ));
+                    }
+                    stmts.extend(effects);
                     let target = LValue::Ident(signal.name().to_string());
                     let mut scoped = self.dims.clone();
                     scoped.insert(
@@ -1085,31 +1959,170 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         self.tree.declarations(),
                         &target,
                         self.tree,
+                        self.session,
                         &scoped,
                     )?;
                     self.rename_expr(&mut init);
                     Some(init)
                 }
+                // Each declaration of an event creates a synchronization
+                // object (IEEE 1800-2023 15.5).
+                None if events::is_event(signal.r#type()) => Some(events::new_event()),
+                None if signal.r#type().kind() == TypeKind::Event => {
+                    return Err(unsupported("array of named events"));
+                }
                 None => None,
             };
+            let implicit_event = assignment.value.is_none() && init.is_some();
+            if signal.r#type().unpacked_struct().is_some() {
+                let explicit = native.lifetime.as_deref() == Some("static");
+                stmts.extend(self.aggregate_local(
+                    &signal,
+                    assignment.value,
+                    init,
+                    automatic,
+                    explicit,
+                )?);
+                continue;
+            }
             let name = self.declare(signal.name(), signal.r#type().clone());
             if signal.is_const {
                 let mut shape = self.dims.get(signal.name()).unwrap().clone();
                 shape.randomizable = false;
                 self.dims.insert(signal.name().to_string(), shape);
             }
-            let automatic = match native.lifetime.as_deref() {
-                Some("automatic") => true,
-                Some("static") => false,
-                _ => self.automatic,
-            };
             if !automatic {
+                // A static event is created once, before any procedure runs,
+                // whatever the procedure that declares it.
+                if native.lifetime.as_deref() == Some("static") || implicit_event {
+                    self.state.explicit_statics.insert(name.clone());
+                }
                 let r#type = scoped_type(signal.r#type().clone(), &self.dims.const_env);
                 self.state.statics.push((name.clone(), r#type));
             }
             stmts.push(Stmt::Local { name, init });
         }
         Ok(stmts)
+    }
+
+    /// A local of unpacked structure type: its leaf variables, then the
+    /// assignment of its initializer.
+    fn aggregate_local(
+        &mut self,
+        signal: &crate::ast::Signal,
+        root: Option<celox_sv_syntax::ExprId>,
+        init: Option<Expr>,
+        automatic: bool,
+        explicit: bool,
+    ) -> Result<Vec<Stmt>, AnalyzerError> {
+        if signal.is_const {
+            return Err(unsupported("const variable of unpacked structure type"));
+        }
+        if let Some(root) = root {
+            let aggregate = signal
+                .r#type()
+                .unpacked_struct()
+                .expect("an unpacked structure local");
+            unpacked_structs::check_value(
+                aggregate,
+                root,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+            )?;
+        }
+        let leaves = self.declare_aggregate(signal.name(), signal.r#type())?;
+        // A static variable is initialized once, not on each entry: each leaf
+        // keeps its part of the initializer, which is hoisted with it.
+        let aggregate = signal
+            .r#type()
+            .unpacked_struct()
+            .expect("an unpacked structure local")
+            .clone();
+        let mut init = init;
+        let mut parts = match init.take() {
+            Some(value)
+                if !automatic && unpacked_structs::leaf_parts(&aggregate, &value).is_some() =>
+            {
+                unpacked_structs::leaf_parts(&aggregate, &value)
+                    .expect("checked by the guard")
+                    .into_iter()
+                    .map(Some)
+                    .collect()
+            }
+            Some(_) if !automatic => {
+                return Err(unsupported(
+                    "initializer of a static variable of unpacked structure type that is not a pattern or variable",
+                ));
+            }
+            other => {
+                init = other;
+                vec![None; leaves.len()]
+            }
+        };
+        let mut stmts = Vec::new();
+        for ((name, r#type), part) in leaves.iter().zip(parts.drain(..)) {
+            if !automatic {
+                // An explicitly static member of a repeating process is
+                // initialized before simulation, like a scalar.
+                if explicit {
+                    self.state.explicit_statics.insert(name.clone());
+                }
+                let r#type = scoped_type(r#type.clone(), &self.dims.const_env);
+                self.state.statics.push((name.clone(), r#type));
+            }
+            stmts.push(Stmt::Local {
+                name: name.clone(),
+                init: part,
+            });
+        }
+        if let Some(rhs) = init {
+            stmts.push(Stmt::AssignConcat {
+                parts: leaves
+                    .into_iter()
+                    .map(|(name, _)| LValue::Ident(name))
+                    .collect(),
+                rhs,
+                nonblocking: false,
+            });
+        }
+        Ok(stmts)
+    }
+
+    /// Declare a variable of unpacked structure type: hide the names of it
+    /// and its members, then declare its leaf variables. Returns their unique
+    /// names and types, first declared first.
+    pub(super) fn declare_aggregate(
+        &mut self,
+        source: &str,
+        r#type: &Type,
+    ) -> Result<Vec<(String, Type)>, AnalyzerError> {
+        if !r#type.unpacked_ranges.is_empty() {
+            return Err(unsupported("array of unpacked structures"));
+        }
+        for (name, ty) in unpacked_structs::aggregates(source, r#type) {
+            let entry = self.take_binding(&name, None, 0);
+            self.dims.insert(name.clone(), dimensions_from_type(&ty));
+            self.names
+                .scopes
+                .last_mut()
+                .expect("a body always has a scope")
+                .entries
+                .push(entry);
+        }
+        let aggregate = r#type
+            .unpacked_struct()
+            .expect("an unpacked structure type")
+            .clone();
+        Ok(aggregate
+            .leaves()
+            .into_iter()
+            .map(|leaf| {
+                let name = self.declare(&leaf.name(source), leaf.r#type.clone());
+                (name, leaf.r#type)
+            })
+            .collect())
     }
 
     /// Make the parameters of a declaration in the body known as constants.
@@ -1128,6 +2141,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         parameters::parameters_from_native(
             &authored,
             self.tree,
+            self.session,
             &mut parameters,
             true,
             &self.dims.const_env,
@@ -1140,7 +2154,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let entry = self.take_binding(name, None, parameter.packed_ranges.len());
             types.remove(name);
             if !parameters::bind_parameter(
-                &self.tree.state,
+                self.tree,
+                self.session,
                 &mut self.dims.const_env,
                 &mut types,
                 &mut self.dims.parameter_values,
@@ -1158,7 +2173,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             } else {
                 return Err(unsupported("local parameter whose value is not constant"));
             };
-            self.local_constants
+            self.names
+                .local_constants
                 .insert(name.to_string(), literal.clone());
             self.dims
                 .parameter_values
@@ -1173,7 +2189,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     .expression_signedness
                     .insert(name.to_string(), ty.signed);
             }
-            self.scopes
+            self.names
+                .scopes
                 .last_mut()
                 .expect("a body always has a scope")
                 .entries
@@ -1187,14 +2204,31 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         root: celox_sv_syntax::ExprId,
     ) -> Result<Vec<Stmt>, AnalyzerError> {
         let native = self.tree.declarations();
+        if let Some((mut value, _)) =
+            array_reductions::bind(root, native, self.tree, self.session, &self.dims)?
+        {
+            self.rename_expr(&mut value);
+            return Ok(vec![Stmt::Eval(value)]);
+        }
+        if let Some(mut value) =
+            containers::value(root, native, self.tree, self.session, &self.dims, true)?
+        {
+            self.rename_expr(&mut value);
+            return Ok(vec![Stmt::Eval(value)]);
+        }
         if let celox_sv_syntax::ExprKind::Call {
             expression,
             arguments,
         } = &native
             .expression(expression_binding::ungroup(root, native))
             .kind
-            && let Some((op, string)) =
-                expression_binding::string_method(self.tree, *expression, native, &self.dims)
+            && let Some((op, string)) = expression_binding::string_method(
+                self.tree,
+                self.session,
+                *expression,
+                native,
+                &self.dims,
+            )
         {
             let (_, count) = StringOp::method(&op.to_string()).expect("a method name");
             let args = arguments
@@ -1204,7 +2238,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .filter(|args| args.len() == count)
                 .ok_or_else(|| unsupported(format!("arguments of string method `{op}`")))?
                 .into_iter()
-                .map(|arg| expression_binding::value(arg, native, self.tree, &self.dims))
+                .map(|arg| {
+                    expression_binding::value(arg, native, self.tree, self.session, &self.dims)
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             // A method that returns a value has no effect as a statement.
             return if op.updates_receiver() {
@@ -1220,6 +2256,34 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         {
             let query_root =
                 expression_binding::call_statement_root(root, discarded, self.tree.declarations())?;
+            if discarded
+                && let Some((mut value, _)) =
+                    array_reductions::bind(query_root, native, self.tree, self.session, &self.dims)?
+            {
+                self.rename_expr(&mut value);
+                return Ok(vec![Stmt::Eval(value)]);
+            }
+            if discarded
+                && let Some(mut value) = containers::value(
+                    query_root,
+                    native,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                    true,
+                )?
+            {
+                self.rename_expr(&mut value);
+                return Ok(vec![Stmt::Eval(value)]);
+            }
+            if matches!(
+                native.expression(query_root).kind,
+                celox_sv_syntax::ExprKind::RandomizeWith { .. }
+            ) {
+                let mut call = self.native_value(query_root)?;
+                self.rename_expr(&mut call);
+                return Ok(vec![Stmt::Eval(call)]);
+            }
             if let Some(call) = self.method_call_statement(query_root)? {
                 return Ok(vec![call]);
             }
@@ -1227,9 +2291,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.tree.declarations().expression(query_root).kind
                 && matches!(
                     expression_binding::native_name(
-                        &self.tree.state,
+                        self.tree,
                         expression,
-                        self.tree.declarations()
+                        self.tree.declarations(),
                     )
                     .as_deref(),
                     Some("randomize" | "std::randomize")
@@ -1255,6 +2319,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 discarded,
                 self.tree.declarations(),
                 self.tree,
+                self.session,
                 &self.dims,
                 signatures,
             )? {
@@ -1304,8 +2369,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         // (IEEE 1800-2023 6.24.2).
         if name == "$cast"
             && !discarded
-            && let Some(cast) =
-                expression_binding::object_cast(self.tree, arguments, declarations, &self.dims)?
+            && let Some(cast) = expression_binding::object_cast(
+                self.tree,
+                self.session,
+                arguments,
+                declarations,
+                &self.dims,
+            )?
         {
             let error = Stmt::SystemTask {
                 task: SystemTask::Severity(system_functions::Severity::Error),
@@ -1326,6 +2396,136 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 else_body: vec![error],
             }]);
         }
+        // `$sformat(output, format, args...)` assigns what `$sformatf(format,
+        // args...)` returns (IEEE 1800-2023 21.3.3).
+        if name == "$sformat" {
+            if arguments.iter().any(|arg| arg.name.is_some()) {
+                return Err(unsupported("named arguments of `$sformat`"));
+            }
+            let output = arguments.first().and_then(|arg| arg.value).ok_or_else(|| {
+                AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "expected an output argument".into(),
+                }
+            })?;
+            let ids = expression_binding::format_arguments(name, &arguments[1..])?;
+            let mut values = Vec::new();
+            for &id in &ids {
+                values.push(expression_binding::bind_value(
+                    id,
+                    declarations,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                    None,
+                )?);
+            }
+            let value = expression_binding::format_call(
+                timescales::time_divisor(root, self.tree)?,
+                &ids,
+                values,
+                self.tree,
+                self.session,
+                declarations,
+                &self.dims,
+            )?;
+            return self.format_assignment(output, value);
+        }
+        // `$swrite(output, args...)` assigns what `$write(args...)` would
+        // print, in the radix of its name (IEEE 1800-2023 21.3.3).
+        if let Some(radix) = swrite_radix(name) {
+            if arguments.iter().any(|arg| arg.name.is_some()) {
+                return Err(unsupported(format!("named arguments of `{name}`")));
+            }
+            let output = arguments.first().and_then(|arg| arg.value).ok_or_else(|| {
+                AnalyzerError::InvalidSystemTfCall {
+                    name: name.into(),
+                    detail: "expected an output argument".into(),
+                }
+            })?;
+            // As for `$write`, a string literal that no conversion consumes
+            // continues the format, and a value without a conversion of its
+            // own is written in the radix of the task (21.2.1.1).
+            let mut text = Vec::new();
+            let mut ids = Vec::new();
+            let mut values = Vec::new();
+            let mut pending = 0;
+            for (position, arg) in arguments.iter().enumerate().skip(1) {
+                let id = arg
+                    .value
+                    .ok_or_else(|| AnalyzerError::InvalidSystemTfCall {
+                        name: name.into(),
+                        detail: format!("argument {} is omitted", position + 1),
+                    })?;
+                let literal = match &declarations.expression(id).kind {
+                    celox_sv_syntax::ExprKind::Literal(text) => {
+                        expression_binding::string_literal_bytes(text)
+                    }
+                    _ => None,
+                };
+                if pending == 0
+                    && let Some(literal) = literal
+                {
+                    pending = format_conversions(&String::from_utf8_lossy(&literal)).len();
+                    text.extend_from_slice(&literal);
+                    continue;
+                }
+                let value = expression_binding::bind_value(
+                    id,
+                    declarations,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                    None,
+                )?;
+                if pending > 0 {
+                    pending -= 1;
+                } else {
+                    text.extend_from_slice(
+                        default_conversion(
+                            literal.is_some()
+                                || expression_binding::string_value(&value, &self.dims),
+                            expression_binding::real_value(&value, &self.dims),
+                            radix,
+                        )
+                        .as_bytes(),
+                    );
+                }
+                ids.push(id);
+                values.push(value);
+            }
+            if expression_binding::has_pattern(&text) {
+                text = expression_binding::rewrite_format(
+                    &text,
+                    &ids,
+                    &mut values,
+                    self.tree,
+                    self.session,
+                    declarations,
+                    &self.dims,
+                )?;
+            }
+            let format = expression_binding::bytes_literal(&text);
+            let value = expression_binding::string_call(
+                StringOp::Format {
+                    ticks_per_unit: timescales::time_divisor(root, self.tree)?,
+                },
+                std::iter::once(format).chain(values).collect(),
+            );
+            return self.format_assignment(output, value);
+        }
+        if name == "$sformatf" {
+            let mut value = expression_binding::bind_value(
+                root,
+                declarations,
+                self.tree,
+                self.session,
+                &self.dims,
+                None,
+            )?;
+            self.rename_expr(&mut value);
+            return Ok(vec![Stmt::Eval(value)]);
+        }
         let task = match system_functions::check_call(
             name,
             args.as_deref(),
@@ -1341,6 +2541,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     root,
                     declarations,
                     self.tree,
+                    self.session,
                     &self.dims,
                     None,
                 )?;
@@ -1372,10 +2573,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     let text = dump_selection_name(
                         id,
                         self.tree,
+                        self.session,
                         &self.dims,
-                        &|value| self.rename_const(value),
+                        &|value| self.names.rename_const(value),
                         &|name| {
-                            self.scopes
+                            self.names
+                                .scopes
                                 .iter()
                                 .any(|scope| scope.entries.iter().any(|entry| entry.source == name))
                         },
@@ -1393,30 +2596,48 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 {
                     return Ok(SystemTaskArg::Str(text.to_string()));
                 }
-                let mut value =
-                    expression_binding::bind_value(id, declarations, self.tree, &self.dims, None)?;
-                self.rename_expr(&mut value);
+                // Renamed below, once the types of the source names have
+                // chosen the conversions of the format.
+                let value = expression_binding::bind_value(
+                    id,
+                    declarations,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                    None,
+                )?;
                 Ok(SystemTaskArg::Expr(value))
             })
             .collect::<Result<Vec<_>, AnalyzerError>>()?;
         let mut args = args;
+        // The native expression of each argument, kept in step with `args`.
+        let mut ids = arguments.iter().map(|arg| arg.value).collect::<Vec<_>>();
+        self.merge_display_formats(task, &mut args, &mut ids);
+        self.rewrite_display_patterns(task, &mut args, &ids)?;
+        for arg in &mut args {
+            if let SystemTaskArg::Expr(value) = arg {
+                self.rename_expr(value);
+            }
+        }
         // A string literal that %t converts is bound as a value: the binder
         // handles every literal form, triple quotes and escapes included.
+        let divisor = timescales::time_divisor(root, self.tree)?;
         let mut bind = |index: usize| -> Result<Option<Expr>, AnalyzerError> {
-            let Some(id) = arguments.get(index).and_then(|arg| arg.value) else {
+            let Some(id) = ids.get(index).copied().flatten() else {
                 return Ok(None);
             };
-            let mut value =
-                expression_binding::bind_value(id, declarations, self.tree, &self.dims, None)?;
-            self.rename_expr(&mut value);
+            let mut value = expression_binding::bind_value(
+                id,
+                declarations,
+                self.tree,
+                self.session,
+                &self.dims,
+                None,
+            )?;
+            self.names.rename_expr(&mut value);
             Ok(Some(value))
         };
-        scale_time_conversions(
-            task,
-            &mut args,
-            timescales::time_divisor(root, self.tree)?,
-            &mut bind,
-        )?;
+        scale_time_conversions(task, &mut args, divisor, &mut bind)?;
         // Keep Veryl's assertion calls as calls: their message arguments
         // execute even on success, unlike an SV assertion's fail action.
         Ok(vec![Stmt::SystemTask {
@@ -1440,8 +2661,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 // call's display, output or module-variable effects optional.
                 None
             } else {
-                expr_to_const(&self.tree.state, condition.clone()).and_then(|condition| {
-                    eval_ast_const_expr(&self.tree.state, &condition, &self.dims.const_env)
+                expr_to_const(self.session, condition.clone()).and_then(|condition| {
+                    eval_ast_const_expr(&self.tree.functions, &condition, &self.dims.const_env)
                 })
             };
             if let Some(value) = constant {
@@ -1466,7 +2687,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     }
 
     fn cond_predicate(
-        &self,
+        &mut self,
         predicate: &celox_sv_syntax::Predicate,
     ) -> Result<Expr, AnalyzerError> {
         let [item] = predicate.items.as_slice() else {
@@ -1479,9 +2700,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             item.expression,
             self.tree.declarations(),
             self.tree,
+            self.session,
             &self.dims,
         )?;
-        let mut condition = statements::simplify_condition(&self.tree.state, condition, &self.dims);
+        let mut condition =
+            statements::simplify_condition(self.tree, self.session, condition, &self.dims);
         self.rename_expr(&mut condition);
         Ok(condition)
     }
@@ -1489,7 +2712,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn for_header(
         &mut self,
         header: &celox_sv_syntax::ForHeader,
-    ) -> Result<(Vec<Stmt>, Option<Expr>, Vec<Stmt>), AnalyzerError> {
+    ) -> Result<ForHeader, AnalyzerError> {
         use celox_sv_syntax::{ForInitialization, ForStep};
         let mut init = Vec::new();
         match &header.initialization {
@@ -1500,11 +2723,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         group.data_type,
                         self.tree.declarations(),
                         self.tree,
+                        self.session,
                         &self.dims.const_env,
                         &self.type_aliases,
                     )?
                     .ok_or_else(|| unsupported("for-loop variable type"))?;
                     for variable in &group.variables {
+                        init.extend(self.effects(&[variable.value])?);
                         let source = instances::normalize_identifier(&variable.name.spelling);
                         let target = LValue::Ident(source.clone());
                         let mut scoped = self.dims.clone();
@@ -1514,6 +2739,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                             self.tree.declarations(),
                             &target,
                             self.tree,
+                            self.session,
                             &scoped,
                         )?;
                         self.rename_expr(&mut value);
@@ -1527,35 +2753,61 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             Some(ForInitialization::Assignments(values)) => {
                 for value in values {
-                    init.push(self.assignment_value("=", false, (value.left, value.right))?);
+                    init.extend(self.effects(&[value.left, value.right])?);
+                    match self.aggregate_property_assignment("=", false, value.left, value.right)? {
+                        Some(stmts) => init.extend(stmts),
+                        None => init.push(self.assignment_value(
+                            "=",
+                            false,
+                            (value.left, value.right),
+                        )?),
+                    }
                 }
             }
         }
-        let condition = header
-            .condition
-            .map(|id| self.native_value(id))
-            .transpose()?;
+        let (condition, prologue) = match header.condition {
+            None => (None, Vec::new()),
+            Some(id) => match self.loop_condition(id)? {
+                Some(prologue) => (None, prologue),
+                None => (Some(self.native_value(id)?), Vec::new()),
+            },
+        };
         let mut steps = Vec::new();
         for step in &header.steps {
-            steps.push(match step {
-                ForStep::Assignment { left, operator, right, .. } => self.assignment_value(operator, false, (*left, *right))?,
-                ForStep::Expression(id) => {
-                    if !matches!(&self.tree.declarations().expression(*id).kind,
-                        celox_sv_syntax::ExprKind::Unary { operator, .. } if matches!(operator.as_str(), "++" | "--")) {
-                        return Err(unsupported("subroutine call as a for-loop step"));
+            match step {
+                ForStep::Assignment {
+                    left,
+                    operator,
+                    right,
+                    ..
+                } => {
+                    steps.extend(self.effects(&[*left, *right])?);
+                    match self.aggregate_property_assignment(operator, false, *left, *right)? {
+                        Some(stmts) => steps.extend(stmts),
+                        None => {
+                            steps.push(self.assignment_value(operator, false, (*left, *right))?)
+                        }
                     }
-                    self.inc_or_dec(*id)?
                 }
-            });
+                ForStep::Expression(id) => steps.extend(
+                    self.update_statement(*id)?
+                        .ok_or_else(|| unsupported("subroutine call as a for-loop step"))?,
+                ),
+            }
         }
-        Ok((init, condition, steps))
+        Ok(ForHeader {
+            init,
+            condition,
+            prologue,
+            steps,
+        })
     }
 
     fn foreach_bound_indices(
         &mut self,
         array: String,
         variables: Vec<Option<String>>,
-    ) -> Result<Vec<(String, i128, i128)>, AnalyzerError> {
+    ) -> Result<Vec<ForeachLoop>, AnalyzerError> {
         let dimensions = self
             .dims
             .get(&array)
@@ -1580,17 +2832,84 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             let (left, right) = bounds
                 .get(position)
                 .ok_or_else(|| unsupported("foreach index beyond the array dimensions"))?;
-            let left = eval_ast_const_expr(&self.tree.state, left, &self.dims.const_env)
+            let left = eval_ast_const_expr(&self.tree.functions, left, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
-            let right = eval_ast_const_expr(&self.tree.state, right, &self.dims.const_env)
+            let right = eval_ast_const_expr(&self.tree.functions, right, &self.dims.const_env)
                 .ok_or_else(|| unsupported("foreach bound"))?;
             let name = self.declare(&variable, int_type());
-            loops.push((name, left, right));
+            loops.push(ForeachLoop::Static(name, left, right));
         }
         Ok(loops)
     }
-    fn fold_foreach(loops: Vec<(String, i128, i128)>, mut body: Vec<Stmt>) -> Vec<Stmt> {
-        for (name, left, right) in loops.into_iter().rev() {
+    fn fold_foreach(loops: Vec<ForeachLoop>, mut body: Vec<Stmt>) -> Vec<Stmt> {
+        for bound in loops.into_iter().rev() {
+            let (name, left, right) = match bound {
+                ForeachLoop::Static(name, left, right) => (name, left, right),
+                ForeachLoop::Container {
+                    array,
+                    index,
+                    layout,
+                    status,
+                } => {
+                    let index_expr = Expr::Ident(index.clone());
+                    let (init, condition, step) = if let Some(status) = status {
+                        let call = |op| {
+                            containers::call(op, layout, vec![array.clone(), index_expr.clone()])
+                        };
+                        (
+                            vec![
+                                Stmt::Local {
+                                    name: index,
+                                    init: None,
+                                },
+                                Stmt::Local {
+                                    name: status.clone(),
+                                    init: Some(call(ContainerOp::First)),
+                                },
+                            ],
+                            Expr::Ident(status.clone()),
+                            vec![Stmt::Assign {
+                                lhs: LValue::Ident(status),
+                                rhs: call(ContainerOp::Next),
+                                nonblocking: false,
+                            }],
+                        )
+                    } else {
+                        (
+                            vec![Stmt::Local {
+                                name: index.clone(),
+                                init: Some(Expr::Literal("0".into())),
+                            }],
+                            Expr::Binary {
+                                left: Box::new(index_expr.clone()),
+                                op: BinaryOp::Lt,
+                                right: Box::new(containers::call(
+                                    ContainerOp::Size,
+                                    layout,
+                                    vec![array],
+                                )),
+                            },
+                            vec![Stmt::Assign {
+                                lhs: LValue::Ident(index),
+                                rhs: Expr::Binary {
+                                    left: Box::new(index_expr),
+                                    op: BinaryOp::Add,
+                                    right: Box::new(Expr::Literal("1".into())),
+                                },
+                                nonblocking: false,
+                            }],
+                        )
+                    };
+                    body = vec![Stmt::Loop {
+                        kind: LoopKind::For,
+                        init,
+                        condition: Some(condition),
+                        step,
+                        body,
+                    }];
+                    continue;
+                }
+            };
             let index = Expr::Ident(name.clone());
             let (compare, step) = if left <= right {
                 (BinaryOp::Le, BinaryOp::Add)
@@ -1694,6 +3013,7 @@ fn attribute_reports(
 pub(super) fn subroutine_param_declarations(
     native: &celox_sv_syntax::Subroutine,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<
@@ -1707,6 +3027,7 @@ pub(super) fn subroutine_param_declarations(
     type_binding::subroutine_formals(
         native,
         tree,
+        session,
         &PackedDimensions::new(HashMap::default(), env, aliases),
     )
 }
@@ -1715,6 +3036,7 @@ pub(super) fn subroutine_param_declarations(
 /// items, in declaration order, keyed by their (qualified) names.
 pub(super) fn subroutine_argument_names(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<
@@ -1728,14 +3050,15 @@ pub(super) fn subroutine_argument_names(
     let mut names = HashMap::default();
     let mut shapes = HashMap::default();
     let mut directions = HashMap::default();
-    for item in generate::subroutine_items(tree, const_env, type_aliases)? {
-        let _interface_scope = item.interface_scope();
+    for item in generate::subroutine_items(tree, session, const_env, type_aliases)? {
+        let tree = &item.scoped(tree);
         for native_id in subroutine_owners::item(item.id, tree)? {
             let native = tree.declarations().subroutine(native_id);
-            let _constant_functions = item.enter();
+            let tree = &item.enter(tree);
             let params = subroutine_param_declarations(
                 native,
                 tree,
+                session,
                 &item.env,
                 &item.type_aliases(type_aliases),
             )?;
@@ -1753,12 +3076,13 @@ pub(super) fn subroutine_argument_names(
             names.insert(qualified.clone(), params);
             shapes.insert(qualified, param_shapes);
         }
-        for class in classes::item_classes(item.id, tree) {
-            let _constant_functions = item.enter();
+        for class in classes::item_classes(item.id, tree, session) {
+            let tree = &item.enter(tree);
             let aliases = item.type_aliases(type_aliases);
             // A specialization's methods see its parameters (8.25).
-            let (env, aliases) = classes::specializations::scope(tree, &class, &item.env, &aliases);
-            let handle = classes::handle_type(tree, &class)
+            let (env, aliases) =
+                classes::specializations::scope(session, &class, &item.env, &aliases);
+            let handle = classes::handle_type(tree, session, &class)
                 .ok_or_else(|| unsupported(format!("class `{class}`")))?;
             let mut constructor = false;
             let this = (
@@ -1767,7 +3091,7 @@ pub(super) fn subroutine_argument_names(
                 handle.clone(),
                 None,
             );
-            let mut methods = classes::declared_methods(tree, &class)?
+            let mut methods = classes::declared_methods(tree, session, &class)?
                 .into_iter()
                 .map(|(native_id, is_static)| {
                     let name = instances::normalize_identifier(
@@ -1782,7 +3106,7 @@ pub(super) fn subroutine_argument_names(
                 .collect::<Vec<_>>();
             // A class that cannot be laid out reports why where it is
             // lowered.
-            let layout = classes::class(tree, &class, &env, &aliases).ok();
+            let layout = classes::class(tree, session, &class, &env, &aliases).ok();
             if let Some(layout) = &layout {
                 methods.extend(layout.dispatched_methods().map(|method| {
                     (
@@ -1794,7 +3118,8 @@ pub(super) fn subroutine_argument_names(
             }
             for (name, native_id, is_static) in methods {
                 let native = tree.declarations().subroutine(native_id);
-                let mut params = subroutine_param_declarations(native, tree, &env, &aliases)?;
+                let mut params =
+                    subroutine_param_declarations(native, tree, session, &env, &aliases)?;
                 constructor |= native.kind == celox_sv_syntax::SubroutineKind::Constructor;
                 if !is_static {
                     params.insert(0, this.clone());
@@ -1868,6 +3193,7 @@ pub(super) fn subroutine_argument_names(
 /// bodies.
 pub(super) fn subroutines_from_scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -1875,6 +3201,7 @@ pub(super) fn subroutines_from_scope(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     subroutines_from_scope_with(
         tree,
+        session,
         const_env,
         packed_dimensions,
         parameter_literals,
@@ -1888,6 +3215,7 @@ pub(super) fn subroutines_from_scope(
 /// failing.
 pub(super) fn subroutines_from_scope_with(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -1896,6 +3224,7 @@ pub(super) fn subroutines_from_scope_with(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     subroutines_with_symbolic_parameters(
         tree,
+        session,
         const_env,
         packed_dimensions,
         parameter_literals,
@@ -1908,6 +3237,7 @@ pub(super) fn subroutines_from_scope_with(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn subroutines_with_symbolic_parameters(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -1917,10 +3247,10 @@ pub(super) fn subroutines_with_symbolic_parameters(
 ) -> Result<Vec<Subroutine>, AnalyzerError> {
     let module_type_aliases = &packed_dimensions.type_aliases;
     let mut subroutines = Vec::new();
-    let active = generate::subroutine_items(tree, const_env, module_type_aliases)?;
+    let active = generate::subroutine_items(tree, session, const_env, module_type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
-        let _interface_scope = item.interface_scope();
+        let tree = &item.scoped(tree);
         if item.is_parameter_declaration(tree.declarations()) {
             continue;
         }
@@ -1950,7 +3280,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
                 )
             };
 
-            let _constant_functions = item.enter();
+            let tree = &item.enter(tree);
             let type_aliases = item.type_aliases(module_type_aliases);
             let name = instances::normalize_identifier(
                 &tree.declarations().subroutine(native_id).name.spelling,
@@ -1958,6 +3288,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
             let lowered = lower_subroutine(
                 native_id,
                 tree,
+                session,
                 &declaration_env,
                 &type_aliases,
                 item_dimensions,
@@ -1986,14 +3317,15 @@ pub(super) fn subroutines_with_symbolic_parameters(
             }
             subroutines.push(subroutine);
         }
-        for class in classes::item_classes(item.id, tree) {
+        for class in classes::item_classes(item.id, tree, session) {
             let (item_dimensions, literals) = views.get(item);
-            let _constant_functions = item.enter();
+            let tree = &item.enter(tree);
             let type_aliases = item.type_aliases(module_type_aliases);
             match (
                 lower_class(
                     &class,
                     tree,
+                    session,
                     &item.env,
                     &type_aliases,
                     item_dimensions,
@@ -2016,7 +3348,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
     // method's dispatcher, which the declaring scope lowered for the classes
     // it saw: the scope lowers the dispatcher again, over every class it
     // sees, when the dispatcher misses one (IEEE 1800-2023 8.20).
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     for class in &imported.classes {
         for method in class.dispatched_methods() {
             let name = classes::Class::dispatcher_name(&class.name, &method.name);
@@ -2029,6 +3361,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
             };
             let targets = classes::dispatch_targets(
                 tree,
+                session,
                 &class.name,
                 &method.name,
                 const_env,
@@ -2057,7 +3390,8 @@ pub(super) fn subroutines_with_symbolic_parameters(
         let Some(cast) = imported.subroutines.iter().find(|known| known.name == name) else {
             continue;
         };
-        let targets = classes::cast_targets(tree, &class.name, const_env, module_type_aliases)?;
+        let targets =
+            classes::cast_targets(tree, session, &class.name, const_env, module_type_aliases)?;
         let covered = case_ids(&cast.body);
         if targets.iter().all(|id| covered.contains(id)) {
             continue;
@@ -2099,6 +3433,7 @@ fn case_ids(body: &[Stmt]) -> HashSet<u32> {
 pub(super) fn lower_subroutine(
     native_id: celox_sv_syntax::SubroutineId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     declaration_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     item_dimensions: &PackedDimensions,
@@ -2126,11 +3461,12 @@ pub(super) fn lower_subroutine(
         });
     let handle = class
         .map(|class| {
-            classes::handle_type(tree, &class.name)
+            classes::handle_type(tree, session, &class.name)
                 .ok_or_else(|| unsupported(format!("class `{}`", class.name)))
         })
         .transpose()?;
-    let params = subroutine_param_declarations(native, tree, declaration_env, type_aliases)?;
+    let params =
+        subroutine_param_declarations(native, tree, session, declaration_env, type_aliases)?;
     let mut formal_names = HashSet::default();
     if let Some((name, ..)) = params
         .iter()
@@ -2149,6 +3485,7 @@ pub(super) fn lower_subroutine(
             Some(type_binding::implicit_subroutine_type(
                 id,
                 tree,
+                session,
                 declaration_env,
                 type_aliases,
             )?)
@@ -2157,13 +3494,23 @@ pub(super) fn lower_subroutine(
             id,
             tree.declarations(),
             tree,
+            session,
             declaration_env,
             type_aliases,
         )?,
         None => None,
     };
+    // An event control could not tell a call of such a function from a
+    // value (IEEE 1800-2023 15.5).
+    if return_type
+        .as_ref()
+        .is_some_and(|ty| ty.kind() == TypeKind::Event)
+    {
+        return Err(unsupported("function returning an event"));
+    }
     let mut builder = BodyBuilder::new(
         tree,
+        session,
         item_dimensions,
         state,
         system_functions::Body::Subroutine,
@@ -2181,27 +3528,60 @@ pub(super) fn lower_subroutine(
         // Methods are automatic (IEEE 1800-2023 8.6).
         None => builder.automatic || class.is_some(),
     };
+    if !builder.automatic
+        && let Some((argument, ..)) = params
+            .iter()
+            .find(|(_, direction, ..)| direction.is_reference())
+    {
+        return Err(AnalyzerError::InvalidRefArgument {
+            subroutine: name.clone(),
+            argument: argument.clone(),
+            detail: "a subroutine with a static lifetime cannot pass arguments by reference \
+                     (IEEE 1800-2023 13.5.2)"
+                .into(),
+        });
+    }
     let first_static = builder.state.statics.len();
     builder.push_scope();
     if let Some(class) = class {
         builder.enter_class_scope(class);
+        // Method formals and locals may shadow properties, but not another
+        // declaration in the method's own lexical scope (8.5, 6.21).
+        builder.push_scope();
     }
     // Defaults bind in the enclosing declaration scope, before
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
         .iter()
-        .map(|(_, _, ty, default)| {
+        .map(|(formal, direction, ty, default)| {
             default
                 .map(|root| {
-                    let shape = ty.tagged_identity().map(|_| dimensions_from_type(ty));
+                    // A default of an unpacked array formal is assigned to
+                    // it like an actual (IEEE 1800-2023 7.6, 13.5.3).
+                    if !ty.unpacked_ranges.is_empty() {
+                        array_compatibility::check_native_unpacked_assignment(
+                            tree,
+                            builder.session,
+                            root,
+                            &dimensions_from_type(ty),
+                            || format!("default of `{formal}`"),
+                            &builder.dims,
+                        )?;
+                    }
+                    // The default of a container input is a container value.
+                    let shape = (ty.tagged_identity().is_some()
+                        || ty.unpacked_struct().is_some()
+                        || ty.container.is_some() && *direction == ParamDirection::Input)
+                        .then(|| dimensions_from_type(ty));
                     let mut value = expression_binding::bind_value(
                         root,
                         tree.declarations(),
                         tree,
+                        builder.session,
                         &builder.dims,
                         shape.as_ref(),
                     )?;
-                    builder.rename_expr(&mut value);
+                    builder.names.rename_expr(&mut value);
                     Ok(value)
                 })
                 .transpose()
@@ -2224,8 +3604,12 @@ pub(super) fn lower_subroutine(
         .map(|_| None)
         .chain(defaults)
         .collect::<Vec<_>>();
+    let mut aggregate_formals = Vec::new();
     for ((source, direction, r#type, _), default) in this.into_iter().chain(params).zip(defaults) {
         let name = builder.declare(&source, r#type.clone());
+        if r#type.unpacked_struct().is_some() {
+            aggregate_formals.push((lowered_params.len(), r#type.clone()));
+        }
         formal_types.insert(name.clone(), scoped_type(r#type.clone(), declaration_env));
         lowered_params.push(SubroutineParam {
             name,
@@ -2235,10 +3619,11 @@ pub(super) fn lower_subroutine(
                 scoped_type(r#type, declaration_env),
                 &const_functions::Environment {
                     constants: &*item.env,
-                    functions: &tree.state.const_functions,
+                    functions: &tree.functions,
                 },
             ),
             default,
+            leaves: Vec::new(),
         });
     }
     let return_var = return_type
@@ -2247,10 +3632,82 @@ pub(super) fn lower_subroutine(
     if let (Some(name), Some(ty)) = (&return_var, &return_type) {
         formal_types.insert(name.clone(), scoped_type(ty.clone(), declaration_env));
     }
+    builder.stream_return_shape = return_type.as_ref().map(dimensions_from_type);
     builder.return_shape = return_type
         .as_ref()
-        .filter(|ty| ty.tagged_identity().is_some())
+        .filter(|ty| ty.tagged_identity().is_some() || ty.unpacked_struct().is_some())
         .map(dimensions_from_type);
+    // An argument of unpacked structure type is passed as its flat value;
+    // the body works on its members (see `unpacked_structs`).
+    let mut aggregate_prologue = Vec::new();
+    let mut aggregate_epilogue = Vec::new();
+    // A result of unpacked structure type assigned through the function's
+    // name is assembled from its members when the body ends without
+    // `return` (IEEE 1800-2023 13.4.1).
+    let mut result_leaves = None;
+    if dispatch.is_none()
+        && let (Some(result), Some(r#type)) = (&return_var, &return_type)
+        && r#type.unpacked_struct().is_some()
+        && !constructor
+    {
+        let leaves = builder
+            .declare_aggregate(&name, r#type)?
+            .into_iter()
+            .map(|(leaf, _)| leaf)
+            .collect::<Vec<_>>();
+        // An automatic result starts each call at its default.
+        if builder.automatic {
+            aggregate_prologue.extend(leaves.iter().map(|leaf| Stmt::Local {
+                name: leaf.clone(),
+                init: None,
+            }));
+        }
+        result_leaves = Some((result.clone(), leaves));
+    }
+    for (index, r#type) in &aggregate_formals {
+        let param = &lowered_params[*index];
+        let (name, source, direction) = (
+            param.name.clone(),
+            param.source_name.clone(),
+            param.direction,
+        );
+        // The members of a reference formal are bound to the members of the
+        // actual, also in the body that dispatches a virtual method.
+        if dispatch.is_some() && !direction.is_reference() {
+            continue;
+        }
+        let leaves = builder
+            .declare_aggregate(&source, r#type)?
+            .into_iter()
+            .map(|(leaf, _)| leaf)
+            .collect::<Vec<_>>();
+        lowered_params[*index].leaves = leaves.clone();
+        if direction.is_reference() {
+            continue;
+        }
+        if direction.is_read() {
+            aggregate_prologue.push(Stmt::AssignConcat {
+                parts: leaves.iter().cloned().map(LValue::Ident).collect(),
+                rhs: Expr::Ident(name.clone()),
+                nonblocking: false,
+            });
+        } else if builder.automatic {
+            // An automatic output starts each call at its default.
+            aggregate_prologue.extend(leaves.iter().map(|leaf| Stmt::Local {
+                name: leaf.clone(),
+                init: None,
+            }));
+        }
+        if direction.is_written() {
+            aggregate_epilogue.push(Stmt::Assign {
+                lhs: LValue::Ident(name),
+                rhs: Expr::Concat(leaves.into_iter().map(Expr::Ident).collect()),
+                nonblocking: false,
+            });
+        }
+    }
+    // The members of formals and of the result have the subroutine's
+    // lifetime, like the formals themselves.
     let parameter_locals_end = builder.state.locals.len();
     let mut items = native.items.clone();
     let mut prologue = Vec::new();
@@ -2261,7 +3718,7 @@ pub(super) fn lower_subroutine(
         // initializers, with the base call the prologue makes.
         let arguments = match (
             super_new(tree.declarations(), &items),
-            classes::base_arguments(tree, &class.name),
+            classes::base_arguments(tree, builder.session, &class.name),
         ) {
             (Some(_), Some(_)) => {
                 return Err(unsupported(
@@ -2286,9 +3743,28 @@ pub(super) fn lower_subroutine(
             &lowered_params,
             return_var.as_deref(),
         )),
-        None => body.extend(builder.native_body(&items, &native.authored_statements)?),
+        None => {
+            body.extend(aggregate_prologue);
+            body.extend(builder.native_body(&items, &native.authored_statements)?);
+        }
     }
+    if !aggregate_epilogue.is_empty() {
+        // Copy the members back on every way out of the body, after the
+        // value of a `return` is taken.
+        before_returns(&mut body, &aggregate_epilogue, return_var.as_deref());
+    }
+    if let Some((result, leaves)) = result_leaves {
+        body.push(Stmt::Assign {
+            lhs: LValue::Ident(result),
+            rhs: Expr::Concat(leaves.into_iter().map(Expr::Ident).collect()),
+            nonblocking: false,
+        });
+    }
+    body.extend(aggregate_epilogue);
     builder.pop_scope();
+    if class.is_some() {
+        builder.pop_scope();
+    }
     let static_types: HashMap<String, Type> = builder
         .state
         .statics
@@ -2333,7 +3809,7 @@ pub(super) fn lower_subroutine(
                 scoped_type(r#type, declaration_env),
                 &const_functions::Environment {
                     constants: &*item.env,
-                    functions: &tree.state.const_functions,
+                    functions: &tree.functions,
                 },
             )
         }),
@@ -2348,41 +3824,52 @@ pub(super) fn lower_subroutine(
         .chain(&mut subroutine.sensitivity_body)
     {
         qualify_stmt(item, stmt);
-        substitute_stmt_constants(&tree.state, stmt, declaration_env, literals);
+        substitute_stmt_constants(tree, builder.session, stmt, declaration_env, literals);
     }
     for param in &mut subroutine.params {
         if let Some(default) = &mut param.default {
             item.expr(default);
             *default = substitute_expr_constants_with_parameter_literals(
-                &tree.state,
+                tree,
+                builder.session,
                 default.clone(),
                 &item.env,
                 literals,
             );
         }
     }
+    // The statics of a task that may suspend are shared by activations
+    // that overlap in time (IEEE 1800-2023 6.21, 13.3.1): another call may
+    // write one between the declaration and a read, so each keeps its value.
+    let mut suspends = false;
     if subroutine.is_task {
-        lifetimes::check_subroutine_statics(
-            &tree.state,
-            &subroutine,
-            &builder.dims.const_env,
-            builder.state.locals,
-            &statics,
-            builder.state.subroutine_directions,
-        )?;
-        if !builder.automatic {
-            lifetimes::check_static_result(
-                &tree.state,
-                &builder.dims.const_env,
-                builder.state.locals,
-                &subroutine,
-                builder.state.subroutine_directions,
-            )?;
+        for stmt in &subroutine.body {
+            // Blocking scheduler operations, such as `semaphore.get()`, are
+            // evaluated calls.
+            stmt.walk(&mut |stmt| {
+                suspends |= events::blocks(stmt)
+                    || matches!(
+                        stmt,
+                        Stmt::Delay { .. }
+                            | Stmt::WaitEvent(_)
+                            | Stmt::WaitImplicit(_)
+                            | Stmt::Wait(_)
+                            | Stmt::AssertionRegion { .. }
+                            | Stmt::WaitFork
+                            | Stmt::Fork { .. }
+                            | Stmt::Call { .. }
+                    );
+            });
         }
-    } else if !builder.state.constant_evaluation {
+    }
+    if suspends {
+        lifetimes::check_constant_initializers(tree, builder.session, &subroutine.body, &statics)?;
+    }
+    if !builder.state.constant_evaluation {
         let retain_result = !builder.automatic
             && lifetimes::check_static_result(
-                &tree.state,
+                tree,
+                builder.session,
                 &builder.dims.const_env,
                 builder.state.locals,
                 &subroutine,
@@ -2393,23 +3880,28 @@ pub(super) fn lower_subroutine(
         let retained_types = static_types
             .iter()
             .filter(|(name, _)| {
-                lifetimes::check_subroutine_statics(
-                    &tree.state,
-                    &subroutine,
-                    &builder.dims.const_env,
-                    builder.state.locals,
-                    &std::iter::once((*name).clone()).collect(),
-                    builder.state.subroutine_directions,
-                )
-                .is_err()
+                suspends
+                    || lifetimes::check_subroutine_statics(
+                        tree,
+                        builder.session,
+                        &subroutine,
+                        &builder.dims.const_env,
+                        builder.state.locals,
+                        &std::iter::once((*name).clone()).collect(),
+                        builder.state.subroutine_directions,
+                    )
+                    .is_err()
             })
             .map(|(name, ty)| (name.clone(), ty.clone()))
             .collect::<HashMap<_, _>>();
         let (mut kept, mut initializers) = lifetimes::keep_static_locals(
-            &tree.state,
+            tree,
+            builder.session,
             &retained_types,
             builder.state.subroutine_directions,
-            std::iter::once(&mut subroutine.body),
+            std::iter::once((&mut subroutine.body, false)),
+            None,
+            suspends,
         )?;
         if retain_result {
             kept.extend(subroutine.return_var.clone());
@@ -2428,7 +3920,13 @@ pub(super) fn lower_subroutine(
         }
         for initializer in &mut initializers {
             qualify_stmt(item, initializer);
-            substitute_stmt_constants(&tree.state, initializer, declaration_env, literals);
+            substitute_stmt_constants(
+                tree,
+                builder.session,
+                initializer,
+                declaration_env,
+                literals,
+            );
         }
         for name in &kept {
             let ty = static_types
@@ -2456,7 +3954,15 @@ fn dispatch_body(
     let this = Expr::Ident(params[0].name.clone());
     let args = params
         .iter()
-        .map(|param| Some(Expr::Ident(param.name.clone())))
+        .map(|param| {
+            Some(
+                if param.direction.is_reference() && !param.leaves.is_empty() {
+                    Expr::Concat(param.leaves.iter().cloned().map(Expr::Ident).collect())
+                } else {
+                    Expr::Ident(param.name.clone())
+                },
+            )
+        })
         .collect::<Vec<_>>();
     let items = targets
         .iter()
@@ -2492,6 +3998,8 @@ fn dispatch_body(
             width: 8,
             signed: false,
             handle: None,
+            four_state: false,
+            nullable: false,
         }),
         vec![this.clone()],
     );
@@ -2563,6 +4071,7 @@ impl BodyBuilder<'_, '_, '_> {
         if let Some(base) = &class.base {
             let base = classes::class(
                 self.tree,
+                self.session,
                 base,
                 &self.dims.const_env,
                 &self.dims.type_aliases,
@@ -2570,6 +4079,7 @@ impl BodyBuilder<'_, '_, '_> {
             if let Some(method) = base.method("new") {
                 expression_binding::check_member_access(
                     self.tree,
+                    self.session,
                     &self.dims,
                     &method.owner,
                     &method.name,
@@ -2583,8 +4093,13 @@ impl BodyBuilder<'_, '_, '_> {
                 args.push(
                     actual
                         .map(|value| {
-                            let mut value =
-                                expression_binding::value(value, native, self.tree, &self.dims)?;
+                            let mut value = expression_binding::value(
+                                value,
+                                native,
+                                self.tree,
+                                self.session,
+                                &self.dims,
+                            )?;
                             self.rename_expr(&mut value);
                             Ok::<_, AnalyzerError>(value)
                         })
@@ -2599,13 +4114,39 @@ impl BodyBuilder<'_, '_, '_> {
                     .collect(),
             });
         }
-        for property in class.own_properties() {
+        let own = class.base_properties..class.properties.len();
+        for (index, property) in own.clone().zip(class.own_properties()) {
+            body.extend(self.aggregate_initializers(class, this, index)?);
             let Some(initializer) = property.initializer else {
+                // Each object has its own synchronization object for each
+                // event property (IEEE 1800-2023 15.5).
+                if events::is_event(&property.r#type) {
+                    body.push(Stmt::Eval(classes::object_call(
+                        system_functions::ObjectOp::Store(property.field),
+                        vec![Expr::Ident(this.to_owned()), events::new_event()],
+                    )));
+                }
                 continue;
             };
+            if let Some(container) = property.r#type.container.as_deref() {
+                let mut value = containers::assignment(
+                    initializer,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                    container,
+                )?;
+                self.rename_expr(&mut value);
+                body.push(Stmt::Eval(classes::object_call(
+                    system_functions::ObjectOp::Store(property.field),
+                    vec![Expr::Ident(this.to_owned()), value],
+                )));
+                continue;
+            }
             let mut value = match property.r#type.class() {
                 Some(class) => expression_binding::object_constructor(
                     self.tree,
+                    self.session,
                     initializer,
                     native,
                     &self.dims,
@@ -2619,6 +4160,7 @@ impl BodyBuilder<'_, '_, '_> {
                     initializer,
                     native,
                     self.tree,
+                    self.session,
                     &self.dims,
                     Some(&dimensions_from_type(&property.r#type)),
                 )?,
@@ -2632,6 +4174,556 @@ impl BodyBuilder<'_, '_, '_> {
                 vec![Expr::Ident(this.to_owned()), value],
             )));
         }
+        body.extend(self.aggregate_initializers(class, this, own.end)?);
+        Ok(body)
+    }
+
+    /// The initializers of the properties of unpacked structure type that
+    /// `class` declares before its property `position`.
+    fn aggregate_initializers(
+        &mut self,
+        class: &classes::Class,
+        this: &str,
+        position: usize,
+    ) -> Converted<Vec<Stmt>> {
+        let mut body = Vec::new();
+        for aggregate in &class.aggregates {
+            if aggregate.owner != class.name || aggregate.position != position {
+                continue;
+            }
+            if let Some(initializer) = aggregate.initializer {
+                body.extend(self.aggregate_store(
+                    aggregate,
+                    class,
+                    Expr::Ident(this.to_owned()),
+                    initializer,
+                )?);
+            }
+        }
+        Ok(body)
+    }
+
+    /// An assignment to a streaming concatenation (IEEE 1800-2023 11.4.14.3),
+    /// or `None` when the target is no stream. Fixed-size variables receive
+    /// the source in one assignment; when some are dynamically sized, a
+    /// hidden local holds the heap stream of the source, from which each
+    /// variable takes its bits in turn.
+    fn stream_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let native = self.tree.declarations();
+        let Some(unpack) = expression_binding::stream_unpack(
+            left,
+            right,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+        )?
+        else {
+            return Ok(None);
+        };
+        if op != "=" {
+            return Err(unsupported(
+                "compound assignment to a streaming concatenation",
+            ));
+        }
+        let mut stmts = match unpack {
+            expression_binding::StreamUnpack::Fixed(parts, rhs) => vec![Stmt::AssignConcat {
+                parts,
+                rhs,
+                nonblocking,
+            }],
+            expression_binding::StreamUnpack::Dynamic { source, targets } => {
+                if nonblocking {
+                    return Err(unsupported(
+                        "nonblocking assignment to a streaming concatenation of dynamically sized data",
+                    ));
+                }
+                let sink = self.dims.locator_locals.as_ref().ok_or_else(|| {
+                    unsupported(
+                        "streaming concatenation of dynamically sized data outside a procedural body",
+                    )
+                })?;
+                let tokens = native.expression(left).tokens;
+                let mut handle = Type::new(TypeKind::Bit);
+                handle.packed_ranges.push(PackedRange::new(
+                    ConstExpr::Literal("31".into()),
+                    ConstExpr::Literal("0".into()),
+                ));
+                let name = sink.declare(
+                    &format!("{}.{}.stream", tokens.start, tokens.end),
+                    "stream",
+                    handle,
+                    self.tree,
+                    &self.dims,
+                );
+                let stream = Expr::Ident(name.clone());
+                let mut stmts = vec![Stmt::Assign {
+                    lhs: LValue::Ident(name),
+                    rhs: source,
+                    nonblocking: false,
+                }];
+                for (lhs, take) in targets {
+                    let (rhs, read) = expression_binding::stream_take(&stream, take);
+                    stmts.push(Stmt::Assign {
+                        lhs,
+                        rhs,
+                        nonblocking: false,
+                    });
+                    stmts.extend(read.map(Stmt::Eval));
+                }
+                stmts.push(Stmt::Eval(expression_binding::stream_free(stream)));
+                stmts
+            }
+        };
+        for stmt in &mut stmts {
+            match stmt {
+                Stmt::Assign { lhs, rhs, .. } => {
+                    self.rename_lvalue(lhs);
+                    self.rename_expr(rhs);
+                }
+                Stmt::AssignConcat { parts, rhs, .. } => {
+                    for part in parts {
+                        self.rename_lvalue(part);
+                    }
+                    self.rename_expr(rhs);
+                }
+                Stmt::Eval(expr) => self.rename_expr(expr),
+                _ => unreachable!("a stream assignment assigns and evaluates"),
+            }
+        }
+        Ok(Some(stmts))
+    }
+
+    /// An assignment to a whole class property of unpacked structure type,
+    /// `h.p = v`: a store of each of its leaf properties.
+    /// `h.p[i] op value`: property `p` is read into a local, the select
+    /// assigned there, and the local stored back, so the select keeps the
+    /// semantics of a select of a variable (IEEE 1800-2023 11.5.1).
+    fn property_select_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let native = self.tree.declarations();
+        let mut base = expression_binding::ungroup(left, native);
+        let mut selected = false;
+        while let celox_sv_syntax::ExprKind::Select { expression, .. } =
+            &native.expression(base).kind
+        {
+            selected = true;
+            base = expression_binding::ungroup(*expression, native);
+        }
+        if !selected {
+            return Ok(None);
+        }
+        let Some((property, receiver)) =
+            expression_binding::object_property(self.tree, self.session, base, native, &self.dims)?
+        else {
+            return Ok(None);
+        };
+        if property.field.handle.is_some()
+            || property.r#type.container.is_some()
+            || property.r#type.unpacked_struct().is_some()
+        {
+            return Ok(None);
+        }
+        if nonblocking {
+            return Err(unsupported("nonblocking assignment to a class property"));
+        }
+        let mut handle = expression_binding::object_receiver(
+            self.tree,
+            self.session,
+            receiver,
+            native,
+            &self.dims,
+        )?;
+        self.rename_expr(&mut handle);
+        let mut body = Vec::new();
+        // The object is evaluated once, for both the load and the store; an
+        // assignment operator reads the target before its value, which may
+        // change the handle.
+        let handle = if inlining::calls_subroutine(&handle) || op != "=" {
+            let receiver = self.declare("$receiver", classes::handle(&property.owner));
+            body.push(Stmt::Local {
+                name: receiver.clone(),
+                init: None,
+            });
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(receiver.clone()),
+                rhs: handle,
+                nonblocking: false,
+            });
+            Expr::Ident(receiver)
+        } else {
+            handle
+        };
+        // Only the target is bound against the template; every other read
+        // of the property, the value's included, reads its object.
+        self.push_scope();
+        let local = self.declare(
+            &expression_binding::object_select_template(&property),
+            property.r#type.clone(),
+        );
+        self.dims.property_select_base = Some(base);
+        let lhs =
+            expression_binding::variable_lvalue(left, native, self.tree, self.session, &self.dims);
+        self.dims.property_select_base = None;
+        let lhs = lhs.and_then(|lhs| self.hoist_index_calls(lhs, op != "=", &mut body));
+        // The width of the selection, which a runtime position leaves unknown
+        // to a constant evaluation, is that of its value.
+        let width = lhs.as_ref().ok().and_then(|_| {
+            self.dims.property_select_base = Some(base);
+            let target =
+                expression_binding::value(left, native, self.tree, self.session, &self.dims);
+            self.dims.property_select_base = None;
+            dimensions::bound_bits_type(self.tree, &target.ok()?, &self.dims).map(|ty| ty.width)
+        });
+        let rhs = lhs.and_then(|lhs| {
+            let rhs = if op == "=" {
+                expression_binding::expression(
+                    right,
+                    native,
+                    &lhs,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                )
+            } else {
+                expression_binding::value(right, native, self.tree, self.session, &self.dims)
+                    .and_then(|value| {
+                        assignment_op_expr(self.tree, self.session, &lhs, op, value, &self.dims)
+                    })
+            };
+            let mut lhs = lhs;
+            self.rename_lvalue(&mut lhs);
+            rhs.map(|mut rhs| {
+                self.rename_expr(&mut rhs);
+                (lhs, rhs)
+            })
+        });
+        self.pop_scope();
+        let (lhs, mut rhs) = rhs?;
+        let load = Stmt::Assign {
+            lhs: LValue::Ident(local.clone()),
+            rhs: classes::object_call(
+                system_functions::ObjectOp::Load(property.field),
+                vec![handle.clone()],
+            ),
+            nonblocking: false,
+        };
+        // A value that calls a subroutine, which may write the property, is
+        // evaluated before the bits it does not replace are read.
+        if inlining::calls_subroutine(&rhs) {
+            let width = width.ok_or_else(|| unsupported("select of a class property"))?;
+            let (_, value) = self.hidden(vector_type(width, false));
+            if op != "=" {
+                // The operator reads the target as it is before the call.
+                body.push(load.clone());
+            }
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(value.clone()),
+                rhs,
+                nonblocking: false,
+            });
+            rhs = Expr::Ident(value);
+        }
+        body.extend([
+            load,
+            Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: false,
+            },
+            Stmt::Eval(classes::object_call(
+                system_functions::ObjectOp::Store(property.field),
+                vec![handle, Expr::Ident(local)],
+            )),
+        ]);
+        Ok(Some(body))
+    }
+
+    /// `lhs` with each subroutine call in its selection evaluated before
+    /// it, into a local that `body` assigns: the call may write the property
+    /// whose value the selection is written into.
+    /// With `whole`, for an assignment operator that reads the target
+    /// before its value is evaluated, the variables the bounds read are
+    /// evaluated too, so the read and the write select the same bits.
+    fn hoist_index_calls(
+        &mut self,
+        mut lhs: LValue,
+        whole: bool,
+        body: &mut Vec<Stmt>,
+    ) -> Converted<LValue> {
+        if let LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            ..
+        } = &mut lhs
+        {
+            let mut bounds = [Some(msb), Some(lsb), array_slice_width.as_mut()];
+            let mut calls = Vec::new();
+            for bound in bounds.iter_mut().flatten() {
+                self.hoist_calls(bound, &mut calls, body)?;
+            }
+            if whole {
+                let mut reads = Vec::new();
+                for bound in bounds.into_iter().flatten() {
+                    self.hoist_reads(bound, &calls, &mut reads, body)?;
+                }
+            }
+        }
+        Ok(lhs)
+    }
+
+    /// Replace each variable that `expr` reads by a local holding its value,
+    /// keeping the shape of the bound; `calls` are the locals of its calls.
+    fn hoist_reads(
+        &mut self,
+        expr: &mut ConstExpr,
+        calls: &[(ConstExpr, String)],
+        reads: &mut Vec<(ConstExpr, String)>,
+        body: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        if eval_ast_const_expr(&self.tree.functions, expr, &self.dims.const_env).is_some() {
+            return Ok(());
+        }
+        match expr {
+            ConstExpr::Ident(name) if calls.iter().any(|(_, local)| local == name) => {}
+            // A read, such as a property load, is evaluated as a whole; so is
+            // a conditional operator, whose operands are read only when it
+            // selects them.
+            ConstExpr::Ident(_)
+            | ConstExpr::Select { .. }
+            | ConstExpr::SelectRange { .. }
+            | ConstExpr::Function { .. }
+            | ConstExpr::Mux { .. }
+            | ConstExpr::Binary {
+                op: BinaryOp::LogicAnd | BinaryOp::LogicOr,
+                ..
+            } => self.hoist_value(expr, reads, body)?,
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.hoist_reads(expr, calls, reads, body)?;
+            }
+            ConstExpr::Binary { left, right, .. } => {
+                self.hoist_reads(left, calls, reads, body)?;
+                self.hoist_reads(right, calls, reads, body)?;
+            }
+            ConstExpr::Literal(_) => {}
+        }
+        Ok(())
+    }
+
+    /// Replace `expr` by a local that `body` assigns its value to; equal
+    /// expressions share one local.
+    fn hoist_value(
+        &mut self,
+        expr: &mut ConstExpr,
+        values: &mut Vec<(ConstExpr, String)>,
+        body: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        let source = match values.iter().find(|(value, _)| value == expr) {
+            Some((_, source)) => source.clone(),
+            None => {
+                let mut value = parameters::const_expr_to_expr(expr.clone());
+                let ty = dimensions::bound_bits_type(self.tree, &value, &self.dims)
+                    .ok_or_else(|| unsupported("index of a select of a class property"))?;
+                let (source, unique) = self.hidden(vector_type(ty.width, ty.signed));
+                self.rename_expr(&mut value);
+                body.push(Stmt::Assign {
+                    lhs: LValue::Ident(unique),
+                    rhs: value,
+                    nonblocking: false,
+                });
+                values.push((expr.clone(), source.clone()));
+                source
+            }
+        };
+        *expr = ConstExpr::Ident(source);
+        Ok(())
+    }
+
+    fn hoist_calls(
+        &mut self,
+        expr: &mut ConstExpr,
+        calls: &mut Vec<(ConstExpr, String)>,
+        body: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        let call = match expr {
+            ConstExpr::Function { callee, .. } => {
+                callee.subroutine().is_some() || matches!(callee, Callee::Checked { .. })
+            }
+            // A conditional operand runs only when its operator selects it, so
+            // a call in one is evaluated with the whole operator.
+            ConstExpr::Mux { .. }
+            | ConstExpr::Binary {
+                op: BinaryOp::LogicAnd | BinaryOp::LogicOr,
+                ..
+            } => inlining::calls_subroutine(&parameters::const_expr_to_expr(expr.clone())),
+            _ => false,
+        };
+        match expr {
+            // The copies of one call in the bounds share one value.
+            _ if call => self.hoist_value(expr, calls, body)?,
+            ConstExpr::Function { args, .. } => {
+                for arg in args {
+                    self.hoist_calls(arg, calls, body)?;
+                }
+            }
+            ConstExpr::Select { expr, bit } => {
+                self.hoist_calls(expr, calls, body)?;
+                self.hoist_calls(bit, calls, body)?;
+            }
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                self.hoist_calls(expr, calls, body)?;
+                self.hoist_calls(msb, calls, body)?;
+                self.hoist_calls(lsb, calls, body)?;
+            }
+            ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
+                self.hoist_calls(expr, calls, body)?;
+            }
+            ConstExpr::Binary { left, right, .. } => {
+                self.hoist_calls(left, calls, body)?;
+                self.hoist_calls(right, calls, body)?;
+            }
+            ConstExpr::Mux {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.hoist_calls(condition, calls, body)?;
+                self.hoist_calls(then_expr, calls, body)?;
+                self.hoist_calls(else_expr, calls, body)?;
+            }
+            ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        }
+        Ok(())
+    }
+
+    fn aggregate_property_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let native = self.tree.declarations();
+        let Some((aggregate, class, receiver)) = expression_binding::object_aggregate_property(
+            self.tree,
+            self.session,
+            left,
+            native,
+            &self.dims,
+        )?
+        else {
+            return Ok(None);
+        };
+        if nonblocking {
+            return Err(unsupported("nonblocking assignment to a class property"));
+        }
+        if op != "=" {
+            return Err(unsupported(format!(
+                "operator `{op}` on an unpacked structure"
+            )));
+        }
+        let mut handle = expression_binding::object_receiver(
+            self.tree,
+            self.session,
+            receiver,
+            native,
+            &self.dims,
+        )?;
+        self.rename_expr(&mut handle);
+        self.aggregate_store(&aggregate, &class, handle, right)
+            .map(Some)
+    }
+
+    /// Store the value of native `right` into each leaf property of
+    /// `aggregate` of the object `handle`.
+    fn aggregate_store(
+        &mut self,
+        aggregate: &classes::AggregateProperty,
+        class: &classes::Class,
+        handle: Expr,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Vec<Stmt>> {
+        let native = self.tree.declarations();
+        let structure = aggregate
+            .r#type
+            .unpacked_struct()
+            .expect("an unpacked structure property")
+            .clone();
+        unpacked_structs::check_value(
+            &structure,
+            right,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+        )?;
+        let mut value = expression_binding::bind_value(
+            right,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+            Some(&dimensions_from_type(&aggregate.r#type)),
+        )?;
+        self.rename_expr(&mut value);
+        let leaves = structure.leaves();
+        let mut body = Vec::new();
+        // Evaluate the whole value, which may read the members it replaces,
+        // and the object it is stored in once, before any member is written.
+        let mut flat = aggregate.r#type.clone();
+        flat.unpacked_struct = None;
+        let temp = self.declare("$aggregate", flat);
+        body.push(Stmt::Local {
+            name: temp.clone(),
+            init: None,
+        });
+        body.push(Stmt::Assign {
+            lhs: LValue::Ident(temp.clone()),
+            rhs: value,
+            nonblocking: false,
+        });
+        let handle = if inlining::calls_subroutine(&handle) {
+            let receiver = self.declare("$receiver", classes::handle(&class.name));
+            body.push(Stmt::Local {
+                name: receiver.clone(),
+                init: None,
+            });
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(receiver.clone()),
+                rhs: handle,
+                nonblocking: false,
+            });
+            Expr::Ident(receiver)
+        } else {
+            handle
+        };
+        let parts = leaves.iter().map(|leaf| Expr::Select {
+            expr: Box::new(Expr::Ident(temp.clone())),
+            msb: ConstExpr::Literal((leaf.offset + leaf.width - 1).to_string()),
+            lsb: ConstExpr::Literal(leaf.offset.to_string()),
+            signed: false,
+        });
+        for (leaf, part) in leaves.iter().zip(parts) {
+            let property = class
+                .property(&leaf.name(&aggregate.name))
+                .ok_or_else(|| unsupported("unpacked structure property member"))?;
+            body.push(Stmt::Eval(classes::object_call(
+                system_functions::ObjectOp::Store(property.field),
+                vec![handle.clone(), part],
+            )));
+        }
         Ok(body)
     }
 }
@@ -2642,6 +4734,7 @@ impl BodyBuilder<'_, '_, '_> {
 fn lower_class(
     name: &str,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     declaration_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     item_dimensions: &PackedDimensions,
@@ -2651,28 +4744,29 @@ fn lower_class(
 ) -> Converted<Vec<Subroutine>> {
     // A specialization's methods see its parameters (IEEE 1800-2023 8.25).
     let (declaration_env, type_aliases) =
-        classes::specializations::scope(tree, name, declaration_env, type_aliases);
+        classes::specializations::scope(session, name, declaration_env, type_aliases);
     let (item_dimensions, literals) =
-        classes::specializations::body_scope(tree, name, item_dimensions, literals);
+        classes::specializations::body_scope(session, name, item_dimensions, literals);
     let (declaration_env, type_aliases, item_dimensions, literals) =
         (&declaration_env, &type_aliases, &item_dimensions, &literals);
-    let class = match classes::class(tree, name, declaration_env, type_aliases) {
+    let class = match classes::class(tree, session, name, declaration_env, type_aliases) {
         Ok(class) => class,
         // An interface class that cannot be laid out has no subroutines; a
         // use of its handles reports why (IEEE 1800-2023 8.26).
-        Err(AnalyzerError::Unsupported(_)) if classes::is_interface(tree, name) => {
+        Err(AnalyzerError::Unsupported(_)) if classes::is_interface(tree, session, name) => {
             return Ok(Vec::new());
         }
         Err(error) => return Err(error),
     };
     let mut subroutines = Vec::new();
     let mut constructor = false;
-    for (id, _) in classes::declared_methods(tree, name)? {
+    for (id, _) in classes::declared_methods(tree, session, name)? {
         constructor |=
             tree.declarations().subroutine(id).kind == celox_sv_syntax::SubroutineKind::Constructor;
         subroutines.push(lower_subroutine(
             id,
             tree,
+            session,
             declaration_env,
             type_aliases,
             item_dimensions,
@@ -2684,11 +4778,18 @@ fn lower_class(
         )?);
     }
     for method in class.dispatched_methods() {
-        let targets =
-            classes::dispatch_targets(tree, name, &method.name, declaration_env, type_aliases)?;
+        let targets = classes::dispatch_targets(
+            tree,
+            session,
+            name,
+            &method.name,
+            declaration_env,
+            type_aliases,
+        )?;
         subroutines.push(lower_subroutine(
             method.native,
             tree,
+            session,
             declaration_env,
             type_aliases,
             item_dimensions,
@@ -2700,17 +4801,18 @@ fn lower_class(
         )?);
     }
     if !constructor && !class.is_interface {
-        let handle = classes::handle_type(tree, name)
+        let handle = classes::handle_type(tree, session, name)
             .ok_or_else(|| unsupported(format!("class `{name}`")))?;
         let ir_type = crate::ir::Type::from_ast(
             scoped_type(handle.clone(), declaration_env),
             &const_functions::Environment {
                 constants: &*item.env,
-                functions: &tree.state.const_functions,
+                functions: &tree.functions,
             },
         );
         let mut builder = BodyBuilder::new(
             tree,
+            session,
             item_dimensions,
             state,
             system_functions::Body::Subroutine,
@@ -2721,12 +4823,9 @@ fn lower_class(
         builder.enter_class_scope(&class);
         let this = builder.declare(classes::THIS, handle.clone());
         let result = builder.declare("new", handle);
-        let body = builder.constructor_prologue(
-            &class,
-            &this,
-            &result,
-            classes::base_arguments(tree, name).unwrap_or_default(),
-        )?;
+        let base_arguments =
+            classes::base_arguments(tree, builder.session, name).unwrap_or_default();
+        let body = builder.constructor_prologue(&class, &this, &result, base_arguments)?;
         builder.pop_scope();
         let mut subroutine = Subroutine {
             name: item.name(&classes::Class::subroutine_name(name, "new")),
@@ -2743,6 +4842,7 @@ fn lower_class(
                 direction: ParamDirection::Input,
                 r#type: ir_type,
                 default: None,
+                leaves: Vec::new(),
             }],
             return_var: Some(result),
             body,
@@ -2750,13 +4850,14 @@ fn lower_class(
         };
         for stmt in &mut subroutine.body {
             qualify_stmt(item, stmt);
-            substitute_stmt_constants(&tree.state, stmt, declaration_env, literals);
+            substitute_stmt_constants(tree, builder.session, stmt, declaration_env, literals);
         }
         subroutines.push(subroutine);
     }
     subroutines.push(lower_cast(
         name,
         tree,
+        session,
         declaration_env,
         type_aliases,
         item_dimensions,
@@ -2766,6 +4867,7 @@ fn lower_class(
     subroutines.extend(randomization::lower(
         &class,
         tree,
+        session,
         item_dimensions,
         state,
         item,
@@ -2785,6 +4887,7 @@ pub(super) const CAST_SOURCE: &str = "source";
 fn lower_cast(
     name: &str,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     declaration_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     item_dimensions: &PackedDimensions,
@@ -2793,22 +4896,24 @@ fn lower_cast(
 ) -> Converted<Subroutine> {
     let environment = const_functions::Environment {
         constants: &*item.env,
-        functions: &tree.state.const_functions,
+        functions: &tree.functions,
     };
-    let handle =
-        classes::handle_type(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
+    let handle = classes::handle_type(tree, session, name)
+        .ok_or_else(|| unsupported(format!("class `{name}`")))?;
     let ir_handle =
         crate::ir::Type::from_ast(scoped_type(handle.clone(), declaration_env), &environment);
     let ir_int = crate::ir::Type::from_ast(int_type(), &environment);
     let mut labels = vec![0];
     labels.extend(classes::cast_targets(
         tree,
+        session,
         name,
         declaration_env,
         type_aliases,
     )?);
     let mut builder = BodyBuilder::new(
         tree,
+        session,
         item_dimensions,
         state,
         system_functions::Body::Subroutine,
@@ -2841,6 +4946,7 @@ fn lower_cast(
                 direction: ParamDirection::Inout,
                 r#type: ir_handle.clone(),
                 default: None,
+                leaves: Vec::new(),
             },
             SubroutineParam {
                 name: source.clone(),
@@ -2848,6 +4954,7 @@ fn lower_cast(
                 direction: ParamDirection::Input,
                 r#type: ir_handle,
                 default: None,
+                leaves: Vec::new(),
             },
         ],
         return_var: Some(result.clone()),
@@ -2892,7 +4999,8 @@ pub(super) fn qualify_stmt(item: &generate::Item, stmt: &mut Stmt) {
 
 /// Replace parameters and genvars by their values.
 pub(super) fn substitute_stmt_constants(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     stmt: &mut Stmt,
     const_env: &HashMap<String, i128>,
     literals: &HashMap<String, Expr>,
@@ -2900,7 +5008,8 @@ pub(super) fn substitute_stmt_constants(
     stmt.visit_mut(
         &mut |expr| {
             *expr = substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
+                session,
                 expr.clone(),
                 const_env,
                 literals,
@@ -2916,6 +5025,7 @@ pub(super) fn substitute_stmt_constants(
 /// Every `initial` process of the active generate items.
 pub(super) fn initial_processes_from_scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     packed_dimensions: &PackedDimensions,
     parameter_literals: &HashMap<String, Expr>,
@@ -2926,14 +5036,14 @@ pub(super) fn initial_processes_from_scope(
     // `always` procedure (IEEE 1800-2023 10.5).
     let mut initializers = Vec::new();
     let mut processes = Vec::new();
-    let active = generate::items(tree, const_env, &type_aliases)?;
+    let active = generate::items(tree, session, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
-        let _interface_scope = item.interface_scope();
+        let tree = &item.scoped(tree);
         if item.is_parameter_declaration(tree.declarations()) {
             continue;
         }
-        let _constant_functions = item.enter();
+        let tree = &item.enter(tree);
         let mut assignments = Vec::new();
         if let celox_sv_syntax::BodyItemKind::Data(id) = tree.declarations().body_item(item.id).kind
         {
@@ -2951,28 +5061,58 @@ pub(super) fn initial_processes_from_scope(
                     tree.declarations(),
                 )
             }) {
+                // The type, possibly an alias of `event`, is checked below.
+                let event = matches!(
+                    &tree.declarations().data_type(declaration.data_type).kind,
+                    celox_sv_syntax::DataTypeKind::Builtin(name) if name == "event"
+                ) || matches!(
+                    &tree.declarations().data_type(declaration.data_type).kind,
+                    celox_sv_syntax::DataTypeKind::Named(_)
+                );
+                let name = instances::normalize_identifier(&variable.name.spelling);
                 if let Some(value) = variable.value {
-                    assignments.push((
-                        instances::normalize_identifier(&variable.name.spelling),
-                        value,
-                        None,
-                    ));
+                    assignments.push((name, Some(value), None));
+                } else if event {
+                    assignments.push((name, None, None));
                 }
             }
         }
         // Static class properties are initialized like variables, in the
         // scope of the class that declares them (IEEE 1800-2023 8.9, 8.25).
-        for property in classes::item_statics(item.id, tree, &item.env, &type_aliases) {
+        for property in classes::item_statics(item.id, tree, session, &item.env, &type_aliases) {
             if let Some(value) = property.initializer {
-                assignments.push((property.variable, value, Some(property.owner)));
+                assignments.push((property.variable, Some(value), Some(property.owner)));
+            } else if events::is_event(&property.r#type) {
+                assignments.push((property.variable, None, Some(property.owner)));
             }
         }
         if !assignments.is_empty() {
             let (item_dimensions, literals) = views.get(item);
             let mut body = Vec::new();
             for (name, native, owner) in assignments {
+                let Some(native) = native else {
+                    // Each declaration of an event creates a synchronization
+                    // object (IEEE 1800-2023 15.5).
+                    if owner.is_none() {
+                        let Some(shape) = item_dimensions
+                            .get(&name)
+                            .filter(|shape| shape.class.as_deref() == Some(events::CLASS))
+                        else {
+                            continue;
+                        };
+                        if !shape.unpacked.is_empty() || shape.container.is_some() {
+                            return Err(unsupported("array of named events"));
+                        }
+                    }
+                    body.push(Stmt::Assign {
+                        lhs: LValue::Ident(name),
+                        rhs: events::new_event(),
+                        nonblocking: false,
+                    });
+                    continue;
+                };
                 let scoped = owner.map(|owner| {
-                    classes::specializations::body_scope(tree, &owner, item_dimensions, literals)
+                    classes::specializations::body_scope(session, &owner, item_dimensions, literals)
                 });
                 let (item_dimensions, literals) = match &scoped {
                     Some((dimensions, literals)) => (dimensions, literals),
@@ -2981,9 +5121,9 @@ pub(super) fn initial_processes_from_scope(
                 if let Some(target) = selected_unpacked_shape(&name, 0, item_dimensions) {
                     let id = native;
                     array_compatibility::check_native_unpacked_assignment(
-                        &tree.state,
+                        tree,
+                        session,
                         id,
-                        tree.declarations(),
                         &target,
                         || format!("initializer of `{name}`"),
                         item_dimensions,
@@ -2995,17 +5135,39 @@ pub(super) fn initial_processes_from_scope(
                     tree.declarations(),
                     &lhs,
                     tree,
+                    session,
                     item_dimensions,
                 )?;
-                let mut stmt = Stmt::Assign {
-                    lhs,
-                    rhs,
-                    nonblocking: false,
+                let LValue::Ident(name) = lhs else {
+                    unreachable!("an initializer target is a variable")
+                };
+                // A variable of unpacked structure type initializes its leaves.
+                let mut stmt = match unpacked_structs::targets(&name, item_dimensions) {
+                    Some(parts) => {
+                        unpacked_structs::check_assignment(
+                            &name,
+                            native,
+                            tree,
+                            session,
+                            item_dimensions,
+                        )?;
+                        Stmt::AssignConcat {
+                            parts,
+                            rhs,
+                            nonblocking: false,
+                        }
+                    }
+                    None => Stmt::Assign {
+                        lhs: LValue::Ident(name),
+                        rhs,
+                        nonblocking: false,
+                    },
                 };
                 // The parameters of the class are its own constants.
                 if scoped.is_some() {
                     substitute_stmt_constants(
-                        &tree.state,
+                        tree,
+                        session,
                         &mut stmt,
                         &item_dimensions.const_env,
                         literals,
@@ -3015,9 +5177,9 @@ pub(super) fn initial_processes_from_scope(
             }
             let (_, literals) = views.get(item);
             for stmt in &mut body {
-                substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
+                substitute_stmt_constants(tree, session, stmt, &item.env, literals);
                 qualify_stmt(item, stmt);
-                substitute_stmt_constants(&tree.state, stmt, const_env, parameter_literals);
+                substitute_stmt_constants(tree, session, stmt, const_env, parameter_literals);
             }
             if !body.is_empty() {
                 initializers.push(InitialProcess {
@@ -3052,7 +5214,12 @@ pub(super) fn initial_processes_from_scope(
             celox_sv_syntax::ProcedureKind::Always
                 if validation::always_kind(procedure, tree.declarations())?
                     == validation::AlwaysKind::Process
-                    || ff_process::always_falls_back_to_process(procedure, tree)? =>
+                    || ff_process::always_falls_back_to_process(
+                        procedure,
+                        tree,
+                        session,
+                        views.get(item).0,
+                    )? =>
             {
                 true
             }
@@ -3062,6 +5229,7 @@ pub(super) fn initial_processes_from_scope(
         let is_final = procedure.kind == celox_sv_syntax::ProcedureKind::Final;
         let mut builder = BodyBuilder::new(
             tree,
+            session,
             item_dimensions,
             state,
             if is_final {
@@ -3088,9 +5256,9 @@ pub(super) fn initial_processes_from_scope(
             body
         };
         for stmt in body.iter_mut().chain(&mut validation_body) {
-            substitute_stmt_constants(&tree.state, stmt, &item.env, literals);
+            substitute_stmt_constants(tree, builder.session, stmt, &item.env, literals);
             qualify_stmt(item, stmt);
-            substitute_stmt_constants(&tree.state, stmt, const_env, parameter_literals);
+            substitute_stmt_constants(tree, builder.session, stmt, const_env, parameter_literals);
         }
         processes.push(InitialProcess {
             creation_order,
@@ -3155,34 +5323,49 @@ pub(super) fn process_site(
     })
 }
 
-/// `%t` reports a time value in the units of `$timeformat`, by default the
-/// smallest time precision of the design (IEEE 1800-2023 20.4.3, Table 20-3),
-/// in which the simulation counts its time. The value is in the time unit of
-/// the calling scope, of which `ticks_per_unit` simulation time units make
-/// one, so each value a `%t` of the template converts is scaled by it.
-fn scale_time_conversions(
-    task: SystemTask,
-    args: &mut [SystemTaskArg<Expr>],
-    ticks_per_unit: u64,
-    bind: &mut impl FnMut(usize) -> Result<Option<Expr>, AnalyzerError>,
-) -> Result<(), AnalyzerError> {
-    if ticks_per_unit == 1 {
-        return Ok(());
-    }
-    let template = match task {
+/// The position of the format among the arguments of a display, write or
+/// severity task, which a leading string literal there is.
+fn template_index(task: SystemTask, args: &[SystemTaskArg<Expr>]) -> Option<usize> {
+    Some(match task {
         SystemTask::Display(_) | SystemTask::Write(_) | SystemTask::Severity(_) => 0,
         SystemTask::Fatal => usize::from(matches!(args.first(), Some(SystemTaskArg::Expr(_)))),
         SystemTask::Fdisplay(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Assert
         | SystemTask::AssertContinue => 1,
-        _ => return Ok(()),
-    };
-    let Some(SystemTaskArg::Str(text)) = args.get(template) else {
-        return Ok(());
-    };
-    // The conversions of the template, in the order they take arguments
-    // (21.2.1.2): flags, a width and a precision may precede each.
+        _ => return None,
+    })
+}
+
+/// The conversion that writes a value without one of its own in a task of
+/// `radix` (IEEE 1800-2023 21.2.1.1): a string as text, a real as `$write`
+/// writes reals.
+fn default_conversion(string: bool, real: bool, radix: system_functions::Radix) -> String {
+    if real {
+        "%#g".into()
+    } else if string {
+        "%s".into()
+    } else {
+        format!("%{}", radix.letter())
+    }
+}
+
+/// The radix of a `$swrite` task named `name`.
+fn swrite_radix(name: &str) -> Option<system_functions::Radix> {
+    use system_functions::Radix;
+    Some(match name {
+        "$swrite" => Radix::Decimal,
+        "$swriteb" => Radix::Binary,
+        "$swriteo" => Radix::Octal,
+        "$swriteh" => Radix::Hexadecimal,
+        _ => return None,
+    })
+}
+
+/// The conversions of a format, in the order they take arguments
+/// (IEEE 1800-2023 21.2.1.2): flags, a width and a precision may precede
+/// each.
+fn format_conversions(text: &str) -> Vec<char> {
     let mut conversions = Vec::new();
     let mut chars = text.chars().peekable();
     while let Some(ch) = chars.next() {
@@ -3198,12 +5381,35 @@ fn scale_time_conversions(
             while chars.next_if(char::is_ascii_digit).is_some() {}
         }
         if let Some(spec) = chars.next()
-            && "bBoOhHxXdDiIcCsStTeEfFgG".contains(spec)
+            && "bBoOhHxXdDiIcCsStTeEfFgGpP".contains(spec)
         {
             conversions.push(spec);
         }
     }
-    for (offset, spec) in conversions.into_iter().enumerate() {
+    conversions
+}
+
+/// `%t` reports a time value in the units of `$timeformat`, by default the
+/// smallest time precision of the design (IEEE 1800-2023 20.4.3, Table 20-3),
+/// in which the simulation counts its time. The value is in the time unit of
+/// the calling scope, of which `ticks_per_unit` simulation time units make
+/// one, so each value a `%t` of the template converts is scaled by it.
+fn scale_time_conversions(
+    task: SystemTask,
+    args: &mut [SystemTaskArg<Expr>],
+    ticks_per_unit: u64,
+    bind: &mut impl FnMut(usize) -> Result<Option<Expr>, AnalyzerError>,
+) -> Result<(), AnalyzerError> {
+    if ticks_per_unit == 1 {
+        return Ok(());
+    }
+    let Some(template) = template_index(task, args) else {
+        return Ok(());
+    };
+    let Some(SystemTaskArg::Str(text)) = args.get(template) else {
+        return Ok(());
+    };
+    for (offset, spec) in format_conversions(text).into_iter().enumerate() {
         if !matches!(spec, 't' | 'T') {
             continue;
         }
@@ -3265,6 +5471,7 @@ pub(super) fn source_span(
 fn dump_selection_name(
     id: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     rename: &dyn Fn(&mut ConstExpr),
     is_local: &dyn Fn(&str) -> bool,
@@ -3275,6 +5482,7 @@ fn dump_selection_name(
     fn append(
         id: celox_sv_syntax::ExprId,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         dimensions: &PackedDimensions,
         rename: &dyn Fn(&mut ConstExpr),
         kind: &mut &'static str,
@@ -3296,7 +5504,7 @@ fn dump_selection_name(
                 separator,
                 name,
             } if separator == "." || separator == "::" => {
-                append(*expression, tree, dimensions, rename, kind, fields)?;
+                append(*expression, tree, session, dimensions, rename, kind, fields)?;
                 if separator == "::" {
                     *kind = "package";
                 }
@@ -3314,11 +5522,11 @@ fn dump_selection_name(
                         "$dumpvars hierarchy selection requires a single constant index",
                     ));
                 };
-                append(*expression, tree, dimensions, rename, kind, fields)?;
-                let mut value = constant_binding::bind(*index, tree, dimensions)?
+                append(*expression, tree, session, dimensions, rename, kind, fields)?;
+                let mut value = constant_binding::bind(*index, tree, session, dimensions)?
                     .ok_or_else(|| unsupported("$dumpvars hierarchy index must be constant"))?;
                 rename(&mut value);
-                let index = eval_ast_const_expr(&tree.state, &value, &dimensions.const_env)
+                let index = eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env)
                     .ok_or_else(|| {
                         unsupported("$dumpvars hierarchy index must be a known constant integer")
                     })?;
@@ -3334,11 +5542,19 @@ fn dump_selection_name(
     }
     let mut kind = "relative";
     let mut fields = Vec::new();
-    append(id, tree, dimensions, rename, &mut kind, &mut fields)?;
+    append(
+        id,
+        tree,
+        session,
+        dimensions,
+        rename,
+        &mut kind,
+        &mut fields,
+    )?;
     // Imports bind declarations, not a module-local spelling. Nested procedural
     // declarations shadow these aliases just as they do for value expressions.
     if kind == "relative" && fields.len() == 2 && !is_local(&fields[1]) {
-        let symbols = scope::imported(&tree.state);
+        let symbols = scope::imported(tree);
         if let Some(target) = symbols.aliases.get(&fields[1])
             && let Some((package, name)) = symbols
                 .state_signals
@@ -3381,4 +5597,17 @@ fn dump_selection_name(
         .chain(fields)
         .collect::<Vec<_>>()
         .join("\0"))
+}
+
+/// A `logic` vector of `width` bits.
+fn vector_type(width: usize, signed: bool) -> Type {
+    let mut r#type = Type::new(TypeKind::Logic);
+    r#type.is_signed = signed;
+    if width > 1 {
+        r#type.packed_ranges = vec![PackedRange::new(
+            ConstExpr::Literal((width - 1).to_string()),
+            ConstExpr::Literal("0".into()),
+        )];
+    }
+    r#type
 }

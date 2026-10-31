@@ -47,7 +47,7 @@ fn preserves_layout_signedness_and_state_kind() {
 #[test]
 fn rejects_invalid_or_unsupported_struct_shapes() {
     for body in [
-        "struct { logic a; } value;",
+        "union { logic a; } value;",
         "union packed { logic a; logic [1:0] b; } value;",
         "union soft { real a; bit [63:0] b; } value;",
         "union soft { logic a[2]; logic b; } value;",
@@ -204,7 +204,7 @@ fn rejects_empty_tagged_union_without_panicking() {
     assert!(
         analyze_source(
             "module Top; union tagged packed {} item; endmodule",
-            Path::new("empty_tagged.sv")
+            Path::new("empty_tagged.sv"),
         )
         .is_err()
     );

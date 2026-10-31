@@ -17,7 +17,9 @@ mod selector;
 
 use cleanup::inline_param_only_jump_blocks;
 use controlled_joins::eliminate_controlled_join_muxes;
-use coupled::{branchify_coupled_priority_chains, branchify_coupled_state_updates};
+use coupled::{
+    branchify_coupled_priority_chains, branchify_coupled_state_updates, verify_coupled_rewrites,
+};
 use cross_block::{
     apply_cross_block_branchify, apply_cross_block_group_branchify,
     apply_cross_block_priority_chain, find_cross_block_branchify_plans,
@@ -497,6 +499,7 @@ fn run_branchify_mux(
             &use_counts,
             &mut next_block_id,
             &mut reg_counter,
+            verify_coupled_rewrites,
         );
         if let Some(start) = priority_start {
             tracing::debug!(
@@ -505,8 +508,13 @@ fn run_branchify_mux(
             );
         }
         let state_start = stage_timing.then(crate::timing::now);
-        applied +=
-            branchify_coupled_state_updates(eu, &use_counts, &mut next_block_id, &mut reg_counter);
+        applied += branchify_coupled_state_updates(
+            eu,
+            &use_counts,
+            &mut next_block_id,
+            &mut reg_counter,
+            verify_coupled_rewrites,
+        );
         if let Some(start) = state_start {
             tracing::debug!(
                 "[branchify-timing] coupled state updates: {:?}",
@@ -911,28 +919,20 @@ impl PathFacts {
             entry_facts.insert(block_id, HashMap::default());
         }
 
-        let mut incoming = HashMap::<BlockId, Vec<(BlockId, Option<bool>)>>::default();
-        let mut successors = HashMap::<BlockId, Vec<BlockId>>::default();
-        for (block, &block_id) in graph.block_ids.iter().enumerate() {
-            incoming.insert(block_id, indexed_incoming[block].clone());
-            successors.insert(
-                block_id,
-                graph.successors[block]
-                    .iter()
-                    .map(|&successor| graph.block_ids[successor])
-                    .collect(),
-            );
-        }
-
-        let mut worklist = VecDeque::from_iter(graph.block_ids.iter().copied());
+        // Each queued block propagates its latest facts. Several incoming
+        // changes before that visit need only one propagation, including when
+        // the block is already in the initial worklist.
+        let mut worklist = VecDeque::from_iter(0..graph.block_ids.len());
+        let mut queued = vec![true; graph.block_ids.len()];
         while let Some(predecessor) = worklist.pop_front() {
-            let targets = successors.get(&predecessor).cloned().unwrap_or_default();
-            for target in targets {
+            queued[predecessor] = false;
+            for &target_index in &graph.successors[predecessor] {
+                let target = graph.block_ids[target_index];
                 if target == eu.entry_block_id {
                     continue;
                 }
                 let mut intersection: Option<HashMap<PathFactKey, bool>> = None;
-                for &(edge_predecessor, edge_truth) in &incoming[&target] {
+                for &(edge_predecessor, edge_truth) in &indexed_incoming[target_index] {
                     let facts = &entry_facts[&edge_predecessor];
                     let Some(edge_facts) = facts_on_edge(
                         eu,
@@ -955,7 +955,10 @@ impl PathFacts {
                 };
                 if entry_facts[&target] != next {
                     entry_facts.insert(target, next);
-                    worklist.push_back(target);
+                    if !queued[target_index] {
+                        queued[target_index] = true;
+                        worklist.push_back(target_index);
+                    }
                 }
             }
         }

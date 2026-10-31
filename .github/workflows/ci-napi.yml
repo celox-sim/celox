@@ -103,10 +103,10 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -132,6 +132,25 @@ jobs:
       - name: Check synchronized versions and stable dependencies
         if: env.NIGHTLY != 'true'
         run: node scripts/check-release-version.mjs
+
+  qualify:
+    name: Verify release branch qualification
+    needs: validate-release
+    if: ${{ !startsWith(inputs.channel, 'nightly-') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate-release.outputs.build_sha }}
+      - name: Require the successful candidate run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CANDIDATE_SHA: ${{ needs.validate-release.outputs.build_sha }}
+        run: node scripts/check-release-qualification.mjs
 
   build:
     needs: validate-release
@@ -168,10 +187,10 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -179,19 +198,21 @@ jobs:
       - uses: pnpm/action-setup@v6
 
       - name: Install Rust toolchain
-        uses: ./.github/actions/setup-rust
+        uses: $/.github/actions/setup-rust
         with:
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@v2
         with:
-          # Keep compiled dependencies, but start a separate publication cache.
-          prefix-key: celox-napi-release-v1
-          shared-key: napi-${{ matrix.target }}
-          # Reinstall Cargo tools instead of restoring executable binaries.
+          # Release target matrices previously consumed most of the repository
+          # quota and evicted the shared Rust Tests cache. Share downloads only;
+          # never retain target/ artifacts for each release target and lane.
+          prefix-key: celox-napi-downloads-v1
+          shared-key: napi-downloads
+          cache-targets: false
           cache-bin: false
-          # Tag/ad-hoc branch runs may restore, but only release lanes populate it.
-          save-if: ${{ (github.event_name == 'repository_dispatch' && github.ref == 'refs/heads/master') || (github.event_name == 'workflow_dispatch' && (github.ref == 'refs/heads/master' || github.ref == 'refs/heads/develop')) }}
+          # All lanes can restore the default-branch cache. Avoid develop copies.
+          save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
 
       - name: Install ziglang (musl targets)
         if: matrix.zigbuild
@@ -255,10 +276,10 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -281,7 +302,8 @@ jobs:
         run: pnpm --filter="!@celox-sim/celox-napi" --filter="!@celox-sim/playground" -r test
 
   publish:
-    needs: [validate-release, test]
+    needs: [validate-release, test, qualify]
+    if: ${{ !cancelled() && needs.validate-release.result == 'success' && needs.test.result == 'success' && (needs.qualify.result == 'success' || (startsWith(inputs.channel, 'nightly-') && needs.qualify.result == 'skipped')) }}
     runs-on: ubuntu-latest
     name: Publish
     environment: npm
@@ -296,11 +318,11 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           registry-url: https://registry.npmjs.org
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}
@@ -318,6 +340,7 @@ jobs:
       - name: Download all artifacts
         uses: actions/download-artifact@v8
         with:
+          pattern: bindings-*
           path: crates/celox-napi/artifacts
 
       - name: Create npm dirs
@@ -405,11 +428,11 @@ jobs:
 
       - uses: actions/setup-node@v7
         with:
-          node-version: 24
+          node-version: 26
           registry-url: https://registry.npmjs.org
 
       - if: env.NIGHTLY == 'true'
-        uses: ./.github/actions/set-nightly-version
+        uses: $/.github/actions/set-nightly-version
         with:
           enabled: ${{ env.NIGHTLY }}
           channel: ${{ env.NIGHTLY_CHANNEL }}

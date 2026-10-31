@@ -1,5 +1,5 @@
 use super::*;
-use std::{hint::black_box, time::Instant};
+use std::{cell::Cell, hint::black_box, time::Instant};
 
 fn ident(name: &str) -> Expr {
     Expr::Ident(name.into())
@@ -186,37 +186,46 @@ fn environment(count: usize) -> HashMap<String, i128> {
 
 // The former eager initialization, retained only for result and timing comparisons.
 fn copied_call(
-    state: &State,
+    functions: &ConstantFunctions,
     function: &ConstantFunction,
     args: &[i128],
     constants: &HashMap<String, i128>,
 ) -> Option<i128> {
-    let empty = HashMap::default();
+    // Calls it makes see the caller's scope, not its frame.
     let context = Environment {
-        constants: &empty,
-        functions: state,
+        constants,
+        functions,
     };
+    let mut budget = Budget::default();
     call_in_frame(
         function,
-        args,
+        &args.iter().copied().map(Value::integer).collect::<Vec<_>>(),
         Frame {
-            constants: &context,
-            values: constants.clone(),
-            types: parameter_types_from_const_env(constants)
-                .into_iter()
-                .map(|(name, ty)| (name, (ty.width, ty.signed)))
-                .collect(),
+            scope: Locals {
+                constants: &context,
+                values: constants
+                    .iter()
+                    .map(|(name, value)| (name.clone(), Value::integer(*value)))
+                    .collect(),
+                types: parameter_types_from_const_env(constants)
+                    .into_iter()
+                    .map(|(name, ty)| (name, (ty.width, ty.signed)))
+                    .collect(),
+                two_state: HashSet::default(),
+            },
+            budget: &mut budget,
+            return_width: None,
             temporaries: 0,
             iterations: 0,
         },
-    )
+    )?
+    .number()
+    .copied()
 }
 
 #[test]
 fn borrowed_calls_match_copied_frames_and_preserve_caller_values() {
     let functions = functions();
-    let state = std::rc::Rc::new(AnalysisState::default());
-    let _installed = install(&state, functions.clone());
     for size in [16, 256, 4096] {
         let env = environment(size);
         let before = env.clone();
@@ -236,13 +245,13 @@ fn borrowed_calls_match_copied_frames_and_preserve_caller_values() {
                 &args,
                 &Environment {
                     constants: &env,
-                    functions: &state.const_functions,
+                    functions: &functions,
                 },
             );
             assert_eq!(borrowed, expected, "{name}");
             assert_eq!(
                 borrowed,
-                copied_call(&state.const_functions, function, &args, &env),
+                copied_call(&functions, function, &args, &env),
                 "{name}"
             );
         }
@@ -265,8 +274,6 @@ impl ConstantEnvironment for CountedEnvironment<'_> {
 #[test]
 fn calls_query_only_referenced_values_and_types() {
     let functions = functions();
-    let state = std::rc::Rc::new(AnalysisState::default());
-    let _installed = install(&state, functions.clone());
     let mut expected = None;
     for size in [16, 256, 4096] {
         let env = environment(size);
@@ -287,7 +294,7 @@ fn calls_query_only_referenced_values_and_types() {
                     &args,
                     &Environment {
                         constants: &counted,
-                        functions: &state.const_functions
+                        functions: &functions
                     }
                 )
                 .is_some()
@@ -303,8 +310,6 @@ fn calls_query_only_referenced_values_and_types() {
 #[test]
 fn unresolved_values_and_recursion_limits_restore_the_call_context() {
     let functions = functions();
-    let state = std::rc::Rc::new(AnalysisState::default());
-    let _installed = install(&state, functions);
     let mut env = environment(0);
     env.remove("GLOBAL");
     assert_eq!(
@@ -313,7 +318,7 @@ fn unresolved_values_and_recursion_limits_restore_the_call_context() {
             &[],
             &Environment {
                 constants: &env,
-                functions: &state.const_functions
+                functions: &functions
             }
         ),
         None
@@ -327,20 +332,19 @@ fn unresolved_values_and_recursion_limits_restore_the_call_context() {
             &[arg("65")],
             &Environment {
                 constants: &env,
-                functions: &state.const_functions
+                functions: &functions
             }
         ),
         None
     );
     FUNCTION_CALLS.with(|count| assert_eq!(count.get(), MAX_DEPTH));
-    assert_eq!(state.const_functions.depth.get(), 0);
     assert_eq!(
         eval_call(
             "recursive",
             &[arg("6")],
             &Environment {
                 constants: &env,
-                functions: &state.const_functions
+                functions: &functions
             }
         ),
         Some(5)
@@ -351,7 +355,7 @@ fn unresolved_values_and_recursion_limits_restore_the_call_context() {
             &[],
             &Environment {
                 constants: &env,
-                functions: &state.const_functions
+                functions: &functions
             }
         ),
         Some(-1)
@@ -362,8 +366,6 @@ fn unresolved_values_and_recursion_limits_restore_the_call_context() {
 #[ignore = "manual paired timing probe; no timing thresholds"]
 fn compare_borrowed_and_copied_function_environments() {
     let functions = functions();
-    let state = std::rc::Rc::new(AnalysisState::default());
-    let _installed = install(&state, functions.clone());
     let function = &functions.functions["read"];
     println!("parameters,calls,copied_ms,borrowed_ms");
     for count in [32, 128, 512, 2048] {
@@ -372,14 +374,14 @@ fn compare_borrowed_and_copied_function_environments() {
             let start = Instant::now();
             for _ in 0..count {
                 let value = if copied {
-                    copied_call(&state.const_functions, function, &[], black_box(&env))
+                    copied_call(&functions, function, &[], black_box(&env))
                 } else {
                     call(
                         function,
                         &[],
                         &Environment {
                             constants: black_box(&env),
-                            functions: &state.const_functions,
+                            functions: &functions,
                         },
                     )
                 };
@@ -406,8 +408,7 @@ fn compare_borrowed_and_copied_function_environments() {
 
 #[test]
 fn literal_probes_do_not_execute_user_functions_and_recursion_is_not_repeated() {
-    let state = std::rc::Rc::new(AnalysisState::default());
-    let _installed = install(&state, functions());
+    let functions = functions();
     let env = environment(0);
     let expr = crate::ir::ConstExpr::Function {
         callee: Callee::Subroutine("recursive".into()),
@@ -422,7 +423,7 @@ fn literal_probes_do_not_execute_user_functions_and_recursion_is_not_repeated() 
             &expr,
             &Environment {
                 constants: &env,
-                functions: &state.const_functions
+                functions: &functions
             }
         ),
         Some(11)
@@ -473,8 +474,6 @@ fn check_function_parameter_chains() {
 
 #[test]
 fn independent_evaluators_keep_their_function_bindings() {
-    let first = std::rc::Rc::new(AnalysisState::default());
-    let second = std::rc::Rc::new(AnalysisState::default());
     let bindings = |value: &str| ConstantFunctions {
         functions: Arc::new(HashMap::from_iter([(
             "read".to_string(),
@@ -482,16 +481,16 @@ fn independent_evaluators_keep_their_function_bindings() {
         )])),
         ..ConstantFunctions::default()
     };
-    let _first = install(&first, bindings("7"));
-    let _second = install(&second, bindings("11"));
+    let first = bindings("7");
+    let second = bindings("11");
     let constants = HashMap::default();
     let first_env = Environment {
         constants: &constants,
-        functions: &first.const_functions,
+        functions: &first,
     };
     let second_env = Environment {
         constants: &constants,
-        functions: &second.const_functions,
+        functions: &second,
     };
     assert_eq!(eval_call("read", &[], &first_env), Some(7));
     assert_eq!(eval_call("read", &[], &second_env), Some(11));
@@ -521,6 +520,11 @@ fn partial_return_assignments_reach_the_127_and_128_bit_boundaries() {
             vec![],
             vec![
                 Stmt::Assign {
+                    lhs: LValue::Ident("wide".into()),
+                    rhs: literal("'0"),
+                    nonblocking: false,
+                },
+                Stmt::Assign {
                     lhs: select(7, 0),
                     rhs: literal("8'ha5"),
                     nonblocking: false,
@@ -539,6 +543,38 @@ fn partial_return_assignments_reach_the_127_and_128_bit_boundaries() {
             "width={width}, signed={signed}"
         );
     }
+}
+
+#[test]
+fn partial_returns_preserve_unwritten_unknown_bits() {
+    let constants = HashMap::default();
+    let mut function = function(
+        "partial",
+        vec![],
+        vec![Stmt::Assign {
+            lhs: LValue::Select {
+                name: "partial".into(),
+                msb: ConstExpr::Literal("1".into()),
+                lsb: ConstExpr::Literal("0".into()),
+                signed: false,
+                array_slice_width: None,
+                array_slice_reversed: false,
+                is_2state: false,
+            },
+            rhs: literal("2'b01"),
+            nonblocking: false,
+        }],
+    );
+    function.return_var = Some(("partial".into(), fixed_ty(8, false)));
+    let value = call_in_frame(
+        &function,
+        &[],
+        Frame::new(&constants, &mut Budget::default()),
+    )
+    .unwrap()
+    .into_literal();
+    assert_eq!(value.value, BigUint::from(0xfdu8));
+    assert_eq!(value.mask, BigUint::from(0xfcu8));
 }
 
 #[test]
@@ -566,4 +602,34 @@ fn full_width_return_assignments_keep_all_128_bits() {
         call(&function, &[], &constants),
         Some(0xfedcba98765432100123456789abcdefu128 as i128)
     );
+}
+
+#[test]
+fn calls_in_select_indices_spend_the_budget_of_their_evaluation() {
+    // A call in a select index is evaluated by the typechecker, inside the
+    // evaluation of the function that selects: it is nested no deeper than
+    // MAX_DEPTH calls, rather than recursing until the stack overflows.
+    let source = |depth: usize| {
+        format!(
+            "module M(output int y);
+                 function automatic int f(input int n);
+                     logic [7:0] v;
+                     v = 8'hff;
+                     if (n == 0) return 0;
+                     return v[f(n - 1)];
+                 endfunction
+                 localparam int P = f({depth});
+                 assign y = P;
+             endmodule"
+        )
+    };
+    let value = |depth| {
+        let ir = crate::analyze_source(&source(depth), Path::new("select.sv")).unwrap();
+        ir.modules()[0].parameters()[0].resolved_value()
+    };
+    assert_eq!(value(3), Some(1));
+    FUNCTION_CALLS.with(|count| count.set(0));
+    assert_eq!(value(100_000), None);
+    // Each evaluation gave up after MAX_DEPTH nested calls.
+    FUNCTION_CALLS.with(|count| assert!(count.get() < 100_000, "{}", count.get()));
 }

@@ -1,12 +1,15 @@
 use super::*;
 pub(super) fn callee_name(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
-    Ok(direct::bound_callable_name(tree, id, native, dimensions)?
-        .filter(|name| !name.starts_with('$') || name.contains("::")))
+    Ok(
+        direct::bound_callable_name(tree, session, id, native, dimensions)?
+            .filter(|name| !name.starts_with('$') || name.contains("::")),
+    )
 }
 
 pub(in crate::ast) fn statement_root(
@@ -14,7 +17,7 @@ pub(in crate::ast) fn statement_root(
     discarded: bool,
     native: &celox_sv_syntax::Declarations,
 ) -> Converted<ExprId> {
-    Ok(if discarded {
+    let root = if discarded {
         let ExprKind::Cast { target, expression } = native.expression(root).kind else {
             return Err(disagreement());
         };
@@ -31,7 +34,14 @@ pub(in crate::ast) fn statement_root(
         expression
     } else {
         root
-    })
+    };
+    if matches!(
+        native.expression(root).kind,
+        ExprKind::ArrayMethodWith { .. }
+    ) {
+        return Err(unsupported("array method with expression"));
+    }
+    Ok(root)
 }
 
 pub(in crate::ast) fn statement(
@@ -39,6 +49,7 @@ pub(in crate::ast) fn statement(
     discarded: bool,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     signatures: &HashMap<String, Vec<String>>,
 ) -> Converted<Option<Expr>> {
@@ -47,7 +58,7 @@ pub(in crate::ast) fn statement(
         ExprKind::Call { expression, .. } => expression,
         _ => root,
     };
-    if callee_name(tree, callee, native, dimensions)?.is_none() {
+    if callee_name(tree, session, callee, native, dimensions)?.is_none() {
         return match &native.expression(callee).kind {
             ExprKind::Name(name) if name.spelling.starts_with('$') => Ok(None),
             ExprKind::Member { separator, .. } if separator == "." => Ok(None),
@@ -60,19 +71,40 @@ pub(in crate::ast) fn statement(
         native.expression(root).kind,
         ExprKind::Name(_) | ExprKind::Member { .. }
     ) {
-        let name = callee_name(tree, root, native, dimensions)?.ok_or_else(disagreement)?;
+        let name =
+            callee_name(tree, session, root, native, dimensions)?.ok_or_else(disagreement)?;
         return Ok(Some(Expr::Call {
             callee: Callee::Subroutine(name),
             args: Vec::new(),
             arg_order: Vec::new(),
         }));
     }
-    super::bind_value(root, native, tree, &context, None).map(Some)
+    super::bind_value(root, native, tree, session, &context, None).map(Some)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn array_method_with_semantics_are_explicitly_rejected() {
+        // Locator method values are bound by `locators`; other methods and a
+        // discarded locator call still reject a with clause.
+        for body in [
+            "initial a.sort with (item);",
+            "initial void'(a.find() with (item > 0));",
+            "localparam N = 0 && a.sum() with (item); initial q = N;",
+        ] {
+            let result = crate::analyze_source(
+                &format!("module M; int a[3], q; {body} endmodule"),
+                Path::new("array-method-with.sv"),
+            );
+            assert!(
+                matches!(result, Err(AnalyzerError::Unsupported(ref construct)) if construct.contains("array method with expression")),
+                "{body}: {result:?}"
+            );
+        }
+    }
 
     #[test]
     fn indexed_interface_statement_calls_keep_the_selected_element() {

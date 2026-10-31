@@ -1,0 +1,222 @@
+{
+  "schemaVersion": 1,
+  "repositories": {
+    "heliodor": {
+      "url": "https://github.com/dalance/heliodor",
+      "revisionFile": "scripts/heliodor-revision"
+    },
+    "rica": {
+      "url": "https://github.com/fabrica-eda/rica",
+      "revisionFile": "scripts/rica-revision"
+    },
+    "logikbench": {
+      "url": "https://github.com/dalance/logikbench_veryl",
+      "revision": "6179df1cd15e13600a36621fc6b57de521a93d9f"
+    },
+    "tarunes": {
+      "url": "https://github.com/tarusake/tarunes",
+      "revision": "5aeb5048cc82a52ef3ec15489970a51537965a35"
+    },
+    "logikbench-original": {
+      "url": "https://github.com/zeroasiccorp/logikbench",
+      "revision": "e8c7c4388c66302c6adb235678512ce62b79968a"
+    }
+  },
+  "workloads": [
+    {
+      "id": "heliodor",
+      "label": "Heliodor Linux",
+      "group": "system",
+      "repository": "heliodor",
+      "role": "Linux boot and large CPU systems",
+      "integration": "existing",
+      "command": "bash scripts/run-heliodor-bench.sh run"
+    },
+    {
+      "id": "rica",
+      "label": "rica",
+      "group": "system",
+      "repository": "rica",
+      "role": "CPU and dual-clock board memory",
+      "integration": "existing",
+      "command": "bash scripts/run-rica-bench.sh run"
+    },
+    {
+      "id": "tarunes",
+      "label": "tarunes",
+      "group": "system",
+      "repository": "tarunes",
+      "role": "CPU, video and audio together",
+      "integration": "pending",
+      "reason": "The original synthetic-ROM probe now agrees with Verilator, including HDMI RGB, on the standard compiler stack. A fixed measurement recipe and collection runner are still needed before performance publication.",
+      "testbenches": [
+        {
+          "id": "upstream-sv-delay-v1",
+          "language": "systemverilog",
+          "repository": "tarunes",
+          "path": "src/tb_top.sv",
+          "purpose": "smoke",
+          "selfChecking": false
+        }
+      ],
+      "qualificationProbe": "benchmarks/tarunes/README.md"
+    },
+    {
+      "id": "sha256",
+      "label": "SHA256",
+      "group": "circuit",
+      "repository": "logikbench",
+      "role": "Cryptographic datapath",
+      "integration": "qualification",
+      "project": "benchmarks/blocks/sha256",
+      "top": "test_sha256_smoke",
+      "workload": "upstream-veryl-smoke-v1",
+      "testbenches": [
+        {
+          "id": "upstream-veryl-smoke-v1",
+          "language": "veryl",
+          "repository": "logikbench",
+          "path": "benchmarks/blocks/sha256/src/test_sha256.veryl",
+          "purpose": "qualification",
+          "selfChecking": true
+        },
+        {
+          "id": "upstream-verilog-smoke-v1",
+          "language": "systemverilog",
+          "repository": "logikbench-original",
+          "path": "logikbench/benchmarks/blocks/sha256/testbench/test_sha256_smoke.v",
+          "purpose": "qualification",
+          "selfChecking": true,
+          "acceptance": "Require PASSED and reject FAIL/FAILED, even on exit 0. Inputs differ from the Veryl TB; not a paired frontend comparison."
+        },
+        {
+          "id": "port-equivalence-v1",
+          "language": "systemverilog",
+          "repository": "logikbench",
+          "path": "benchmarks/blocks/sha256/equiv/equiv_tb.v",
+          "purpose": "equivalence",
+          "selfChecking": true,
+          "acceptance": "Two DUTs: original Verilog and emitted SV. Not single-design performance."
+        }
+      ],
+      "measurement": {
+        "id": "nist-pairs-v1",
+        "repetitions": 4096,
+        "unitsPerRepetition": 2,
+        "unit": "hashes",
+        "description": "4096 repetitions of the upstream abc and empty-message known-answer pair; reset and assertions included."
+      },
+      "negativeControl": {
+        "find": "32'hba7816bf",
+        "replace": "32'hba7816be"
+      }
+    },
+    {
+      "id": "fft",
+      "label": "FFT",
+      "group": "circuit",
+      "repository": "logikbench",
+      "role": "Fixed-point signal processing",
+      "integration": "qualification",
+      "project": "benchmarks/blocks/fft",
+      "top": "test_fft_smoke",
+      "workload": "upstream-veryl-smoke-v1",
+      "testbenches": [
+        {
+          "id": "upstream-veryl-smoke-v1",
+          "language": "veryl",
+          "repository": "logikbench",
+          "path": "benchmarks/blocks/fft/src/test_fft.veryl",
+          "purpose": "qualification",
+          "selfChecking": true
+        },
+        {
+          "id": "upstream-verilog-smoke-v1",
+          "language": "systemverilog",
+          "repository": "logikbench-original",
+          "path": "logikbench/benchmarks/blocks/fft/testbench/test_fft_smoke.v",
+          "purpose": "qualification",
+          "selfChecking": true,
+          "acceptance": "Require PASSED and reject FAIL/FAILED, even on exit 0. Inputs differ from the Veryl TB; not a paired frontend comparison."
+        },
+        {
+          "id": "port-equivalence-v1",
+          "language": "systemverilog",
+          "repository": "logikbench",
+          "path": "benchmarks/blocks/fft/equiv/equiv_tb.v",
+          "purpose": "equivalence",
+          "selfChecking": true,
+          "acceptance": "Two DUTs: original Verilog and emitted SV. Not single-design performance."
+        }
+      ],
+      "negativeControl": {
+        "find": "$assert(nz == 1);",
+        "replace": "$assert(nz == 999);"
+      },
+      "measurement": {
+        "id": "three-tones-v1",
+        "repetitions": 1024,
+        "unitsPerRepetition": 3,
+        "unit": "frames",
+        "description": "1024 repetitions of the upstream DC, Nyquist and bin-16 64-point FFT checks, including resets and pipeline drain."
+      }
+    },
+    {
+      "id": "lz77",
+      "label": "LZ77",
+      "group": "circuit",
+      "repository": "logikbench",
+      "role": "Compression and history memory",
+      "integration": "qualification",
+      "project": "benchmarks/large/lz77",
+      "top": "test_lz77_smoke",
+      "workload": "upstream-veryl-smoke-v1",
+      "testbenches": [
+        {
+          "id": "upstream-veryl-smoke-v1",
+          "language": "veryl",
+          "repository": "logikbench",
+          "path": "benchmarks/large/lz77/src/test_lz77.veryl",
+          "purpose": "qualification",
+          "selfChecking": true
+        },
+        {
+          "id": "upstream-verilog-smoke-v1",
+          "language": "systemverilog",
+          "repository": "logikbench-original",
+          "path": "logikbench/benchmarks/large/lz77/testbench/test_lz77_smoke.v",
+          "purpose": "qualification",
+          "selfChecking": true,
+          "acceptance": "Require PASSED and reject FAIL/FAILED, even on exit 0. Inputs differ from the Veryl TB; not a paired frontend comparison."
+        },
+        {
+          "id": "port-equivalence-v1",
+          "language": "systemverilog",
+          "repository": "logikbench",
+          "path": "benchmarks/large/lz77/equiv/equiv_tb.v",
+          "purpose": "equivalence",
+          "selfChecking": true,
+          "acceptance": "Two DUTs: original Verilog and emitted SV. Not single-design performance."
+        }
+      ],
+      "negativeControl": {
+        "find": "rcnt == n",
+        "replace": "rcnt == n + 1"
+      },
+      "measurement": {
+        "id": "roundtrip-streams-v1",
+        "repetitions": 16,
+        "unitsPerRepetition": 184,
+        "unit": "bytes",
+        "description": "16 repetitions of the upstream three deterministic byte streams. Each phase stops when all expected bytes arrive, retaining the original timeout and every comparison.",
+        "transforms": [
+          {
+            "find": "                send_idx = send_idx + 1;\n            }\n        }",
+            "replace": "                send_idx = send_idx + 1;\n            }\n            if rcnt == n { break; }\n        }",
+            "count": 3
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,85 @@
+(group mailboxes (category sequential))
+
+; IEEE 1800-2023 15.4: messages of a parameterized mailbox come out in the
+; order they were put, num counts them, and peek copies the first one.
+(case messages_come_out_in_put_order
+ (source "order.sv" #"module Top(output int sum, output int first, output int count);
+ mailbox #(int) m;
+ initial begin
+  int v;
+  m = new;
+  m.put(3); m.put(5); m.put(7);
+  count = m.num();
+  m.peek(first);
+  repeat (3) begin m.get(v); sum = sum * 10 + v; end
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq sum 357) (assert_eq first 3) (assert_eq count 3))
+
+; 15.4.3, 15.4.5: get blocks until a message is put, and put into a full
+; bounded mailbox blocks until a get makes room.
+(case get_and_bounded_put_block
+ (source "blocking.sv" #"module Top(output int got, output int got_at, output int put_at);
+ mailbox #(int) m;
+ initial begin
+  m = new(1);
+  fork
+   begin m.get(got); got_at = $time; end
+   begin #1 m.put(4); end
+   begin #2 m.put(5); m.put(6); put_at = $time; end
+   begin #4 m.get(got); end
+  join
+ end
+endmodule"#)
+ (top Top) (run_until 1) (assert_eq got 4) (assert_eq got_at 1)
+ (run_until 3) (assert_eq put_at 0)
+ (run_until 4) (assert_eq got 5) (assert_eq put_at 4))
+
+; 15.4.4, 15.4.6, 15.4.8: the try methods return 0 instead of blocking.
+(case try_methods_do_not_block
+ (source "try.sv" #"module Top(output bit [4:0] q, output int v);
+ mailbox #(int) m;
+ initial begin
+  m = new(1);
+  q[0] = m.try_get(v) == 0;
+  q[1] = m.try_peek(v) == 0;
+  q[2] = m.try_put(8) != 0;
+  q[3] = m.try_put(9) == 0;
+  q[4] = m.try_get(v) != 0;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq q 31) (assert_eq v 8))
+
+; 15.4.9: mailboxes of strings and of class handles, as uvm_tlm_fifo holds
+; transactions.
+(case strings_and_class_handles
+ (source "handles.sv" #"module Top(output int id, output bit same);
+ class Item;
+  int id;
+  function new(int i); id = i; endfunction
+ endclass
+ class Fifo #(type T = int);
+  local mailbox #(T) m;
+  function new(int size = 1); m = new(size); endfunction
+  task put(input T t); m.put(t); endtask
+  task get(output T t); m.get(t); endtask
+ endclass
+ Fifo #(Item) items;
+ mailbox #(string) names;
+ initial begin
+  Item a, b;
+  string s;
+  items = new;
+  names = new;
+  a = new(5);
+  names.put("abc");
+  fork
+   items.put(a);
+   items.get(b);
+  join
+  names.get(s);
+  id = b.id;
+  same = a == b && s == "abc";
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq id 5) (assert_eq same 1))

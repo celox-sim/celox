@@ -41,6 +41,7 @@ pub(super) fn is_array_parameter(
 fn declared_type(
     native: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Converted<Option<Type>> {
@@ -52,6 +53,7 @@ fn declared_type(
     type_binding::bind(
         data_type,
         tree,
+        session,
         &PackedDimensions::new(HashMap::default(), const_env, type_aliases),
     )
 }
@@ -61,6 +63,7 @@ fn declared_type(
 pub(super) fn uses_signal_representation(
     parameter: &celox_sv_syntax::Parameter,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<bool> {
@@ -71,7 +74,7 @@ pub(super) fn uses_signal_representation(
     if !parameter.local
         && tree.parameter_overrides.contains_key(&name)
         && matches!(&parameter.kind, celox_sv_syntax::ParameterKind::Value { dimensions, .. } if dimensions.is_empty())
-        && declared_type(parameter, tree, const_env, aliases)?
+        && declared_type(parameter, tree, session, const_env, aliases)?
             .is_some_and(|ty| ty.unpacked_ranges.is_empty())
     {
         return Ok(false);
@@ -82,6 +85,7 @@ pub(super) fn uses_signal_representation(
 /// Array parameters declared directly in the selected native unit/scope.
 pub(super) fn array_parameters_from_scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<ArrayParameter>> {
@@ -98,6 +102,7 @@ pub(super) fn array_parameters_from_scope(
         parameters.extend(array_parameters_from_declaration(
             &authored,
             tree,
+            session,
             const_env,
             type_aliases,
             &mut |_| {},
@@ -118,6 +123,7 @@ pub(super) fn array_parameters_from_scope(
             parameters.extend(array_parameters_from_declaration(
                 &authored,
                 tree,
+                session,
                 const_env,
                 type_aliases,
                 &mut |_| {},
@@ -131,23 +137,27 @@ pub(super) fn array_parameters_from_scope(
 fn array_parameters_from_declaration(
     authored: &[&celox_sv_syntax::Parameter],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     publish: &mut impl FnMut(&ArrayParameter),
 ) -> Result<Vec<ArrayParameter>, AnalyzerError> {
     let mut parameters = Vec::new();
     for &native in authored {
-        let bound = scope::imported(&tree.state)
+        let bound = scope::imported(tree)
             .pattern_parameter_bindings
             .get(&native.id)
             .cloned();
-        if !uses_signal_representation(native, tree, const_env, type_aliases)? && bound.is_none() {
+        if !uses_signal_representation(native, tree, session, const_env, type_aliases)?
+            && bound.is_none()
+        {
             continue;
         }
         let name = instances::normalize_identifier(&native.name.spelling);
-        let element = declared_type(native, tree, const_env, type_aliases)?.ok_or_else(|| {
-            AnalyzerError::Unsupported(format!("type of array parameter `{name}`"))
-        })?;
+        let element =
+            declared_type(native, tree, session, const_env, type_aliases)?.ok_or_else(|| {
+                AnalyzerError::Unsupported(format!("type of array parameter `{name}`"))
+            })?;
         let celox_sv_syntax::ParameterKind::Value { dimensions, .. } = &native.kind else {
             return Err(AnalyzerError::Parse(
                 "native array parameter kind disagrees".into(),
@@ -156,7 +166,13 @@ fn array_parameters_from_declaration(
         let ranges = dimensions
             .iter()
             .map(|dimension| {
-                constant_binding::unpacked_dimension(dimension, tree, const_env, type_aliases)
+                constant_binding::unpacked_dimension(
+                    dimension,
+                    tree,
+                    session,
+                    const_env,
+                    type_aliases,
+                )
             })
             .collect::<Converted<Vec<_>>>()?;
         let pattern = parameters::ownership::default(native).filter(|id| {
@@ -192,15 +208,17 @@ impl ArrayParameter {
     pub(super) fn initial_process(
         &self,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         dims: &PackedDimensions,
     ) -> Result<InitialProcess, AnalyzerError> {
         let name = self.signal.name().to_string();
         let shape = procedural::dimensions_from_type(self.signal.r#type());
         let value = if let Some(bound) = &self.bound {
-            bound.lower(&tree.state, &shape, dims)?
+            bound.lower(tree, session, &shape, dims)?
         } else {
             match self.native_pattern {
-                Some(root) => match patterns::native_expression(root, &shape, tree, dims)? {
+                Some(root) => match patterns::native_expression(root, &shape, tree, session, dims)?
+                {
                     Some(value) => value,
                     None => return Err(unsupported("array parameter pattern target")),
                 },

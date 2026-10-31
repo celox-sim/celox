@@ -1,0 +1,29 @@
+{
+  "case": "array_locators::array_locator_associative",
+  "source": "src/sv/cases/array_locators.vtest",
+  "standard": "IEEE 1800-2023 7.8.4: the ordering of an integral index is signed or unsigned numerical, depending on the signedness of the index type; 7.12.1: find_index returns the indices as a queue of the index type, and a locator of an associative array uses that order for first and last.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters.",
+  "reduced_source": "module Top;\n    int by_key[int];\n    int r[$];\n    initial begin\n        by_key[10] = 1; by_key[-5] = 2; by_key[3] = 2;\n        foreach (by_key[k]) $display(\"key %0d\", k);\n        r = by_key.find_index with (item == 2);\n        $display(\"find_index size=%0d first=%0d\", r.size(), r[0]);\n        r = by_key.max with (item.index);\n        $display(\"max by index size=%0d value=%0d\", r.size(), r[0]);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "key 3\nkey 10\nkey -5\nfind_index size=2 first=3\nmax by index size=1 value=2\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:7: syntax error\nrepro.sv:7: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "key -5\nkey 3\nkey 10\nfind_index size=0 first=0\nmax by index size=0 value=0\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "key -5\nkey 3\nkey 10\nfind_index size=2 first=-5\nmax by index size=1 value=1\n"
+    }
+  ]
+}

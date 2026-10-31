@@ -11,20 +11,22 @@ for every RTL design.
 The complete benchmark matrix and raw history are available on the
 [external dashboard](https://celox-sim.github.io/celox/dev/bench/).
 
-## Workload groups
+## Workloads
 
-| Group | What it exercises |
-|---|---|
-| Compile time (CodSpeed) | End-to-end frontend, optimization, layout, and native/Cranelift code generation |
-| Counter | Sequential state updates and clock-event overhead |
-| Standard library | A mix of combinational, sequential, and structured datapaths |
-| TypeScript testbench | N-API calls, typed signal access, and scheduler overhead |
-| Verilator comparison | Equivalent generated simulators for a reference baseline |
-| Heliodor Linux | Whole-design compilation, execution including the host testbench, and tiered startup/total time |
+The main view prioritizes complete hardware workloads: Heliodor and representative
+SHA-256, FFT and LZ77 circuits, plus rica's five self-checking RISC-V kernels.
+The **rica** tab compares Celox tiered and Veryl simulator tiered by total process
+time; its daily workflow runs at 04:47 UTC. Details and tarunes qualification
+are tracked in the [circuit collection](./collection.md), including pinned sources,
+acceptance checks and the planned SystemVerilog frontend comparisons.
 
-Compilation and execution are reported separately. A faster compile does not
-imply faster generated code, and a microbenchmark result does not establish
-whole-design performance.
+[API, counter and standard-library measurements](./diagnostics.md) remain available
+as diagnostics. Compilation and execution are reported separately; a faster
+compile does not imply faster generated code.
+
+The [Taxi / cocotb comparison](./taxi.md) runs daily at 03:17 UTC and publishes
+Celox/Verilator results for five fixed configurations (472 tests per sample).
+Its tab separates test-body, whole-process and HDL compilation time.
 
 ## Reading results
 
@@ -45,9 +47,9 @@ group share a CPU.
 Benchmark measurements run on the daily schedule or by manual dispatch. PRs
 exercise the benchmark tooling when it changes. Each measurement workflow keeps
 its running sample and at most one pending run, replacing an older pending run
-with the latest request. The regular benchmark and Heliodor use independent
+with the latest request. The regular benchmark, Heliodor and Taxi use independent
 queues; their publishers retry against the latest `gh-pages` history so concurrent
-publication preserves both sets of results. Only `master` publishes history.
+publication preserves every history. Only `master` publishes history.
 
 - Compare the same workload, backend, revision, and host environment.
 - Treat small changes on shared CI runners as noise until repeated.
@@ -57,8 +59,8 @@ publication preserves both sets of results. Only `master` publishes history.
 
 Heliodor uses an additional fixed-input acceptance workload. Its methodology is
 described in [Heliodor Linux Benchmark](./heliodor.md). The dashboard compares
-the native backend with synchronous Veryl-CC, and shows startup and end-to-end
-time separately for Celox and Veryl-CC tiered execution. Standalone Cranelift boot
+the native backend with synchronous Veryl-CC, and compares Celox and Veryl-CC
+tiered execution by total time through completion, including compilation. Standalone Cranelift boot
 results are excluded because their much longer runtime makes this chart
 ineffective for that comparison.
 Heliodor charts are separated by CPU architecture because results from different

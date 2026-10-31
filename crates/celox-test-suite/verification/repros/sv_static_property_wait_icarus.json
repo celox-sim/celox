@@ -1,0 +1,16 @@
+{
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "source": "sv_static_property_wait_icarus.sv",
+  "standard": "IEEE 1800-2023 8.9, 9.4.3",
+  "command": "iverilog -g2012 -s Top -o sp.vvp sv_static_property_wait_icarus.sv && vvp sp.vvp",
+  "expected_output": "reached 2 at 2",
+  "observations": [
+    {
+      "build_exit_code": 0,
+      "exit_code": 2,
+      "output": "unresolved vvp_net reference: v0x5555558f2f70_0\nunresolved vvp_net reference: v0x5555558f3050_0\ncompile_cleanup: 2 unresolved items\nsp.vvp: Program not runnable, 2 errors.\n"
+    }
+  ],
+  "note": "A task of a class waits on a static property of the class, which another process writes through a handle. Icarus 13.0 compiles the design but vvp cannot load it (unresolved nets). Verilator 5.052, xezim 0.11.3 and Celox print reached 2 at 2."
+}

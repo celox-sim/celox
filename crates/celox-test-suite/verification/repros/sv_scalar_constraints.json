@@ -1,0 +1,33 @@
+{
+  "specification": "IEEE 1800-2023 18.5, 18.6.3",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "case": "class::constrained_randomize_hooks",
+      "status": "runtime_error",
+      "log": "%Warning-UNSATCONSTR: <case>/source_0.sv:6: Unsatisfied constraint: 'constraint bounds { x == limit; x < 3; }'\n%Warning-UNSATCONSTR: <case>/source_0.sv:6: Unsatisfied constraint: 'constraint bounds { x == limit; x < 3; }'\n[0] %Fatal: source_0.sv:16: Assertion failed in TOP.celox_suite_tb.dut: post called on failure\n%Error: <case>/source_0.sv:16: Verilog $stop\nAborting...\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "case": "class::constrained_randomize_hooks",
+      "status": "compile_error",
+      "log": "<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "case": "class::constrained_randomize_scalar",
+      "status": "compile_error",
+      "log": "<case>/source_0.sv:6: sorry: Constraint declarations not supported.\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+      "case": "class::constrained_randomize_width_and_inheritance",
+      "status": "compile_error",
+      "log": "<case>/source_0.sv:7: sorry: Constraint declarations not supported.\n<case>/source_0.sv:8: sorry: Constraint declarations not supported.\n<case>/source_0.sv:11: sorry: Constraint declarations not supported.\n"
+    }
+  ]
+}

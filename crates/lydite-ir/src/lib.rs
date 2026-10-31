@@ -5,10 +5,9 @@ mod specification;
 pub use scoped_specification::*;
 pub use specification::*;
 pub mod lower;
-mod term;
+pub use aplite::term::*;
 pub use design::*;
 pub use lower::*;
-pub use term::*;
 
 #[cfg(test)]
 mod validation_tests;

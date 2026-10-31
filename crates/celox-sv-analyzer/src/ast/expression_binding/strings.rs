@@ -11,6 +11,13 @@ use super::*;
 /// Whether `expr` has type `string`.
 pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -> bool {
     match expr {
+        Expr::Call {
+            callee:
+                Callee::System(crate::system_functions::SystemFunction::Process(
+                    celox_design::ProcessOp::GetRandstate,
+                )),
+            ..
+        } => true,
         Expr::Ident(name) => dimensions.get(name).is_some_and(|ty| ty.string),
         Expr::Call {
             callee: Callee::String(op),
@@ -32,8 +39,18 @@ pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -
         Expr::Call {
             callee: Callee::Object(op),
             ..
-        } => matches!(**op, crate::system_functions::ObjectOp::Load(field)
-            if field.handle == Some(crate::system_functions::HandleProperty::String)),
+        } => {
+            matches!(**op, crate::system_functions::ObjectOp::Load(field)
+            if field.handle == Some(crate::system_functions::HandleProperty::String))
+                || matches!(**op, ObjectOp::Container { op: ContainerOp::Get | ContainerOp::PopFront | ContainerOp::PopBack, layout } if layout.handle == Some(crate::system_functions::HandleProperty::String))
+                || matches!(
+                    **op,
+                    ObjectOp::Stream(
+                        crate::system_functions::StreamOp::ToString
+                            | crate::system_functions::StreamOp::TakeString { .. }
+                    )
+                )
+        }
         Expr::Mux {
             then_expr,
             else_expr,
@@ -103,7 +120,10 @@ pub(in crate::ast) fn operands(
     dimensions: &PackedDimensions,
 ) -> Vec<Expr> {
     let strings = match op {
-        StringOp::FromBits | StringOp::Itoa(_) => 0,
+        // A format keeps its type: the frontend reads a literal one as text.
+        StringOp::FromBits | StringOp::Itoa(_) | StringOp::Format { .. } | StringOp::Pattern(_) => {
+            0
+        }
         StringOp::Concat => usize::MAX,
         StringOp::Compare | StringOp::ICompare => 2,
         _ => 1,
@@ -126,11 +146,31 @@ pub(in crate::ast) fn operands(
 /// bound: a string variable, or a method of a string value that returns one.
 pub(in crate::ast) fn native_string(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
     match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, separator } if separator == "." && name.spelling == "get_randstate" && objects::native_class(tree, session, *base, native, dimensions).as_deref() == Some(super::super::processes::CLASS)) => {
+            true
+        }
+        ExprKind::Select { expression, .. }
+            if containers::native_type(*expression, native, tree, session, dimensions)
+                .ok()
+                .flatten()
+                .is_some() =>
+        {
+            containers::native_type(*expression, native, tree, session, dimensions)
+                .ok()
+                .flatten()
+                .is_some_and(|ty| {
+                    ty.layout.handle == Some(crate::system_functions::HandleProperty::String)
+                })
+        }
+        ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, .. } if matches!(name.spelling.as_str(), "pop_front" | "pop_back") && containers::native_type(*base, native, tree, session, dimensions).ok().flatten().is_some_and(|ty| ty.layout.handle == Some(crate::system_functions::HandleProperty::String))) => {
+            true
+        }
         ExprKind::Name(name)
             if dimensions
                 .get(&instances::normalize_identifier(&name.spelling))
@@ -141,10 +181,44 @@ pub(in crate::ast) fn native_string(
                 .is_some_and(|ty| ty.string)
         }
         ExprKind::Call { expression, .. } => {
-            method(tree, *expression, native, dimensions).is_some_and(|(op, _)| op.returns_string())
+            matches!(&native.expression(ungroup(*expression, native)).kind,
+                ExprKind::Name(name) if matches!(name.spelling.as_str(), "$sformatf" | "$typename"))
+                || method(tree, session, *expression, native, dimensions)
+                    .is_some_and(|(op, _)| op.returns_string())
+                || enum_name(tree, session, *expression, native, dimensions)
+                || returns_string(tree, session, *expression, native, dimensions)
+        }
+        // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
+        ExprKind::Member { .. } if enum_name(tree, session, id, native, dimensions) => true,
+        // A string member of a container element of unpacked structure type.
+        ExprKind::Member { .. }
+            if containers::element_member(
+                ungroup(id, native),
+                native,
+                tree,
+                session,
+                dimensions,
+            )
+            .ok()
+            .flatten()
+            .is_some() =>
+        {
+            containers::element_member(ungroup(id, native), native, tree, session, dimensions)
+                .ok()
+                .flatten()
+                .is_some_and(|(ty, _)| ty.kind() == TypeKind::String)
+        }
+        // A string member of an unpacked structure variable.
+        ExprKind::Member { .. }
+            if unpacked_structs::native_member(ungroup(id, native), native, dimensions)
+                .is_some() =>
+        {
+            unpacked_structs::native_member(ungroup(id, native), native, dimensions)
+                .and_then(|name| dimensions.get(&name))
+                .is_some_and(|ty| ty.string)
         }
         // A string property of a class object.
-        _ => objects::property(tree, id, native, dimensions)
+        _ => objects::property(tree, session, id, native, dimensions)
             .ok()
             .flatten()
             .is_some_and(|(property, _)| {
@@ -153,10 +227,53 @@ pub(in crate::ast) fn native_string(
     }
 }
 
+/// Whether native callee expression `id` is a function or method that
+/// returns a `string`.
+fn returns_string(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    let name = match objects::method(tree, session, id, native, dimensions) {
+        Ok(Some((name, ..))) => name,
+        Ok(None) => match super::direct::callable_name(tree, id, native) {
+            Some(name) => name,
+            None => return false,
+        },
+        Err(_) => return false,
+    };
+    dimensions
+        .functions
+        .get(&name)
+        .is_some_and(|function| function.return_string)
+        || dimensions
+            .function_return_types
+            .get(&name)
+            .is_some_and(|metadata| metadata.string)
+}
+
+/// Whether native callee expression `id` names the `name` method of an
+/// enumerated type (6.19.5.6).
+fn enum_name(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    enums::method(tree, session, id, native, dimensions)
+        .ok()
+        .flatten()
+        .is_some_and(|(method, _, _)| method.returns_string())
+}
+
 /// The string method that native callee expression `id` names, with the
 /// expression it is called on.
 pub(in crate::ast) fn method(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -169,7 +286,7 @@ pub(in crate::ast) fn method(
     else {
         return None;
     };
-    if separator != "." || !native_string(tree, *expression, native, dimensions) {
+    if separator != "." || !native_string(tree, session, *expression, native, dimensions) {
         return None;
     }
     let (op, _) = StringOp::method(&name.spelling)?;

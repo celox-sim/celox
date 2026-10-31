@@ -1,0 +1,21 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "08af331166889f70f738a651810f99df619054eb",
+  "separate-pull-requests": true,
+  "packages": {
+    "crates/aplite": {
+      "release-type": "rust",
+      "component": "aplite",
+      "package-name": "aplite",
+      "include-component-in-tag": true,
+      "bump-minor-pre-major": true,
+      "extra-files": [
+        {
+          "type": "toml",
+          "path": "Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value == \"aplite\")].version"
+        }
+      ]
+    }
+  }
+}

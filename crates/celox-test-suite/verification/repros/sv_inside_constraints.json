@@ -1,0 +1,16 @@
+{
+  "observations": [
+    {
+      "tool": "icarus",
+      "case": "class::constrained_randomize_inside",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inside/source_0.sv:5: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_inside/source_0.sv:5: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_inside/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_inside/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_inside/source_0.sv:5: sorry: Constraint declarations not supported.\n<target>/sv-icarus/class/constrained_randomize_inside/source_0.sv:10: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_inside/source_0.sv:10: sorry: Constraint declarations not supported.\n"
+    },
+    {
+      "tool": "icarus",
+      "case": "class::constrained_randomize_inside_widths",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inside_widths/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_inside_widths/source_0.sv:6: sorry: \"inside\" expressions not supported yet.\n<target>/sv-icarus/class/constrained_randomize_inside_widths/source_0.sv:6: sorry: Constraint declarations not supported.\n"
+    }
+  ]
+}

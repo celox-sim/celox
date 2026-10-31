@@ -44,6 +44,11 @@ pub(super) fn always_kind(
             }
             match event {
                 EventControl::Wildcard => AlwaysKind::Comb,
+                // An `iff` event is judged when it occurs, which only the
+                // process path does (IEEE 1800-2023 9.4.2.3).
+                EventControl::Items(items) if items.iter().any(|item| item.iff.is_some()) => {
+                    AlwaysKind::Process
+                }
                 EventControl::Items(items)
                     if items.iter().any(|item| item.edge != TimingEdge::Any) =>
                 {
@@ -74,6 +79,10 @@ fn has_timing_control(
         if matches!(
             statement.kind,
             StatementKind::Timing { .. }
+                | StatementKind::Assertion {
+                    header: celox_sv_syntax::AssertionHeader::Concurrent { .. },
+                    ..
+                }
                 | StatementKind::Parallel { .. }
                 | StatementKind::Wait { .. }
                 | StatementKind::WaitFork
@@ -191,8 +200,7 @@ fn validate_final(
             | StatementKind::WaitOrder { .. } => Some("wait statement"),
             StatementKind::Parallel { join, .. } if join != "join_none" => Some("fork-join block"),
             // 13.4.4 permits join_none in functions. Its child statements
-            // obey task rules, so leave the whole construct to the existing
-            // unsupported parallel-process binder rather than rejecting it.
+            // obey task rules rather than the parent's function restrictions.
             StatementKind::Parallel { .. } => continue,
             StatementKind::Assertion { keyword, .. } if keyword == "expect" => {
                 Some("expect statement")
@@ -253,6 +261,7 @@ fn validate_body_items(
 
 pub(super) fn reject_silently_ignored_constructs(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_dimensions: &ScopedMap<VariableDimensions>,
@@ -264,19 +273,19 @@ pub(super) fn reject_silently_ignored_constructs(
     let mut dimensions =
         PackedDimensions::new(parameter_dimensions.clone(), const_env, type_aliases);
     dimensions.parameter_values = parameter_values.clone().into();
-    validate_scope(None, syntax_tree, &dimensions)?;
+    validate_scope(None, syntax_tree, session, &dimensions)?;
     if syntax_tree
         .root_unit()
         .is_ok_and(|unit| unit.kind.is_module_like())
     {
-        let active = generate::items(syntax_tree, const_env, type_aliases)?;
+        let active = generate::items(syntax_tree, session, const_env, type_aliases)?;
         let mut views = generate::ScopeViews::new(&dimensions);
         for item in &active {
             item.procedure(syntax_tree.declarations())?;
             item.continuous_assignment(syntax_tree.declarations())?;
-            let _constant_functions = item.enter();
-            let _interface_scope = item.interface_scope();
-            validate_scope(Some(item), syntax_tree, views.dimensions(item))?;
+            let syntax_tree = &item.enter(syntax_tree);
+            let syntax_tree = &item.scoped(syntax_tree);
+            validate_scope(Some(item), syntax_tree, session, views.dimensions(item))?;
         }
     }
     Ok(())
@@ -673,6 +682,7 @@ impl Facts {
 fn validate_scope(
     item: Option<&generate::Item>,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     indexed_dimensions: &PackedDimensions,
 ) -> Converted<()> {
     use celox_sv_syntax::{BodyItemKind, DataTypeKind, DimensionKind, ExprKind};
@@ -686,7 +696,13 @@ fn validate_scope(
             .is_ok_and(|unit| unit.kind.is_module_like());
     let items = owner.map_or_else(|| syntax_tree.body_membership(), |id| Ok(vec![id]))?;
     validate_body_items(&items, native, !is_module)?;
-    parameters::skipped::validate_scope(owner, is_module, syntax_tree, indexed_dimensions)?;
+    parameters::skipped::validate_scope(
+        owner,
+        is_module,
+        syntax_tree,
+        session,
+        indexed_dimensions,
+    )?;
     let const_env = &indexed_dimensions.const_env;
     let type_aliases = &indexed_dimensions.type_aliases;
     let mut ranges = items
@@ -726,6 +742,7 @@ fn validate_scope(
         &selected,
         &ranges,
         syntax_tree,
+        session,
         indexed_dimensions,
         item,
     )?;
@@ -821,31 +838,22 @@ fn validate_scope(
             return Err(unsupported("wildcard port connection"));
         }
     }
-    for index in spans.subroutines.within(&ranges) {
-        let function = &native.subroutines[index];
-        if selected(function.tokens)
-            && function
-                .ports
-                .iter()
-                .flatten()
-                .chain(
-                    function
-                        .port_declarations
-                        .iter()
-                        .flat_map(|declaration| &declaration.ports),
-                )
-                .any(|port| port.direction == Some(celox_sv_syntax::Direction::Ref))
-        {
-            return Err(unsupported("ref function argument"));
-        }
-    }
     for id in spans.types.within(&ranges) {
         let data = native.data_type(id);
         if !selected(data.tokens) {
             continue;
         }
+        // A structure of a class may name the typedefs of the class and its
+        // bases, which only the class scope resolves; the class binds it.
+        if native
+            .classes
+            .iter()
+            .any(|class| contains(class.tokens, data.tokens))
+        {
+            continue;
+        }
         if matches!(data.kind, DataTypeKind::Struct { .. })
-            && type_binding::bind(id, syntax_tree, indexed_dimensions)?.is_none()
+            && type_binding::bind(id, syntax_tree, session, indexed_dimensions)?.is_none()
         {
             return Err(unsupported(
                 "unpacked struct, union, or unsupported packed struct member",
@@ -874,8 +882,15 @@ fn validate_scope(
             continue;
         };
         for id in [left, right] {
-            if constant_binding::expression(id, native, syntax_tree, const_env, type_aliases)?
-                .is_none()
+            if constant_binding::expression(
+                id,
+                native,
+                syntax_tree,
+                session,
+                const_env,
+                type_aliases,
+            )?
+            .is_none()
             {
                 return Err(unsupported("unsupported packed range"));
             }
@@ -897,7 +912,7 @@ fn validate_scope(
                     // IEEE 1800-2023 11.5.1 permits a variable base. Its
                     // expression is bound after variable types are available;
                     // only the width requires constant validation here.
-                    check_indexed_width(width, syntax_tree, indexed_dimensions)?;
+                    check_indexed_width(width, syntax_tree, session, indexed_dimensions)?;
                 }
             }
             _ => {}
@@ -923,7 +938,7 @@ fn validate_scope(
                 .into_iter()
                 .any(|index| {
                     parameters::skipped::needs_selected(
-                        &syntax_tree.state,
+                        syntax_tree,
                         facts.declared_defaults[index],
                         native,
                     )
@@ -934,6 +949,7 @@ fn validate_scope(
                 operand,
                 native,
                 syntax_tree,
+                session,
                 indexed_dimensions,
             )?;
         }
@@ -950,12 +966,12 @@ fn validate_scope(
         if let celox_sv_syntax::ExprKind::Call {
             expression: callee, ..
         } = native.expression(root).kind
-            && expression_binding::native_name(&syntax_tree.state, callee, native).as_deref()
+            && expression_binding::native_name(syntax_tree, callee, native).as_deref()
                 == Some("$isunbounded")
         {
-            expression_binding::bind(root, syntax_tree, indexed_dimensions)?;
+            expression_binding::bind(root, syntax_tree, session, indexed_dimensions)?;
         } else {
-            dimensions::query_value(root, syntax_tree, indexed_dimensions)?
+            dimensions::query_value(root, syntax_tree, session, indexed_dimensions)?
                 .ok_or_else(|| unsupported("operand of native type query"))?;
         }
     }
@@ -992,6 +1008,7 @@ fn reject_constant_calls(
     selected: &impl Fn(celox_sv_syntax::TokenRange) -> bool,
     ranges: &[celox_sv_syntax::TokenRange],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     item: Option<&generate::Item>,
 ) -> Converted<()> {
@@ -1048,9 +1065,10 @@ fn reject_constant_calls(
             .containing(tokens)
             .into_iter()
             .any(|index| {
-                expression_binding::native_name(&tree.state, facts.first_arguments[index].0, native)
+                expression_binding::native_name(tree, facts.first_arguments[index].0, native)
                     .is_some_and(|name| {
-                        SystemFunction::from_name(&name).is_some_and(SystemFunction::is_data_query)
+                        SystemFunction::from_name(&name)
+                            .is_some_and(SystemFunction::has_unevaluated_operand)
                     })
             })
     };
@@ -1067,8 +1085,7 @@ fn reject_constant_calls(
                 expression,
                 arguments,
             } => {
-                let Some(name) = expression_binding::native_name(&tree.state, *expression, native)
-                else {
+                let Some(name) = expression_binding::native_name(tree, *expression, native) else {
                     continue;
                 };
                 (name, arguments.as_slice())
@@ -1104,18 +1121,16 @@ fn reject_constant_calls(
                     detail: "not permitted in a constant-value expression".into(),
                 });
             }
-        } else if !const_functions::is_constant_function(&tree.state.const_functions, &name) {
-            if let Some(error) =
-                const_functions::conversion_error(&tree.state.const_functions, &name)
-            {
+        } else if !const_functions::is_constant_function(&tree.functions, &name) {
+            if let Some(error) = const_functions::conversion_error(&tree.functions, &name) {
                 return Err(error);
             }
-            let context = dimensions::query_context_for_operand(id, tree, dimensions)?;
+            let context = dimensions::query_context_for_operand(id, tree, session, dimensions)?;
             // Generate imports can hide an outer constant function with a
             // package DPI function. Resolve that authored name in the active
             // item before consulting the qualified package declarations.
             let bound = item.map_or_else(|| name.clone(), |item| item.name(&name));
-            let imported = scope::imported(&tree.state);
+            let imported = scope::imported(tree);
             if imported
                 .dpi_imports
                 .iter()
@@ -1138,6 +1153,7 @@ fn reject_constant_calls(
 fn check_indexed_width(
     native: celox_sv_syntax::ExprId,
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
     let mut context = dimensions.clone();
@@ -1146,11 +1162,12 @@ fn check_indexed_width(
         native,
         syntax_tree.declarations(),
         syntax_tree,
+        session,
         &context,
     )?;
-    let width = selects::indexed_expression_value(&syntax_tree.state, value, &context)
+    let width = selects::indexed_expression_value(syntax_tree, session, value, &context)
         .ok_or_else(|| unsupported("constant index expression"))?;
-    match eval_ast_const_expr(&syntax_tree.state, &width, &dimensions.const_env) {
+    match eval_ast_const_expr(&syntax_tree.functions, &width, &dimensions.const_env) {
         Some(width) if width > 0 => Ok(()),
         Some(width) => Err(unsupported(format!("indexed part-select width {width}"))),
         None => Err(unsupported(
@@ -1166,6 +1183,7 @@ mod traversal_tests {
 
     #[test]
     fn validates_native_owners_without_visiting_inactive_generate_bodies() {
+        let session = &mut Session::default();
         for (body, accepted) in [
             (
                 "logic visible; if (0) begin : hidden always_latch visible <= 1; end",
@@ -1185,6 +1203,7 @@ mod traversal_tests {
             .unwrap();
             let result = reject_silently_ignored_constructs(
                 &AnalysisContext::unspecialized(&tree),
+                session,
                 &HashMap::default(),
                 &HashMap::default(),
                 &ScopedMap::default(),

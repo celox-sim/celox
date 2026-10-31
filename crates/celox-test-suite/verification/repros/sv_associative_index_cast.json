@@ -1,0 +1,29 @@
+{
+  "case": "string_format::sformatf_with_associative_index",
+  "source": "src/sv/cases/string_format.vtest",
+  "standard": "IEEE 1800-2023 7.8.4: an integral index expression is evaluated in terms of a cast to the index type; 6.24.1: a size cast returns the value after an assignment to that width, so x + 32'd1 is evaluated at 64 bits.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim.",
+  "reduced_source": "module Top(output bit done);\n    string wide[bit [63:0]];\n    int unsigned x;\n    initial begin\n        x = 32'hffffffff;\n        wide[x + 32'd1] = $sformatf(\"%0d\", 7);\n        $display(\"%0d %0d\", wide.exists(64'h100000000), wide.exists(0));\n        done = 1;\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "0 1\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "0 1\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "source_0.sv:3: error: Type names are not valid expressions here.\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "1 0\n"
+    }
+  ]
+}

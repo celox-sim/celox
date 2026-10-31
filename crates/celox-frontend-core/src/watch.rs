@@ -29,6 +29,21 @@ pub struct WatchCode<A> {
     /// Whether the signal is held in four-state form.
     pub four_state: bool,
     pub counters: Vec<(CounterKind, A)>,
+    /// Gated wait terms on the signal, whose counters a write bumps.
+    pub gated: Vec<GatedCode<A>>,
+}
+
+/// A gated wait term on a watched signal (`celox_design::GateCounters`): a
+/// write that is an occurrence of `kind` bumps `all`, and `gated` too if
+/// the least significant bit of `gate` is a known 1 after it (IEEE
+/// 1800-2023 9.4.2.3).
+#[derive(Clone, Debug)]
+pub struct GatedCode<A> {
+    pub kind: CounterKind,
+    pub gate: A,
+    pub gate_four_state: bool,
+    pub gated: A,
+    pub all: A,
 }
 
 impl<A> WatchCode<A> {
@@ -44,6 +59,7 @@ impl<A> WatchCode<A> {
                 .counters()
                 .map(|(kind, counter)| (kind, address(counter)))
                 .collect(),
+            gated: Vec::new(),
         }
     }
 }
@@ -140,7 +156,7 @@ pub fn emit_watched<A: Clone>(
     // so no backend can re-read the written state for it.
     let old_lsb = lsb(b, old, watch.width, watch.four_state);
     b.emit(write);
-    if watch.counters.is_empty() {
+    if watch.counters.is_empty() && watch.gated.is_empty() {
         return;
     }
     let new = match stored {
@@ -164,6 +180,23 @@ pub fn emit_watched<A: Clone>(
             watch.four_state,
         );
         bump(b, counter, occurred);
+    }
+    for term in &watch.gated {
+        let occurred = occurrence(
+            b,
+            term.kind,
+            (old, old_lsb),
+            (new, new_lsb),
+            watch.width,
+            watch.four_state,
+        );
+        bump(b, &term.all, occurred);
+        let gate = load_range(b, &term.gate, SIROffset::Static(0), 1, term.gate_four_state);
+        let one = constant(b, 1, 1, term.gate_four_state);
+        // Case equality: an unknown gate does not hold.
+        let holds = binary(b, gate, BinaryOp::EqCase, one);
+        let counted = binary(b, occurred, BinaryOp::And, holds);
+        bump(b, &term.gated, counted);
     }
 }
 
@@ -1520,31 +1553,35 @@ mod tests {
         candidates
     }
 
+    /// A linear congruential generator for the random units below.
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) % bound
+        }
+    }
+
     /// A random unit: sparse block ids, forward and backward edges (loops),
     /// edges to missing blocks, returns, and stores, commits and other
     /// instructions over a few addresses.
     fn random_unit(seed: u64) -> celox_sir::ExecutionUnit<u32> {
         use celox_sir::{BasicBlock, BlockId, RegisterId, SIRSwitchCase};
-        let state = std::cell::Cell::new(seed);
-        let next = |bound: u64| {
-            state.set(
-                state
-                    .get()
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407),
-            );
-            (state.get() >> 33) % bound
-        };
-        let count = 1 + next(30) as usize;
-        let addresses = 1 + next(12) as u32;
-        let back_edges = next(4);
+        let mut rng = Lcg(seed);
+        let count = 1 + rng.next(30) as usize;
+        let addresses = 1 + rng.next(12) as u32;
+        let back_edges = rng.next(4);
         let id = |n: usize| BlockId(n * 3 + 1);
         let mut blocks = crate::HashMap::default();
         for n in 0..count {
             let mut instructions = Vec::new();
-            for _ in 0..next(5) {
-                let address = next(addresses as u64) as u32;
-                instructions.push(match next(4) {
+            for _ in 0..rng.next(5) {
+                let address = rng.next(addresses as u64) as u32;
+                instructions.push(match rng.next(4) {
                     0 => SIRInstruction::Imm(RegisterId(0), SIRValue::new(1u8)),
                     1 => SIRInstruction::Commit(
                         address,
@@ -1563,33 +1600,33 @@ mod tests {
                     ),
                 });
             }
-            let target = || {
-                let roll = next(10);
+            let target = |rng: &mut Lcg| {
+                let roll = rng.next(10);
                 if roll == 0 {
                     BlockId(0)
                 } else if roll <= back_edges {
-                    id(next(n as u64 + 1) as usize)
+                    id(rng.next(n as u64 + 1) as usize)
                 } else {
-                    id((n + 1 + next(4) as usize).min(count))
+                    id((n + 1 + rng.next(4) as usize).min(count))
                 }
             };
-            let terminator = match next(5) {
+            let terminator = match rng.next(5) {
                 0 => SIRTerminator::Return,
-                1 | 2 => SIRTerminator::Jump(target(), Vec::new()),
+                1 | 2 => SIRTerminator::Jump(target(&mut rng), Vec::new()),
                 3 => SIRTerminator::Branch {
                     cond: RegisterId(0),
-                    true_block: (target(), Vec::new()),
-                    false_block: (target(), Vec::new()),
+                    true_block: (target(&mut rng), Vec::new()),
+                    false_block: (target(&mut rng), Vec::new()),
                 },
                 _ => SIRTerminator::Switch {
                     selector: RegisterId(0),
                     cases: (0..3u8)
                         .map(|value| SIRSwitchCase {
                             value: value.into(),
-                            target: target(),
+                            target: target(&mut rng),
                         })
                         .collect(),
-                    default: target(),
+                    default: target(&mut rng),
                 },
             };
             blocks.insert(
@@ -1689,31 +1726,25 @@ mod tests {
     /// by another pass's code.
     fn random_instrumentation(seed: u64) -> (celox_sir::ExecutionUnit<u32>, Vec<Pass>) {
         use celox_design::CounterKind;
-        let state = std::cell::Cell::new(seed);
-        let next = |bound: u64| {
-            state.set(
-                state
-                    .get()
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407),
-            );
-            (state.get() >> 33) % bound
-        };
-        let addresses = 1 + next(6) as u32;
+        let mut rng = Lcg(seed);
+        let addresses = 1 + rng.next(6) as u32;
         let widths = [1, 4, 8];
         let mut b = SIRBuilder::new();
-        let blocks = 1 + next(4);
+        let blocks = 1 + rng.next(4);
         for block in 0..blocks {
-            for _ in 0..next(6) {
-                let width = widths[next(3) as usize];
-                let value = if next(2) == 0 {
+            for _ in 0..rng.next(6) {
+                let width = widths[rng.next(3) as usize];
+                let value = if rng.next(2) == 0 {
                     b.alloc_logic(width)
                 } else {
                     b.alloc_bit(width, false)
                 };
-                b.emit(SIRInstruction::Imm(value, SIRValue::new(next(256) as u8)));
-                let address = next(addresses as u64) as u32;
-                b.emit(match next(3) {
+                b.emit(SIRInstruction::Imm(
+                    value,
+                    SIRValue::new(rng.next(256) as u8),
+                ));
+                let address = rng.next(addresses as u64) as u32;
+                b.emit(match rng.next(3) {
                     0 => SIRInstruction::Commit(
                         address,
                         address,
@@ -1723,7 +1754,7 @@ mod tests {
                     ),
                     _ => SIRInstruction::Store(
                         address,
-                        SIROffset::Static(next(2) as usize * 2),
+                        SIROffset::Static(rng.next(2) as usize * 2),
                         width,
                         value,
                         Vec::new(),
@@ -1740,19 +1771,25 @@ mod tests {
         let value = b.alloc_bit(1, false);
         b.emit(SIRInstruction::Imm(value, SIRValue::new(0u8)));
         let unit = b.flush_eu().unwrap();
-        let passes = (0..1 + next(8))
+        let passes = (0..1 + rng.next(8))
             .map(|_| Pass {
-                address: next(addresses as u64) as u32,
-                stores_only: next(2) == 0,
+                address: rng.next(addresses as u64) as u32,
+                stores_only: rng.next(2) == 0,
                 code: WatchCode {
-                    signal: next(addresses as u64) as u32,
-                    width: widths[next(3) as usize],
-                    offset: SIROffset::Static(next(2) as usize * 2),
-                    four_state: next(2) == 0,
+                    gated: Vec::new(),
+                    signal: rng.next(addresses as u64) as u32,
+                    width: widths[rng.next(3) as usize],
+                    offset: SIROffset::Static(rng.next(2) as usize * 2),
+                    four_state: rng.next(2) == 0,
                     counters: CounterKind::ALL
                         .into_iter()
-                        .filter(|_| next(2) == 0)
-                        .map(|kind| (kind, next(addresses as u64 + 2) as u32))
+                        .filter_map(|kind| {
+                            if rng.next(2) == 0 {
+                                Some((kind, rng.next(addresses as u64 + 2) as u32))
+                            } else {
+                                None
+                            }
+                        })
                         .collect(),
                 },
             })

@@ -11,7 +11,7 @@ pub(in crate::ast) use tagged::{
 #[cfg(test)]
 mod tests;
 
-pub(super) use layout::{AggregateKind, native_type};
+pub(super) use layout::{AggregateKind, capture_member_type, native_type};
 pub(super) use selects::{select_member, whole_member};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -42,6 +42,10 @@ impl generate::CallSites for PackedMember {
 impl PackedMember {
     pub(in crate::ast) fn is_tagged(&self) -> bool {
         self.tag.is_some()
+    }
+    /// The declaration of the aggregate that has the member.
+    pub(in crate::ast) fn owner(&self) -> &Arc<str> {
+        &self.owner
     }
     pub(in crate::ast) fn same_owner(&self, other: &Self) -> bool {
         self.owner == other.owner

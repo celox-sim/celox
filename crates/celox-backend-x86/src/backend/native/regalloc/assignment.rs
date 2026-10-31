@@ -98,8 +98,7 @@ pub const ALLOCATABLE_REGS: &[PhysReg] = &[
 
 /// The registers an extern call changes: those a C function need not
 /// preserve, and RBX, which holds the state pointer during the call sequence.
-#[cfg(not(target_os = "windows"))]
-const EXTERN_CALL_CLOBBERS: &[PhysReg] = &[
+const NATIVE_KERNEL_CLOBBERS: &[PhysReg] = &[
     PhysReg::RAX,
     PhysReg::RCX,
     PhysReg::RDX,
@@ -111,6 +110,8 @@ const EXTERN_CALL_CLOBBERS: &[PhysReg] = &[
     PhysReg::R11,
     PhysReg::RBX,
 ];
+#[cfg(not(target_os = "windows"))]
+const EXTERN_CALL_CLOBBERS: &[PhysReg] = NATIVE_KERNEL_CLOBBERS;
 #[cfg(target_os = "windows")]
 const EXTERN_CALL_CLOBBERS: &[PhysReg] = &[
     PhysReg::RAX,
@@ -223,6 +224,11 @@ pub fn clobbers(inst: &MInst) -> &'static [PhysReg] {
         // Return.  Model the clobber at the allocation boundary instead so
         // only genuinely live-through values are moved to their homes.
         MInst::SparseCommitWorklist { .. } => ALLOCATABLE_REGS,
+        MInst::CallExtern { func, .. }
+            if celox_sir::extern_abi::native_kernel_index(*func).is_some() =>
+        {
+            NATIVE_KERNEL_CLOBBERS
+        }
         MInst::CallExtern { .. } => EXTERN_CALL_CLOBBERS,
         _ => &[],
     }

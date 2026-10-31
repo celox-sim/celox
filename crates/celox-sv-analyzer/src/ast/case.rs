@@ -3,10 +3,12 @@
 use super::*;
 
 pub(super) fn expr_is_two_state(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: &Expr,
     packed_dimensions: &PackedDimensions,
 ) -> bool {
+    let functions = &tree.functions;
     match expr {
         Expr::Ident(name) => {
             packed_dimensions
@@ -17,33 +19,33 @@ pub(super) fn expr_is_two_state(
         Expr::Literal(value) => typecheck::parse_integral_literal(value)
             .is_some_and(|literal| literal.mask == num_bigint::BigUint::default()),
         Expr::Select { expr, msb, lsb, .. } => {
-            expr_is_two_state(state, expr, packed_dimensions)
-                && select_bounds_are_statically_valid(state, expr, msb, lsb, packed_dimensions)
+            expr_is_two_state(tree, session, expr, packed_dimensions)
+                && select_bounds_are_statically_valid(tree, expr, msb, lsb, packed_dimensions)
         }
-        Expr::Resize { expr, .. } => expr_is_two_state(state, expr, packed_dimensions),
+        Expr::Resize { expr, .. } => expr_is_two_state(tree, session, expr, packed_dimensions),
         Expr::Concat(parts) | Expr::RepeatConcat { parts, .. } => parts
             .iter()
-            .all(|part| expr_is_two_state(state, part, packed_dimensions)),
+            .all(|part| expr_is_two_state(tree, session, part, packed_dimensions)),
         Expr::Unary { op, expr } => {
-            *op == UnaryOp::ToTwoState || expr_is_two_state(state, expr, packed_dimensions)
+            *op == UnaryOp::ToTwoState || expr_is_two_state(tree, session, expr, packed_dimensions)
         }
         Expr::Binary { left, op, right } => {
             matches!(op, BinaryOp::EqCase | BinaryOp::NeCase)
-                || (expr_is_two_state(state, left, packed_dimensions)
-                    && expr_is_two_state(state, right, packed_dimensions)
+                || (expr_is_two_state(tree, session, left, packed_dimensions)
+                    && expr_is_two_state(tree, session, right, packed_dimensions)
                     && (!matches!(op, BinaryOp::Div | BinaryOp::Mod)
-                        || expr_to_const(state, (**right).clone())
+                        || expr_to_const(session, (**right).clone())
                             .and_then(|right| {
-                                eval_ast_const_expr(state, &right, &packed_dimensions.const_env)
+                                eval_ast_const_expr(functions, &right, &packed_dimensions.const_env)
                             })
                             .is_some_and(|right| right != 0)))
         }
         Expr::Inside { expr, items } => {
-            expr_is_two_state(state, expr, packed_dimensions)
+            expr_is_two_state(tree, session, expr, packed_dimensions)
                 && items.iter().all(|item| {
                     item.exprs()
                         .into_iter()
-                        .all(|operand| expr_is_two_state(state, operand, packed_dimensions))
+                        .all(|operand| expr_is_two_state(tree, session, operand, packed_dimensions))
                 })
         }
         Expr::Mux {
@@ -51,10 +53,10 @@ pub(super) fn expr_is_two_state(
             then_expr,
             else_expr,
         } => {
-            expr_is_two_state(state, then_expr, packed_dimensions)
+            expr_is_two_state(tree, session, then_expr, packed_dimensions)
                 && (then_expr == else_expr
-                    || (expr_is_two_state(state, condition, packed_dimensions)
-                        && expr_is_two_state(state, else_expr, packed_dimensions)))
+                    || (expr_is_two_state(tree, session, condition, packed_dimensions)
+                        && expr_is_two_state(tree, session, else_expr, packed_dimensions)))
         }
         Expr::Call {
             callee: Callee::System(function),
@@ -64,15 +66,55 @@ pub(super) fn expr_is_two_state(
             callee: Callee::String(op),
             ..
         } => !matches!(op, crate::system_functions::StringOp::Atoi(_)),
+        // A stream is 2-state when all of its data are (11.4.14).
+        Expr::Call {
+            callee: Callee::Stream(_),
+            args,
+            ..
+        } => args.iter().all(|arg| {
+            arg.as_ref()
+                .is_some_and(|arg| expr_is_two_state(tree, session, arg, packed_dimensions))
+        }),
         // Properties are 2-state.
         Expr::Call {
             callee: Callee::Checked { .. },
             ..
         } => false,
+        // The selector is compared with case equality; the result is a value
+        // or the default.
         Expr::Call {
-            callee: Callee::Object(_),
+            callee: Callee::Lookup { .. },
+            args,
             ..
-        } => true,
+        } => {
+            let key = |index: usize| index % 2 == 1 && index + 1 != args.len();
+            args.iter().enumerate().skip(1).all(|(index, arg)| {
+                key(index)
+                    || arg
+                        .as_ref()
+                        .is_some_and(|arg| expr_is_two_state(tree, session, arg, packed_dimensions))
+            })
+        }
+        Expr::Call {
+            callee: Callee::Object(op),
+            ..
+        } => match **op {
+            // A 4-state property or member of a record may hold X or Z.
+            ObjectOp::Load(field) => !field.four_state,
+            ObjectOp::Unbox(ref record) => !record.fields.iter().any(|field| field.four_state),
+            ObjectOp::Container { op, layout } => {
+                layout.two_state
+                    || !(op.reduction().is_some()
+                        || matches!(
+                            op,
+                            ContainerOp::Get
+                                | ContainerOp::PopFront
+                                | ContainerOp::PopBack
+                                | ContainerOp::Equal
+                        ))
+            }
+            _ => true,
+        },
         Expr::Call {
             callee: Callee::Subroutine(name),
             ..
@@ -84,15 +126,16 @@ pub(super) fn expr_is_two_state(
 }
 
 fn select_bounds_are_statically_valid(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expr: &Expr,
     msb: &ConstExpr,
     lsb: &ConstExpr,
     packed_dimensions: &PackedDimensions,
 ) -> bool {
+    let functions = &tree.functions;
     let (Some(msb), Some(lsb)) = (
-        eval_ast_const_expr(state, msb, &packed_dimensions.const_env),
-        eval_ast_const_expr(state, lsb, &packed_dimensions.const_env),
+        eval_ast_const_expr(functions, msb, &packed_dimensions.const_env),
+        eval_ast_const_expr(functions, lsb, &packed_dimensions.const_env),
     ) else {
         return false;
     };
@@ -102,14 +145,14 @@ fn select_bounds_are_statically_valid(
             return false;
         };
         let (Some(msb), Some(lsb)) = (
-            eval_ast_const_expr(state, &msb, &packed_dimensions.const_env),
-            eval_ast_const_expr(state, &lsb, &packed_dimensions.const_env),
+            eval_ast_const_expr(functions, &msb, &packed_dimensions.const_env),
+            eval_ast_const_expr(functions, &lsb, &packed_dimensions.const_env),
         ) else {
             return false;
         };
         (msb.min(lsb), msb.max(lsb))
     } else {
-        let Some(width) = expr_static_width(state, expr, packed_dimensions)
+        let Some(width) = expr_static_width(tree, expr, packed_dimensions)
             .and_then(|width| width.checked_sub(1))
             .and_then(|high| i128::try_from(high).ok())
         else {

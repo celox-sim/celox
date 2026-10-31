@@ -1,4 +1,4 @@
-use crate::HashMap;
+use crate::{HashMap, HashSet};
 pub use celox_design::PortTypeKind;
 pub(crate) use celox_design::{
     AbsoluteAddrBase, BitAccess, InstanceId, ModuleId, RegionedAbsoluteAddrBase,
@@ -93,6 +93,9 @@ pub struct RuntimeDesign {
     instance_ids: HashMap<InstancePath, InstanceId>,
     variables: HashMap<AbsoluteAddr, RuntimeVariable>,
     package_instances: crate::HashSet<InstanceId>,
+    /// Source-declared lexical scopes used only by reflection. Keep the
+    /// real-instance display path unchanged for lookup and VCD bookkeeping.
+    reflection_instance_paths: std::collections::BTreeMap<InstanceId, Vec<String>>,
 }
 
 impl std::ops::Deref for RuntimeDesign {
@@ -104,6 +107,90 @@ impl std::ops::Deref for RuntimeDesign {
 }
 
 impl RuntimeDesign {
+    /// Add compiler-owned storage after source hierarchy projection. The slot
+    /// remains an ordinary state object for layout, roots, images and snapshots.
+    pub(crate) fn allocate_testbench_slot(
+        &mut self,
+        width: usize,
+        is_string: bool,
+    ) -> AbsoluteAddr {
+        let instance_id = *self
+            .instances
+            .keys()
+            .min()
+            .expect("testbench root instance");
+        let object = self
+            .semantic
+            .state_objects
+            .keys()
+            .map(|a| a.var_id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let source = self
+            .variables
+            .values()
+            .map(|v| v.source_id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let address = AbsoluteAddr {
+            instance_id,
+            var_id: celox_design::StateObjectId(object),
+        };
+        let source_id = SourceVarId(source);
+        let path = vec![format!("__celox_tb_{object}")];
+        self.semantic.state_objects.insert(
+            address,
+            celox_design::VariableMetadata {
+                width: width.max(1),
+                is_4state: false,
+                kind: celox_design::DomainKind::Other,
+                type_kind: celox_design::PortTypeKind::Bit,
+                array_dims: vec![],
+                value_kind: if is_string {
+                    celox_design::ValueKind::StrRef
+                } else {
+                    Default::default()
+                },
+            },
+        );
+        self.variables.insert(
+            address,
+            RuntimeVariable {
+                address,
+                source_id,
+                path: path.clone(),
+                var_kind: VariableKind::Variable,
+                signed: false,
+                packed_dims: vec![width.max(1)],
+                unpacked_ranges: vec![],
+            },
+        );
+        let instance = self.instances.get_mut(&instance_id).unwrap();
+        instance.state_addresses.push(address);
+        instance.source_variables.insert(source_id, address);
+        // Compiler storage is deliberately absent from source lookup and VCD.
+        address
+    }
+
+    /// A four-state testbench slot: it keeps the unknown bits of what is
+    /// stored in a four-state build.
+    pub(crate) fn allocate_testbench_logic_slot(&mut self, width: usize) -> AbsoluteAddr {
+        let address = self.allocate_testbench_slot(width, false);
+        let object = self.semantic.state_objects.get_mut(&address).unwrap();
+        object.is_4state = true;
+        object.type_kind = celox_design::PortTypeKind::Logic;
+        address
+    }
+
+    pub(crate) fn allocate_testbench_copy(&mut self, source: AbsoluteAddr) -> AbsoluteAddr {
+        let info = self.semantic.state_objects[&source].clone();
+        let address = self.allocate_testbench_slot(info.width, false);
+        self.semantic.state_objects.insert(address, info);
+        address
+    }
+
     fn from_projection(
         semantic: celox_design::ElaboratedDesign<AbsoluteAddr>,
         frontend: FrontendLookup,
@@ -195,6 +282,7 @@ impl RuntimeDesign {
             instance_ids: frontend.instance_ids,
             variables,
             package_instances: frontend.package_instances,
+            reflection_instance_paths: Default::default(),
         };
         design
             .validate()
@@ -204,6 +292,14 @@ impl RuntimeDesign {
 
     pub fn semantic(&self) -> &celox_design::ElaboratedDesign<AbsoluteAddr> {
         &self.semantic
+    }
+
+    #[cfg(feature = "systemverilog")]
+    pub(crate) fn set_reflection_instance_paths(
+        &mut self,
+        paths: std::collections::BTreeMap<InstanceId, Vec<String>>,
+    ) {
+        self.reflection_instance_paths = paths;
     }
 
     pub fn instances(&self) -> impl Iterator<Item = &RuntimeInstance> {
@@ -444,6 +540,9 @@ pub struct RuntimeProgram {
     pub design: RuntimeDesign,
     pub runtime_schema: RuntimeSchema<AbsoluteAddr>,
     pub testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+    /// Objects accessed by RTL before optimization. Retained so host-side
+    /// testbench writes can distinguish private variables from hardware.
+    pub(crate) rtl_accesses: HashSet<AbsoluteAddr>,
 }
 
 /// Lowered SIR whose backend-independent optimization pipeline has not run.
@@ -563,6 +662,10 @@ pub struct LaidOutProgram {
     pub sir: SirProgram,
     pub(crate) runtime: RuntimeProgram,
     layout: crate::backend::MemoryLayout,
+    /// Native-only generated process entries. Their SIR is expanded for one
+    /// compilation at a time; `sir.processes` reserves their stable indices.
+    #[cfg(feature = "host-runtime")]
+    pub(crate) deferred_derived_edges: HashMap<usize, crate::derived_edge::DeferredEdge>,
 }
 
 impl LaidOutProgram {
@@ -773,6 +876,8 @@ impl OptimizedSir {
             sir,
             runtime,
             layout,
+            #[cfg(feature = "host-runtime")]
+            deferred_derived_edges: HashMap::default(),
         };
         crate::settle::instrument(&mut laid_out);
         laid_out
@@ -821,7 +926,15 @@ fn rebuild_rtl_writes(program: &mut OptimizedSir) {
                 .iter()
                 .flat_map(|parallel| parallel.units().map(|unit| &unit.unit)),
         )
-        .chain(&program.sir.processes)
+        .chain(
+            program
+                .sir
+                .processes
+                .iter()
+                .zip(&program.runtime.runtime_schema.processes)
+                .filter(|(_, slots)| slots.kind != celox_design::ProcessKind::Callable)
+                .map(|(unit, _)| unit),
+        )
     {
         for block in unit.blocks.values() {
             for instruction in &block.instructions {
@@ -894,7 +1007,11 @@ impl RuntimeProgram {
             .design
             .instances()
             .map(|instance| {
-                let segments = &instance.display_path;
+                let segments = self
+                    .design
+                    .reflection_instance_paths
+                    .get(&instance.id)
+                    .unwrap_or(&instance.display_path);
                 let name = segments
                     .last()
                     .cloned()
@@ -926,9 +1043,42 @@ impl RuntimeProgram {
         // instances. Retain their source path segments as navigable scopes.
         let real_scopes = scope_sources
             .iter()
-            .map(|scope| scope.full_name.clone())
-            .collect::<crate::HashSet<_>>();
+            .map(|scope| (scope.full_name.clone(), scope.instance_id))
+            .collect::<HashMap<_, _>>();
         let mut member_scopes = HashMap::default();
+        let root_instance = self
+            .design
+            .root_instance()
+            .expect("top-level instance exists")
+            .id;
+        // A generate block can contain only child instances, without a local
+        // variable to create its scope. Materialize every declared prefix and
+        // inherit its time scale from the nearest real enclosing instance.
+        for segments in self.design.reflection_instance_paths.values() {
+            let mut owner = root_instance;
+            for depth in 1..segments.len() {
+                let full_name = format!("{root_name}.{}", segments[..depth].join("."));
+                if let Some(&instance) = real_scopes.get(&full_name) {
+                    owner = instance;
+                    continue;
+                }
+                let parent_name = if depth == 1 {
+                    root_name.clone()
+                } else {
+                    format!("{root_name}.{}", segments[..depth - 1].join("."))
+                };
+                member_scopes
+                    .entry(full_name.clone())
+                    .or_insert_with(|| ScopeSource {
+                        is_instance: false,
+                        instance_id: owner,
+                        name: segments[depth - 1].clone(),
+                        full_name,
+                        parent_name: Some(parent_name),
+                        module_name: String::new(),
+                    });
+            }
+        }
         for scope in &scope_sources {
             let instance = self.design.instance(scope.instance_id).unwrap();
             for address in instance.state_addresses() {
@@ -939,7 +1089,7 @@ impl RuntimeProgram {
                 for depth in 1..variable.path.len() {
                     let full_name =
                         format!("{}.{}", scope.full_name, variable.path[..depth].join("."));
-                    if real_scopes.contains(&full_name) {
+                    if real_scopes.contains_key(&full_name) {
                         continue;
                     }
                     let parent_name = if depth == 1 {
@@ -1108,12 +1258,49 @@ impl RuntimeProgram {
         scheduled: celox_frontend_core::ScheduledRtl,
     ) -> Result<(SirProgram, Self), DesignProjectionError> {
         let design = RuntimeDesign::from_projection(scheduled.design, scheduled.frontend_lookup)?;
+        let rtl_accesses = {
+            let mut rtl_accesses = HashSet::default();
+            for unit in scheduled
+                .sir
+                .eval_comb
+                .iter()
+                .chain(scheduled.sir.eval_apply_ffs.values().flatten())
+                .chain(scheduled.sir.eval_comb_apply_ffs.values().flatten())
+                .chain(scheduled.sir.eval_only_ffs.values().flatten())
+                .chain(scheduled.sir.apply_ffs.values().flatten())
+                .chain(scheduled.sir.processes.iter())
+            {
+                for inst in unit.blocks.values().flat_map(|block| &block.instructions) {
+                    match inst {
+                        SIRInstruction::Load(_, addr, ..) | SIRInstruction::Store(addr, ..) => {
+                            rtl_accesses.insert(addr.absolute_addr());
+                        }
+                        SIRInstruction::Commit(src, dst, ..) => {
+                            rtl_accesses.insert(src.absolute_addr());
+                            rtl_accesses.insert(dst.absolute_addr());
+                        }
+                        SIRInstruction::Imm(..)
+                        | SIRInstruction::Binary(..)
+                        | SIRInstruction::Unary(..)
+                        | SIRInstruction::Concat(..)
+                        | SIRInstruction::Slice(..)
+                        | SIRInstruction::Mux(..)
+                        | SIRInstruction::RuntimeEvent { .. }
+                        | SIRInstruction::CombCaptureEvent { .. }
+                        | SIRInstruction::CombCaptureEnableIfChanged { .. }
+                        | SIRInstruction::ExternCall { .. } => {}
+                    }
+                }
+            }
+            rtl_accesses
+        };
         Ok((
             scheduled.sir,
             Self {
                 design,
                 runtime_schema: scheduled.runtime_schema,
                 testbench: None,
+                rtl_accesses,
             },
         ))
     }

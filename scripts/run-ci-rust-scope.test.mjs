@@ -70,3 +70,12 @@ test("the runner stops and propagates a failed scoped Cargo invocation", () => {
     assert.equal(readFileSync(log, "utf8"), "called\n");
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
+
+
+test("backend exclusion intersects each scoped test invocation but never lint", () => {
+  const backend = "not test(parallel)";
+  for (const args of cargoCommands("test", builds, filter, backend)) {
+    assert.equal(args.at(-1), `(${filter}) & (${backend})`);
+  }
+  assert.deepEqual(cargoCommands("lint", builds, filter, backend), cargoCommands("lint", builds, filter));
+});

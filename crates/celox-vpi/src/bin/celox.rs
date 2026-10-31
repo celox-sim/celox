@@ -13,10 +13,20 @@ use celox::{
 };
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
 
+#[cfg(feature = "systemverilog")]
+#[path = "celox/checkpoint_fs.rs"]
+mod checkpoint_fs;
 #[path = "celox/project.rs"]
 mod project;
 #[path = "celox/runner.rs"]
 mod runner;
+#[cfg(feature = "systemverilog")]
+#[path = "celox/state_signal.rs"]
+mod state_signal;
+#[cfg(feature = "systemverilog")]
+#[path = "celox/system_checkpoint.rs"]
+mod system_checkpoint;
+
 use project::{Design, DesignArgs};
 
 #[derive(Parser)]
@@ -88,15 +98,23 @@ struct SaveStateArgs {
     /// the design's global time precision.
     #[arg(long, value_name = "T", value_delimiter = ',')]
     save_state_at_time: Vec<u64>,
+    /// Disable the default SIGUSR1 checkpoint handler (Unix, SystemVerilog).
+    #[arg(long)]
+    no_checkpoint_on_signal: bool,
+    /// Resume a trusted CLI checkpoint with the same design and options.
+    #[arg(long, value_name = "FILE")]
+    restore_checkpoint: Option<PathBuf>,
     /// The directory of the saved files, `<signal>-<N>.state` and
-    /// `time-<T>.state` (default: the current directory).
+    /// `time-<T>.state` or `signal-<PID>-<N>.checkpoint` (default: the current directory).
     #[arg(long, value_name = "DIR")]
     save_state_dir: Option<PathBuf>,
 }
 
 impl SaveStateArgs {
     fn is_empty(&self) -> bool {
-        self.save_state_on.is_none() && self.save_state_at_time.is_empty()
+        self.save_state_on.is_none()
+            && self.save_state_at_time.is_empty()
+            && self.restore_checkpoint.is_none()
     }
 }
 
@@ -202,7 +220,7 @@ fn run_testbench(arguments: RunArgs) -> Result<(), String> {
     }
     if !arguments.save_state.is_empty() {
         return Err(
-            "--save-state-on and --save-state-at-time currently require a SystemVerilog testbench"
+            "--save-state-on, --save-state-at-time and --restore-checkpoint currently require a SystemVerilog testbench"
                 .into(),
         );
     }
@@ -219,6 +237,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     arguments.execution.validate_sv().unwrap_or_else(|message| {
         clap::Error::raw(clap::error::ErrorKind::ArgumentConflict, message).exit()
     });
+    // Install before compiling so requests received during compilation are
+    // deferred until the first safe simulation boundary.
+    let signal = (cfg!(unix) && !arguments.save_state.no_checkpoint_on_signal)
+        .then(state_signal::StateSignal::install)
+        .transpose()?;
     let sources = arguments.design.sv_sources()?;
     let source_refs = sources
         .iter()
@@ -231,7 +254,13 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .diagnostic_policy(arguments.design.diagnostics.clone())
         .sv_timescale(arguments.design.timescale)
         .signal_access(arguments.design.signal_access.clone())
-        .plusargs(arguments.plusargs.iter().cloned());
+        .plusargs(arguments.plusargs.iter().cloned())
+        .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    let builder = if signal.is_some() || arguments.save_state.restore_checkpoint.is_some() {
+        builder.file_system(|| Box::<checkpoint_fs::CheckpointFs>::default())
+    } else {
+        builder
+    };
     let builder = arguments.design.apply_parameters(builder);
     let max_steps = if arguments.execution.unlimited {
         u64::MAX
@@ -240,11 +269,24 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
     };
     macro_rules! execute {
         ($build:ident) => {{
-            let simulation = builder
+            let mut simulation = builder
                 .$build()
                 .map_err(|error| format!("compilation failed:\n{error}"))?;
             report_warnings(simulation.warnings())?;
-            let saves = StateSaves::new(&simulation, &arguments.design.top, &arguments.save_state)?;
+            let progress = if let Some(path) = &arguments.save_state.restore_checkpoint {
+                Some(system_checkpoint::restore(&mut simulation, path)?)
+            } else {
+                None
+            };
+            let mut saves = StateSaves::new(
+                &simulation,
+                &arguments.design.top,
+                &arguments.save_state,
+                signal,
+            )?;
+            if let Some(progress) = progress {
+                saves.restore_progress(&simulation, &arguments.design.top, progress)?;
+            }
             simulate_sv(simulation, max_steps, saves, &mut std::io::stdout().lock())
         }};
     }
@@ -266,11 +308,11 @@ fn simulate_sv<B: celox::SimBackend>(
     mut saves: StateSaves,
     output: &mut impl Write,
 ) -> Result<(), String> {
-    let mut failed = false;
     let initial = simulation.eval_comb();
-    drain_sv_output(&mut simulation, output, &mut failed)?;
+    drain_sv_output(&mut simulation, output, &mut saves.failed)?;
     initial.map_err(|error| error.to_string())?;
     saves.start(&mut simulation);
+    saves.service_signal(&mut simulation);
     let mut steps = 0;
     while !simulation.is_finished()
         && let Some(next) = simulation.next_event_time()
@@ -280,7 +322,7 @@ fn simulate_sv<B: celox::SimBackend>(
         }
         saves.before(&mut simulation, next)?;
         let step = simulation.step();
-        drain_sv_output(&mut simulation, output, &mut failed)?;
+        drain_sv_output(&mut simulation, output, &mut saves.failed)?;
         if step.map_err(|error| error.to_string())?.is_none() {
             break;
         }
@@ -288,10 +330,10 @@ fn simulate_sv<B: celox::SimBackend>(
         steps += 1;
     }
     let finished = simulation.finish();
-    drain_sv_output(&mut simulation, output, &mut failed)?;
+    drain_sv_output(&mut simulation, output, &mut saves.failed)?;
     finished.map_err(|error| error.to_string())?;
     saves.finish(&mut simulation)?;
-    if failed {
+    if saves.failed {
         return Err("SystemVerilog testbench reported an assertion failure or $error".to_string());
     }
     Ok(())
@@ -315,14 +357,66 @@ struct StateSaves {
     /// The times still to save, in descending order.
     times: Vec<u64>,
     directory: PathBuf,
+    signal: Option<state_signal::StateSignal>,
+    signal_sequence: u64,
+    failed: bool,
+    started: bool,
+}
+
+/// Persistent CLI bookkeeping; signal registration and output directory are local.
+#[cfg(feature = "systemverilog")]
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct SavedStateSaves {
+    counted: Option<String>,
+    cycles: Vec<u64>,
+    count: u64,
+    high: bool,
+    times: Vec<u64>,
+    signal_sequence: u64,
+    failed: bool,
+    started: bool,
 }
 
 #[cfg(feature = "systemverilog")]
 impl StateSaves {
+    fn progress(&self) -> SavedStateSaves {
+        SavedStateSaves {
+            counted: self.counted.as_ref().map(|(name, _)| name.clone()),
+            cycles: self.cycles.clone(),
+            count: self.count,
+            high: self.high,
+            times: self.times.clone(),
+            signal_sequence: self.signal_sequence,
+            failed: self.failed,
+            started: self.started,
+        }
+    }
+
+    fn restore_progress<B: celox::SimBackend>(
+        &mut self,
+        simulation: &celox::Simulation<B>,
+        top: &str,
+        saved: SavedStateSaves,
+    ) -> Result<(), String> {
+        self.counted = saved
+            .counted
+            .map(|name| resolve_signal_path(simulation, top, &name).map(|signal| (name, signal)))
+            .transpose()?;
+        self.cycles = saved.cycles;
+        self.count = saved.count;
+        self.high = saved.high;
+        self.times = saved.times;
+        self.signal_sequence = saved.signal_sequence;
+        self.failed = saved.failed;
+        self.started = saved.started;
+        Ok(())
+    }
+
     fn new<B: celox::SimBackend>(
         simulation: &celox::Simulation<B>,
         top: &str,
         arguments: &SaveStateArgs,
+        signal: Option<state_signal::StateSignal>,
     ) -> Result<Self, String> {
         let counted = match &arguments.save_state_on {
             Some(path) => Some((path.clone(), resolve_signal_path(simulation, top, path)?)),
@@ -338,11 +432,23 @@ impl StateSaves {
             .save_state_dir
             .clone()
             .unwrap_or_else(|| PathBuf::from("."));
-        if !arguments.is_empty() {
+        if !arguments.is_empty() || signal.is_some() {
             std::fs::create_dir_all(&directory)
                 .map_err(|error| format!("cannot create {}: {error}", directory.display()))?;
         }
+        if signal.is_some() {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "SIGUSR1 checkpoint ready (pid {}): {}",
+                std::process::id(),
+                directory.display()
+            );
+        }
         Ok(Self {
+            signal,
+            signal_sequence: 0,
+            failed: false,
+            started: false,
             counted,
             cycles: descending(&arguments.save_state_at),
             count: 0,
@@ -361,8 +467,11 @@ impl StateSaves {
     }
 
     fn start<B: celox::SimBackend>(&mut self, simulation: &mut celox::Simulation<B>) {
-        if let Some((_, signal)) = self.counted {
-            self.high = Self::level(simulation, signal);
+        if !self.started {
+            if let Some((_, signal)) = self.counted {
+                self.high = Self::level(simulation, signal);
+            }
+            self.started = true;
         }
     }
 
@@ -372,6 +481,7 @@ impl StateSaves {
         simulation: &mut celox::Simulation<B>,
         next: u64,
     ) -> Result<(), String> {
+        self.service_signal(simulation);
         while let Some(&time) = self.times.last()
             && time < next
         {
@@ -386,6 +496,7 @@ impl StateSaves {
         simulation: &mut celox::Simulation<B>,
     ) -> Result<(), String> {
         let Some((name, signal)) = &self.counted else {
+            self.service_signal(simulation);
             return Ok(());
         };
         let (name, signal) = (name.clone(), *signal);
@@ -399,6 +510,7 @@ impl StateSaves {
                 self.save(simulation, format!("{name}-{}.state", self.count))?;
             }
         }
+        self.service_signal(simulation);
         Ok(())
     }
 
@@ -417,6 +529,62 @@ impl StateSaves {
             ));
         }
         Ok(())
+    }
+
+    /// A signal request must never turn a diagnostic failure into loss of the
+    /// ongoing run. Keep requests pending across `$stop` suspensions.
+    fn service_signal<B: celox::SimBackend>(&mut self, simulation: &mut celox::Simulation<B>) {
+        if simulation.is_stopped()
+            || !self
+                .signal
+                .as_ref()
+                .is_some_and(|signal| signal.take_request())
+        {
+            return;
+        }
+        let Some(sequence) = self.signal_sequence.checked_add(1) else {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "cannot save SIGUSR1 checkpoint: request sequence exhausted"
+            );
+            return;
+        };
+        self.signal_sequence = sequence;
+        let path = self.directory.join(format!(
+            "signal-{}-{sequence}.checkpoint",
+            std::process::id()
+        ));
+        let result = (|| -> Result<(), String> {
+            let state = system_checkpoint::capture(simulation, self)?;
+            // Publish only complete files, without overwriting earlier captures.
+            let mut temporary = tempfile::NamedTempFile::new_in(&self.directory)
+                .map_err(|error| error.to_string())?;
+            temporary
+                .as_file_mut()
+                .write_all(&state)
+                .map_err(|error| error.to_string())?;
+            temporary
+                .as_file_mut()
+                .sync_all()
+                .map_err(|error| error.to_string())?;
+            temporary
+                .persist_noclobber(&path)
+                .map_err(|error| error.to_string())?;
+            Ok(())
+        })();
+        let _ = match result {
+            Ok(()) => writeln!(
+                std::io::stderr().lock(),
+                "saved SIGUSR1 checkpoint: {} (time {})",
+                path.display(),
+                simulation.time()
+            ),
+            Err(error) => writeln!(
+                std::io::stderr().lock(),
+                "cannot save SIGUSR1 checkpoint {}: {error}; continuing simulation",
+                path.display()
+            ),
+        };
     }
 
     fn save<B: celox::SimBackend>(
@@ -671,35 +839,18 @@ fn compile_native_design(design: &Design) -> Result<NativeProgramImage, String> 
                 .iter()
                 .map(|(text, path)| (text.as_str(), path.as_path()))
                 .collect();
-            let untimed = configure_sv(
+            // VPI advances time and dispatches callbacks even for a process-free
+            // DUT. Compile its process-capable image directly, rather than first
+            // compiling an untimed image and repeating analysis and optimization
+            // when that builder discovers a process.
+            let simulation = configure_sv(
                 design,
-                celox::Simulator::from_sv_sources(refs.clone(), &design.top),
+                celox::Simulation::from_sv_sources(refs, &design.top),
             )
-            .compile_native();
-            let image = match untimed {
-                Ok(simulator) => {
-                    report_warnings(simulator.warnings())?;
-                    simulator.into_program_image()
-                }
-                // A design with processes runs as a timed simulation, in step
-                // with the VPI time callbacks.
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        celox::SimulatorErrorKind::ProcessRequiresSimulation(_)
-                    ) =>
-                {
-                    let simulation = configure_sv(
-                        design,
-                        celox::Simulation::from_sv_sources(refs, &design.top),
-                    )
-                    .compile_native()
-                    .map_err(|error| format!("compilation failed:\n{error}"))?;
-                    report_warnings(simulation.warnings())?;
-                    simulation.into_program_image()
-                }
-                Err(error) => return Err(format!("compilation failed:\n{error}")),
-            };
+            .compile_native()
+            .map_err(|error| format!("compilation failed:\n{error}"))?;
+            report_warnings(simulation.warnings())?;
+            let image = simulation.into_program_image();
             return Ok(image);
         }
         #[cfg(not(feature = "systemverilog"))]
@@ -763,7 +914,7 @@ fn python_output(python: &Path, arguments: &[&OsStr], purpose: &str) -> Result<S
         ));
     }
     let value = String::from_utf8(output.stdout)
-        .map_err(|_| format!("Python returned a non-UTF-8 path for {purpose}"))?;
+        .map_err(|_| format!("Python returned non-UTF-8 output for {purpose}"))?;
     let value = value.trim();
     if value.is_empty() {
         return Err(format!("Python returned an empty path for {purpose}"));
@@ -771,74 +922,56 @@ fn python_output(python: &Path, arguments: &[&OsStr], purpose: &str) -> Result<S
     Ok(value.to_string())
 }
 
-fn discover_libpython(python: &Path) -> Result<PathBuf, String> {
-    python_output(
-        python,
-        &[
-            OsStr::new("-m"),
-            OsStr::new("cocotb_tools.config"),
-            OsStr::new("--libpython"),
-        ],
-        "libpython",
-    )
-    .map(PathBuf::from)
+#[derive(Clone, Copy)]
+struct PythonDiscovery {
+    vpi: bool,
+    libpython: bool,
+    pygpi_entry_point: bool,
 }
 
-fn discover_pygpi_entry_point(python: &Path) -> Result<Option<String>, String> {
-    const SUPPORTED_PREFIX: &str = "celox-pygpi-entry-point:";
-    const UNSUPPORTED: &str = "celox-pygpi-entry-point-unavailable";
+#[derive(serde::Deserialize)]
+struct PythonConfiguration {
+    python: PathBuf,
+    vpi: Option<PathBuf>,
+    libpython: Option<PathBuf>,
+    pygpi_entry_point: Option<String>,
+}
 
-    // cocotb 2.1 exposes PyGPI as a separate GPI user. Older cocotb releases
-    // embed Python directly and do not provide this configuration function.
+fn discover_python_configuration(
+    python: &Path,
+    request: PythonDiscovery,
+) -> Result<PythonConfiguration, String> {
+    let flag = |enabled| OsStr::new(if enabled { "1" } else { "0" });
     let output = python_output(
         python,
         &[
             OsStr::new("-c"),
-            OsStr::new(
-                "from cocotb_tools import config; entry = getattr(config, 'pygpi_entry_point', None); print('celox-pygpi-entry-point:' + entry() if entry is not None else 'celox-pygpi-entry-point-unavailable')",
-            ),
+            OsStr::new(include_str!("../cocotb_config.py")),
+            flag(request.vpi),
+            flag(request.libpython),
+            flag(request.pygpi_entry_point),
         ],
-        "cocotb's PyGPI entry point",
+        "cocotb runtime configuration",
     )?;
-    if output == UNSUPPORTED {
-        return Ok(None);
+    let configuration: PythonConfiguration = serde_json::from_str(&output)
+        .map_err(|error| format!("Python returned invalid cocotb configuration: {error}"))?;
+    if configuration.python.as_os_str().is_empty() {
+        return Err("Python returned an empty interpreter path".into());
     }
-    output
-        .strip_prefix(SUPPORTED_PREFIX)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| Some(entry.to_string()))
-        .ok_or_else(|| format!("Python returned an invalid PyGPI entry point: {output}"))
+    Ok(configuration)
+}
+
+fn discovered_path(value: Option<PathBuf>, purpose: &str) -> Result<PathBuf, String> {
+    value
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| format!("Python returned an empty path for {purpose}"))
 }
 
 fn gpi_users_value(libpython: &Path, pygpi_entry_point: &str) -> String {
     format!("{};{pygpi_entry_point}", libpython.display())
 }
 
-fn discover_python(python: &Path) -> Result<PathBuf, String> {
-    python_output(
-        python,
-        &[
-            OsStr::new("-c"),
-            OsStr::new("import sys; print(sys.executable)"),
-        ],
-        "the Python executable",
-    )
-    .map(PathBuf::from)
-}
-
-fn discover_vpi(python: &Path) -> Result<PathBuf, String> {
-    let configured = python_output(
-        python,
-        &[
-            OsStr::new("-m"),
-            OsStr::new("cocotb_tools.config"),
-            OsStr::new("--lib-name-path"),
-            OsStr::new("vpi"),
-            OsStr::new("icarus"),
-        ],
-        "cocotb's VPI adapter",
-    )
-    .map(PathBuf::from)?;
+fn loadable_vpi(configured: PathBuf) -> Result<PathBuf, String> {
     if configured.is_file() {
         return Ok(configured);
     }
@@ -924,20 +1057,34 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
         .python
         .or_else(|| environment_path("PYGPI_PYTHON_BIN"))
         .unwrap_or_else(|| PathBuf::from("python3"));
-    let python = discover_python(&python_command)?;
-    let vpi = arguments
+    let configured_vpi = arguments
         .vpi
-        .or_else(|| environment_path("CELOX_COCOTB_VPI"))
-        .map_or_else(|| discover_vpi(&python), Ok)?;
-    let libpython = match environment_path("LIBPYTHON_LOC") {
+        .or_else(|| environment_path("CELOX_COCOTB_VPI"));
+    let configured_libpython = environment_path("LIBPYTHON_LOC");
+    let request = PythonDiscovery {
+        vpi: configured_vpi.is_none(),
+        libpython: configured_libpython.is_none(),
+        pygpi_entry_point: env::var_os("GPI_USERS").is_none(),
+    };
+    let configuration = discover_python_configuration(&python_command, request)?;
+    let python = configuration.python;
+    let vpi = match configured_vpi {
         Some(path) => path,
-        None => discover_libpython(&python)?,
+        None => loadable_vpi(discovered_path(configuration.vpi, "cocotb's VPI adapter")?)?,
+    };
+    let libpython = match configured_libpython {
+        Some(path) => path,
+        None => discovered_path(configuration.libpython, "libpython")?,
     };
     // Preserve an explicitly configured user chain. Otherwise, match cocotb
     // 2.1's runner and load libpython before the PyGPI entry point.
-    let gpi_users = if env::var_os("GPI_USERS").is_none() {
-        discover_pygpi_entry_point(&python)?
-            .map(|pygpi_entry_point| gpi_users_value(&libpython, &pygpi_entry_point))
+    let gpi_users = if request.pygpi_entry_point {
+        match configuration.pygpi_entry_point {
+            Some(entry) if entry.is_empty() => {
+                return Err("Python returned an empty PyGPI entry point".into());
+            }
+            entry => entry.map(|entry| gpi_users_value(&libpython, &entry)),
+        }
     } else {
         None
     };
@@ -961,6 +1108,12 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
     set_environment("LIBPYTHON_LOC", libpython);
     if let Some(gpi_users) = gpi_users {
         set_environment("GPI_USERS", gpi_users);
+    }
+    // Zero-delay inertial deposits are applied after the current callback/
+    // domain round. Let cocotb bypass its Python write scheduler and use its
+    // C++ clock by default, while retaining an explicit user opt-out.
+    if env::var_os("COCOTB_TRUST_INERTIAL_WRITES").is_none() {
+        set_environment("COCOTB_TRUST_INERTIAL_WRITES", "1");
     }
     set_environment("COCOTB_TOPLEVEL", top);
     set_environment("COCOTB_TEST_MODULES", test_module);
@@ -1275,6 +1428,7 @@ mod tests {
             ],
             schedule: None,
             strings: Vec::new(),
+            next_object: None,
         }
     }
 

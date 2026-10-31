@@ -7,6 +7,7 @@ pub(super) fn branchify_coupled_state_updates(
     use_counts: &HashMap<RegisterId, usize>,
     next_block_id: &mut usize,
     reg_counter: &mut usize,
+    mut verify: impl FnMut(&ExecutionUnit<RegionedAbsoluteAddr>),
 ) -> usize {
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|block| block.0);
@@ -20,7 +21,9 @@ pub(super) fn branchify_coupled_state_updates(
         applied += plans.len();
         apply_coupled_state_update_batch(eu, plans, next_block_id, reg_counter);
     }
-
+    if applied != 0 {
+        verify(eu);
+    }
     applied
 }
 
@@ -29,6 +32,7 @@ pub(super) fn branchify_coupled_priority_chains(
     use_counts: &HashMap<RegisterId, usize>,
     next_block_id: &mut usize,
     reg_counter: &mut usize,
+    mut verify: impl FnMut(&ExecutionUnit<RegionedAbsoluteAddr>),
 ) -> usize {
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|block| block.0);
@@ -43,7 +47,16 @@ pub(super) fn branchify_coupled_priority_chains(
         applied += 1;
         worklist.push_front(merge);
     }
+    if applied != 0 {
+        verify(eu);
+    }
     applied
+}
+
+/// Verify the complete rewrite once, rather than revisiting every unrelated
+/// block and definition after each local state update or priority chain.
+pub(super) fn verify_coupled_rewrites(eu: &ExecutionUnit<RegionedAbsoluteAddr>) {
+    debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
 fn find_coupled_priority_chain_in_block(
@@ -286,7 +299,6 @@ fn apply_coupled_priority_chain(
             terminator: original.terminator,
         },
     );
-    debug_assert_eq!(eu.verify_result(), Ok(()));
     merge_id
 }
 
@@ -758,5 +770,4 @@ fn apply_coupled_state_update_batch(
             terminator: original.terminator,
         },
     );
-    debug_assert_eq!(eu.verify_result(), Ok(()));
 }

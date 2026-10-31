@@ -1,0 +1,136 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_finished_parent_kills_descendants at 355:27: assert_eq checks: expected 0xf, got 0x0",
+      "expectation": "Simulation",
+      "name": "fork_control::process_finished_parent_kills_descendants",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_self_suspend_and_await",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_status_wait_and_disable at 410:27: assert_eq checks: expected 0x3, got 0x0",
+      "expectation": "Simulation",
+      "name": "fork_control::process_status_wait_and_disable",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_suspend_and_resume_waits",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_external_kill_finishes_program at 484:28: assert_eq ticks: expected 0x1, got 0x5",
+      "expectation": "Simulation",
+      "name": "fork_control::process_external_kill_finishes_program",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_self_kill_finishes_program at 468:28: assert_eq ticks: expected 0x1, got 0x5",
+      "expectation": "Simulation",
+      "name": "fork_control::process_self_kill_finishes_program",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "the simulation ended before the script did",
+      "expectation": "Simulation",
+      "name": "fork_control::process_program_exit_wakes_sibling_observers",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_mutual_status_waits_advance_to_cancellation at 534:26: assert_eq checks: expected 0x2, got 0x0",
+      "expectation": "Simulation",
+      "name": "fork_control::process_mutual_status_waits_advance_to_cancellation",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "fork_control::process_ancestor_kill_preserves_caller_rng at 636:26: assert_eq checks: expected 0x1f, got 0xb",
+      "expectation": "Simulation",
+      "name": "fork_control::process_ancestor_kill_preserves_caller_rng",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_nested_calls_preserve_level_wait_resume",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Warning-WIDTHTRUNC: <case>/source_0.sv:8:60: Operator ASSIGN expects 32 bits on the Assign RHS, but Assign RHS's TIME generates 64 bits.\n                                            : ... note: In instance 'celox_suite_tb.dut'\n    8 |    begin worker=process::self(); @(x ^ y); hits++; event_at=$time; end\n      |                                                            ^\n                     ... For warning description see https://verilator.org/warn/WIDTHTRUNC?v=5.052\n                     ... Use \"/* verilator lint_off WIDTHTRUNC */\" and lint_on around source to disable this message.\n%Error-LIFETIME: <case>/source_0.sv:9:14: Invalid reference: Process might outlive variable 'x'.\n                                        : ... note: In instance 'celox_suite_tb.dut'\n                                        : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    9 |    begin #2; x=1; #4; y=1; end\n      |              ^\n                 ... For error description see https://verilator.org/warn/LIFETIME?v=5.052\n%Error-LIFETIME: <case>/source_0.sv:9:23: Invalid reference: Process might outlive variable 'y'.\n                                        : ... note: In instance 'celox_suite_tb.dut'\n                                        : ... Suggest use it as read-only to initialize a local copy at the beginning of the process, or declare it as static. It is also possible to refer by reference to objects and their members.\n    9 |    begin #2; x=1; #4; y=1; end\n      |                       ^\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_resume_resamples_automatic_event_expression",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_resume_after_program_exit_is_noop",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

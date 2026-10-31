@@ -27,8 +27,11 @@ use super::{
 /// instances and the signals names can denote.
 pub(super) struct ElaboratedModule {
     name: String,
+    /// The interface instances and ports a virtual interface may denote.
+    pub(super) interface_handles: Vec<sv::ir::InterfaceHandle>,
     /// Ports and signals, by local name, with their net kind.
     signals: Vec<(String, sv::ir::Type, bool)>,
+    interface_scopes: HashSet<String>,
     instances: Vec<LoweredSvInstance>,
     constants: HashMap<String, i128>,
     parameter_types: HashMap<String, (usize, bool)>,
@@ -38,7 +41,14 @@ impl ElaboratedModule {
     pub(super) fn from_lowered(lowered: LoweredSvModule) -> Self {
         Self {
             name: lowered.source.name().to_string(),
+            interface_handles: lowered.source.interface_handles().to_vec(),
             signals: signals(&lowered.source),
+            interface_scopes: lowered
+                .source
+                .interface_scope_names()
+                .iter()
+                .cloned()
+                .collect(),
             instances: lowered.instances,
             constants: lowered.constants,
             parameter_types: lowered.parameter_types,
@@ -56,7 +66,9 @@ impl ElaboratedModule {
         propagate_force_signals(&mut instances, force_signals);
         Ok(Self {
             name: source.name().to_string(),
+            interface_handles: source.interface_handles().to_vec(),
             signals: signals(source),
+            interface_scopes: source.interface_scope_names().iter().cloned().collect(),
             instances,
             constants,
             parameter_types,
@@ -133,6 +145,22 @@ struct Found {
     is_net: bool,
     /// The specializations that hold the signal.
     modules: Vec<ModuleId>,
+}
+
+impl HierarchicalReference {
+    /// A reference from the top instance along `path` to `targets`.
+    pub(super) fn rooted(
+        signal: sv::ast::HierarchicalSignal,
+        path: Vec<(String, usize)>,
+        targets: Vec<(ModuleId, String)>,
+    ) -> Self {
+        Self {
+            signal,
+            start: HierarchicalStart::Root,
+            path,
+            targets,
+        }
+    }
 }
 
 impl Found {
@@ -255,7 +283,7 @@ impl<'a> Hierarchy<'a> {
     }
 
     /// Follow a name written in `module` down from it: from an instance of
-    /// it, or from the module's own name (IEEE 1800-2023 23.8).
+    /// it, a local interface, or from the module's own name (23.8).
     fn downward(
         &self,
         module: ModuleId,
@@ -266,6 +294,16 @@ impl<'a> Hierarchy<'a> {
             return Ok(self
                 .walk(module, components, 0)?
                 .filter(|found| !found.path.is_empty()));
+        }
+        // Interface instances are flattened into the module's signals, rather
+        // than retained as child modules. Their scopes still participate in
+        // upwards lookup (IEEE 1800-2023 23.8).
+        if (1..components.len()).any(|end| {
+            elaborated
+                .interface_scopes
+                .contains(&components[..end].join("."))
+        }) {
+            return self.walk(module, components, 0);
         }
         if components[0] == self.authored_name(module) {
             return self.walk(module, components, 1);
@@ -519,6 +557,30 @@ pub(super) fn collect_foreign_writes(
     }
 }
 
+/// [`collect_foreign_writes`] for `references` to the members of the
+/// interface instances that virtual interfaces of `module` may denote: each
+/// instance of a specialization may denote the same instances, so the
+/// specialization counts once for each signal it writes.
+pub(super) fn collect_virtual_writes(
+    module: &sv::ir::Module,
+    references: &[HierarchicalReference],
+    writes: &mut HashMap<ModuleId, HashMap<String, ForeignWrites>>,
+) {
+    let mut own = HashMap::default();
+    collect_foreign_writes(module, references, &mut own);
+    for (target_module, targets) in own {
+        for (target, foreign) in targets {
+            let entry = writes
+                .entry(target_module)
+                .or_default()
+                .entry(target)
+                .or_default();
+            entry.repeating += foreign.repeating.min(1);
+            entry.always_ff |= foreign.always_ff;
+        }
+    }
+}
+
 /// Whether leading components of a name name an instance of the module.
 fn starts_at_instance(module: &ElaboratedModule, components: &[String]) -> bool {
     (1..components.len()).any(|end| find_instance(module, &components[..end].join(".")).is_some())
@@ -534,6 +596,12 @@ fn declares(module: &ElaboratedModule, name: &str) -> bool {
                 .is_some_and(|rest| rest.starts_with(['.', '[', '$']))
     };
     module.signals.iter().any(|(signal, _, _)| scoped(signal))
+        || module.interface_scopes.iter().any(|scope| {
+            scoped(scope)
+                || name
+                    .strip_prefix(scope.as_str())
+                    .is_some_and(|rest| rest.starts_with('['))
+        })
         || module
             .instances
             .iter()

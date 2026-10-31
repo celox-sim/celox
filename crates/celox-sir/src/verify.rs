@@ -483,6 +483,43 @@ fn verify_instruction_types<A>(
             UnaryOp::Minus | UnaryOp::BitNot => {
                 same_width(*dst, *src, "TYPE.UNARY_VALUE_WIDTH")?;
             }
+            // Planes move whole 64-bit words.
+            UnaryOp::ToPlanes | UnaryOp::FromPlanes
+                if {
+                    let words = if *op == UnaryOp::ToPlanes { 64 } else { 128 };
+                    let width = ty(*src)?.width();
+                    width == 0 || width % words != 0
+                } =>
+            {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.PLANES_WORDS",
+                    block,
+                    index,
+                    format!("r{} is not a whole number of 64-bit planes words", src.0),
+                ));
+            }
+            UnaryOp::ToPlanes => {
+                exact_width(*dst, 2 * ty(*src)?.width(), "TYPE.PLANES_WIDTH")?;
+                if !matches!(ty(*dst)?, RegisterType::Bit { signed: false, .. }) {
+                    return Err(SirVerifyError::instruction(
+                        "TYPE.PLANES_DESTINATION",
+                        block,
+                        index,
+                        format!("r{} is not an unsigned Bit register", dst.0),
+                    ));
+                }
+            }
+            UnaryOp::FromPlanes => {
+                exact_width(*src, 2 * ty(*dst)?.width(), "TYPE.PLANES_WIDTH")?;
+                if !matches!(ty(*src)?, RegisterType::Bit { .. }) {
+                    return Err(SirVerifyError::instruction(
+                        "TYPE.PLANES_SOURCE",
+                        block,
+                        index,
+                        format!("r{} is not a Bit register", src.0),
+                    ));
+                }
+            }
             UnaryOp::Ident => {
                 ty(*dst)?;
                 ty(*src)?;
@@ -632,6 +669,16 @@ fn verify_instruction_types<A>(
             same_width(*old, *new, "TYPE.CAPTURE_COMPARE_OPERANDS")?;
         }
         SIRInstruction::ExternCall { dst, func, args } => {
+            if crate::extern_abi::native_kernel_index(*func).is_some()
+                && (dst.is_some() || !args.is_empty())
+            {
+                return Err(SirVerifyError::instruction(
+                    "TYPE.NATIVE_KERNEL_CALL_SIGNATURE",
+                    block,
+                    index,
+                    "a native kernel call has only an implicit state pointer",
+                ));
+            }
             if *func == crate::extern_abi::HEAP_HELPER_ID
                 && args.len() != crate::extern_abi::HEAP_HELPER_ARGUMENTS
             {

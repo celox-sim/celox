@@ -1,0 +1,83 @@
+name: Release Candidate
+
+on:
+  push:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      validation_only:
+        description: Qualify a recovery SHA without creating a stable release
+        type: boolean
+        default: false
+
+# A newer RC must not cancel qualification of a running candidate.
+concurrency:
+  group: release-candidate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Resolve release candidate
+    if: github.ref == 'refs/heads/release'
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.candidate.outputs.sha }}
+      tag: ${{ steps.candidate.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - name: Validate candidate identity
+        id: candidate
+        run: |
+          git merge-base --is-ancestor HEAD origin/master
+          node scripts/check-release-version.mjs
+          tag="v$(tr -d '\r\n' < VERSION)"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  qualify:
+    name: Qualify release candidate
+    needs: candidate
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      issues: write
+    with:
+      validation_ref: ${{ needs.candidate.outputs.sha }}
+    secrets: inherit
+
+  publish:
+    name: Promote qualified candidate
+    if: inputs.validation_only != true
+    needs: [candidate, qualify]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create release app token
+        id: release-token
+        uses: actions/create-github-app-token@v3
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-pull-requests: write
+          permission-issues: write
+          permission-actions: write
+          permission-contents: write
+          permission-workflows: write
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Publish the qualified candidate
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          CANDIDATE_SHA: ${{ needs.candidate.outputs.sha }}
+          RELEASE_TAG: ${{ needs.candidate.outputs.tag }}
+        run: node scripts/promote-release-candidate.mjs

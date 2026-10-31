@@ -240,7 +240,7 @@ pub enum CodegenError {
         source: wasmtime::Error,
     },
 
-    #[cfg(feature = "host-runtime")]
+    #[cfg(any(feature = "host-runtime", feature = "systemverilog"))]
     #[error("{message}")]
     Message { message: String },
 
@@ -250,7 +250,7 @@ pub enum CodegenError {
     Cancelled,
 }
 
-#[cfg(feature = "host-runtime")]
+#[cfg(any(feature = "host-runtime", feature = "systemverilog"))]
 impl CodegenError {
     pub(crate) fn message(message: impl Into<String>) -> Self {
         Self::Message {

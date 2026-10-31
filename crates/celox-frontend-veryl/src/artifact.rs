@@ -154,6 +154,9 @@ pub struct CombProcess {
     /// Exact bounded specialization proved that every output is independent
     /// of values stored by the process's preceding activation.
     pub proven_combinational: bool,
+    /// Binary selector coverage alone does not remove X/Z retention. With
+    /// `proven_combinational` also set, two-state lowering completed it.
+    pub proven_binary_combinational: bool,
 }
 
 #[derive(Clone)]
@@ -505,7 +508,14 @@ pub(crate) fn project_module_with_ids(
     let mut inferred_latch_diagnostics = Vec::new();
     if config.allow_inferred_latches {
         for process in &module.comb_process_ranges {
-            if !process.proven_combinational
+            if process.proven_combinational && process.proven_binary_combinational {
+                // Two-state lowering completed the process's binary cases:
+                // only absorb the analyzer's coverage warning for them.
+                inferred_latch_diagnostics.push(crate::FrontendDiagnostic::inferred_latch(
+                    &process.token,
+                    true,
+                ));
+            } else if !process.proven_combinational
                 && lower_retained_comb_process(
                     &mut comb_blocks[process.paths.clone()],
                     &arena,
@@ -519,8 +529,10 @@ pub(crate) fn project_module_with_ids(
                         .collect(),
                 )
             {
-                inferred_latch_diagnostics
-                    .push(crate::FrontendDiagnostic::inferred_latch(&process.token));
+                inferred_latch_diagnostics.push(crate::FrontendDiagnostic::inferred_latch(
+                    &process.token,
+                    false,
+                ));
             }
         }
     }
@@ -682,6 +694,8 @@ pub(crate) fn project_module_with_ids(
             nba_switches: Vec::new(),
             host_request_sites: Vec::new(),
             time_slot: None,
+            sample_shadows: Vec::new(),
+            initial_copies: Vec::new(),
         },
         ids,
         inferred_latch_diagnostics,

@@ -460,3 +460,105 @@
   (top Top) (eval)
   (assert_eq y 0)
   (assert_eq array_values 0))
+
+(case enum_methods_iterate_members
+  (source "enum_methods.sv" #"
+    module Top(output bit done);
+      typedef enum {red, green, blue, yellow} Colors;
+      Colors c, first, last;
+      initial begin
+        c = c.first;
+        forever begin
+          $display("%s : %0d", c.name, c);
+          if (c == c.last) break;
+          c = c.next;
+        end
+        first = c.first();
+        last = c.last();
+        $display("num=%0d first=%s last=%s", c.num(), first.name(), last.name());
+        done = 1;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "red : 0\ngreen : 1\nblue : 2\nyellow : 3\nnum=4 first=red last=yellow\n"))
+
+(case enum_methods_wrap_and_count
+  (source "enum_methods.sv" #"
+    module Top(output bit done);
+      typedef enum bit [2:0] {A = 3'd1, B = 3'd4, C = 3'd6} E;
+      E e;
+      initial begin
+        e = B;
+        $display("%0d %0d %0d %0d %0d", e.next(), e.next(2), e.prev(), e.prev(4), e.next(3));
+        e = E'(3'd5);
+        $display("[%s] %0d %0d", e.name(), e.next(), e.prev());
+        done = 1;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "6 1 1 1 4\n[] 0 0\n"))
+
+(case enum_methods_in_combinational_and_sequential_logic
+  (source "enum_methods.sv" #"
+    module Top(input bit clk, input bit [1:0] sel,
+               output bit [1:0] following, output bit [1:0] preceding,
+               output bit [1:0] state);
+      typedef enum bit [1:0] {IDLE, RUN, DONE} S;
+      S current, register;
+      always_comb current = S'(sel);
+      always_comb following = current.next(2);
+      always_comb preceding = current.prev();
+      always_ff @(posedge clk) register <= register.next();
+      assign state = register;
+    endmodule
+  "#)
+  (top Top)
+  (set sel 1) (set clk 0) (eval)
+  (assert_eq following 0)
+  (assert_eq preceding 0)
+  (set sel 2) (eval)
+  (assert_eq following 1)
+  (assert_eq preceding 1)
+  (tick clk) (tick clk)
+  (assert_eq state 2)
+  (tick clk)
+  (assert_eq state 0))
+(case unpacked_array_assignments_through_selects_and_calls
+  (source "top.sv" #"
+module Sub;
+    int b[2] = '{7, 8};
+endmodule
+module Top(output int sum);
+    typedef enum {A, B} e_t;
+    typedef int ia_t[2];
+    Sub u();
+    int a[4], c[2], d[2], h[2];
+    e_t ea[2], eb[2];
+    bit signed [31:0] w[2];
+    bit s;
+    function ia_t f();
+        return d;
+    endfunction
+    function int g(int p[2] = d);
+        return p[0] + p[1];
+    endfunction
+    initial begin
+        d = '{1, 2};
+        a = '{1, 2, 3, 4};
+        a[0:1] = a[2:3];
+        c = a[1+:2];
+        w = c;
+        s = 1;
+        h = s ? c : d;
+        eb = '{B, A};
+        ea = eb;
+        c = f();
+        h[1] = u.b[1];
+        sum = a[0] + 10 * c[0] + 100 * w[1] + 1000 * h[0] + 10000 * c[1] + 100000 * g()
+            + 1000000 * h[1] + 10000000 * ea[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 18324313))

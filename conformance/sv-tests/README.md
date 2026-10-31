@@ -45,7 +45,7 @@ modes, sources without a module still undergo preprocessing and parsing; root
 detection then reports the actual no-root diagnostic. The current
 compiler and simulator require a module root, so the driver reports a failure for
 rootless unit, package and interface inputs. The official runner still decides
-the case verdict, including expected failures. There is no `no_top` classification
+the case verdict, including expected failures. There is no `no_top` verdict
 or preemptive skip. Without an explicit top, the driver infers a single root from
 parsed declarations and instantiations; multiple roots receive a diagnostic
 because Celox’s simulator requires one root. Each input file is a separate
@@ -64,6 +64,17 @@ including `chapter-22/22.11--pragma-invalid.sv`: a bare `` `pragma `` is rejecte
 because its name is required by IEEE 1800-2023 22.11. Upstream preprocessing
 verdicts check process success and expected failure; they do not compare the
 emitted text against a golden file.
+
+Built-in process handles update eight expectations: both state modes of
+`9.7--process_cls_await`, `9.7--process_cls_kill`, `9.7--process_cls_self`,
+and `9.7--process_cls_suspend_resume` now pass. CI reports only these four
+fail-to-pass transitions per mode; the same sources also pass the local
+simulation driver in both modes. No failure expectation is broadened.
+
+Static task locals that keep their value update two expectations: both state
+modes of `13.3.1--task-static` now pass. Its `int a = 0;` in a static task is
+initialized once and shared by the four calls, which print 1, 2, 3 and 4 in
+the local simulation driver; the full run reports no other change.
 
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
@@ -131,6 +142,117 @@ class with constraints is rejected. `18.5.8.1--foreach-iterative-constraints_0`,
 static random properties. Full official runs at the pinned revision report 1112
 passing cases in 2state and 1123 in 4state, with no passing case regressing.
 
+Dynamic container support updates 22 rows: both state modes of eleven chapter 7
+cases change from fail to pass. Eight cases execute simulations and their
+`:assert:` output passes: associative assignment, `exists`, `first`, `last`,
+`next`, `prev`, traversal with a byte key, and dynamic-array `new[]`. The traversal
+case declares both its key and output as `byte`; the stored key is already
+truncated before traversal, so returning 1 is correct. The integral-key and
+string-key associative declaration cases and `queues/basic` pass elaboration
+only; they do not establish runtime behavior. Queue mutations and other container
+behavior are exercised by the shared container simulation cases.
+The [reviewed CI run](https://github.com/celox-sim/celox/actions/runs/40323383639)
+contains 3,300 case/mode verdicts at the pinned revision. These are its only
+changed rows, with no passing case regressing: 1,201 cases pass in 2state and
+1,212 in 4state. Only these reviewed expectations are updated.
+
+Zero-argument dynamic-container methods accept omitted parentheses, including
+`size`, associative `num`, `delete`, and queue `pop_front` / `pop_back`
+(7.5.2–7.5.3, 7.9, 7.10.2). Sixteen unmodified upstream simulation cases pass
+the official runner in both state modes at the pinned revision: dynamic
+`op-delete` / `op-size`, associative `alloc`, `nonexistent`, `delete`, `num`,
+and `size`, and queue
+`bounded`, `delete`, `insert`, `max-size`, `pop_back`, `pop_front`, `push_back`,
+`push_front` and `size`. Only these 32 expectations change from `fail` to `pass`.
+The focused runner checked 36 pinned case files containing these bare
+method names (72 case/mode verdicts), with no passing candidate regressing.
+This does not establish full dynamic-container conformance.
+Shared regressions additionally cover discarded pop results, string/class
+handles, four-state values and empty-pop defaults, and unevaluated type queries
+that preserve packed result dimensions and authored bounds. The packed-result
+query regression failed on all five Celox backend configurations even after
+the initial 28 upstream checks passed. Arity and void-result rejection remain checked.
+Queue slices, queue operands in concatenations, element-reference persistence,
+warning diagnostics, and queries on nonintegral pop results remain outside
+this change's support contract.
+Logical equivalence (`<->`) now passes six generated cases in both state modes.
+The binary-operator case passes elaboration; the five logical-operator cases
+execute simulations and pass their assertions. A full run before the container
+method changes above changed only these twelve verdicts, with no passing case
+regressing: 1,208 cases pass in 2state and 1,219 in 4state. Shared tests cover unknown operands and
+evaluate both operands exactly once (IEEE 1800-2023 11.4.7).
+
+Logical implication (`->`) now passes six generated cases in both state modes.
+The binary-operator case passes elaboration; the five logical-operator cases
+execute simulations and pass their assertions. A full run before the container
+method changes above changed only these twelve verdicts, with no passing case
+regressing: 1,208 cases pass in 2state and 1,219 in 4state. Shared tests also cover short-circuiting and
+unknown operands (IEEE 1800-2023 11.4.7).
+
+Integral array reductions (7.12.3) support `sum`, `product`, `and`, `or` and
+`xor`, with or without empty parentheses. The five unmodified
+`chapter-7/arrays/unpacked/reduction-methods` simulation cases pass the
+official runner in both state modes at the pinned revision. Only those ten
+reviewed expectations change from `fail` to `pass`; this is a focused run,
+not a new full-corpus measurement. Shared regressions also exercise fixed
+arrays, queues, integral- and string-indexed associative arrays, element-width
+overflow, signed results, packed type queries and four-state propagation.
+Empty reductions use the operation identity (`product`: one, `and`: all ones,
+`sum` / `or` / `xor`: zero). An explicit `legacy_empty_reductions` build option
+selects zero for all empty reductions. These empty-input cases are covered by
+shared and simulator API regressions; the five upstream cases use nonempty
+arrays and do not distinguish these modes.
+`with` expressions, iterator arguments and
+multidimensional unpacked receivers remain unsupported.
+
+Dynamic arrays and queues support `reverse`, `sort` and `rsort` (7.12.2),
+including the bare method form. The three unmodified upstream
+`chapter-7/arrays/unpacked/ordering-methods` cases pass the official simulation
+runner in both state modes. Exactly these six expectations change from `fail`
+to `pass`; the neighboring `shuffle` case remains a failure in both modes.
+This is a focused eight-verdict run, not a full-corpus measurement.
+Shared cases additionally check negative and unsigned integral values through
+64 bits, string ordering, bounded queues, empty/singleton arrays, local
+shadowing, value copies, class identity, X/Z preservation and scalar element
+change events. Native-image/checkpoint tests cover the new runtime operations.
+Associative ordering is prohibited by 7.12.2; fixed-array ordering, `shuffle`,
+`with` expressions and iterator arguments remain unsupported.
+
+Array locator methods (7.12.1) update 22 more rows: both state modes of the
+ten `chapter-7/arrays/associative/locator-methods` cases and of
+`chapter-7/arrays/unpacked/index.sv` (`item.index`, 7.12.4) change from fail
+to pass. Each was simulated in both modes and its displayed values checked
+against 7.12.1, including the first occurrence that `unique_index` keeps.
+Full official runs at the pinned revision report 1277 passing cases in 2state
+and 1288 in 4state, and change only these 22 verdicts.
+
+Increment and decrement operators in expressions (11.4.2) update 4 more rows:
+both state modes of `chapter-11/11.3.6--assign_in_expression.sv` and
+`11.3.6--assign_in_expression-sim.sv`, which assign `(++a)`, change from fail
+to pass. Each was simulated in both modes and leaves `a` and `b` at 1. Full
+official runs at the pinned revision report 1283 passing cases in 2state and
+1294 in 4state, and change only these 4 verdicts.
+
+Streaming concatenations of fixed-size data (11.4.14) update 22 more rows:
+both state modes of the `chapter-11/11.4.14.1` to `11.4.14.3` pack, re-order,
+unpack and padding cases and of `simple/11.4.14.3--simple_unpack_stream-sim.sv`
+change from fail to pass. Each was simulated in both modes: the `-sim` cases
+assert their values, and the bit-reversed `{<<{a, b, c}}` of the other
+`unpack_stream` cases was checked against 11.4.14.2 in 96 and, left-aligned,
+128 bits. `11.4.14.3--unpack_stream_inv.sv` still fails to compile, as it must:
+its 96-bit stream is wider than the 32-bit target. The `11.4.14.4` cases stream
+dynamic arrays and queues, which remain unsupported. Full official runs at the
+pinned revision report 1294 passing cases in 2state and 1305 in 4state, and
+change only these 22 verdicts.
+
+Streaming concatenations of dynamically sized data (11.4.14.4) update 6 more
+rows: both state modes of `11.4.14.4--dynamic_array_stream.sv`,
+`dynamic_array_stream-sim.sv` and `dynamic_array_stream_with.sv` change from
+fail to pass. Each was simulated in both modes and unpacks the packet's header,
+length, payload and checksum as they were packed, greedily and with
+`with [0 +: o_len]`. Full official runs at the pinned revision report 1297
+passing cases in 2state and 1308 in 4state, and change only these 6 verdicts.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
@@ -160,6 +282,14 @@ and state mode has separate logs, and upstream `BaseRunner` creates unique
 work directories. Reports and expectations are sorted regardless of completion
 order. A runner infrastructure error cancels pending work and cannot update
 expectations.
+
+`--shard INDEX/COUNT` runs and compares only one of COUNT disjoint shards
+(1-based). Tests are dealt round-robin from their sorted names, so that
+neighbouring tests, such as the UVM testbenches, spread over the shards; a test
+that `expected.tsv` lists but the corpus lost belongs to one shard, which
+reports it missing. With `--update`, a shard replaces only its own rows. CI
+builds the driver once and runs three shards (`sv-tests conformance (N/3)`),
+each with 4 jobs, and retains one report per shard.
 
 Both state modes run by default. Use `--state-mode 2state` or
 `--state-mode 4state` to run and compare only one; `--state-mode both` explicitly
@@ -327,3 +457,68 @@ These fixtures exercise the actual upstream runner with a controlled driver,
 including mode priority, skips, negative tests, assertions, timeouts, library
 injection and missing-environment failures. The Rust example is a single-case
 compiler/simulator driver; it does not parse sv-tests metadata or judge verdicts.
+
+## Failure triage
+
+`run.py` now writes four companion artifacts:
+
+- `report.tsv`: official verdicts plus `failure_category`, `diagnostic`, a bounded
+  diagnostic excerpt (`evidence`), and `negative_test` (`1`, `0`, or empty when unknown).
+- `report.summary.json`: schema version 2, collection completeness, requested and
+  collected row counts, per-group/per-state totals, failure counts and frequent
+  diagnostics. `classification_version` identifies the diagnostic rules.
+- `report.summary.md`: a readable overview, also attached to the CI job summary.
+- `report.failures.json`: every failing case with its classification and log path,
+  plus collection errors. No case is removed from the TSV or denominator.
+
+Categories describe **observed diagnostics**, not proven compiler root causes:
+
+| Category | Evidence |
+| --- | --- |
+| `unsupported` | explicit unsupported-construct or single-module-root diagnostic |
+| `compile_error` | parse-error or illegal-context diagnostic, even if the selected mode was simulation |
+| `runtime_error` | `$fatal` or lost-runtime-event diagnostic |
+| `assertion_failure` | official simulation output validation failed after a successful positive invocation |
+| `unexpected_success` | a negative test's driver succeeded |
+| `timeout` | upstream timeout return code **and** timeout diagnostic |
+| `crash` | Rust panic diagnostic or abnormal/signal return code |
+| `input_issue` | the reviewed upstream input defect described above |
+| `environment` | missing include directory without the reviewed input exception |
+| `unclassified` | unknown diagnostic, missing log, or TSV/log metadata disagreement |
+
+For example, a parser error on a valid but unimplemented grammar construct is
+still `compile_error`; the classifier does not guess whether the source or the
+parser is wrong. A nonzero return code in simulation mode alone does not establish
+a runtime bug because compilation may have failed first. Frequent diagnostic
+counts normalize source paths and line numbers; `.failures.json` retains the
+individual evidence and log locations. Tag counts still overlap as described above.
+
+Negative-test passes accompanied by unsupported, root-requirement, timeout or
+crash diagnostics appear in `negative_pass_diagnostics` for review. They remain
+**official passes**, not new failures. No assertion expression is evaluated by
+this classification code.
+
+Missing drivers, missing libraries, runner exceptions and other collection
+errors still return exit code 2 and prohibit `--update`. A failed collection now
+retains already completed rows and separate `collection_errors`, with
+`complete: false`; cancelled/unrun cases do not become invented failure rows.
+An incomplete report must not be used as a full conformance score. Successful
+collection has `complete: true` even when comparison with expectations returns 1.
+
+Reclassify a downloaded or older **run report**, without rerunning simulations or
+changing `expected.tsv`:
+
+```bash
+python conformance/sv-tests/reporting.py work/sv-tests-report.tsv \
+  --log-root work/sv-tests-results \
+  --meta-tags ../sv-tests/conf/meta-tags.conf \
+  --output work/triage/report.tsv
+```
+
+`--log-root` relocates logs using `STATE/TEST/official.log`. Otherwise the paths
+in the TSV are used (relative paths resolve against the TSV directory).
+`--meta-tags` should reference the matching pinned checkout; omit it to count
+only literal tags, reported as `meta_tags_expanded: false`. The existing summary
+supplies the corpus revision and incomplete-collection provenance. Without a
+completeness marker in that summary, offline reports use `complete: null`
+(unknown), not a claim that every case ran. Missing logs stay unclassified.

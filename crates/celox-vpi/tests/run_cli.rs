@@ -373,6 +373,88 @@ fn veryl_backends_share_cli_execution_and_opt_in_reports() {
     assert!(output.stdout.is_empty(), "{output:?}");
 }
 
+#[test]
+fn tiered_report_records_when_each_tier_ran() {
+    let source = "module Counter (clk: input clock, q: output bit<32>) { always_ff { q += 1; } }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var q: bit<32>;
+            inst counter: Counter (clk, q);
+            initial { clk.next(40); $assert(q == 40); $finish(); }
+        }";
+    let output = run(
+        &[("top.veryl", source)],
+        &["--report", "--backend", "tiered"],
+    );
+    assert!(output.status.success(), "{output:?}");
+    let report = String::from_utf8(output.stdout).unwrap();
+    let line = report
+        .lines()
+        .find(|line| line.starts_with("CELOX_TIERED_TIMELINE "))
+        .unwrap_or_else(|| panic!("no timeline: {report}"));
+    let field = |name: &str| {
+        line.split(' ')
+            .find_map(|part| part.strip_prefix(&format!("{name}=")))
+            .unwrap_or_else(|| panic!("no {name}: {line}"))
+    };
+    // Compilation may finish after this short run; the record stays complete.
+    let finish: u64 = field("finish_tick").parse().unwrap();
+    assert!(finish >= 40, "{line}");
+    for stage in field("compiles")
+        .split(',')
+        .filter(|stage| *stage != "none")
+    {
+        let parts: Vec<_> = stage.split(':').collect();
+        assert_eq!(parts.len(), 3, "{line}");
+        parts[1].parse::<u128>().unwrap();
+        assert!(matches!(parts[2], "completed" | "failed"), "{line}");
+    }
+    if let Ok(promoted) = field("promoted_tick").parse::<u64>() {
+        assert!(promoted <= finish, "{line}");
+    }
+}
+
+// Unknown bits print as `x` in testbench messages (IEEE 1800-2023
+// 21.2.1.3), not as their payload (#2629).
+#[test]
+fn veryl_testbench_displays_print_unknown_bits() {
+    let source = r#"
+        #[test(Top)]
+        module Top {
+            inst clk: $tb::clock_gen;
+            var mem: logic<64> [4];
+            var v  : logic<64>;
+            initial {
+                clk.next(1);
+                v = mem[1];
+                $display("v=%h", v);
+                $display("m=%h", mem[2]);
+                $finish();
+            }
+        }
+    "#;
+    for backend in [
+        "native",
+        "tiered",
+        "interpreter",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+    ] {
+        for (state, digit) in [("--four-state", 'x'), ("--two-state", '0')] {
+            let output = run(&[("top.veryl", source)], &["--backend", backend, state]);
+            assert!(output.status.success(), "{backend} {state}: {output:?}");
+            let printed = String::from_utf8_lossy(&output.stderr);
+            let value = digit.to_string().repeat(16);
+            for line in [format!("v={value}"), format!("m={value}")] {
+                assert!(
+                    printed.lines().any(|printed| printed == line),
+                    "{backend} {state}: missing {line} in {printed}"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(not(any(
     all(target_arch = "x86_64", feature = "arm64-codegen"),
     all(target_arch = "aarch64", feature = "x86_64-codegen")
@@ -756,4 +838,175 @@ endmodule
         String::from_utf8_lossy(&output.stdout),
         "iterations=7000 mode=slow verbose=0\n"
     );
+}
+
+#[cfg(all(unix, feature = "systemverilog"))]
+#[test]
+fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
+    use std::{
+        io::BufRead,
+        process::{Child, Stdio},
+        sync::mpsc,
+        time::Duration,
+    };
+    struct Running(Child);
+    impl Drop for Running {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    for backend in [
+        "interpreter",
+        "native",
+        "tiered",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+        #[cfg(feature = "wasm-runtime")]
+        "wasm",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("top.sv");
+        let output_path = dir.path().join("output.log");
+        let waveform_path = dir.path().join("trace.vcd");
+        std::fs::write(
+            &source,
+            format!(
+                r#"
+module Top(output longint unsigned count);
+ timeunit 1ns; timeprecision 1ns;
+ int fd = $fopen("{}", "w");
+ initial begin $dumpfile("{}"); $dumpvars(0, Top); end
+ always #1 begin count++; $display("%0d", count); end
+endmodule
+"#,
+                output_path.display(),
+                waveform_path.display()
+            ),
+        )
+        .unwrap();
+        let mut process = Running(
+            Command::new(env!("CARGO_BIN_EXE_celox"))
+                .arg("run")
+                .arg(&source)
+                .args([
+                    "--top",
+                    "Top",
+                    "--backend",
+                    backend,
+                    "--unlimited",
+                    "--save-state-dir",
+                ])
+                .arg(dir.path())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap(),
+        );
+        let stderr = process.0.stderr.take().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stderr).lines() {
+                if tx.send(line.unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        let wait = |message: &str| {
+            let deadline = std::time::Instant::now() + Duration::from_secs(60);
+            let mut logs = String::new();
+            loop {
+                let line = rx
+                    .recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_else(|error| panic!("{backend}: {message}: {error}; {logs}"));
+                logs.push_str(&line);
+                logs.push('\n');
+                if line.contains(message) {
+                    break;
+                }
+            }
+        };
+        wait("SIGUSR1 checkpoint ready");
+        let deadline = std::time::Instant::now() + Duration::from_secs(60);
+        while !waveform_path.exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "waveform did not start: {backend}"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let pid = process.0.id();
+        // SAFETY: signal a live child owned by this test.
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) }, 0);
+        wait("saved SIGUSR1 checkpoint");
+        assert!(process.0.try_wait().unwrap().is_none());
+        let checkpoint = dir.path().join(format!("signal-{pid}-1.checkpoint"));
+        let state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&checkpoint).unwrap()).unwrap();
+        let time = state["time"].as_u64().unwrap();
+        // A failed request must leave the old file and running simulation intact.
+        let collision = dir.path().join(format!("signal-{pid}-2.checkpoint"));
+        std::fs::write(&collision, b"keep").unwrap();
+        assert_eq!(unsafe { libc::kill(pid as libc::pid_t, libc::SIGUSR1) }, 0);
+        wait("cannot save SIGUSR1 checkpoint");
+        assert_eq!(std::fs::read(&collision).unwrap(), b"keep");
+        assert!(process.0.try_wait().unwrap().is_none());
+        drop(process);
+        reader.join().unwrap();
+        std::fs::write(&output_path, b"delivered after checkpoint").unwrap();
+        let original_waveform = std::fs::read(&waveform_path).unwrap();
+        let resumed = Command::new(env!("CARGO_BIN_EXE_celox"))
+            .arg("run")
+            .arg(&source)
+            .args([
+                "--top",
+                "Top",
+                "--backend",
+                backend,
+                "--max-steps",
+                "3",
+                "--no-checkpoint-on-signal",
+                "--restore-checkpoint",
+            ])
+            .arg(&checkpoint)
+            .output()
+            .unwrap();
+        assert_eq!(
+            std::fs::read(&output_path).unwrap(),
+            b"delivered after checkpoint"
+        );
+        assert_eq!(std::fs::read(&waveform_path).unwrap(), original_waveform);
+        let segments = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("trace.vcd.resume-")
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            segments.len(),
+            1,
+            "{backend}: {}",
+            String::from_utf8_lossy(&resumed.stderr)
+        );
+        let waveform = std::fs::read_to_string(segments[0].path()).unwrap();
+        assert!(waveform.contains("$enddefinitions $end"), "{waveform}");
+        assert!(
+            waveform.contains(&format!("#{}\n", time + 3)),
+            "{backend}: {waveform}"
+        );
+        let output = String::from_utf8(resumed.stdout).unwrap();
+        let counts: Vec<u64> = output.lines().map(|line| line.parse().unwrap()).collect();
+        // A checkpoint before the initial time-zero slot needs one step to
+        // start the always process; otherwise all three steps advance time.
+        assert!((2..=3).contains(&counts.len()), "{output}");
+        assert_eq!(
+            counts,
+            (time + 1..=time + counts.len() as u64).collect::<Vec<_>>()
+        );
+        assert!(String::from_utf8_lossy(&resumed.stderr).contains("exceeded --max-steps 3"));
+    }
 }

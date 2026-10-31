@@ -5,7 +5,7 @@ use crate::ir::*;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use super::block_opt::aggregate_static_offset;
+use super::block_opt::{aggregate_static_offset, store_concat_source};
 use super::pass_manager::ExecutionUnitPass;
 
 pub(in crate::optimizer) struct CoalesceStoresPass {
@@ -207,8 +207,20 @@ fn coalesce_block(
                 );
 
                 // Concat order: MSB first, so reverse the LSB-sorted order
-                let concat_args: Vec<RegisterId> =
-                    sub_run.iter().rev().map(|c| c.src_reg).collect();
+                let mut new_instructions = Vec::new();
+                let concat_args: Vec<RegisterId> = sub_run
+                    .iter()
+                    .rev()
+                    .map(|c| {
+                        store_concat_source(
+                            c.src_reg,
+                            c.width,
+                            register_map,
+                            reg_counter,
+                            &mut new_instructions,
+                        )
+                    })
+                    .collect();
                 let mut comb_capture_sites = Vec::new();
                 for site_id in sub_run
                     .iter()
@@ -236,7 +248,7 @@ fn coalesce_block(
                     run_start = run_end + 1;
                     continue;
                 };
-                let new_instructions = vec![
+                new_instructions.extend([
                     SIRInstruction::Concat(concat_reg, concat_args),
                     SIRInstruction::Store(
                         addr,
@@ -246,7 +258,7 @@ fn coalesce_block(
                         Vec::new(),
                         comb_capture_sites,
                     ),
-                ];
+                ]);
 
                 replacements.push(Replacement {
                     removed_indices,
@@ -310,6 +322,68 @@ fn seal_group(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coalescing_preserves_truncation_of_wide_sources() {
+        for source_width in [8, 64, 129] {
+            let registers = [RegisterId(0), RegisterId(1)]
+                .into_iter()
+                .map(|reg| {
+                    (
+                        reg,
+                        RegisterType::Logic {
+                            width: source_width,
+                        },
+                    )
+                })
+                .collect();
+            let mut eu = make_eu(
+                vec![
+                    SIRInstruction::Imm(RegisterId(0), SIRValue::new(0xffu8)),
+                    SIRInstruction::Imm(RegisterId(1), SIRValue::new(0xfeu8)),
+                    SIRInstruction::Store(
+                        make_addr(1),
+                        SIROffset::Static(0),
+                        1,
+                        RegisterId(0),
+                        vec![],
+                        vec![],
+                    ),
+                    SIRInstruction::Store(
+                        make_addr(1),
+                        SIROffset::Static(1),
+                        2,
+                        RegisterId(1),
+                        vec![],
+                        vec![],
+                    ),
+                ],
+                registers,
+            );
+            eu.verify_result().unwrap();
+            CoalesceStoresPass::default().run(&mut eu, &PassOptions::default());
+            eu.verify_result().unwrap();
+            let instructions = &eu.blocks[&BlockId(0)].instructions;
+            let stores = instructions
+                .iter()
+                .filter(|inst| matches!(inst, SIRInstruction::Store(..)))
+                .count();
+            assert_eq!(stores, 1);
+            let args = instructions
+                .iter()
+                .find_map(|inst| match inst {
+                    SIRInstruction::Concat(_, args) => Some(args),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                args.iter()
+                    .map(|arg| eu.register_map[arg].width())
+                    .collect::<Vec<_>>(),
+                [2, 1]
+            );
+        }
+    }
 
     fn make_var_id(n: u32) -> celox_design::StateObjectId {
         celox_design::StateObjectId(n)

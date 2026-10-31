@@ -1,0 +1,32 @@
+{
+  "cases": [
+    "increment_decrement::increment_decrement_conditional_arms",
+    "increment_decrement::increment_decrement_implication"
+  ],
+  "source": "src/sv/cases/increment_decrement.vtest",
+  "standard": "IEEE 1800-2023 11.4.2: increment and decrement operators may be used in expressions and behave as blocking assignments; 11.4.7: the second operand of -> is not evaluated when the first one is logically false; 11.4.11: the conditional operator evaluates the selected arm.",
+  "method": "The shared cases run unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters.",
+  "reduced_source": "module Top;\n    int i, j, k;\n    initial begin\n        i = 1;\n        j = 0;\n        k = (i == 0) -> (j++ > 0);\n        $display(\"implication skipped %0d %0d\", k, j);\n        k = (i != 0) -> (j-- > 100);\n        $display(\"implication evaluated %0d %0d\", k, j);\n        j = 1;\n        k = i ? j++ : j--;\n        $display(\"then %0d %0d\", k, j);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "status": "compile_error",
+      "stderr": "%Error-UNSUPPORTED: repro.sv:6:27: Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\n%Error-UNSUPPORTED: repro.sv:8:27: Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\n%Error-UNSUPPORTED: repro.sv:11:18: Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\n%Error-UNSUPPORTED: repro.sv:11:24: Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stdout": "implication skipped 1 1\nimplication evaluated 0 0\nthen 1 2\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "implication skipped 1 1\nimplication evaluated 0 0\nthen 1 2\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "implication skipped 1 0\nimplication evaluated 0 -1\nthen 1 2\n"
+    }
+  ]
+}

@@ -218,3 +218,86 @@ module Top(output logic [3:0] q);
 endmodule"#)
  (top Top) (run_until 1) (assert_eq q (fourstate 0 0))
  (run_until 2) (assert_eq q (fourstate 10 3)))
+
+; IEEE 1800-2023 9.4.2: observe the expression result, not every operand write.
+(case compound_event_tracks_result_not_operands
+ (source "compound_event_tracks_result_not_operands.sv" #"module Top(output int q);
+ initial begin
+  automatic int value=0;
+  q=0;
+  fork
+   begin @(value > 2); q=q+1; end
+   begin #1; value=1; #1; if(q!=0) q=100; value=2;
+         #1; if(q!=0) q=100; value=3; end
+  join
+  q=q+2;
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 3))
+
+(case compound_event_activations_outlive_parent
+ (source "compound_event_activations_outlive_parent.sv" #"module Top(output int q);
+ task automatic start(input int n);
+  int value=0;
+  fork begin
+   fork
+    begin @(value+n == 4); q=q+n; end
+    begin #(n+1); value=4-n; end
+   join_none
+  end join_none
+ endtask
+ int count=2;
+ initial begin q=0; for(int i=1;i<=count;i++) start(i); end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 3))
+
+(case compound_event_function_scratch_isolated
+ (source "compound_event_function_scratch_isolated.sv" #"module Top(output int q);
+ parameter int threshold=2;
+ function automatic int inner(input int x, input int limit=threshold);
+  int answer;
+  answer=0;
+  for(int i=0;i<x;i++) answer=answer+1;
+  return answer >= limit;
+ endfunction
+ function automatic int outer(input int x);
+  return inner(x);
+ endfunction
+ task automatic start(input int n);
+  int value=0;
+  fork
+   begin @(outer(value)); q=q+n; end
+   begin #(n+1); value=1; #1; value=2; end
+  join_none
+ endtask
+ int count=2;
+ initial begin q=0; for(int i=1;i<=count;i++) start(i); end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq q 3))
+
+(case compound_event_four_state_lsb_edges
+ (four_state)
+ (source "compound_event_four_state_lsb_edges.sv" #"module Top(output int rises, output int falls);
+ initial begin
+  automatic logic [1:0] value=2'b00;
+  rises=0; falls=0;
+  fork
+   begin forever begin @(posedge ({value[1],value[0]})); rises++; end end
+   begin forever begin @(negedge ({value[1],value[0]})); falls++; end end
+   begin #1; value=2'b10; #1; value=2'b0x; #1; value=2'b0z;
+         #1; value=2'b0x; #1; value=2'b01;
+         #1; value=2'b0z; #1; value=2'b00; #1; value=2'b01;
+         #1; value=2'b00; end
+  join
+ end
+endmodule"#)
+ (top Top)
+ (run_until 10)
+ (assert_eq rises 3)
+ (assert_eq falls 3))

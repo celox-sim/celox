@@ -36,7 +36,8 @@ pub(in crate::ast) fn construction_member(
 }
 
 pub(in crate::ast) fn construct(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     plan: Construction,
     value: Option<Expr>,
     dims: &PackedDimensions,
@@ -49,7 +50,7 @@ pub(in crate::ast) fn construct(
         )));
     }
     let width = match &plan.shape {
-        Some(shape) => patterns::shape_width(state, shape, dims)
+        Some(shape) => patterns::shape_width(&tree.functions, shape, dims)
             .ok_or_else(|| unsupported("tagged payload width"))?,
         None => 0,
     };
@@ -64,7 +65,7 @@ pub(in crate::ast) fn construct(
             let signed =
                 dimensions::expression_signedness(&value, dims, &dims.const_env).unwrap_or(false);
             parts.push(patterns::assignment_value(
-                state, &value, signed, None, &shape, dims, false,
+                tree, session, &value, signed, None, &shape, dims, false,
             )?);
         }
         (None, None) => {}
@@ -85,9 +86,9 @@ pub(in crate::ast) fn construct(
 pub(in crate::ast) fn member_access(
     mut path: Vec<String>,
     dims: &PackedDimensions,
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
 ) -> Converted<Option<(Vec<Expr>, Type)>> {
-    selects::bind_interface_path(state, &mut path, dims);
+    selects::bind_interface_path(tree, &mut path, dims);
     let Some(root) = path.first().and_then(|name| dims.get(name)) else {
         return Ok(None);
     };
@@ -130,18 +131,22 @@ pub(in crate::ast) fn member_access(
 pub(in crate::ast) fn checked_value(
     guards: Vec<Expr>,
     mut value: Expr,
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Expr> {
     if guards.is_empty() {
         return Ok(value);
     }
     let width =
-        expr_static_width(state, &value, dims).ok_or_else(|| unsupported("tagged access width"))?;
+        expr_static_width(tree, &value, dims).ok_or_else(|| unsupported("tagged access width"))?;
     let signed = dimensions::expression_signedness(&value, dims, &dims.const_env).unwrap_or(false);
     for guard in guards.into_iter().rev() {
         value = Expr::Call {
-            callee: Callee::Checked { width, signed },
+            callee: Callee::Checked {
+                width,
+                signed,
+                check: crate::system_functions::AccessCheck::TaggedMember,
+            },
             args: vec![Some(guard), Some(value)],
             arg_order: Vec::new(),
         };

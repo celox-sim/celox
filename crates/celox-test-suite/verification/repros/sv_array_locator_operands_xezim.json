@@ -1,0 +1,34 @@
+{
+  "cases": [
+    "array_locators::array_locator_find",
+    "array_locators::array_locator_min_max_unique",
+    "array_locators::array_locator_class_predicates",
+    "array_locators::array_locator_fixed_struct_enum"
+  ],
+  "source": "src/sv/cases/array_locators.vtest",
+  "standard": "IEEE 1800-2023 7.12: an array manipulation method call may be used as an implicit variable within an expression, and a method may follow its with clause (q.find with (...).size()); 7.12.1: min of strings returns the least string (6.16 orders strings lexicographically); 6.19.5: next() of an enumeration value.",
+  "method": "The shared cases run unchanged in verify-sv-xezim; the reduced source below runs without the adapter.",
+  "reduced_source": "module Top;\n    typedef enum logic [1:0] { RED, GREEN, BLUE } color_t;\n    color_t colors[4] = '{RED, BLUE, GREEN, BLUE};\n    color_t c[$];\n    int q[$] = '{5, 1, 4, 1, 9, 2, 6};\n    int r[$], lowest[$];\n    string names[$] = '{\"bob\", \"alice\", \"carol\", \"alice\"};\n    string s[$];\n    initial begin\n        lowest = '{4};\n        r = q.find with (item > 3);\n        $display(\"operand equality %0d\", r.min() == lowest);\n        $display(\"chained size %0d\", q.find with (item == 1).size());\n        r = q.find with (q.find(y) with (y == item).size() > 1);\n        $display(\"nested size %0d\", r.size());\n        s = names.min();\n        $display(\"string min %s\", s[0]);\n        c = colors.find_first with (item.next() == BLUE);\n        $display(\"enum next size %0d\", c.size());\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "operand equality 1\nchained size 2\nnested size 2\nstring min alice\nenum next size 1\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:11: syntax error\nrepro.sv:11: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "operand equality 0\nchained size 0\nnested size 0\nstring min bob\n[xezim][error] null handle at time 0 — method `next` called on a null class handle (\\xa78.4); the call runs nothing\nenum next size 0\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "operand equality 1\nchained size 2\nnested size 2\nstring min alice\nenum next size 1\n"
+    }
+  ]
+}

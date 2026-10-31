@@ -110,47 +110,18 @@ pub(super) struct Timescales {
     options: crate::AnalysisOptions,
 }
 
-/// Time-query state owned by one analysis, shared explicitly by nested scopes.
-#[derive(Default)]
-pub(super) struct State {
-    design: RefCell<QueryContext>,
-    interface_instance: RefCell<Option<String>>,
-    revision: generate::Revision,
+/// The options the design was analyzed with.
+pub(super) fn analysis_options(tree: &AnalysisContext<'_>) -> crate::AnalysisOptions {
+    tree.timescale.design.options.clone()
 }
 
-pub(super) fn revision(state: &State) -> &generate::Revision {
-    &state.revision
-}
-
-pub(super) fn with_interface_instance<T>(
-    state: &State,
-    name: &str,
-    analyze: impl FnOnce() -> T,
-) -> T {
-    struct Restore<'a> {
-        state: &'a State,
-        previous: Option<String>,
-        revision: u64,
+/// The hierarchical path of interface instance `name` inside the instance
+/// at `parent`, which time messages of its body are prefixed with.
+pub(super) fn interface_instance(parent: Option<&str>, name: &str) -> Arc<str> {
+    match parent {
+        Some(parent) => format!("{parent}.{name}").into(),
+        None => name.into(),
     }
-    impl Drop for Restore<'_> {
-        fn drop(&mut self) {
-            *self.state.interface_instance.borrow_mut() = self.previous.take();
-            self.state.revision.restore(self.revision);
-        }
-    }
-    let previous = {
-        let mut current = state.interface_instance.borrow_mut();
-        let nested = current
-            .as_ref()
-            .map_or_else(|| name.to_string(), |parent| format!("{parent}.{name}"));
-        current.replace(nested)
-    };
-    let _restore = Restore {
-        state,
-        previous,
-        revision: state.revision.change(),
-    };
-    analyze()
 }
 
 #[cfg(test)]
@@ -160,8 +131,9 @@ thread_local! {
     static SCOPE_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+/// The time scopes of the design, and those of the source being analyzed.
 #[derive(Default)]
-struct QueryContext {
+pub(super) struct QueryContext {
     design: Arc<Timescales>,
     prepared: Option<PreparedTree>,
 }
@@ -171,24 +143,9 @@ struct PreparedTree {
     unit: Arc<Unit>,
 }
 
-pub(super) struct Installed<'a> {
-    previous: QueryContext,
-    revision: u64,
-    state: &'a State,
-    // A prepared tree's address is used only while this guard borrows it.
-    _tree: Option<&'a SyntaxTree>,
-}
-impl Drop for Installed<'_> {
-    fn drop(&mut self) {
-        *self.state.design.borrow_mut() = std::mem::take(&mut self.previous);
-        self.state.revision.restore(self.revision);
-    }
-}
-pub(super) fn install_for_tree<'a>(
-    state: &'a State,
-    design: Arc<Timescales>,
-    tree: &'a SyntaxTree,
-) -> Converted<Installed<'a>> {
+/// The time scopes of `design` with those of `tree`, which queries of the
+/// tree's scopes read.
+pub(super) fn for_tree(design: Arc<Timescales>, tree: &SyntaxTree) -> Converted<Arc<QueryContext>> {
     let source = key(tree);
     // Missing sources and type-specialized trees contribute to the same design.
     // Collect and merge once, before any query or module-body analysis.
@@ -204,24 +161,7 @@ pub(super) fn install_for_tree<'a>(
         address: tree as *const SyntaxTree as usize,
         unit,
     });
-    Ok(install_context(
-        state,
-        QueryContext { design, prepared },
-        Some(tree),
-    ))
-}
-
-fn install_context<'a>(
-    state: &'a State,
-    context: QueryContext,
-    tree: Option<&'a SyntaxTree>,
-) -> Installed<'a> {
-    Installed {
-        previous: state.design.replace(context),
-        revision: state.revision.change(),
-        state,
-        _tree: tree,
-    }
+    Ok(Arc::new(QueryContext { design, prepared }))
 }
 
 fn key(tree: &SyntaxTree) -> crate::source_tree::SourceText {
@@ -507,7 +447,7 @@ impl Timescales {
         self.precision.unwrap_or(DEFAULT.precision)
     }
     fn including_tree(&self, tree: &SyntaxTree) -> Converted<Self> {
-        let local = Self::collect_with_options(&[(tree, Path::new(""))], self.options)?;
+        let local = Self::collect_with_options(&[(tree, Path::new(""))], self.options.clone())?;
         let specified = [
             self.specified[0] | local.specified[0],
             self.specified[1] | local.specified[1],
@@ -589,7 +529,7 @@ impl Timescales {
         };
         let mut design = Self {
             precision: options.default_timescale.map(|(_, precision)| precision),
-            options,
+            options: options.clone(),
             ..Self::default()
         };
         // Each bit records whether a design element uses a default (1) or an
@@ -957,9 +897,9 @@ pub(super) fn print_message(
     tree: &AnalysisContext<'_>,
     site: system_functions::CallSite,
 ) -> Converted<String> {
-    let prefix = tree.state.timescales.interface_instance.borrow().clone();
+    let prefix = tree.interface_instance.clone();
     {
-        let context = tree.state.timescales.design.borrow();
+        let context = &*tree.timescale;
         if let Some(prepared) = &context.prepared
             && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
         {
@@ -970,7 +910,7 @@ pub(super) fn print_message(
                     tree,
                     &prepared.unit,
                     site,
-                    &scope::imported(&tree.state).interface_types,
+                    &scope::imported(tree).interface_types,
                 )
                 .map(|scope| scope.message(prefix.as_deref()))
         } else {
@@ -979,7 +919,7 @@ pub(super) fn print_message(
                 tree,
                 site,
                 prefix.as_deref(),
-                &scope::imported(&tree.state).interface_types,
+                &scope::imported(tree).interface_types,
             )
         }
     }
@@ -987,7 +927,7 @@ pub(super) fn print_message(
 
 pub(super) fn query(call: celox_sv_syntax::ExprId, tree: &AnalysisContext<'_>) -> Converted<i32> {
     {
-        let context = tree.state.timescales.design.borrow();
+        let context = &*tree.timescale;
         if let Some(prepared) = &context.prepared
             && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
         {
@@ -995,12 +935,12 @@ pub(super) fn query(call: celox_sv_syntax::ExprId, tree: &AnalysisContext<'_>) -
                 call,
                 tree,
                 &prepared.unit,
-                &scope::imported(&tree.state).interface_types,
+                &scope::imported(tree).interface_types,
             )
         } else {
             context
                 .design
-                .query(call, tree, &scope::imported(&tree.state).interface_types)
+                .query(call, tree, &scope::imported(tree).interface_types)
         }
     }
 }
@@ -1029,7 +969,7 @@ fn divisor(
     tree: &AnalysisContext<'_>,
     in_unit: fn(&Timescales, usize, &Unit) -> u64,
 ) -> Converted<u64> {
-    let context = tree.state.timescales.design.borrow();
+    let context = &*tree.timescale;
     let at = tree.declarations().expression(node).tokens.start;
     if let Some(prepared) = &context.prepared
         && prepared.address == tree.syntax_tree as *const SyntaxTree as usize
@@ -1064,7 +1004,7 @@ pub(super) fn delay_literal(
     .find_map(|(suffix, exponent)| text.strip_suffix(suffix).map(|n| (n, exponent))) else {
         return Ok(None);
     };
-    let context = tree.state.timescales.design.borrow();
+    let context = &*tree.timescale;
     let source = key(tree);
     let extended = (!context.design.units.contains_key(&source))
         .then(|| context.design.including_tree(tree))
@@ -1106,17 +1046,12 @@ pub(super) fn delay_literal(
 mod tests {
     #[test]
     fn nested_interface_instances_keep_their_full_path() {
-        let state = State::default();
-        with_interface_instance(&state, "outer", || {
-            with_interface_instance(&state, "child[2]", || {
-                assert_eq!(
-                    state.interface_instance.borrow().as_deref(),
-                    Some("outer.child[2]")
-                );
-            });
-            assert_eq!(state.interface_instance.borrow().as_deref(), Some("outer"));
-        });
-        assert!(state.interface_instance.borrow().is_none());
+        let outer = interface_instance(None, "outer");
+        assert_eq!(&*outer, "outer");
+        assert_eq!(
+            &*interface_instance(Some(&outer), "child[2]"),
+            "outer.child[2]"
+        );
     }
 
     use super::*;
@@ -1153,7 +1088,10 @@ mod tests {
         let design =
             Arc::new(Timescales::collect(&[(&tree, Path::new("many_queries.sv"))]).unwrap());
         let tree = AnalysisContext::unspecialized(&tree);
-        let _guard = install_for_tree(&tree.state.timescales, design, &tree).unwrap();
+        let tree = AnalysisContext {
+            timescale: for_tree(design, &tree).unwrap(),
+            ..tree.clone()
+        };
         let before = SCOPE_CHECKS.with(|count| count.get());
         let mut calls = 0;
         for call in native_calls(&tree) {
@@ -1181,7 +1119,10 @@ mod tests {
         let design =
             Arc::new(Timescales::collect(&[(&tree, Path::new("nested_queries.sv"))]).unwrap());
         let tree = AnalysisContext::unspecialized(&tree);
-        let _guard = install_for_tree(&tree.state.timescales, design, &tree).unwrap();
+        let tree = AnalysisContext {
+            timescale: for_tree(design, &tree).unwrap(),
+            ..tree.clone()
+        };
         let values: Vec<_> = native_calls(&tree)
             .into_iter()
             .map(|call| query(call, &tree).unwrap())
@@ -1207,6 +1148,7 @@ mod tests {
                 "Top",
                 &HashMap::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
             let values: Vec<_> = ir.modules()[0]
@@ -1237,6 +1179,7 @@ mod tests {
                 "Top",
                 &HashMap::default(),
                 &packages,
+                &mut packages.design(),
             );
             assert!(result.is_err(), "accepted mixed defaults for {module}");
             assert!(
@@ -1262,7 +1205,8 @@ mod tests {
                 Path::new("omitted.sv"),
                 "Top",
                 &HashMap::default(),
-                &packages
+                &packages,
+                &mut packages.design()
             )
             .is_err()
         );
@@ -1289,6 +1233,7 @@ mod tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         let values: Vec<_> = ir.modules()[0]
@@ -1530,6 +1475,7 @@ mod tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         let values: Vec<_> = ir.modules()[0]
@@ -1557,7 +1503,8 @@ mod tests {
                         &[],
                         &[],
                         &ModuleInterfaces::default(),
-                        &packages
+                        &packages,
+                        &mut packages.design()
                     )
                     .is_err(),
                 "accepted {expression}"
@@ -1655,12 +1602,18 @@ mod tests {
         let a = AnalysisContext::unspecialized(&a);
         let overrides = HashMap::default();
         let b = a.child(&b, &overrides);
-        let _outer = install_for_tree(&a.state.timescales, design.clone(), &a).unwrap();
+        let a = AnalysisContext {
+            timescale: for_tree(design.clone(), &a).unwrap(),
+            ..a.clone()
+        };
         assert_eq!(query(call(&a), &a).unwrap(), -6);
         {
-            let _inner = install_for_tree(&b.state.timescales, design.clone(), &b).unwrap();
+            let b = AnalysisContext {
+                timescale: for_tree(design.clone(), &b).unwrap(),
+                ..b.clone()
+            };
             assert_eq!(query(call(&b), &b).unwrap(), -9);
-            assert!(install_for_tree(&b.state.timescales, design, &invalid).is_err());
+            assert!(for_tree(design, &invalid).is_err());
             assert_eq!(query(call(&b), &b).unwrap(), -9);
         }
         assert_eq!(query(call(&a), &a).unwrap(), -6);
@@ -1695,6 +1648,7 @@ mod tests {
                     &[],
                     &ModuleInterfaces::default(),
                     &packages,
+                    &mut packages.design(),
                 )
                 .unwrap();
             let after = COLLECTIONS.with(std::cell::Cell::get);

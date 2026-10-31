@@ -50,6 +50,16 @@ fn native_merged_optimization_preserves_large_and_wide_array_boundaries() {
 }
 
 sv_backends! {
+    fn constant_functions_evaluate_wide_address_tables(sim) {
+        @case "procedural::constant_functions_evaluate_wide_address_tables";
+    }
+    fn constant_functions_preserve_wide_arguments_and_signedness(sim) {
+        @case "procedural::constant_functions_preserve_wide_arguments_and_signedness";
+    }
+    fn constant_functions_preserve_wide_unknown_masks(sim) {
+        @case "procedural::constant_functions_preserve_wide_unknown_masks";
+    }
+
     fn static_function_partial_writes_preserve_last_write(sim) {
         @case "procedural::static_function_partial_writes_preserve_last_write";
     }
@@ -78,8 +88,20 @@ sv_backends! {
         @case "procedural::static_function_scratch_arrays_are_filled_before_reads";
     }
 
+    fn static_locals_with_run_time_initializers_run_before_procedures(sim) {
+        @case "procedural::static_locals_with_run_time_initializers_run_before_procedures";
+    }
+
     fn static_function_result_filled_by_constant_loops(sim) {
         @case "procedural::static_function_result_filled_by_constant_loops";
+    }
+
+    fn static_function_unread_partial_result_is_constant(sim) {
+        @case "procedural::static_function_unread_partial_result_is_constant";
+    }
+
+    fn static_function_unread_partial_result_keeps_unknown_bits(sim) {
+        @case "procedural::static_function_unread_partial_result_keeps_unknown_bits";
     }
 
     fn typedef_declaration_initializers(sim) {
@@ -268,5 +290,8 @@ sv_backends! {
     }
     fn initial_while_loops_define_the_state(sim) {
         @case "procedural::initial_while_loops_define_the_state";
+    }
+    fn dpi_exports_leave_subroutines_unchanged(sim) {
+        @case "procedural::dpi_exports_leave_subroutines_unchanged";
     }
 }

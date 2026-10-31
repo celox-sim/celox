@@ -8,13 +8,13 @@
 //! that uses packages starts its own analysis from the symbols of those
 //! packages, plus an alias for each name its imports make visible.
 
-use std::cell::RefCell;
-
 use super::*;
 
 /// The symbols of a scope, independent of the syntax they came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ScopeSymbols {
+    /// User package qualifiers precede implicit std declarations (26.7).
+    pub package_scopes: HashSet<String>,
     /// Declaration inspection omits executable bodies; it is not simulation validation.
     pub declarations_only: bool,
     /// Constant values of parameters and enum members, with their type
@@ -53,6 +53,8 @@ pub(super) struct ScopeSymbols {
     /// scope's own declarations.
     pub local_aliases: HashSet<String>,
     pub interface_types: HashMap<String, String>,
+    /// The modport of each interface port handle declared with one.
+    pub interface_modports: HashMap<String, String>,
     pub interface_arrays: HashMap<String, interface_binding::ArrayBinding>,
     pub interface_scopes: HashMap<String, interface_binding::ScopeBinding>,
     pub interface_declarations: HashSet<celox_sv_syntax::BodyItemId>,
@@ -65,81 +67,25 @@ pub(super) struct ScopeSymbols {
     /// (IEEE 1800-2023 26.3): a scope that uses them may be analyzed from
     /// another source, without their declarations.
     pub classes: Vec<classes::Class>,
-}
-
-#[derive(Default)]
-pub(super) struct State {
-    imported: RefCell<Arc<ScopeSymbols>>,
-    package: RefCell<Option<String>>,
-}
-
-/// Restores the previously analyzed package when dropped.
-pub(super) struct InPackage {
-    previous: Option<String>,
-    revision: u64,
-    state: std::rc::Rc<AnalysisState>,
-}
-
-impl Drop for InPackage {
-    fn drop(&mut self) {
-        let previous = self.previous.take();
-        *self.state.scope.package.borrow_mut() = previous;
-        self.state.revision.restore(self.revision);
-    }
-}
-
-/// Analyze the package `name` until the guard is dropped: inside it, `p::x`
-/// with `p` the package names its own item `x`.
-pub(super) fn enter_package(state: &std::rc::Rc<AnalysisState>, name: &str) -> InPackage {
-    let previous = state.scope.package.borrow_mut().replace(name.to_string());
-    InPackage {
-        previous,
-        revision: state.revision.change(),
-        state: state.clone(),
-    }
+    /// Class-declared types, frozen in each specialization's declaration
+    /// environment before another source imports them (8.23, 8.25).
+    pub class_member_types: HashMap<String, HashMap<String, Type>>,
+    pub inline_randomizations: Vec<classes::constraints::InlineRequest>,
 }
 
 /// The name a reference to item `name` of `package` has in the scope being
 /// analyzed: `package::name`, or `name` inside the package itself.
-pub(super) fn qualified_name(state: &AnalysisState, package: &str, name: &str) -> String {
-    {
-        if state.scope.package.borrow().as_deref() == Some(package) {
-            name.to_string()
-        } else {
-            format!("{package}::{name}")
-        }
-    }
-}
-
-/// Restores the previously imported symbols when dropped.
-pub(super) struct Installed {
-    previous: Arc<ScopeSymbols>,
-    revision: u64,
-    state: std::rc::Rc<AnalysisState>,
-}
-
-impl Drop for Installed {
-    fn drop(&mut self) {
-        let previous = std::mem::take(&mut self.previous);
-        *self.state.scope.imported.borrow_mut() = previous;
-        self.state.revision.restore(self.revision);
-    }
-}
-
-/// Make `symbols` the symbols the scope being analyzed imports, until the
-/// guard is dropped.
-pub(super) fn install(state: &std::rc::Rc<AnalysisState>, symbols: Arc<ScopeSymbols>) -> Installed {
-    let previous = state.scope.imported.replace(symbols);
-    Installed {
-        previous,
-        revision: state.revision.change(),
-        state: state.clone(),
+pub(super) fn qualified_name(tree: &AnalysisContext<'_>, package: &str, name: &str) -> String {
+    if tree.package.as_deref() == Some(package) {
+        name.to_string()
+    } else {
+        format!("{package}::{name}")
     }
 }
 
 /// The symbols the scope being analyzed imports.
-pub(super) fn imported(state: &AnalysisState) -> Arc<ScopeSymbols> {
-    state.scope.imported.borrow().clone()
+pub(super) fn imported(tree: &AnalysisContext<'_>) -> Arc<ScopeSymbols> {
+    tree.imported.clone()
 }
 
 /// The name a constant-environment marker key describes, with the marker
@@ -184,11 +130,23 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
 impl ScopeSymbols {
     /// Add the symbols of `other` that this scope does not already have.
     pub fn extend(&mut self, other: &ScopeSymbols) {
+        self.package_scopes
+            .extend(other.package_scopes.iter().cloned());
+        for request in &other.inline_randomizations {
+            if !self
+                .inline_randomizations
+                .iter()
+                .any(|known| known.key == request.key)
+            {
+                self.inline_randomizations.push(request.clone());
+            }
+        }
         for class in &other.classes {
             if !self.classes.iter().any(|known| known.name == class.name) {
                 self.classes.push(class.clone());
             }
         }
+        extend_missing(&mut self.class_member_types, &other.class_member_types);
         for (name, value) in &other.const_env {
             self.const_env.entry(name.clone()).or_insert(*value);
         }
@@ -435,11 +393,15 @@ impl ScopeSymbols {
             })
             .collect();
         ScopeSymbols {
+            package_scopes: self.package_scopes.clone(),
             // Classes have their qualified names already.
             classes: self.classes.clone(),
+            class_member_types: self.class_member_types.clone(),
+            inline_randomizations: self.inline_randomizations.clone(),
             declarations_only: self.declarations_only,
             interface_instances: self.interface_instances.clone(),
             interface_types: self.interface_types.clone(),
+            interface_modports: self.interface_modports.clone(),
             interface_arrays: self.interface_arrays.clone(),
             interface_scopes: self.interface_scopes.clone(),
             interface_declarations: self.interface_declarations.clone(),
@@ -553,6 +515,7 @@ impl ScopeSymbols {
                         rename.r#type(port.r#type.clone()),
                         port.is_net,
                     )
+                    .with_unresolved_net(port.unresolved_net)
                     .with_default(port.default.clone().map(|value| rename.const_expr(value)))
                 })
                 .collect(),
@@ -1043,6 +1006,7 @@ impl Renamer<'_> {
                 .map(|param| crate::procedural::SubroutineParamBase {
                     name: self.name(&param.name),
                     default: param.default.map(|default| self.expr(default)),
+                    leaves: param.leaves.iter().map(|leaf| self.name(leaf)).collect(),
                     ..param
                 })
                 .collect(),

@@ -1,0 +1,32 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source": "sv_handle_array_property_writes_xezim.sv",
+  "standard": "IEEE 1800-2023 8.4, 7.4, 11.5.1",
+  "expected_output": "whole 56\nconstant select 96\nvariable select 91",
+  "observations": [
+    {
+      "top": "Top",
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nwhole 56\nconstant select 96\nvariable select 91\nSimulation finished at time 0\n"
+    },
+    {
+      "top": "Wrapped",
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nwhole 34\nconstant select 34\nvariable select 34\nSimulation finished at time 0\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "top": "Top",
+      "exit_code": 0,
+      "output": "whole 56\nconstant select 96\nvariable select 91\n"
+    },
+    {
+      "top": "Wrapped",
+      "exit_code": 0,
+      "output": "whole 56\nconstant select 96\nvariable select 91\n"
+    }
+  ]
+}

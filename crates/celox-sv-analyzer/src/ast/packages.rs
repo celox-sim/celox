@@ -1,11 +1,13 @@
 //! Packages (IEEE 1800-2023 26) and compilation units (3.12.1).
 //!
-//! A package is analyzed once, after the packages it depends on, with the
+//! A package is analyzed after the packages it depends on, with the
 //! collectors that analyze a module: its declarations form a scope of their
 //! own. Its symbols are exported under their qualified names `p::x`, with the
 //! references among them bound to those names (see the `scope` module). A
 //! module or package that uses packages starts from their symbols, and from
-//! an alias for each name its imports bind (see the `imports` module).
+//! an alias for each name its imports bind (see the `imports` module). Importing
+//! scopes can request additional class specializations; their declarations and
+//! bodies are bound in the retained package scope (see `classes::foreign`).
 //!
 //! Each source file is a compilation unit of its own. Its declarations
 //! outside any module or package form the compilation-unit scope `$unit`,
@@ -21,8 +23,9 @@ use super::*;
 /// The analyzed packages of a design.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
-    /// Source-call identities shared with modules importing these package bodies.
-    pub(super) call_sites: std::rc::Rc<std::cell::Cell<usize>>,
+    /// What analyzing the packages made that modules analyzed with them
+    /// continue from.
+    design: Design,
     pub(crate) interface_plan: Arc<interfaces::NativeInterfacePlan>,
     /// All interface declaration names, including unsupported non-ANSI bodies.
     /// Namespace validation must not depend on sources selected for binding.
@@ -36,6 +39,21 @@ pub struct Packages {
     units: HashMap<PathBuf, Arc<Unit>>,
     /// What analyzing the packages warned about.
     warnings: Vec<super::warnings::AnalyzerWarning>,
+    /// The virtual interfaces of the design, which the modules that use the
+    /// packages are analyzed with.
+    pub(crate) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+}
+
+/// What the analyses of the modules of a design add to the packages they
+/// use: the specializations of package class templates the modules request,
+/// the semantic types of the design and its call sites. Each analysis takes
+/// it as `&mut`, starting from [`Packages::design`].
+#[derive(Clone, Debug, Default)]
+pub struct Design {
+    pub(super) foreign: classes::foreign::Registry,
+    /// Source-call identities shared with modules importing these package bodies.
+    pub(super) call_sites: usize,
+    pub(super) types: semantic_types::TyTable,
 }
 
 /// The compilation-unit scope of a source file.
@@ -91,7 +109,7 @@ pub(super) struct Package {
     pub symbols: ScopeSymbols,
     /// The package as a module, when it has variables: the module the
     /// package's one instance holds them in.
-    state_module: Option<crate::ir::Module>,
+    pub(super) state_module: Option<crate::ir::Module>,
 }
 
 impl Package {
@@ -119,6 +137,11 @@ impl Packages {
             .modules
             .get(name)
             .map_or(name, |plan| plan.original.as_str())
+    }
+
+    /// The virtual interfaces the packages were analyzed with.
+    pub fn virtual_interfaces(&self) -> Option<&Arc<virtual_interfaces::VirtualInterfaces>> {
+        self.virtual_interfaces.as_ref()
     }
 
     /// Global simulation precision, as a power of ten seconds (IEEE 1800-2023 3.14.3).
@@ -183,6 +206,34 @@ impl Packages {
             .filter_map(|package| package.state_module.as_ref())
     }
 
+    /// Package state after specialization requests made by importing scopes.
+    /// The state of the design that analyzing the packages left, which the
+    /// analyses of its modules continue.
+    pub fn design(&self) -> Design {
+        self.design.clone()
+    }
+
+    pub fn specialized_state_modules(&self, design: &Design) -> Vec<crate::ir::Module> {
+        let specialized = design.foreign.states();
+        // Different compilation units may each have a state module named
+        // `$unit`; preserve every one rather than indexing them by name.
+        let mut states = self
+            .state_modules()
+            .filter(|module| !specialized.contains_key(module.name()))
+            .cloned()
+            .collect::<Vec<_>>();
+        states.extend(specialized.values().cloned());
+        states.sort_by(|left, right| {
+            left.name().cmp(right.name()).then_with(|| {
+                left.signals()
+                    .first()
+                    .map(|signal| signal.name())
+                    .cmp(&right.signals().first().map(|signal| signal.name()))
+            })
+        });
+        states
+    }
+
     pub(super) fn get(&self, name: &str) -> Option<&Package> {
         self.packages.get(name).map(|package| &**package)
     }
@@ -240,20 +291,23 @@ impl Packages {
         roots: Option<&[&str]>,
         options: crate::AnalysisOptions,
     ) -> Result<Self, AnalyzerError> {
-        let mut timescales = timescales::Timescales::collect_with_options(trees, options)?;
+        let mut timescales = timescales::Timescales::collect_with_options(trees, options.clone())?;
         if let Some(roots) = roots {
             timescales.select_roots(roots);
         }
         let mixed_timescales = timescales.has_mixed_timescales();
         let timescales = Arc::new(timescales);
-        let state = std::rc::Rc::new(AnalysisState::default());
-        let mut packages = Self::analyze_packages(trees, timescales, &state)?;
+        let session = &mut Session {
+            virtual_interfaces: options.virtual_interfaces.clone(),
+            ..Session::default()
+        };
+        let mut packages = Self::analyze_packages(trees, timescales, session)?;
+        packages.virtual_interfaces = options.virtual_interfaces;
         if mixed_timescales {
             packages
                 .warnings
                 .push(super::warnings::AnalyzerWarning::MixedTimescale);
         }
-        packages.call_sites = state.next_call_site.clone();
         let units: Vec<_> = trees
             .iter()
             .map(|(tree, path)| (tree.compilation_scope(), *path))
@@ -265,11 +319,12 @@ impl Packages {
             let visibility = unit_visibility(tree)?;
             // The classes of each compilation unit are its own, though those
             // of two sources may share a name.
-            state.classes.borrow_mut().clear();
-            state.class_specializations.borrow_mut().clear();
-            state.class_declaration_scopes.borrow_mut().clear();
-            state.class_declarations_repeated.borrow_mut().clear();
-            let scope = analyze_package(UNIT, tree, &packages, &state);
+            session.classes.clear();
+            session.class_specializations.clear();
+            session.class_specialization_names.clear();
+            session.class_declaration_scopes.clear();
+            session.class_declarations_repeated.clear();
+            let scope = analyze_package(UNIT, tree, &packages, session);
             if scope
                 .as_ref()
                 .is_ok_and(|scope| scope.state_module.is_some())
@@ -295,13 +350,20 @@ impl Packages {
                 .units
                 .insert(path.to_path_buf(), Arc::new(Unit { visibility, scope }));
         }
+        // Modules analyzed with the packages start from what analyzing
+        // them made.
+        packages.design = Design {
+            call_sites: session.next_call_site,
+            foreign: std::mem::take(&mut session.foreign),
+            types: std::mem::take(&mut session.types),
+        };
         Ok(packages)
     }
 
     fn analyze_packages(
         trees: &[(&SyntaxTree, &Path)],
         timescales: Arc<timescales::Timescales>,
-        state: &std::rc::Rc<AnalysisState>,
+        session: &mut Session,
     ) -> Result<Self, AnalyzerError> {
         let mut declarations: Vec<(String, SyntaxTree)> = Vec::new();
         for (tree, _) in trees {
@@ -369,7 +431,7 @@ impl Packages {
         };
         for index in order {
             let (name, tree) = &declarations[index];
-            let package = analyze_package(name, tree, &packages, state)?;
+            let package = analyze_package(name, tree, &packages, session)?;
             packages.packages.insert(
                 name.clone(),
                 Arc::new(Package {
@@ -462,20 +524,28 @@ fn analyze_package(
     name: &str,
     tree: &SyntaxTree,
     packages: &Packages,
-    state: &std::rc::Rc<AnalysisState>,
+    session: &mut Session,
 ) -> Result<Package, AnalyzerError> {
     let context = AnalysisContext {
         syntax_tree: tree,
-        state: state.clone(),
         parameter_overrides: Cow::Owned(HashMap::default()),
+        imported: Arc::default(),
+        package: None,
+        functions: const_functions::ConstantFunctions::default(),
+        root_subroutines: false,
+        active_interfaces: Arc::default(),
+        timescale: Arc::default(),
+        interface_instance: None,
     };
     let tree = &context;
-    let _timescales =
-        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
+    let timed = AnalysisContext {
+        timescale: timescales::for_tree(packages.timescales.clone(), tree)?,
+        ..tree.clone()
+    };
+    let tree = &timed;
     let first = {
         // Inside the package, `p::x` names its own item `x`.
-        let _package = scope::enter_package(&tree.state, name);
-        analyze_package_scope(name, tree, packages, None)?
+        analyze_package_scope(name, &tree.in_package(name), session, packages, None)?
     };
     if !imports::ScopeImports::from_scope(tree)?
         .qualified
@@ -487,19 +557,39 @@ fn analyze_package(
     // A self-qualified reference `p::x` is not hidden by a local `x` of a
     // function (IEEE 1800-2023 26.3). Analyze the package again with its
     // items from the first analysis under their qualified names.
-    analyze_package_scope(name, tree, packages, Some(&first.symbols))
+    analyze_package_scope(name, tree, session, packages, Some(&first.symbols))
 }
 
 fn analyze_package_scope(
     name: &str,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     packages: &Packages,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
     let imports::ResolvedImports {
-        symbols: mut imported,
+        symbols: imported,
         exports,
     } = imports::resolve_imports(tree, packages, None)?;
+    if own_items.is_none() && name != UNIT {
+        session.foreign.register(
+            name,
+            tree.syntax_tree,
+            &imported,
+            packages.timescales.clone(),
+        );
+    }
+    analyze_package_with_symbols(name, tree, session, imported, exports, own_items)
+}
+
+pub(super) fn analyze_package_with_symbols(
+    name: &str,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    mut imported: ScopeSymbols,
+    exports: HashMap<String, String>,
+    own_items: Option<&ScopeSymbols>,
+) -> Result<Package, AnalyzerError> {
     if let Some(own_items) = own_items {
         imported.extend(own_items);
     }
@@ -511,6 +601,7 @@ fn analyze_package_scope(
     let mut variables = package_variables(name, tree)?;
     let mut module = Module::from_scope_with_parameter_overrides(
         tree,
+        session,
         "",
         &HashMap::default(),
         &InterfaceLookup {
@@ -537,6 +628,10 @@ fn analyze_package_scope(
                 .map(|property| property.variable.clone()),
         );
     }
+    // Each scope declares its own signals for virtual interfaces.
+    symbols
+        .signals
+        .retain(|signal| virtual_interfaces::VirtualInterfaceSignal::of(&signal.name).is_none());
     // The package's variables, and those it imports, are shared objects;
     // the other signals are constants, copied with their initializers.
     let (state, constants): (Vec<_>, Vec<_>) = std::mem::take(&mut symbols.signals)

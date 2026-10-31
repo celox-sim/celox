@@ -51,6 +51,7 @@ pub struct ModuleParser<'a> {
     comb_blocks: Vec<LogicPath<VarId>>,
     comb_process_ranges: Vec<crate::artifact::CombProcess>,
     allow_inferred_latches: bool,
+    four_state: bool,
     comb_observers: Vec<CombObserver<VarId>>,
     comb_runtime_event_sites: Vec<RuntimeEventSite>,
     comb_boundaries: HashMap<VarId, BTreeSet<usize>>,
@@ -908,6 +909,7 @@ impl<'a> ModuleParser<'a> {
             comb_blocks: Vec::new(),
             comb_process_ranges: Vec::new(),
             allow_inferred_latches: config.allow_inferred_latches,
+            four_state: config.four_state,
             comb_observers: Vec::new(),
             comb_runtime_event_sites: Vec::new(),
             comb_boundaries: HashMap::default(),
@@ -934,7 +936,7 @@ impl<'a> ModuleParser<'a> {
     ) -> Result<(), ParserError> {
         let arena_start = self.arena.len();
         let site_offset = self.comb_runtime_event_sites.len() as u32;
-        let (paths, store, boundaries, mut observers, sites) = parse_comb_with_loop_recovery(
+        let (mut paths, store, boundaries, mut observers, sites) = parse_comb_with_loop_recovery(
             self.module,
             decl,
             &mut self.arena,
@@ -959,6 +961,16 @@ impl<'a> ModuleParser<'a> {
             ))
         });
         if self.allow_inferred_latches && !continuous {
+            let mut proven_combinational =
+                crate::logic_tree::proves_combinational(&paths, &self.arena);
+            let proven_binary_combinational = !proven_combinational
+                && crate::logic_tree::proves_binary_combinational(&paths, &self.arena);
+            // A two-state selector has no value outside complete binary
+            // labels, so the unmatched branch never runs.
+            if proven_binary_combinational && !self.four_state {
+                proven_combinational =
+                    crate::logic_tree::complete_binary_cases(&mut paths, &mut self.arena);
+            }
             self.comb_process_ranges.push(crate::artifact::CombProcess {
                 paths: self.comb_blocks.len()..self.comb_blocks.len() + paths.len(),
                 reads: crate::logic_tree::sensitivity::implicit_reads(
@@ -986,7 +998,8 @@ impl<'a> ModuleParser<'a> {
                         range
                     })
                     .unwrap_or(self.module.token),
-                proven_combinational: crate::logic_tree::proves_combinational(&paths, &self.arena),
+                proven_combinational,
+                proven_binary_combinational,
             });
         }
         self.comb_blocks.extend(paths);
@@ -2406,6 +2419,13 @@ pub(crate) fn visit_initial_statement(
         &mut veryl_analyzer::Context,
     ) -> Result<(), ParserError>,
 ) -> Result<(), ParserError> {
+    // Native testbenches retain runtime loops in initial declarations. This
+    // visitor only extracts memory initialization: do not execute their loop
+    // ranges or evaluate their conditions when there is nothing to extract.
+    // Keep unsupported statements reachable so existing diagnostics survive.
+    if !has_initial_memory_effect(stmt) {
+        return Ok(());
+    }
     match stmt {
         Statement::SystemFunctionCall(call) => {
             if let SystemFunctionKind::Readmemh(filename, output) = &call.kind {
@@ -2457,6 +2477,27 @@ pub(crate) fn visit_initial_statement(
         )),
         _ => Ok(()),
     }
+}
+
+fn has_initial_memory_effect(stmt: &Statement) -> bool {
+    let mut pending = vec![stmt];
+    while let Some(stmt) = pending.pop() {
+        match stmt {
+            Statement::SystemFunctionCall(call) => {
+                if matches!(call.kind, SystemFunctionKind::Readmemh(..)) {
+                    return true;
+                }
+            }
+            Statement::Unsupported(_) => return true,
+            Statement::If(stmt) => {
+                pending.extend(&stmt.true_side);
+                pending.extend(&stmt.false_side);
+            }
+            Statement::For(stmt) => pending.extend(&stmt.body),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The writes performed by `$readmemh(filename, destination)`.
@@ -2912,6 +2953,86 @@ mod tests {
                 _ => None,
             })
             .expect("Top module not found")
+    }
+
+    #[test]
+    fn memory_extraction_does_not_execute_testbench_only_loops() {
+        let module = parse_top_module(
+            "#[test(Top)] module Top { var x: u32; initial {
+                for i in 0..32 { if i <: 16 { x = i; } }
+                $assert(x == 15);
+            } }",
+        );
+        let mut context = Context::default();
+        context.variables = module.variables.clone();
+        let before: Vec<_> = context
+            .variables
+            .iter()
+            .map(|(id, var)| (*id, var.get_value(&[]).cloned()))
+            .collect();
+        for declaration in &module.declarations {
+            if let Declaration::Initial(initial) = declaration {
+                for stmt in &initial.statements {
+                    super::visit_initial_statement(stmt, &mut context, &mut |_, _, _| {
+                        panic!("no memory initialization in this testbench")
+                    })
+                    .unwrap();
+                }
+            }
+        }
+        // Walking a runtime loop used to overwrite its induction variable
+        // during memory extraction, even though it contained no readmemh.
+        for (id, value) in before {
+            assert_eq!(context.variables[&id].get_value(&[]), value.as_ref());
+        }
+    }
+
+    #[test]
+    fn value_type_check_handles_deep_statement_chains() {
+        // Exercise only the checker: parsing and dropping deeply recursive IR
+        // have their own traversal constraints.
+        std::thread::Builder::new()
+            .stack_size(2 * 1024 * 1024)
+            .spawn(|| {
+                use veryl_analyzer::ir::{Expression, IfStatement, Statement};
+                use veryl_analyzer::value::Value;
+                let mut module = parse_top_module(
+                    "module Top(a: input logic, q: output logic) { assign q = a; }",
+                );
+                let Declaration::Comb(comb) = &mut module.declarations[0] else {
+                    panic!("expected combinational declaration");
+                };
+                let mut body = std::mem::take(&mut comb.statements);
+                for depth in 0..4096 {
+                    let (true_side, false_side) = if depth % 2 == 0 {
+                        (body, Vec::new())
+                    } else {
+                        (Vec::new(), body)
+                    };
+                    body = vec![Statement::If(IfStatement {
+                        cond: Expression::create_value(Value::new(1, 1, false), Default::default()),
+                        true_side,
+                        false_side,
+                        token: Default::default(),
+                    })];
+                }
+                comb.statements = body;
+                let result = crate::value_type_check::check_module(&module);
+                let Declaration::Comb(comb) = &mut module.declarations[0] else {
+                    unreachable!()
+                };
+                let mut pending = std::mem::take(&mut comb.statements);
+                while let Some(statement) = pending.pop() {
+                    if let Statement::If(branch) = statement {
+                        pending.extend(branch.true_side);
+                        pending.extend(branch.false_side);
+                    }
+                }
+                result.unwrap();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

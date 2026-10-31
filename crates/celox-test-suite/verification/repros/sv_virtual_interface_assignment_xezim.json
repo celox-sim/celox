@@ -1,0 +1,22 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source": "sv_virtual_interface_assignment_xezim.sv",
+  "standard": "IEEE 1800-2023 25.9",
+  "command": "xezim --compile -s Top sv_virtual_interface_assignment_xezim.sv",
+  "expected_output": "compile-time rejection of both assignments",
+  "observations": [
+    {
+      "exit_code": 0,
+      "output": "Parsed 1 file(s): 3 descriptions, 0 errors, 0 warnings\nElaboration successful\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "exit_code": 1,
+      "output": "%Error: sv_virtual_interface_assignment_xezim.sv:18:13: Operator ASSIGN expected 'bus_if' interface on Assign RHS but 'o' is a different interface ('other_if').\n                                                      : ... note: In instance 'Top'\n   18 |         v = o;\n      |             ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: sv_virtual_interface_assignment_xezim.sv:19:13: Operator ASSIGN expected no interface modport on Assign RHS but got 'mon' modport.\n                                                      : ... note: In instance 'Top'\n   19 |         v = m;\n      |             ^\n%Error: Exiting due to 2 error(s)\n"
+    }
+  ],
+  "note": "25.9 allows assigning a virtual interface only from one of the same interface type, and one with no modport to one with a modport, not the reverse. xezim 0.11.3 elaborates both illegal assignments; Verilator 5.052 and Celox reject them."
+}

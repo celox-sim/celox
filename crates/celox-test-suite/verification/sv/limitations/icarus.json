@@ -9,7 +9,7 @@
     "unexpected_accept": 1,
     "mismatch": 17,
     "emission_error": 0,
-    "compile_error": 138,
+    "compile_error": 139,
     "runtime_error": 8,
     "unsupported": 0,
     "ignored": 0
@@ -1501,6 +1501,14 @@
       "detail": "Icarus build exit status: 8; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "class::package_classes_by_their_qualified_names",
+      "phase": "compile",
+      "status": "compile_error"
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:45: syntax error\n<case>/source_0.sv:45: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::named_method_arguments",
       "phase": "compile",
       "status": "compile_error"
     }

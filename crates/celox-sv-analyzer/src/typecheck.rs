@@ -10,6 +10,7 @@ use fxhash::FxHashMap as HashMap;
 
 use num_bigint::BigUint;
 
+use crate::ast::const_functions::Budget;
 use crate::ir::{BinaryOp, Callee, ConstExpr, PackedRange, SystemFunction, UnaryOp};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +21,7 @@ pub struct IntegralLiteral {
     pub mask: BigUint,
 }
 
-/// The type of a fixed-size unpacked array of an integral element type.
+/// The type of a fixed-size unpacked array.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UnpackedArrayType {
     /// The element count of each unpacked dimension, slowest varying first.
@@ -29,6 +30,12 @@ pub struct UnpackedArrayType {
     pub element_width: usize,
     pub signed: bool,
     pub four_state: bool,
+    /// The element type when it is not an integral type that its width,
+    /// state count and signedness describe: an enumeration, an unpacked
+    /// structure, a class, a string, a real or a virtual interface type, as
+    /// it spells in a diagnostic. Such a type is equivalent only to itself
+    /// (IEEE 1800-2023 6.22.2).
+    pub element: Option<String>,
 }
 
 impl UnpackedArrayType {
@@ -44,6 +51,14 @@ impl UnpackedArrayType {
 
 impl std::fmt::Display for UnpackedArrayType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(element) = &self.element {
+            f.write_str(element)?;
+            f.write_str(" ")?;
+            for count in &self.dims {
+                write!(f, "[{count}]")?;
+            }
+            return Ok(());
+        }
         f.write_str(if self.four_state { "logic" } else { "bit" })?;
         if self.signed {
             f.write_str(" signed")?;
@@ -74,13 +89,21 @@ pub(crate) fn resolve_packed_width_in_env(
     ranges: &[PackedRange],
     constants: &dyn ConstantEnvironment,
 ) -> Option<usize> {
+    resolve_packed_width_in_env_budgeted(ranges, constants, &mut Budget::default())
+}
+
+pub(crate) fn resolve_packed_width_in_env_budgeted(
+    ranges: &[PackedRange],
+    constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
+) -> Option<usize> {
     if ranges.is_empty() {
         return Some(1);
     }
 
     ranges.iter().try_fold(1usize, |acc, range| {
-        let left = eval_const_expr_in_env(range.left(), constants)?;
-        let right = eval_const_expr_in_env(range.right(), constants)?;
+        let left = eval_const_expr_in_env_budgeted(range.left(), constants, budget)?;
+        let right = eval_const_expr_in_env_budgeted(range.right(), constants, budget)?;
         let width = usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?;
         acc.checked_mul(width)
     })
@@ -89,10 +112,14 @@ pub(crate) fn resolve_packed_width_in_env(
 /// Value lookup shared by immutable module environments and function frames.
 /// Dynamic dispatch keeps recursive calls from nesting generic frame types.
 pub(crate) trait ConstantEnvironment {
-    fn function_state(&self) -> Option<&crate::ast::const_functions::State> {
+    /// The constant functions calls in the environment's expressions call.
+    fn functions(&self) -> Option<&crate::ast::const_functions::ConstantFunctions> {
         None
     }
     fn get(&self, name: &str) -> Option<&i128>;
+    fn literal(&self, _name: &str) -> Option<&IntegralLiteral> {
+        None
+    }
 }
 
 impl ConstantEnvironment for HashMap<String, i128> {
@@ -150,6 +177,14 @@ pub(crate) fn eval_const_expr_in_env(
     expr: &ConstExpr,
     constants: &dyn ConstantEnvironment,
 ) -> Option<i128> {
+    eval_const_expr_in_env_budgeted(expr, constants, &mut Budget::default())
+}
+
+pub(crate) fn eval_const_expr_in_env_budgeted(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
+) -> Option<i128> {
     // This evaluator serves integral-only bounds and selectors as well as
     // numeric parameters. A real result is converted only by a caller with
     // an explicit integer destination; truth/comparison results remain valid.
@@ -157,7 +192,7 @@ pub(crate) fn eval_const_expr_in_env(
         return None;
     }
     if real::needs_real_evaluation(expr) {
-        return real::evaluate(expr, constants).map(real::round_to_i128);
+        return real::evaluate_budgeted(expr, constants, budget).map(real::round_to_i128);
     }
     match expr {
         ConstExpr::Literal(value) => literal_as_i128(value),
@@ -171,14 +206,14 @@ pub(crate) fn eval_const_expr_in_env(
             if let Some(literal) = integral_literal_from_const_expr(expr) {
                 return integral_literal_as_i128(&literal, *signed);
             }
-            let value = eval_const_expr_in_env(operand, constants)?;
+            let value = eval_const_expr_in_env_budgeted(operand, constants, budget)?;
             let selected = ConstExpr::SelectRange {
                 expr: Box::new(ConstExpr::Literal(format!("128'sh{:x}", value as u128))),
                 msb: Box::new(ConstExpr::Literal(
-                    eval_const_expr_in_env(msb, constants)?.to_string(),
+                    eval_const_expr_in_env_budgeted(msb, constants, budget)?.to_string(),
                 )),
                 lsb: Box::new(ConstExpr::Literal(
-                    eval_const_expr_in_env(lsb, constants)?.to_string(),
+                    eval_const_expr_in_env_budgeted(lsb, constants, budget)?.to_string(),
                 )),
                 signed: *signed,
             };
@@ -193,14 +228,14 @@ pub(crate) fn eval_const_expr_in_env(
                 return integral_literal_as_i128(&literal, *signed);
             }
             let value = if real::has_real_type(operand) {
-                real::round_to_i128(real::evaluate(operand, constants)?)
+                real::round_to_i128(real::evaluate_budgeted(operand, constants, budget)?)
             } else {
-                eval_const_expr_in_env(operand, constants)?
+                eval_const_expr_in_env_budgeted(operand, constants, budget)?
             };
             literal_as_i128(&format_typed_constant_literal(value, *width, *signed))
         }
         ConstExpr::Select { expr, bit } => {
-            let bit = eval_const_expr_in_env(bit, constants)?;
+            let bit = eval_const_expr_in_env_budgeted(bit, constants, budget)?;
             let bit = usize::try_from(bit).ok()?;
             if let ConstExpr::Literal(value) = &**expr {
                 let value = parse_integral_literal(value)?;
@@ -209,31 +244,63 @@ pub(crate) fn eval_const_expr_in_env(
                 }
                 return Some(value.value.bit(bit as u64) as i128);
             }
-            let value = eval_const_expr_in_env(expr, constants)?;
+            let value = eval_const_expr_in_env_budgeted(expr, constants, budget)?;
             let bit = u32::try_from(bit).ok()?;
             value.checked_shr(bit).map(|value| value & 1)
         }
         ConstExpr::Function { callee, args, .. } => match callee {
             Callee::Subroutine(name) => {
-                crate::ast::const_functions::eval_call(name, args, constants)
+                crate::ast::const_functions::eval_call_budgeted(name, args, constants, budget)
             }
-            Callee::System(function) => eval_system_function(*function, args, constants),
-            Callee::Checked { width, signed } => {
+            Callee::System(function) => eval_system_function(*function, args, constants, budget),
+            Callee::Checked { width, signed, .. } => {
                 let [guard, payload] = args.as_slice() else {
                     return None;
                 };
                 // IEEE 1800-2023 7.3.2: a member can only be read with its active tag.
                 // Keep the guard even when evaluating a constant function (13.4.3).
-                if eval_const_expr_in_env(guard, constants)? == 0 {
+                if eval_const_expr_in_env_budgeted(guard, constants, budget)? == 0 {
                     return None;
                 }
-                eval_const_expr_in_env(
+                eval_const_expr_in_env_budgeted(
                     &ConstExpr::Resize {
                         expr: Box::new(payload.clone()),
                         width: *width,
                         signed: *signed,
                     },
                     constants,
+                    budget,
+                )
+            }
+            Callee::Stream(stream) => {
+                let values = args
+                    .iter()
+                    .map(|arg| eval_const_expr_in_env_budgeted(arg, constants, budget))
+                    .collect::<Option<Vec<_>>>()?;
+                stream.evaluate(&values)
+            }
+            Callee::Lookup { width, signed } => {
+                let (selector, rest) = args.split_first()?;
+                let (default, pairs) = rest.split_last()?;
+                let selector = eval_const_expr_in_env_budgeted(selector, constants, budget)?;
+                let (pairs, []) = pairs.as_chunks::<2>() else {
+                    return None;
+                };
+                let mut value = default;
+                for [key, candidate] in pairs {
+                    if eval_const_expr_in_env_budgeted(key, constants, budget)? == selector {
+                        value = candidate;
+                        break;
+                    }
+                }
+                eval_const_expr_in_env_budgeted(
+                    &ConstExpr::Resize {
+                        expr: Box::new(value.clone()),
+                        width: *width,
+                        signed: *signed,
+                    },
+                    constants,
+                    budget,
                 )
             }
             Callee::String(_) | Callee::Object(_) => None,
@@ -244,7 +311,7 @@ pub(crate) fn eval_const_expr_in_env(
             {
                 return Some(value);
             }
-            let value = eval_const_expr_in_env(operand, constants)?;
+            let value = eval_const_expr_in_env_budgeted(operand, constants, budget)?;
             match op {
                 UnaryOp::Plus => Some(value),
                 UnaryOp::Minus => value.checked_neg(),
@@ -265,14 +332,14 @@ pub(crate) fn eval_const_expr_in_env(
             // Numeric declaration bounds need the same short-circuiting as
             // four-state generate conditions (11.3.5, 6.20.7).
             if matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr)
-                && let Some(Some(truth)) = eval_const_truth(left, constants)
+                && let Some(Some(truth)) = eval_const_truth(left, constants, budget)
             {
                 if (*op == BinaryOp::LogicAnd && !truth) || (*op == BinaryOp::LogicOr && truth) {
                     return Some(i128::from(truth));
                 }
                 // Reuse the known left truth; reevaluating it recursively
                 // would double the work at every level of a logical chain.
-                return eval_const_truth(right, constants)?.map(i128::from);
+                return eval_const_truth(right, constants, budget)?.map(i128::from);
             }
             if let Some(result) = eval_literal_binary(left, *op, right) {
                 return Some(result);
@@ -284,8 +351,8 @@ pub(crate) fn eval_const_expr_in_env(
             {
                 return Some(result as i128);
             }
-            let left = eval_const_expr_in_env(left, constants)?;
-            let right = eval_const_expr_in_env(right, constants)?;
+            let left = eval_const_expr_in_env_budgeted(left, constants, budget)?;
+            let right = eval_const_expr_in_env_budgeted(right, constants, budget)?;
             match op {
                 BinaryOp::Add => left.checked_add(right),
                 BinaryOp::Sub => left.checked_sub(right),
@@ -324,10 +391,10 @@ pub(crate) fn eval_const_expr_in_env(
             condition,
             then_expr,
             else_expr,
-        } => match eval_const_truth(condition, constants)? {
-            Some(true) => eval_const_expr_in_env(then_expr, constants),
-            Some(false) => eval_const_expr_in_env(else_expr, constants),
-            None => merge_unknown_const_mux_arms(then_expr, else_expr, constants),
+        } => match eval_const_truth(condition, constants, budget)? {
+            Some(true) => eval_const_expr_in_env_budgeted(then_expr, constants, budget),
+            Some(false) => eval_const_expr_in_env_budgeted(else_expr, constants, budget),
+            None => merge_unknown_const_mux_arms(then_expr, else_expr, constants, budget),
         },
     }
 }
@@ -342,12 +409,49 @@ pub fn eval_const_expr_with_types(
     constants: &HashMap<String, i128>,
     types: &HashMap<String, (usize, bool)>,
 ) -> Option<i128> {
+    // Runtime select bounds often contain large inlined expressions. Reject a
+    // required runtime value before attempting literal folding at every node.
+    if requires_unbound_value(expr, constants) {
+        return None;
+    }
     // Substitution only replaces the identifiers of typed constants.
     if !has_typed_constant(expr, constants, types) {
         return eval_const_expr(expr, constants);
     }
     let expr = substitute_typed_constants(expr.clone(), constants, types);
     eval_const_expr(&expr, constants)
+}
+
+fn requires_unbound_value(expr: &ConstExpr, constants: &HashMap<String, i128>) -> bool {
+    match expr {
+        ConstExpr::Literal(_) | ConstExpr::Function { .. } => return false,
+        ConstExpr::Ident(name) => return !constants.contains_key(name),
+        _ => {}
+    }
+    let mut pending = vec![expr];
+    while let Some(expr) = pending.pop() {
+        match expr {
+            ConstExpr::Ident(name) if !constants.contains_key(name) => return true,
+            ConstExpr::Unary { expr, .. } | ConstExpr::Resize { expr, .. } => pending.push(expr),
+            ConstExpr::Select { expr, bit } => pending.extend([bit.as_ref(), expr.as_ref()]),
+            ConstExpr::SelectRange { expr, msb, lsb, .. } => {
+                pending.extend([lsb.as_ref(), msb.as_ref(), expr.as_ref()]);
+            }
+            ConstExpr::Binary { left, op, right } => {
+                // A right logical operand can be skipped. The left operand is
+                // required; preserve the evaluator's short-circuiting policy.
+                if !matches!(op, BinaryOp::LogicAnd | BinaryOp::LogicOr) {
+                    pending.push(right);
+                }
+                pending.push(left);
+            }
+            ConstExpr::Mux { condition, .. } => pending.push(condition),
+            // Argument evaluation belongs to the callee (including checked
+            // accesses). Do not infer whether a call needs its actuals here.
+            ConstExpr::Function { .. } | ConstExpr::Literal(_) | ConstExpr::Ident(_) => {}
+        }
+    }
+    false
 }
 
 /// Whether `expr` names a constant that has a type, which
@@ -415,8 +519,34 @@ pub(crate) fn eval_const_expr_with_types_in_env(
     constants: &dyn ConstantEnvironment,
     types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<i128> {
+    eval_const_expr_with_types_in_env_budgeted(expr, constants, types, &mut Budget::default())
+}
+
+pub(crate) fn eval_const_expr_with_types_in_env_budgeted(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+    budget: &mut Budget,
+) -> Option<i128> {
     let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
-    eval_const_expr_in_env(&expr, constants)
+    eval_const_expr_in_env_budgeted(&expr, constants, budget)
+}
+
+/// An assignment supplies a size context before arithmetic is evaluated;
+/// the receiving declaration supplies its signedness only after evaluation.
+pub(crate) fn eval_const_assignment_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+    width: usize,
+) -> Option<IntegralLiteral> {
+    let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
+    let literal = integral_literal_from_const_expr(&expr)?;
+    if literal.width >= width {
+        Some(literal)
+    } else {
+        eval_integral_in_context(&expr, width, literal.signed)
+    }
 }
 
 /// Evaluate and resize a constant expression in a case selector's comparison
@@ -448,7 +578,23 @@ pub(crate) fn eval_generate_case_operand(
     width: usize,
     signed: bool,
 ) -> Option<IntegralLiteral> {
-    let expr = substitute_typed_constants(expr.clone(), constants, types);
+    eval_case_operand_in_env(
+        expr,
+        constants,
+        &|name| types.get(name).copied(),
+        width,
+        signed,
+    )
+}
+
+pub(crate) fn eval_case_operand_in_env(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    types: &impl Fn(&str) -> Option<(usize, bool)>,
+    width: usize,
+    signed: bool,
+) -> Option<IntegralLiteral> {
+    let expr = substitute_typed_constants_with_lookup(expr.clone(), constants, types);
     eval_integral_in_context(&expr, width, signed)
 }
 
@@ -479,7 +625,6 @@ fn eval_integral_in_context(
                     | BinaryOp::Mul
                     | BinaryOp::Div
                     | BinaryOp::Mod
-                    | BinaryOp::Pow
                     | BinaryOp::BitAnd
                     | BinaryOp::BitOr
                     | BinaryOp::BitXor
@@ -492,6 +637,16 @@ fn eval_integral_in_context(
                 signed,
             )?
         }
+        ConstExpr::Binary {
+            left,
+            op: BinaryOp::Pow,
+            right,
+        } => eval_four_state_binary_literal(
+            &eval_integral_in_context(left, width, signed)?,
+            BinaryOp::Pow,
+            &self_determined_integral_literal(right)?,
+            signed,
+        )?,
         ConstExpr::Binary { left, op, right }
             if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::Sar) =>
         {
@@ -552,12 +707,18 @@ fn substitute_typed_constants_with_lookup(
     types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> ConstExpr {
     match expr {
-        ConstExpr::Ident(name) => match (constants.get(&name), types(&name)) {
-            (Some(value), Some((width, signed))) => {
-                ConstExpr::Literal(format_typed_constant_literal(*value, width, signed))
+        ConstExpr::Ident(name) => {
+            if let Some(literal) = constants.literal(&name) {
+                ConstExpr::Literal(format_integral_literal_binary(literal))
+            } else {
+                match (constants.get(&name), types(&name)) {
+                    (Some(value), Some((width, signed))) => {
+                        ConstExpr::Literal(format_typed_constant_literal(*value, width, signed))
+                    }
+                    _ => ConstExpr::Ident(name),
+                }
             }
-            _ => ConstExpr::Ident(name),
-        },
+        }
         ConstExpr::Literal(value) => ConstExpr::Literal(value),
         ConstExpr::SelectRange {
             expr,
@@ -688,6 +849,15 @@ fn context_binary_operands(
     right: &ConstExpr,
 ) -> Option<(IntegralLiteral, IntegralLiteral, bool)> {
     let (left_type, right_type) = integral_binary_operands(left, right)?;
+    context_binary_values(left, right, left_type, right_type)
+}
+
+fn context_binary_values(
+    left: &ConstExpr,
+    right: &ConstExpr,
+    left_type: IntegralLiteral,
+    right_type: IntegralLiteral,
+) -> Option<(IntegralLiteral, IntegralLiteral, bool)> {
     let width = left_type.width.max(right_type.width);
     let signed = left_type.signed && right_type.signed;
     // These values were already evaluated in their own expression contexts.
@@ -757,7 +927,7 @@ fn eval_literal_binary(
         );
         return eval_four_state_binary(&left, op, &right, signed);
     }
-    let (left, right, signed) = context_binary_operands(left_expr, right_expr)?;
+    let (left, right, signed) = context_binary_values(left_expr, right_expr, left, right)?;
     eval_four_state_binary(&left, op, &right, signed)
 }
 
@@ -970,24 +1140,29 @@ pub(crate) fn integral_literal_truth(literal: &IntegralLiteral) -> Option<bool> 
     }
 }
 
-fn eval_const_truth(expr: &ConstExpr, constants: &dyn ConstantEnvironment) -> Option<Option<bool>> {
+fn eval_const_truth(
+    expr: &ConstExpr,
+    constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
+) -> Option<Option<bool>> {
     if real::has_real_type(expr) {
-        return real::evaluate(expr, constants).map(|value| Some(value != 0.0));
+        return real::evaluate_budgeted(expr, constants, budget).map(|value| Some(value != 0.0));
     }
     if let Some(literal) = integral_literal_from_const_expr(expr) {
         return Some(integral_literal_truth(&literal));
     }
-    eval_const_expr_in_env(expr, constants).map(|value| Some(value != 0))
+    eval_const_expr_in_env_budgeted(expr, constants, budget).map(|value| Some(value != 0))
 }
 
 fn merge_unknown_const_mux_arms(
     then_expr: &ConstExpr,
     else_expr: &ConstExpr,
     constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
 ) -> Option<i128> {
     if let (Some(then_value), Some(else_value)) = (
-        eval_const_expr_in_env(then_expr, constants),
-        eval_const_expr_in_env(else_expr, constants),
+        eval_const_expr_in_env_budgeted(then_expr, constants, budget),
+        eval_const_expr_in_env_budgeted(else_expr, constants, budget),
     ) && then_value == else_value
     {
         return Some(then_value);
@@ -1063,7 +1238,14 @@ fn self_determined_integral_literal(expr: &ConstExpr) -> Option<IntegralLiteral>
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static LITERAL_EVALUATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral> {
+    #[cfg(test)]
+    LITERAL_EVALUATIONS.with(|count| count.set(count.get() + 1));
     match expr {
         ConstExpr::Literal(literal) => parse_integral_literal(literal),
         ConstExpr::Resize {
@@ -1099,7 +1281,8 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                 return Some(literal);
             }
             let (width, signed) = function.result_type()?;
-            let value = eval_system_function(*function, args, &HashMap::default())?;
+            let value =
+                eval_system_function(*function, args, &HashMap::default(), &mut Budget::default())?;
             let signing = if signed { "s" } else { "" };
             parse_integral_literal(&format!("{width}'{signing}d{value}"))
         }
@@ -1262,8 +1445,11 @@ fn integral_literal_from_const_expr(expr: &ConstExpr) -> Option<IntegralLiteral>
                     literal.signed = signed;
                     return Some(literal);
                 }
-                let extension = signed_extension(&literal, signed);
-                Some(resize_integral_literal(literal, width, signed, extension))
+                if literal.width == width && literal.signed == signed {
+                    Some(literal)
+                } else {
+                    eval_integral_in_context(expr, width, signed)
+                }
             };
             let then_literal = resize_arm(then_expr, then_literal)?;
             let else_literal = resize_arm(else_expr, else_literal)?;
@@ -1432,6 +1618,7 @@ fn eval_system_function(
     function: SystemFunction,
     args: &[ConstExpr],
     constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
 ) -> Option<i128> {
     if matches!(
         function,
@@ -1440,7 +1627,7 @@ fn eval_system_function(
         let [arg] = args else {
             return None;
         };
-        let value = real::evaluate(arg, constants)?;
+        let value = real::evaluate_budgeted(arg, constants, budget)?;
         return Some(match function {
             SystemFunction::Rtoi => celox_design::eval_float_unary(
                 celox_design::FloatUnaryOp::ToSigned {
@@ -1460,12 +1647,12 @@ fn eval_system_function(
         if controls.is_empty() {
             return None;
         }
-        let operand = const_countbits_literal(arg, constants)?;
+        let operand = const_countbits_literal(arg, constants, budget)?;
         // Control arguments are converted to logic: only their LSB matters.
         // A set of states prevents duplicate controls from counting twice.
         let mut states = [false; 4];
         for control in controls {
-            let literal = const_countbits_literal(control, constants)?;
+            let literal = const_countbits_literal(control, constants, budget)?;
             let state = literal.value.bit(0) as usize + 2 * literal.mask.bit(0) as usize;
             states[state] = true;
         }
@@ -1489,8 +1676,8 @@ fn eval_system_function(
     let [arg] = args else {
         return None;
     };
-    let ones = || {
-        let value = const_expr_known_one_bits(arg, constants)?;
+    let mut ones = || {
+        let value = const_expr_known_one_bits(arg, constants, budget)?;
         Some(value.iter_u64_digits().map(u64::count_ones).sum::<u32>())
     };
     match function {
@@ -1498,12 +1685,12 @@ fn eval_system_function(
             let literal = self_determined_integral_literal(arg)?;
             integral_literal_as_i128(&literal, function == SystemFunction::Signed)
         }
-        SystemFunction::Clog2 => clog2(eval_const_expr_in_env(arg, constants)?),
+        SystemFunction::Clog2 => clog2(eval_const_expr_in_env_budgeted(arg, constants, budget)?),
         SystemFunction::Isunknown => {
             if let Some(literal) = self_determined_integral_literal(arg) {
                 Some((literal.mask != BigUint::default()) as i128)
             } else {
-                eval_const_expr_in_env(arg, constants).map(|_| 0)
+                eval_const_expr_in_env_budgeted(arg, constants, budget).map(|_| 0)
             }
         }
         SystemFunction::Countones => Some(ones()? as i32 as i128),
@@ -1516,9 +1703,10 @@ fn eval_system_function(
 fn const_countbits_literal(
     expr: &ConstExpr,
     constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
 ) -> Option<IntegralLiteral> {
     self_determined_integral_literal(expr).or_else(|| {
-        let value = eval_const_expr_in_env(expr, constants)?;
+        let value = eval_const_expr_in_env_budgeted(expr, constants, budget)?;
         parse_integral_literal(&format_typed_constant_literal(value, 32, true))
     })
 }
@@ -1526,13 +1714,14 @@ fn const_countbits_literal(
 fn const_expr_known_one_bits(
     expr: &ConstExpr,
     constants: &dyn ConstantEnvironment,
+    budget: &mut Budget,
 ) -> Option<BigUint> {
     if let Some(literal) = self_determined_integral_literal(expr) {
         // IEEE 1800-2023 20.9 counts only bits equal to 1; X/Z do not
         // contribute, and onehot/onehot0 always return a two-state bit.
         return Some(&literal.value ^ (&literal.value & &literal.mask));
     }
-    let value = eval_const_expr_in_env(expr, constants)?;
+    let value = eval_const_expr_in_env_budgeted(expr, constants, budget)?;
     (value >= 0).then(|| BigUint::from(value as u128))
 }
 
@@ -1899,37 +2088,51 @@ fn parse_based_decimal_digits(digits: &str) -> Option<IntegralLiteral> {
     })
 }
 
+/// Each digit fills its own bits of the value and mask words, so a wide
+/// literal is parsed in time linear in its length.
 fn parse_power_of_two_based_digits(digits: &str, bits_per_digit: usize) -> Option<IntegralLiteral> {
-    let mut value = BigUint::default();
-    let mut mask = BigUint::default();
-    for ch in digits.chars() {
-        value <<= bits_per_digit;
-        mask <<= bits_per_digit;
-        match ch {
+    let width = digits.chars().count().checked_mul(bits_per_digit)?;
+    let mut value = vec![0u32; width.div_ceil(32)];
+    let mut mask = vec![0u32; value.len()];
+    let all = (1u32 << bits_per_digit) - 1;
+    for (index, ch) in digits.chars().rev().enumerate() {
+        let (digit_value, digit_mask) = match ch {
             '0'..='9' | 'a'..='f' | 'A'..='F' => {
                 let digit = ch.to_digit(16)?;
-                if digit >= (1 << bits_per_digit) {
+                if digit > all {
                     return None;
                 }
-                value |= BigUint::from(digit);
+                (digit, 0)
             }
-            'x' | 'X' => {
-                let unknown = (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
-                value |= &unknown;
-                mask |= unknown;
-            }
-            'z' | 'Z' | '?' => {
-                mask |= (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
-            }
+            'x' | 'X' => (all, all),
+            'z' | 'Z' | '?' => (0, all),
             _ => return None,
+        };
+        let bit = index * bits_per_digit;
+        for (words, bits) in [(&mut value, digit_value), (&mut mask, digit_mask)] {
+            // An octal digit can straddle two words.
+            let shifted = u64::from(bits) << (bit % 32);
+            words[bit / 32] |= shifted as u32;
+            if let Some(next) = words.get_mut(bit / 32 + 1) {
+                *next |= (shifted >> 32) as u32;
+            }
         }
     }
     Some(IntegralLiteral {
-        width: digits.chars().count() * bits_per_digit,
+        width,
         signed: false,
-        value,
-        mask,
+        value: BigUint::new(value),
+        mask: BigUint::new(mask),
     })
+}
+
+pub(crate) fn resize_const_integral_literal(
+    literal: IntegralLiteral,
+    width: usize,
+    signed: bool,
+) -> IntegralLiteral {
+    let extension = signed_extension(&literal, literal.signed);
+    resize_integral_literal(literal, width, signed, extension)
 }
 
 fn resize_integral_literal(
@@ -1980,6 +2183,115 @@ fn extension_for_leading_digit(ch: char) -> (bool, bool) {
 mod literal_tests {
     use super::*;
 
+    #[test]
+    fn numeric_binary_operands_are_evaluated_once_before_type_context() {
+        let expr = ConstExpr::Binary {
+            left: Box::new(ConstExpr::Literal("2".into())),
+            op: BinaryOp::Add,
+            right: Box::new(ConstExpr::Literal("3".into())),
+        };
+        LITERAL_EVALUATIONS.with(|count| count.set(0));
+        assert_eq!(
+            eval_const_expr_with_types(&expr, &HashMap::default(), &HashMap::default()),
+            Some(5)
+        );
+        assert_eq!(LITERAL_EVALUATIONS.with(|count| count.get()), 2);
+    }
+
+    #[test]
+    fn runtime_bounds_skip_literal_evaluation_before_substitution() {
+        let mut bound = ConstExpr::Ident("runtime_index".into());
+        for _ in 0..64 {
+            bound = ConstExpr::Resize {
+                expr: Box::new(ConstExpr::Binary {
+                    left: Box::new(bound),
+                    op: BinaryOp::Add,
+                    right: Box::new(ConstExpr::Ident("P".into())),
+                }),
+                width: 32,
+                signed: false,
+            };
+        }
+        LITERAL_EVALUATIONS.with(|count| count.set(0));
+        assert_eq!(
+            eval_const_expr_with_types(
+                &bound,
+                &HashMap::from_iter([("P".into(), 7)]),
+                &HashMap::from_iter([("P".into(), (32, false))])
+            ),
+            None
+        );
+        assert_eq!(LITERAL_EVALUATIONS.with(|count| count.get()), 0);
+    }
+
+    #[test]
+    fn runtime_bound_probe_preserves_short_circuiting_and_sampled_values() {
+        let literal = |text: &str| ConstExpr::Literal(text.into());
+        let missing = || ConstExpr::Ident("runtime_index".into());
+        let expressions = [
+            (
+                ConstExpr::Binary {
+                    left: Box::new(literal("0")),
+                    op: BinaryOp::LogicAnd,
+                    right: Box::new(missing()),
+                },
+                Some(0),
+            ),
+            (
+                ConstExpr::Binary {
+                    left: Box::new(literal("1")),
+                    op: BinaryOp::LogicOr,
+                    right: Box::new(missing()),
+                },
+                Some(1),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("1")),
+                    then_expr: Box::new(literal("13")),
+                    else_expr: Box::new(missing()),
+                },
+                Some(13),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("0")),
+                    then_expr: Box::new(missing()),
+                    else_expr: Box::new(literal("19")),
+                },
+                Some(19),
+            ),
+            (
+                ConstExpr::Mux {
+                    condition: Box::new(literal("1'bx")),
+                    then_expr: Box::new(literal("17")),
+                    else_expr: Box::new(literal("17")),
+                },
+                Some(17),
+            ),
+        ];
+        for (expr, expected) in expressions {
+            assert_eq!(
+                eval_const_expr_with_types(&expr, &HashMap::default(), &HashMap::default()),
+                expected,
+                "{expr:?}"
+            );
+        }
+        let sample = ConstExpr::Binary {
+            left: Box::new(missing()),
+            op: BinaryOp::Mul,
+            right: Box::new(ConstExpr::Ident("P".into())),
+        };
+        assert_eq!(
+            eval_const_expr_with_types(
+                &sample,
+                &HashMap::from_iter([("runtime_index".into(), 3), ("P".into(), 7)]),
+                &HashMap::from_iter([("P".into(), (32, false))])
+            ),
+            Some(21)
+        );
+    }
+
     /// Expressions without typed constants evaluate as their substituted
     /// copies do, and typed constants still take their declared type.
     #[test]
@@ -2019,6 +2331,78 @@ mod literal_tests {
             Some(0)
         );
         assert_eq!(eval_const_expr(&typed, &constants), Some(256));
+    }
+
+    /// The word-filling digit parser agrees with shifting the whole value in
+    /// once per digit, including unknown digits and octal digits that cross
+    /// a word boundary.
+    #[test]
+    fn power_of_two_digits_parse_like_shifting_parser() {
+        fn shifting(digits: &str, bits_per_digit: usize) -> Option<IntegralLiteral> {
+            let mut value = BigUint::default();
+            let mut mask = BigUint::default();
+            for ch in digits.chars() {
+                value <<= bits_per_digit;
+                mask <<= bits_per_digit;
+                match ch {
+                    '0'..='9' | 'a'..='f' | 'A'..='F' => {
+                        let digit = ch.to_digit(16)?;
+                        if digit >= (1 << bits_per_digit) {
+                            return None;
+                        }
+                        value |= BigUint::from(digit);
+                    }
+                    'x' | 'X' => {
+                        let unknown = (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
+                        value |= &unknown;
+                        mask |= unknown;
+                    }
+                    'z' | 'Z' | '?' => {
+                        mask |= (BigUint::from(1u8) << bits_per_digit) - BigUint::from(1u8);
+                    }
+                    _ => return None,
+                }
+            }
+            Some(IntegralLiteral {
+                width: digits.chars().count() * bits_per_digit,
+                signed: false,
+                value,
+                mask,
+            })
+        }
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let unknown: Vec<char> = "xXzZ?".chars().collect();
+        let invalid: Vec<char> = "9fFg_".chars().collect();
+        for _ in 0..20_000 {
+            let bits_per_digit = [1, 3, 4][next(3)];
+            let radix = 1u32 << bits_per_digit;
+            let digits: String = (0..1 + next(80))
+                .map(|_| match next(64) {
+                    0..=5 => unknown[next(unknown.len())],
+                    6 => invalid[next(invalid.len())],
+                    _ => {
+                        let digit = std::char::from_digit(next(radix as usize) as u32, radix);
+                        let digit = digit.unwrap();
+                        if next(2) == 0 {
+                            digit.to_ascii_uppercase()
+                        } else {
+                            digit
+                        }
+                    }
+                })
+                .collect();
+            assert_eq!(
+                parse_power_of_two_based_digits(&digits, bits_per_digit),
+                shifting(&digits, bits_per_digit),
+                "{digits} with {bits_per_digit} bits per digit"
+            );
+        }
     }
 
     /// The fast parser of plain-digit literals agrees with the general one.

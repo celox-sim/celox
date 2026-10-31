@@ -61,7 +61,9 @@ impl NativeProgramInstance {
     /// validation is structural and does not authenticate executable code.
     ///
     /// An image with process kernels, which only a timed
-    /// [`crate::Simulation`] runs, fails to attach.
+    /// [`crate::Simulation`] runs, fails to attach. So does one with sampled
+    /// value copies, `$past` histories or deferred assertions, whose time
+    /// slots a [`crate::Simulator`] or [`crate::Simulation`] ends.
     pub unsafe fn from_image(image: NativeProgramImage) -> Result<Self, NativeProgramLoadError> {
         if image.has_processes() {
             let origin = image
@@ -72,6 +74,24 @@ impl NativeProgramInstance {
                 .unwrap_or_default();
             return Err(NativeProgramLoadError::Attach(SimulatorError::new(
                 crate::SimulatorErrorKind::ProcessRequiresSimulation(origin),
+            )));
+        }
+        let schema = image.runtime_schema();
+        if !schema.sample_shadows.is_empty()
+            || !schema.initial_copies.is_empty()
+            || schema
+                .runtime_event_sites
+                .iter()
+                .any(|site| site.deferred.is_some())
+        {
+            return Err(NativeProgramLoadError::Attach(SimulatorError::new(
+                crate::SimulatorErrorKind::Runtime(crate::RuntimeErrorCode::Runtime {
+                    message: "a native program instance does not end time slots: sampled \
+                              values, `$past` and deferred assertions need a `Simulator` or \
+                              `Simulation`"
+                        .to_string(),
+                    signals: Vec::new(),
+                }),
             )));
         }
         // Safety: upheld by this constructor's caller.
@@ -124,6 +144,27 @@ impl NativeProgramInstance {
             .ok_or(NativeProgramLoadError::MissingImage)?;
         // Safety: upheld by this constructor's caller.
         unsafe { Self::from_image(appended.image) }
+    }
+
+    /// Capture HDL values as last evaluated, without executing code or callbacks.
+    ///
+    /// This diagnostic state file excludes VPI callbacks, pending writes, force
+    /// registrations, plugin memory and time scheduling. It has no schedule and
+    /// is not a resumable VPI session. Signal values include currently applied
+    /// forces; output already emitted is not withdrawn.
+    pub fn save_state(&self) -> Result<celox_runtime::StateFile, crate::StateError> {
+        let image = self.shared.program_image();
+        let schema = image.runtime_schema();
+        crate::StateSchema::from_design(
+            &self.backend,
+            image.state_design(),
+            |address| schema.comb_writes.contains(address),
+            schema
+                .time_slots
+                .iter()
+                .chain(schema.scheduler.iter().flat_map(|s| s.slots.iter())),
+        )
+        .capture(&self.backend)
     }
 
     /// Physical duration of one tick in the attached design.

@@ -1,9 +1,9 @@
 //! Native testbench execution for Veryl `#[test]` modules.
 //!
-//! Testbench expressions are compiled to a flat bytecode (`TbOpcode`) and
-//! evaluated by a stack-based VM that reads directly from the simulator's
-//! memory buffer.  Signals ≤64 bits use native `u64` arithmetic with zero
-//! heap allocation; wider signals fall back to `BigUint`.
+//! Processes and expressions execute generated host machine code. Persistent
+//! continuations retain ordinary state slots across clock waits. Expressions
+//! and loop arithmetic use the shared SIR backend; host requests provide timing,
+//! diagnostics and external component services.
 
 use crate::HashMap;
 use crate::RuntimeErrorCode;
@@ -20,20 +20,19 @@ pub use celox_testbench::SourceLocation;
 use celox_testbench::{
     DisplayFormatArg, ExecutableArgument, ExecutableAssertMessage, ExecutableClockCount,
     ExecutableLoopBound, ExecutableStatement, ExecutableTestbench, FieldSpec,
-    TestbenchOperator as Op, TestbenchStatement as GenericTestbenchStatement, TestbenchTarget,
-    TestbenchValue as TbValue, format_veryl_display_arg, pad_veryl_field,
+    TestbenchStatement as GenericTestbenchStatement, TestbenchTarget, TestbenchValue as TbValue,
+    format_veryl_display_arg, pad_veryl_field,
 };
-use num_bigint::{BigInt, BigUint, Sign};
-use num_traits::ToPrimitive as _;
+use num_bigint::BigUint;
+use num_traits::{ToPrimitive as _, Zero as _};
 use rand::{RngExt as _, SeedableRng as _};
 use rand_pcg::Pcg64;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::{
-    cell::RefCell,
-    future::Future,
-    pin::Pin,
-    task::{Context, Poll, Waker},
-};
+use std::task::Poll;
+
+mod clock_batch;
+mod compiled;
+mod native;
 
 // ── Public types ───────────────────────────────────────────────────────
 
@@ -86,35 +85,93 @@ enum TestbenchEvaluationError {
         #[source]
         source: RuntimeErrorCode,
     },
-    #[error("dynamic signed for-loop bound exceeds host i128")]
-    SignedLoopBoundOutOfRange,
 }
 
 pub(crate) type TestbenchStatement<B> = ExecutableStatement<<B as SimBackend>::Event, SignalRef>;
 
 pub(crate) type CompiledAssertArg = ExecutableArgument;
 
+/// The value of `expr` with its unknown bits read as 0, as a two-state use
+/// reads them (IEEE 1800-2023 6.11.2). A condition is true when this is
+/// nonzero: when the value has a known one bit (12.4, 16.3).
 fn eval_expr<B: SimBackend>(
     sim: &mut Simulator<B>,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
-    eval_backend_expr(&mut sim.backend, expr)
+    let (value, mask) = eval_expr_four_state(sim, expr);
+    if mask.is_zero() {
+        return value;
+    }
+    let value = value.to_biguint();
+    let known = &value ^ (&value & mask);
+    match known.to_u64() {
+        Some(known) if expr.kernel().is_some_and(|kernel| kernel.width <= 64) => {
+            TbValue::U64(known)
+        }
+        _ => TbValue::Wide(known),
+    }
 }
 
+/// The value of `expr` and its unknown bits.
+fn eval_expr_four_state<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    expr: &celox_testbench::CompiledExpr,
+) -> (TbValue, BigUint) {
+    let (value, mask, writes) = eval_backend_expr_tracked(&mut sim.backend, expr);
+    sim.dirty |= writes
+        .iter()
+        .any(|&(offset, len)| !private_testbench_range(sim, offset, len));
+    (value, mask)
+}
+
+/// The value bits of `expr`: an unknown bit reads as its value-plane bit.
 pub(crate) fn eval_backend_expr<B: SimBackend>(
     backend: &mut B,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
-    // This pointer is used only during evaluation, never exposed to a host.
-    // Observe VM stores explicitly instead of disabling tracking for reads;
-    // they are marked once the heap is no longer borrowed.
+    eval_backend_expr_tracked(backend, expr).0
+}
+
+/// Run `expr`: its value, its unknown bits and the ranges it wrote.
+fn eval_backend_expr_tracked<B: SimBackend>(
+    backend: &mut B,
+    expr: &celox_testbench::CompiledExpr,
+) -> (TbValue, BigUint, Vec<(usize, usize)>) {
+    let kernel = expr
+        .kernel()
+        .expect("expression was compiled before state layout");
+    backend
+        .run_process(kernel.entry)
+        .unwrap_or_else(|error| panic!("testbench expression kernel: {error}"));
     let (memory, _) = backend.memory_as_ptr();
-    let mut writes = Vec::new();
-    let value = expr.eval_with_heap(
-        memory.cast_mut(),
-        Some(backend.heap_mut()),
-        |offset, len| writes.push((offset, len)),
-    );
+    // The kernel result is an ordinary, layout-owned state slot.
+    let bytes =
+        unsafe { std::slice::from_raw_parts(memory.add(kernel.result), kernel.width.div_ceil(8)) };
+    let value = if kernel.is_string {
+        let handle =
+            celox_heap::Handle::from_le_bytes(bytes.try_into().expect("string handle width"));
+        TbValue::String(backend.heap().string(handle as celox_heap::Handle).to_vec())
+    } else if kernel.width <= 64 {
+        let mut value = [0u8; 8];
+        value[..bytes.len()].copy_from_slice(bytes);
+        TbValue::U64(u64::from_le_bytes(value))
+    } else {
+        TbValue::Wide(BigUint::from_bytes_le(bytes))
+    };
+    // A four-state result slot holds its mask plane after its value plane.
+    let mask = if kernel.four_state {
+        let plane = kernel.width.div_ceil(8);
+        BigUint::from_bytes_le(unsafe {
+            std::slice::from_raw_parts(memory.add(kernel.result + plane), plane)
+        })
+    } else {
+        BigUint::ZERO
+    };
+    let writes = kernel
+        .writes
+        .iter()
+        .map(|(offset, size)| (*offset, *size))
+        .collect::<Vec<_>>();
     if let Some(trace) = backend.layout().trace.as_ref() {
         for &(offset, len) in &writes {
             // SAFETY: bound bytecode writes valid locations in this image, and
@@ -124,10 +181,92 @@ pub(crate) fn eval_backend_expr<B: SimBackend>(
             }
         }
     }
-    for (offset, len) in writes {
+    for &(offset, len) in &writes {
         backend.mark_settle_range(offset, len);
     }
-    value
+    (value, mask, writes)
+}
+
+fn private_testbench_range<B: SimBackend>(sim: &Simulator<B>, offset: usize, len: usize) -> bool {
+    if !sim.components.is_empty() || sim.schedule.timed {
+        return false;
+    }
+    let ranges = sim.testbench_hardware_ranges.get_or_init(|| {
+        let layout = sim.backend.layout();
+        let mut ranges: Vec<_> = sim
+            .program
+            .rtl_accesses
+            .iter()
+            .chain(sim.backend.id_to_addr_slice())
+            .filter_map(|addr| {
+                let start = *layout.offsets.get(addr)?;
+                let planes =
+                    if layout.four_state && layout.is_4states.get(addr).copied().unwrap_or(false) {
+                        2
+                    } else {
+                        1
+                    };
+                Some(start..start + layout.plane_size(addr) * planes)
+            })
+            .collect();
+        ranges.sort_unstable_by_key(|range| (range.start, range.end));
+        let mut merged: Vec<std::ops::Range<usize>> = Vec::new();
+        for range in ranges {
+            if let Some(last) = merged.last_mut()
+                && range.start <= last.end
+            {
+                last.end = last.end.max(range.end);
+            } else {
+                merged.push(range);
+            }
+        }
+        merged
+    });
+    let first = ranges.partition_point(|range| range.end <= offset);
+    ranges
+        .get(first)
+        .is_none_or(|range| range.start >= offset.saturating_add(len.max(1)))
+}
+
+fn write_testbench_signal<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    signal: SignalRef,
+    write: impl FnOnce(&mut Simulator<B>),
+) {
+    let dirty = sim.dirty;
+    let private = private_testbench_range(sim, signal.offset, signal.width.div_ceil(8));
+    write(sim);
+    if private {
+        sim.dirty = dirty;
+    }
+}
+
+/// TB observations need settled hardware, but repeated observations without
+/// intervening writes must not execute the hardware again. Keep the public
+/// explicit-evaluation API unchanged.
+fn settle_testbench<B: SimBackend>(sim: &mut Simulator<B>) -> Result<(), RuntimeErrorCode> {
+    if sim.dirty {
+        sim.eval_comb()?;
+    }
+    Ok(())
+}
+
+fn settle_testbench_expr<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    expr: &celox_testbench::CompiledExpr,
+) -> Result<(), RuntimeErrorCode> {
+    let schema = &sim.program.runtime_schema;
+    // Only defer pure combinational work. Stateful comb, observers, process
+    // kernels and external components can observe intervening TB writes.
+    if !expr.observes_hardware()
+        && schema.persistent_comb_state.is_empty()
+        && schema.comb_observers.is_empty()
+        && !sim.schedule.timed
+        && sim.components.is_empty()
+    {
+        return Ok(());
+    }
+    settle_testbench(sim)
 }
 
 fn format_assert_arg<B: SimBackend>(
@@ -136,16 +275,17 @@ fn format_assert_arg<B: SimBackend>(
     spec: char,
     field: FieldSpec,
 ) -> Vec<u8> {
-    let value = eval_expr(sim, &arg.expr);
+    // Formatting keeps unknown bits (IEEE 1800-2023 21.2.1.3).
+    let (value, mask) = eval_expr_four_state(sim, &arg.expr);
     let width = match &value {
         TbValue::String(bytes) => bytes.len() * 8,
         _ => arg.width,
     };
-    let value = value.to_biguint();
+    let (value, mask) = (value.to_biguint(), (!mask.is_zero()).then_some(mask));
     format_veryl_display_arg(
         &DisplayFormatArg {
             value: &value,
-            mask: None,
+            mask: mask.as_ref(),
             width,
             signed: arg.signed,
             is_string: arg.is_string,
@@ -236,13 +376,13 @@ fn render_assert_message<B: SimBackend>(
 }
 
 fn sim_set_u64<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef, value: u64) {
-    match sig.width {
+    write_testbench_signal(sim, sig, |sim| match sig.width {
         0..=8 => sim.set(sig, value as u8),
         9..=16 => sim.set(sig, value as u16),
         17..=32 => sim.set(sig, value as u32),
         33..=64 => sim.set(sig, value),
         _ => sim.set_wide(sig, BigUint::from(value)),
-    }
+    });
 }
 
 fn sim_set_target<B: SimBackend>(
@@ -263,7 +403,7 @@ fn sim_set_target<B: SimBackend>(
                 is_4state: false,
                 array_layout: None,
             };
-            sim.set(element, handle);
+            write_testbench_signal(sim, element, |sim| sim.set(element, handle));
         }
         return;
     }
@@ -271,7 +411,9 @@ fn sim_set_target<B: SimBackend>(
         match value {
             TbValue::String(_) => unreachable!(),
             TbValue::U64(value) => sim_set_u64(sim, target.signal, value),
-            TbValue::Wide(value) => sim.set_wide(target.signal, value),
+            TbValue::Wide(value) => {
+                write_testbench_signal(sim, target.signal, |sim| sim.set_wide(target.signal, value))
+            }
         }
         return;
     };
@@ -284,15 +426,22 @@ fn sim_set_target<B: SimBackend>(
         return;
     }
 
-    let (root, root_mask) = sim.get_four_state(target.signal);
+    let (root, root_mask) =
+        if private_testbench_range(sim, target.signal.offset, target.signal.width.div_ceil(8)) {
+            sim.backend.get_four_state(target.signal)
+        } else {
+            sim.get_four_state(target.signal)
+        };
     let selected_mask = width_mask(width) << offset;
     let clear_mask = width_mask(target.signal.width) ^ &selected_mask;
     let selected_value = (value.to_biguint() & width_mask(width)) << offset;
-    sim.set_four_state(
-        target.signal,
-        (root & &clear_mask) | selected_value,
-        root_mask & clear_mask,
-    );
+    write_testbench_signal(sim, target.signal, |sim| {
+        sim.set_four_state(
+            target.signal,
+            (root & &clear_mask) | selected_value,
+            root_mask & clear_mask,
+        )
+    });
 }
 
 /// Collect the heap between concurrent process polls. The saved temporaries of
@@ -424,21 +573,14 @@ fn sign_extend_random(raw: u64, width: u32) -> i64 {
 
 enum ExecResult {
     Continue,
-    Break,
     Finished,
     Fail(String),
-}
-
-impl ExecResult {
-    fn should_stop(&self) -> bool {
-        !matches!(self, ExecResult::Continue)
-    }
 }
 
 impl From<ExecResult> for TestResult {
     fn from(r: ExecResult) -> Self {
         match r {
-            ExecResult::Continue | ExecResult::Break | ExecResult::Finished => TestResult::Pass,
+            ExecResult::Continue | ExecResult::Finished => TestResult::Pass,
             ExecResult::Fail(m) => TestResult::Fail(m),
         }
     }
@@ -452,182 +594,11 @@ fn eval_clock_count<B: SimBackend>(
     Ok(match count {
         ClockCount::Static(n) => *n,
         ClockCount::Dynamic(expr) => {
-            sim.eval_comb()
+            settle_testbench_expr(sim, expr)
                 .map_err(|source| TestbenchEvaluationError::EvalComb { source })?;
             eval_expr(sim, expr).to_u64()
         }
     })
-}
-
-fn eval_loop_bound<B: SimBackend>(
-    sim: &mut Simulator<B>,
-    bound: &LoopBound,
-) -> Result<EvaluatedLoopBound, TestbenchEvaluationError> {
-    match bound {
-        // Unsigned Veryl constants are represented as typed Dynamic bytecode;
-        // Static retains signed induction-variable semantics.
-        LoopBound::Static(v) => Ok(EvaluatedLoopBound::Signed(*v as i128)),
-        LoopBound::Dynamic {
-            expr,
-            width,
-            signed,
-        } => {
-            sim.eval_comb()
-                .map_err(|source| TestbenchEvaluationError::EvalComb { source })?;
-            let value = eval_expr(sim, expr);
-            if *signed {
-                decode_signed_loop_bound(value, *width)
-            } else {
-                match value {
-                    TbValue::String(_) => unreachable!("string loop bound"),
-                    TbValue::U64(v) => match usize::try_from(v) {
-                        Ok(v) => Ok(EvaluatedLoopBound::Unsigned(v)),
-                        Err(_) => Ok(EvaluatedLoopBound::UnsignedWide(BigUint::from(v))),
-                    },
-                    TbValue::Wide(v) => match v.to_usize() {
-                        Some(v) => Ok(EvaluatedLoopBound::Unsigned(v)),
-                        None => Ok(EvaluatedLoopBound::UnsignedWide(v)),
-                    },
-                }
-            }
-        }
-    }
-}
-
-enum EvaluatedLoopBound {
-    Unsigned(usize),
-    UnsignedWide(BigUint),
-    Signed(i128),
-    SignedWide(BigInt),
-}
-
-fn decode_signed_loop_bound(
-    value: TbValue,
-    width: usize,
-) -> Result<EvaluatedLoopBound, TestbenchEvaluationError> {
-    let width = width.max(1);
-    match value {
-        TbValue::String(_) => unreachable!("string loop bound"),
-        TbValue::U64(v) => {
-            let raw = if width >= 64 {
-                v as u128
-            } else {
-                (v as u128) & ((1u128 << width) - 1)
-            };
-            Ok(EvaluatedLoopBound::Signed(sign_extend_u128(raw, width)))
-        }
-        TbValue::Wide(v) => {
-            if width > 128 {
-                let signed = sign_extend_biguint(v, width);
-                return Ok(match signed.to_i128() {
-                    Some(v) => EvaluatedLoopBound::Signed(v),
-                    None => EvaluatedLoopBound::SignedWide(signed),
-                });
-            }
-            let raw = v
-                .to_u128()
-                .ok_or(TestbenchEvaluationError::SignedLoopBoundOutOfRange)?;
-            Ok(EvaluatedLoopBound::Signed(sign_extend_u128(raw, width)))
-        }
-    }
-}
-
-fn sign_extend_u128(raw: u128, width: usize) -> i128 {
-    let width = width.max(1);
-    if width >= 128 {
-        raw as i128
-    } else {
-        let sign_bit = 1u128 << (width - 1);
-        if raw & sign_bit == 0 {
-            raw as i128
-        } else {
-            raw as i128 - ((1u128 << width) as i128)
-        }
-    }
-}
-
-fn truncate_i128_to_width(value: i128, width: usize, signed: bool) -> i128 {
-    let width = width.max(1);
-    if width >= 128 {
-        return value;
-    }
-    let raw = (value as u128) & ((1u128 << width) - 1);
-    if signed {
-        sign_extend_u128(raw, width)
-    } else {
-        raw as i128
-    }
-}
-
-fn truncate_bigint_to_width(value: BigInt, width: usize, signed: bool) -> BigInt {
-    let width = width.max(1);
-    let modulus = BigInt::from(1u8) << width;
-    let mut wrapped = value % &modulus;
-    if wrapped.sign() == Sign::Minus {
-        wrapped += &modulus;
-    }
-    if signed && wrapped >= (BigInt::from(1u8) << (width - 1)) {
-        wrapped - modulus
-    } else {
-        wrapped
-    }
-}
-
-fn advance_bigint_counter(
-    current: &BigInt,
-    step: usize,
-    step_op: Option<Op>,
-    reverse: bool,
-    width: usize,
-    signed: bool,
-) -> BigInt {
-    let step_value = BigInt::from(step);
-    let raw = if reverse {
-        current - &step_value
-    } else {
-        match step_op {
-            Some(Op::Mul) => current * &step_value,
-            Some(Op::BitOr) => current | &step_value,
-            Some(Op::BitXor) => current ^ &step_value,
-            Some(Op::LogicShiftL | Op::ArithShiftL) => {
-                if step >= width.max(1) {
-                    BigInt::from(0u8)
-                } else {
-                    current << step
-                }
-            }
-            _ => current + &step_value,
-        }
-    };
-    truncate_bigint_to_width(raw, width, signed)
-}
-
-fn truncate_usize_to_width(value: usize, width: usize) -> usize {
-    if width >= usize::BITS as usize {
-        value
-    } else if width == 0 {
-        0
-    } else {
-        value & ((1usize << width) - 1)
-    }
-}
-
-fn sign_extend_biguint(raw: BigUint, width: usize) -> BigInt {
-    let width = width.max(1);
-    let sign_bit = BigUint::from(1u8) << (width - 1);
-    if raw < sign_bit {
-        BigInt::from(raw)
-    } else {
-        BigInt::from(raw) - (BigInt::from(1u8) << width)
-    }
-}
-
-fn mask_to_width(value: BigUint, width: usize) -> BigUint {
-    if width == 0 {
-        BigUint::from(0u8)
-    } else {
-        value & ((BigUint::from(1u8) << width) - BigUint::from(1u8))
-    }
 }
 
 fn width_mask(width: usize) -> BigUint {
@@ -635,31 +606,6 @@ fn width_mask(width: usize) -> BigUint {
         BigUint::from(0u8)
     } else {
         (BigUint::from(1u8) << width) - BigUint::from(1u8)
-    }
-}
-
-fn sim_set_i128<B: SimBackend>(
-    sim: &mut crate::Simulator<B>,
-    sig: SignalRef,
-    width: usize,
-    value: i128,
-) {
-    if width <= 64 {
-        sim_set_u64(sim, sig, value as u64);
-    } else if value >= 0 {
-        sim.set_wide(sig, BigUint::from(value as u128));
-    } else {
-        let modulus = BigUint::from(1u8) << width;
-        let mag = BigUint::from(value.unsigned_abs());
-        sim.set_wide(sig, modulus - mag);
-    }
-}
-
-fn sim_set_biguint<B: SimBackend>(sim: &mut crate::Simulator<B>, sig: SignalRef, value: BigUint) {
-    if sig.width <= 64 {
-        sim_set_u64(sim, sig, value.to_u64().unwrap_or(0));
-    } else {
-        sim.set_wide(sig, mask_to_width(value, sig.width));
     }
 }
 
@@ -694,428 +640,6 @@ fn sim_set_random_target<B: SimBackend>(
 ) {
     let value = random_value_for_destination(value, source_width, signed, target.width);
     sim_set_target(sim, target, TbValue::Wide(value));
-}
-
-fn sim_set_bigint<B: SimBackend>(
-    sim: &mut crate::Simulator<B>,
-    sig: SignalRef,
-    width: usize,
-    value: BigInt,
-) {
-    if width <= 128 {
-        sim_set_i128(sim, sig, width, value.try_into().unwrap_or(0));
-        return;
-    }
-    if value.sign() != Sign::Minus {
-        sim_set_biguint(
-            sim,
-            sig,
-            value.try_into().unwrap_or_else(|_| BigUint::from(0u8)),
-        );
-    } else {
-        let modulus = BigUint::from(1u8) << width;
-        sim_set_biguint(sim, sig, modulus - value.magnitude().clone());
-    }
-}
-
-fn as_bigint_bound(bound: &EvaluatedLoopBound) -> Option<BigInt> {
-    match bound {
-        EvaluatedLoopBound::Unsigned(v) => Some(BigInt::from(*v)),
-        EvaluatedLoopBound::UnsignedWide(v) => Some(BigInt::from(v.clone())),
-        EvaluatedLoopBound::Signed(v) => Some(BigInt::from(*v)),
-        EvaluatedLoopBound::SignedWide(v) => Some(v.clone()),
-    }
-}
-
-fn exec_for_loop<B: SimBackend>(
-    sim: &mut Simulator<B>,
-    loop_var: &Option<(SignalRef, usize, bool)>,
-    start: &LoopBound,
-    end: &LoopBound,
-    inclusive: bool,
-    step: usize,
-    step_op: Option<Op>,
-    reverse: bool,
-    mut exec_body: impl FnMut(&mut Simulator<B>) -> ExecResult,
-) -> ExecResult {
-    let sim = RefCell::new(sim);
-    let mut future = std::pin::pin!(exec_for_loop_async(
-        &sim,
-        loop_var,
-        start,
-        end,
-        inclusive,
-        step,
-        step_op,
-        reverse,
-        || std::future::ready(exec_body(&mut sim.borrow_mut())),
-    ));
-    match future
-        .as_mut()
-        .poll(&mut Context::from_waker(Waker::noop()))
-    {
-        Poll::Ready(result) => result,
-        Poll::Pending => unreachable!("synchronous loop body cannot suspend"),
-    }
-}
-
-async fn exec_for_loop_async<B: SimBackend, F: Future<Output = ExecResult>>(
-    sim: &RefCell<&mut Simulator<B>>,
-    loop_var: &Option<(SignalRef, usize, bool)>,
-    start: &LoopBound,
-    end: &LoopBound,
-    inclusive: bool,
-    step: usize,
-    step_op: Option<Op>,
-    reverse: bool,
-    mut exec_body: impl FnMut() -> F,
-) -> ExecResult {
-    let continuation_bound = if reverse { start } else { end };
-    let (bound_width, bound_signed) = match continuation_bound {
-        LoopBound::Static(value) => (
-            (usize::BITS as usize - value.leading_zeros() as usize).max(32),
-            true,
-        ),
-        LoopBound::Dynamic { width, signed, .. } => (*width, *signed),
-    };
-    let (counter_width, counter_signed) = loop_var
-        .as_ref()
-        .map_or((usize::BITS as usize, true), |(_, width, signed)| {
-            (*width, *signed)
-        });
-    let comparison_signed = counter_signed && bound_signed;
-    let unsigned_value = |value: i128, width: usize| {
-        let mask = if width >= u128::BITS as usize {
-            u128::MAX
-        } else {
-            (1u128 << width.max(1)) - 1
-        };
-        (value as u128) & mask
-    };
-    let in_range = |value: i128, limit: i128| {
-        if comparison_signed {
-            if reverse {
-                value >= limit
-            } else if inclusive {
-                value <= limit
-            } else {
-                value < limit
-            }
-        } else {
-            let value = unsigned_value(value, counter_width);
-            let limit = unsigned_value(limit, bound_width);
-            if reverse {
-                value >= limit
-            } else if inclusive {
-                value <= limit
-            } else {
-                value < limit
-            }
-        }
-    };
-
-    let mut start = match eval_loop_bound(&mut sim.borrow_mut(), start) {
-        Ok(v) => v,
-        Err(error) => return ExecResult::Fail(error.to_string()),
-    };
-    let mut end = match eval_loop_bound(&mut sim.borrow_mut(), end) {
-        Ok(v) => v,
-        Err(error) => return ExecResult::Fail(error.to_string()),
-    };
-
-    let initially_wide = matches!(start, EvaluatedLoopBound::UnsignedWide(_))
-        || matches!(end, EvaluatedLoopBound::UnsignedWide(_))
-        || matches!(start, EvaluatedLoopBound::SignedWide(_))
-        || matches!(end, EvaluatedLoopBound::SignedWide(_));
-    if let Some((_, width, true)) = loop_var.as_ref()
-        && !initially_wide
-    {
-        let width = (*width).max(1);
-        let unsigned_max = if width <= usize::BITS as usize {
-            Some((1usize << (width - 1)) - 1)
-        } else {
-            None
-        };
-        let unsigned_value = |bound: &EvaluatedLoopBound| match bound {
-            EvaluatedLoopBound::Unsigned(value) => Some(*value),
-            _ => None,
-        };
-        let start_out_of_range = unsigned_max
-            .zip(unsigned_value(&start))
-            .is_some_and(|(max, value)| value > max);
-        let end_out_of_range =
-            unsigned_max
-                .zip(unsigned_value(&end))
-                .is_some_and(|(max, value)| {
-                    value > max && !(!inclusive && value == max.saturating_add(1))
-                });
-        if start_out_of_range || end_out_of_range {
-            return ExecResult::Fail("non-progressing stepped for loop".to_string());
-        }
-        start = match start {
-            EvaluatedLoopBound::Unsigned(value) => EvaluatedLoopBound::Signed(value as i128),
-            other => other,
-        };
-        end = match end {
-            EvaluatedLoopBound::Unsigned(value) => EvaluatedLoopBound::Signed(value as i128),
-            other => other,
-        };
-    }
-
-    let has_unsigned_wide = matches!(start, EvaluatedLoopBound::UnsignedWide(_))
-        || matches!(end, EvaluatedLoopBound::UnsignedWide(_));
-    let has_signed_wide = matches!(start, EvaluatedLoopBound::SignedWide(_))
-        || matches!(end, EvaluatedLoopBound::SignedWide(_));
-    if has_unsigned_wide || has_signed_wide {
-        let start = as_bigint_bound(&start).expect("big loop bound");
-        let end = as_bigint_bound(&end).expect("big loop bound");
-        let mut step_body = |i: BigInt| {
-            if let Some((sig, width, _)) = loop_var {
-                sim_set_bigint(&mut sim.borrow_mut(), *sig, *width, i);
-            }
-            exec_body()
-        };
-        if reverse {
-            if inclusive {
-                if end < start {
-                    return ExecResult::Continue;
-                }
-                if end == start {
-                    let (width, signed) = loop_var
-                        .as_ref()
-                        .map_or((usize::BITS as usize, false), |(_, width, signed)| {
-                            (*width, *signed)
-                        });
-                    let current = truncate_bigint_to_width(end, width, signed);
-                    let result = step_body(current.clone()).await;
-                    if matches!(result, ExecResult::Break) {
-                        return ExecResult::Continue;
-                    }
-                    if result.should_stop() {
-                        return result;
-                    }
-                    let next =
-                        advance_bigint_counter(&current, step, step_op, reverse, width, signed);
-                    return if next >= current {
-                        ExecResult::Fail("non-progressing stepped for loop".to_string())
-                    } else {
-                        ExecResult::Continue
-                    };
-                }
-            } else if end <= start {
-                return ExecResult::Continue;
-            }
-        } else if inclusive {
-            if start > end {
-                return ExecResult::Continue;
-            }
-            if start == end {
-                let (width, signed) = loop_var
-                    .as_ref()
-                    .map_or((usize::BITS as usize, false), |(_, width, signed)| {
-                        (*width, *signed)
-                    });
-                let current = truncate_bigint_to_width(start, width, signed);
-                let result = step_body(current.clone()).await;
-                if matches!(result, ExecResult::Break) {
-                    return ExecResult::Continue;
-                }
-                if result.should_stop() {
-                    return result;
-                }
-                let next = advance_bigint_counter(&current, step, step_op, reverse, width, signed);
-                return if next <= current {
-                    ExecResult::Fail("non-progressing stepped for loop".to_string())
-                } else {
-                    ExecResult::Continue
-                };
-            }
-        } else if start >= end {
-            return ExecResult::Continue;
-        }
-        return ExecResult::Fail(if loop_var.as_ref().is_some_and(|(_, _, signed)| *signed) {
-            "dynamic signed for-loop bound exceeds host i128".to_string()
-        } else {
-            "dynamic for-loop bound exceeds host usize".to_string()
-        });
-    }
-
-    let (start_signed, end_signed) = match (start, end) {
-        (EvaluatedLoopBound::Unsigned(start), EvaluatedLoopBound::Unsigned(end)) => {
-            (None, Some((start, end)))
-        }
-        (EvaluatedLoopBound::Signed(start), EvaluatedLoopBound::Signed(end)) => {
-            (Some((start, end)), None)
-        }
-        (EvaluatedLoopBound::Signed(start), EvaluatedLoopBound::Unsigned(end)) => {
-            (Some((start, end as i128)), None)
-        }
-        (EvaluatedLoopBound::Unsigned(start), EvaluatedLoopBound::Signed(end)) => {
-            (Some((start as i128, end)), None)
-        }
-        _ => unreachable!("wide loop bounds handled above"),
-    };
-
-    if let Some((start, end)) = start_signed {
-        let truncate_counter = |value| {
-            loop_var.as_ref().map_or(value, |(_, width, signed)| {
-                truncate_i128_to_width(value, *width, *signed)
-            })
-        };
-        let mut step_body = |i: i128| {
-            if let Some((sig, width, _)) = loop_var {
-                sim_set_i128(&mut sim.borrow_mut(), *sig, *width, i);
-            }
-            exec_body()
-        };
-
-        let step_i = step as i128;
-        if reverse {
-            let mut i = truncate_counter(if inclusive { end } else { end.wrapping_sub(1) });
-            while in_range(i, start) {
-                let r = step_body(i).await;
-                if matches!(r, ExecResult::Break) {
-                    return ExecResult::Continue;
-                }
-                if r.should_stop() {
-                    return r;
-                }
-                let next = truncate_counter(i.wrapping_sub(step_i));
-                if next >= i {
-                    return ExecResult::Fail("non-progressing stepped for loop".to_string());
-                }
-                i = next;
-            }
-        } else if let Some(op) = step_op {
-            let mut i = truncate_counter(start);
-            while in_range(i, end) {
-                let r = step_body(i).await;
-                if matches!(r, ExecResult::Break) {
-                    return ExecResult::Continue;
-                }
-                if r.should_stop() {
-                    return r;
-                }
-                let new_i = match op {
-                    Op::Mul => i.wrapping_mul(step_i),
-                    Op::BitOr => i | step_i,
-                    Op::BitXor => i ^ step_i,
-                    Op::LogicShiftL | Op::ArithShiftL => {
-                        if step >= i128::BITS as usize {
-                            0
-                        } else {
-                            i.checked_shl(step as u32).unwrap_or(0)
-                        }
-                    }
-                    _ => i.wrapping_add(step_i),
-                };
-                let new_i = truncate_counter(new_i);
-                if new_i <= i {
-                    return ExecResult::Fail("non-progressing stepped for loop".to_string());
-                }
-                i = new_i;
-            }
-        } else {
-            let mut i = truncate_counter(start);
-            while in_range(i, end) {
-                let r = step_body(i).await;
-                if matches!(r, ExecResult::Break) {
-                    return ExecResult::Continue;
-                }
-                if r.should_stop() {
-                    return r;
-                }
-                let next = i.wrapping_add(step_i);
-                let next = truncate_counter(next);
-                if next <= i {
-                    return ExecResult::Fail("non-progressing stepped for loop".to_string());
-                }
-                i = next;
-            }
-        }
-
-        return ExecResult::Continue;
-    }
-
-    let (start, end) = end_signed.expect("unsigned loop bounds expected");
-    let truncate_counter = |value| {
-        loop_var.as_ref().map_or(value, |(_, width, _)| {
-            truncate_usize_to_width(value, *width)
-        })
-    };
-
-    let mut step_body = |i: usize| {
-        if let Some((sig, _, _)) = loop_var {
-            sim_set_u64(&mut sim.borrow_mut(), *sig, i as u64);
-        }
-        exec_body()
-    };
-
-    if reverse {
-        let mut i = truncate_counter(if inclusive { end } else { end.wrapping_sub(1) });
-        while i >= start {
-            let r = step_body(i).await;
-            if matches!(r, ExecResult::Break) {
-                return ExecResult::Continue;
-            }
-            if r.should_stop() {
-                return r;
-            }
-            let next = truncate_counter(i.wrapping_sub(step));
-            if next >= i {
-                return ExecResult::Fail("non-progressing stepped for loop".to_string());
-            }
-            i = next;
-        }
-    } else if let Some(op) = step_op {
-        let mut i = truncate_counter(start);
-        while if inclusive { i <= end } else { i < end } {
-            let r = step_body(i).await;
-            if matches!(r, ExecResult::Break) {
-                return ExecResult::Continue;
-            }
-            if r.should_stop() {
-                return r;
-            }
-            let new_i = match op {
-                Op::Mul => i.wrapping_mul(step),
-                Op::BitOr => i | step,
-                Op::BitXor => i ^ step,
-                Op::LogicShiftL | Op::ArithShiftL => {
-                    if step >= usize::BITS as usize {
-                        0
-                    } else {
-                        i << step
-                    }
-                }
-                _ => i.wrapping_add(step),
-            };
-            let new_i = truncate_counter(new_i);
-            if new_i <= i {
-                return ExecResult::Fail("non-progressing stepped for loop".to_string());
-            }
-            i = new_i;
-        }
-    } else {
-        let mut i = truncate_counter(start);
-        while if inclusive { i <= end } else { i < end } {
-            let r = step_body(i).await;
-            if matches!(r, ExecResult::Break) {
-                return ExecResult::Continue;
-            }
-            if r.should_stop() {
-                return r;
-            }
-            let next = i.wrapping_add(step);
-            let next = truncate_counter(next);
-            if next <= i {
-                return ExecResult::Fail("non-progressing stepped for loop".to_string());
-            }
-            i = next;
-        }
-    }
-
-    ExecResult::Continue
 }
 
 pub(crate) fn run_testbench<B: SimBackend>(
@@ -1165,7 +689,7 @@ fn run_testbench_limited<B: SimBackend>(
     sim.component_simulation = sim
         .components
         .has_scheduled_components()
-        .then(|| crate::simulation::simulation_state(sim));
+        .then(|| Box::new(crate::simulation::simulation_state(sim)));
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
@@ -1173,6 +697,7 @@ fn run_testbench_limited<B: SimBackend>(
         tick_limit,
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
+        record_passes: false,
     };
     let mut result = if sim.components.finish_requested() {
         ExecResult::Finished
@@ -1209,7 +734,7 @@ fn run_testbench_limited<B: SimBackend>(
                 TestResult::Fail(combined.join("\n"))
             }
         }
-        ExecResult::Continue | ExecResult::Break | ExecResult::Finished => {
+        ExecResult::Continue | ExecResult::Finished => {
             if !failed_messages.is_empty() {
                 TestResult::Fail(failed_messages.join("\n"))
             } else if require_finish && !finished {
@@ -1313,7 +838,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     sim.component_simulation = sim
         .components
         .has_scheduled_components()
-        .then(|| crate::simulation::simulation_state(sim));
+        .then(|| Box::new(crate::simulation::simulation_state(sim)));
     let mut ctx = DetailedExecContext {
         assertions: Vec::new(),
         current_time: 0,
@@ -1321,6 +846,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         tick_limit: None,
         tick_limit_reached: false,
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
+        record_passes: true,
     };
     let result = if sim.components.finish_requested() {
         ExecResult::Finished
@@ -1329,7 +855,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
     };
     let mut error = match result {
         ExecResult::Fail(message) => Some(message),
-        ExecResult::Continue | ExecResult::Break | ExecResult::Finished => None,
+        ExecResult::Continue | ExecResult::Finished => None,
     };
     if let Err(message) = sim.components.finish(ctx.simulation_time())
         && error.is_none()
@@ -1352,6 +878,9 @@ struct DetailedExecContext {
     tick_limit: Option<u64>,
     tick_limit_reached: bool,
     random: RandomTable,
+    /// Whether passing assertions are recorded, as the detailed API reports
+    /// them.
+    record_passes: bool,
 }
 
 impl DetailedExecContext {
@@ -1419,7 +948,10 @@ fn publish_tb_assert_event<B: SimBackend>(
 ) {
     let args = assert_event_args(message)
         .iter()
-        .map(|arg| eval_expr(sim, &arg.expr).to_biguint())
+        .map(|arg| {
+            let (value, mask) = eval_expr_four_state(sim, &arg.expr);
+            (value.to_biguint(), mask)
+        })
         .collect::<Vec<_>>();
     let layout = sim.layout();
     let Some(site_layout) = layout
@@ -1463,9 +995,10 @@ fn publish_tb_assert_event<B: SimBackend>(
         arg_count as u64,
     );
 
-    for (idx, value) in args.iter().take(arg_count).enumerate() {
+    for (idx, (value, mask)) in args.iter().take(arg_count).enumerate() {
         let arg_layout = &site_layout.args[idx];
         let words = value.to_u64_digits();
+        let mask_words = mask.to_u64_digits();
         for word_idx in 0..arg_layout.word_count {
             let value_word = words.get(word_idx).copied().unwrap_or(0);
             write_u64_volatile(
@@ -1480,7 +1013,7 @@ fn publish_tb_assert_event<B: SimBackend>(
                 slot_base
                     + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
                     + (arg_layout.mask_word_offset + word_idx) * 8,
-                0,
+                mask_words.get(word_idx).copied().unwrap_or(0),
             );
         }
     }
@@ -1494,14 +1027,27 @@ fn drain_runtime_assertions<B: SimBackend>(
     ctx: &mut DetailedExecContext,
     location: Option<&SourceLocation>,
 ) -> DrainedAssertionEvents {
-    let mut last_message = None;
-    let mut fatal_message = None;
-    let mut finished = false;
     let format_ctx = RuntimeFormatContext {
         tb_time: Some(ctx.simulation_time()),
         scope: None,
     };
-    for event in sim.drain_runtime_events_deferred_with_context(format_ctx) {
+    let events = sim.drain_runtime_events_deferred_with_context(format_ctx);
+    record_runtime_events(
+        ctx,
+        events.into_iter().map(|event| (event, location.cloned())),
+    )
+}
+
+/// Forward the messages of runtime events and record their failures, each
+/// at its source location.
+fn record_runtime_events(
+    ctx: &mut DetailedExecContext,
+    events: impl IntoIterator<Item = (RuntimeEvent, Option<SourceLocation>)>,
+) -> DrainedAssertionEvents {
+    let mut last_message = None;
+    let mut fatal_message = None;
+    let mut finished = false;
+    for (event, location) in events {
         match event {
             // Only errors fail a test (IEEE 1800-2023 20.10).
             RuntimeEvent::Report(report) if report.severity < Severity::Error => {
@@ -1516,7 +1062,7 @@ fn drain_runtime_assertions<B: SimBackend>(
                 ctx.assertions.push(AssertionResult {
                     passed: false,
                     message: Some(message),
-                    location: location.cloned(),
+                    location,
                 });
             }
             RuntimeEvent::Missed { count } => {
@@ -1541,139 +1087,12 @@ fn drain_runtime_assertions<B: SimBackend>(
     }
 }
 
-// Futures retain each process's control stack (including evaluated loop bounds)
-// while no simulator borrow is held. Only this deterministic scheduler polls
-// them; no threads, executor, or background work are involved.
 struct ProcessWait<Event> {
     clock: Event,
     remaining: u64,
     period: u64,
     resume_at: Option<u64>,
     reset: Option<(SignalRef, Option<Event>, u8)>,
-}
-
-fn exec_process<'a, B: SimBackend>(
-    sim: &'a RefCell<&mut Simulator<B>>,
-    ctx: &'a RefCell<&mut DetailedExecContext>,
-    wait: &'a RefCell<Option<ProcessWait<B::Event>>>,
-    reset_edges: &'a RefCell<Vec<(B::Event, u8)>>,
-    stmts: &'a [TestbenchStatement<B>],
-) -> Pin<Box<dyn Future<Output = ExecResult> + 'a>> {
-    Box::pin(async move {
-        for stmt in stmts {
-            let result = match stmt {
-                GenericTestbenchStatement::ClockNext {
-                    clock_event,
-                    count,
-                    period,
-                } => {
-                    let count = match eval_clock_count(&mut sim.borrow_mut(), count) {
-                        Ok(count) => count,
-                        Err(error) => return ExecResult::Fail(error.to_string()),
-                    };
-                    *wait.borrow_mut() = (count != 0).then_some(ProcessWait {
-                        clock: *clock_event,
-                        remaining: count,
-                        reset: None,
-                        period: *period,
-                        resume_at: None,
-                    });
-                    std::future::poll_fn(|_| {
-                        if wait.borrow().is_none() {
-                            Poll::Ready(())
-                        } else {
-                            Poll::Pending
-                        }
-                    })
-                    .await;
-                    ExecResult::Continue
-                }
-                GenericTestbenchStatement::ResetAssert {
-                    reset_signal,
-                    reset_event,
-                    clock_event,
-                    duration,
-                    assert_value,
-                    deassert_value,
-                    period,
-                } => {
-                    let duration = match eval_clock_count(&mut sim.borrow_mut(), duration) {
-                        Ok(count) => count.max(1),
-                        Err(error) => return ExecResult::Fail(error.to_string()),
-                    };
-                    sim_set_u64(&mut sim.borrow_mut(), *reset_signal, (*assert_value).into());
-                    if let Some(event) = reset_event {
-                        reset_edges.borrow_mut().push((*event, *assert_value));
-                    }
-                    *wait.borrow_mut() = Some(ProcessWait {
-                        clock: *clock_event,
-                        remaining: duration,
-                        period: *period,
-                        resume_at: None,
-                        reset: Some((*reset_signal, *reset_event, *deassert_value)),
-                    });
-                    std::future::poll_fn(|_| {
-                        if wait.borrow().is_none() {
-                            Poll::Ready(())
-                        } else {
-                            Poll::Pending
-                        }
-                    })
-                    .await;
-                    ExecResult::Continue
-                }
-                GenericTestbenchStatement::If {
-                    expr,
-                    then_block,
-                    else_block,
-                } => {
-                    let condition = {
-                        let mut sim = sim.borrow_mut();
-                        if let Err(error) = sim.eval_comb() {
-                            return ExecResult::Fail(format!("eval_comb: {error}"));
-                        }
-                        !eval_expr(&mut sim, expr).is_zero()
-                    };
-                    exec_process(
-                        sim,
-                        ctx,
-                        wait,
-                        reset_edges,
-                        if condition { then_block } else { else_block },
-                    )
-                    .await
-                }
-                GenericTestbenchStatement::For {
-                    loop_var,
-                    start,
-                    end,
-                    inclusive,
-                    step,
-                    step_op,
-                    reverse,
-                    body,
-                } => {
-                    exec_for_loop_async(
-                        sim,
-                        loop_var,
-                        start,
-                        end,
-                        *inclusive,
-                        *step,
-                        *step_op,
-                        *reverse,
-                        || exec_process(sim, ctx, wait, reset_edges, body),
-                    )
-                    .await
-                }
-                _ => exec_one_detailed(&mut sim.borrow_mut(), stmt, &mut ctx.borrow_mut()),
-            };
-            if !matches!(result, ExecResult::Continue) {
-                return result;
-            }
-        }
-        ExecResult::Continue
-    })
 }
 
 struct ProcessClock<Event> {
@@ -1729,18 +1148,33 @@ fn exec_testbench<B: SimBackend>(
     testbench: &CompiledTestbench<B>,
     ctx: &mut DetailedExecContext,
 ) -> ExecResult {
-    let blocks: Vec<_> = testbench
-        .processes()
-        .filter(|block| !block.is_empty())
-        .collect();
+    let blocks: Vec<_> = testbench.processes().collect();
     let clocks = initialize_process_clocks(sim, testbench);
+    // A finished kernel returns without passing a collection point, so
+    // collect its temporaries here; no process is suspended anymore.
+    if let Some(result) = compiled::run(sim, testbench, ctx) {
+        sim.heap_safepoint();
+        return result;
+    }
     // One process on one clock spends time only in that clock's periods, so
     // stepping them in place is the whole schedule.
-    if blocks.is_empty() || (blocks.len() == 1 && clocks.len() <= 1) {
-        return exec_detailed(sim, testbench.statements(), ctx);
+    if blocks.is_empty() {
+        return ExecResult::Continue;
+    }
+    if blocks.len() == 1 && clocks.len() <= 1 {
+        let mut process = match native::Process::<B>::compile(blocks[0], &testbench.kernels()[0]) {
+            Ok(process) => process,
+            Err(error) => return ExecResult::Fail(format!("testbench compilation: {error}")),
+        };
+        let result = match process.resume(sim, ctx, &mut None, &mut Vec::new(), false) {
+            Poll::Ready(result) => result,
+            Poll::Pending => unreachable!("synchronous clock execution cannot suspend"),
+        };
+        sim.heap_safepoint();
+        return result;
     }
     // Suspended processes keep their temporaries outside state memory, so
-    // only the poll loop collects, with those temporaries as roots.
+    // only the scheduler loop collects, with those temporaries as roots.
     let blocked = std::mem::replace(&mut sim.heap_safepoints_blocked, true);
     let result = exec_processes(sim, testbench, ctx, &blocks);
     sim.heap_safepoints_blocked = blocked;
@@ -1762,15 +1196,17 @@ fn exec_processes<B: SimBackend>(
         .map(|&signal| sim.backend.get_four_state(signal))
         .collect();
     let mut locals = vec![initial_locals; blocks.len()];
-    let sim = RefCell::new(sim);
-    let ctx = RefCell::new(ctx);
-    let waits: Vec<_> = blocks.iter().map(|_| RefCell::new(None)).collect();
-    let reset_edges = RefCell::new(Vec::new());
-    let mut processes: Vec<_> = blocks
+    let mut waits: Vec<Option<ProcessWait<B::Event>>> = blocks.iter().map(|_| None).collect();
+    let mut reset_edges = Vec::new();
+    let mut processes = match blocks
         .iter()
-        .zip(&waits)
-        .map(|(block, wait)| Some(exec_process(&sim, &ctx, wait, &reset_edges, block)))
-        .collect();
+        .zip(testbench.kernels())
+        .map(|(block, kernel)| native::Process::<B>::compile(block, kernel).map(Some))
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(processes) => processes,
+        Err(error) => return ExecResult::Fail(format!("testbench compilation: {error}")),
+    };
     // Every clock generator runs from time 0, whether or not a process
     // waits on it.
     let mut clocks: Vec<ProcessClock<B::Event>> = testbench
@@ -1788,96 +1224,99 @@ fn exec_processes<B: SimBackend>(
     // their clock's next edge is still in the future. Rebasing after the
     // writes would silently absorb the asynchronous transition.
     {
-        let mut sim = sim.borrow_mut();
         if sim.dirty
-            && let Err(error) = sim.eval_comb()
+            && let Err(error) = settle_testbench(sim)
         {
             return ExecResult::Fail(format!("eval_comb: {error}"));
         }
         let mut state = sim
             .component_simulation
             .take()
-            .unwrap_or_else(|| crate::simulation::simulation_state(&sim));
+            .unwrap_or_else(|| Box::new(crate::simulation::simulation_state(sim)));
         state.synchronize_event_values(&sim.backend);
         sim.component_simulation = Some(state);
     }
+    let clock_batch = clock_batch::ClockBatch::new(sim);
     let mut now = 0;
-    let mut task_context = Context::from_waker(Waker::noop());
+    // Reuse per-slot batches instead of allocating on each rising and falling
+    // edge; their capacities can grow when a wait introduces another clock.
+    let mut falling = Vec::with_capacity(clocks.len());
+    let mut fired = Vec::with_capacity(clocks.len());
+    let mut resets = Vec::with_capacity(waits.len());
+    let mut events = Vec::with_capacity(clocks.len() + waits.len());
+    let mut moves = Vec::with_capacity(clocks.len());
     loop {
-        ctx.borrow_mut().scheduler_time = Some(now);
-        let draining = ctx.borrow().at_tick_limit();
+        ctx.scheduler_time = Some(now);
+        let draining = ctx.at_tick_limit();
         if draining {
-            ctx.borrow_mut().tick_limit_reached = true;
+            ctx.tick_limit_reached = true;
             // Stop starting work, but finish edges/releases already scheduled
             // by the final permitted tick before returning the simulator state.
             if clocks.iter().all(|clock| clock.falling_edge.is_none())
-                && waits.iter().all(|wait| {
-                    wait.borrow()
-                        .as_ref()
-                        .is_none_or(|wait| wait.resume_at.is_none())
-                })
+                && waits
+                    .iter()
+                    .all(|wait| wait.as_ref().is_none_or(|wait| wait.resume_at.is_none()))
             {
                 return ExecResult::Finished;
             }
         }
         // A waiter resumes at the end of its last cycle. Collect all edge
         // polarities for this timestamp before evaluating clocked logic.
-        let falling: Vec<_> = clocks
-            .iter_mut()
-            .filter_map(|clock| {
-                if clock.falling_edge == Some(now) {
-                    clock.falling_edge = None;
-                    Some(clock.event)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        for wait in &waits {
-            let mut wait = wait.borrow_mut();
+        falling.clear();
+        falling.extend(clocks.iter_mut().filter_map(|clock| {
+            if clock.falling_edge == Some(now) {
+                clock.falling_edge = None;
+                Some(clock.event)
+            } else {
+                None
+            }
+        }));
+        for wait in &mut waits {
             if let Some(pending) = wait.as_ref()
                 && pending.resume_at == Some(now)
             {
                 if let Some((signal, event, value)) = pending.reset {
-                    sim_set_u64(&mut sim.borrow_mut(), signal, value.into());
+                    sim_set_u64(sim, signal, value.into());
                     if let Some(event) = event {
-                        reset_edges.borrow_mut().push((event, value));
+                        reset_edges.push((event, value));
                     }
                 }
                 *wait = None;
             }
         }
-        // Poll only ready processes, in declaration order, until their next
-        // wait, completion, or a global stop. No simulator borrow crosses await.
+        // Resume ready processes in declaration order until their next wait,
+        // completion, or a global stop. Each native call returns before another
+        // process or a clock domain can run.
         let mut stopped = false;
-        for ((process, wait), locals) in processes.iter_mut().zip(&waits).zip(&mut locals) {
-            if draining || wait.borrow().is_some() {
+        for ((process, wait), locals) in processes.iter_mut().zip(&mut waits).zip(&mut locals) {
+            if draining || wait.is_some() {
                 continue;
             }
-            let Some(future) = process else { continue };
+            let Some(executable) = process else { continue };
             for (&signal, (value, mask)) in testbench.private_signals().iter().zip(locals.iter()) {
-                sim.borrow_mut()
-                    .set_four_state(signal, value.clone(), mask.clone());
+                write_testbench_signal(sim, signal, |sim| {
+                    sim.set_four_state(signal, value.clone(), mask.clone());
+                });
             }
-            let result = future.as_mut().poll(&mut task_context);
+            let result = executable.resume(sim, ctx, wait, &mut reset_edges, true);
             for (&signal, value) in testbench.private_signals().iter().zip(locals.iter_mut()) {
-                *value = sim.borrow().backend.get_four_state(signal);
+                *value = sim.backend.get_four_state(signal);
             }
             match result {
-                Poll::Ready(ExecResult::Continue | ExecResult::Break) => *process = None,
+                Poll::Ready(ExecResult::Continue) => *process = None,
                 Poll::Ready(ExecResult::Finished) => {
                     stopped = true;
                     break;
                 }
                 Poll::Ready(result) => return result,
-                Poll::Pending => debug_assert!(wait.borrow().is_some()),
+                Poll::Pending => debug_assert!(wait.is_some()),
             }
         }
         // No process is running, so every string handle is in state memory or
         // in a suspended process's saved temporaries.
-        collect_testbench_heap(&mut sim.borrow_mut(), testbench.private_signals(), &locals);
+        collect_testbench_heap(sim, testbench.private_signals(), &locals);
         for wait in &waits {
-            if let Some(wait) = wait.borrow().as_ref()
+            if let Some(wait) = wait.as_ref()
                 && wait.remaining != 0
             {
                 if let Some(clock) = clocks
@@ -1895,33 +1334,36 @@ fn exec_processes<B: SimBackend>(
                 }
             }
         }
-        let fired: Vec<_> = clocks
-            .iter()
-            .filter(|clock| !draining && !stopped && clock.next_edge == now)
-            .map(|clock| clock.event)
-            .collect();
+        fired.clear();
+        fired.extend(
+            clocks
+                .iter()
+                .filter(|clock| !draining && !stopped && clock.next_edge == now)
+                .map(|clock| clock.event),
+        );
         {
-            let resets: Vec<_> = waits
-                .iter()
-                .filter_map(|wait| {
-                    let wait = wait.borrow();
-                    let wait = wait.as_ref()?;
-                    wait.reset.map(|(_, event, _)| (wait.clock, event))
-                })
-                .collect();
-            let events: Vec<_> = falling
-                .iter()
-                .map(|&event| (event, 0))
-                .chain(fired.iter().map(|&event| (event, 1)))
-                .chain(reset_edges.borrow_mut().drain(..))
-                .collect();
+            resets.clear();
+            resets.extend(waits.iter().filter_map(|wait| {
+                let wait = wait.as_ref()?;
+                wait.reset.map(|(_, event, _)| (wait.clock, event))
+            }));
+            events.clear();
+            events.extend(
+                falling
+                    .iter()
+                    .map(|&event| (event, 0))
+                    .chain(fired.iter().map(|&event| (event, 1)))
+                    .chain(reset_edges.drain(..)),
+            );
             let result = step_process_events(
-                &mut sim.borrow_mut(),
+                sim,
                 &events,
                 &resets,
                 now,
                 !fired.is_empty(),
-                &mut ctx.borrow_mut(),
+                ctx,
+                &mut moves,
+                clock_batch.as_ref(),
             );
             if !matches!(result, ExecResult::Continue) {
                 return result;
@@ -1935,8 +1377,8 @@ fn exec_processes<B: SimBackend>(
                     clock.falling_edge = Some(now + clock.period - clock.period / 2);
                 }
             }
-            for wait in &waits {
-                if let Some(wait) = wait.borrow_mut().as_mut()
+            for wait in &mut waits {
+                if let Some(wait) = wait.as_mut()
                     && wait.remaining != 0
                     && let Some(clock) = clocks
                         .iter()
@@ -1958,13 +1400,13 @@ fn exec_processes<B: SimBackend>(
         }
         let next_edge = clocks
             .iter()
-            .filter(|_| !ctx.borrow().at_tick_limit())
+            .filter(|_| !ctx.at_tick_limit())
             .map(|clock| clock.next_edge)
             .min();
         let next_falling = clocks.iter().filter_map(|clock| clock.falling_edge).min();
         let next_resume = waits
             .iter()
-            .filter_map(|wait| wait.borrow().as_ref().and_then(|wait| wait.resume_at))
+            .filter_map(|wait| wait.as_ref().and_then(|wait| wait.resume_at))
             .min();
         if let Some(next) = [next_edge, next_falling, next_resume]
             .into_iter()
@@ -1972,8 +1414,8 @@ fn exec_processes<B: SimBackend>(
             .min()
         {
             now = next;
-        } else if ctx.borrow().at_tick_limit() {
-            ctx.borrow_mut().tick_limit_reached = true;
+        } else if ctx.at_tick_limit() {
+            ctx.tick_limit_reached = true;
             return ExecResult::Finished;
         } else {
             unreachable!("a live process has a pending wait");
@@ -1981,6 +1423,7 @@ fn exec_processes<B: SimBackend>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn step_process_events<B: SimBackend>(
     sim: &mut Simulator<B>,
     events: &[(B::Event, u8)],
@@ -1988,13 +1431,47 @@ fn step_process_events<B: SimBackend>(
     time: u64,
     rising: bool,
     ctx: &mut DetailedExecContext,
+    moves: &mut Vec<(B::Event, celox_runtime::Edge)>,
+    clock_batch: Option<&clock_batch::ClockBatch>,
 ) -> ExecResult {
     let mut state = sim
         .component_simulation
         .take()
-        .unwrap_or_else(|| crate::simulation::simulation_state(sim));
-    if sim.dirty
-        && let Err(error) = sim.eval_comb()
+        .unwrap_or_else(|| Box::new(crate::simulation::simulation_state(sim)));
+    let edges = sim.event_edges();
+    let schema = &sim.program.runtime_schema;
+    // Plain RTL needs simultaneous edge evaluation, not the timed process
+    // queue. The edge engine already skips inactive clock edges that cannot
+    // run a domain. Keep reset transitions on the queue: reset_gen writes
+    // their levels before submitting them, so its saved baseline matters.
+    // Latches need inactive phases settled before the next edge. VCD needs
+    // the queue's per-timestamp publication, even when no domain fires.
+    // A TB assignment can change an unrelated event (including an async
+    // reset). Preserve the queue's old baseline until it detects that change.
+    // Dirty combinational logic may propagate such a change, so it also takes
+    // the queue path even when no event signal has changed yet.
+    let direct_edges = !events.is_empty()
+        && !sim.dirty
+        && !state.has_unsampled_event_changes(&sim.backend)
+        && sim.vcd_writer.is_none()
+        && schema.persistent_comb_state.is_empty()
+        && sim.components.is_empty()
+        && !sim.schedule.timed
+        && schema.time_slots.is_empty()
+        && schema.watches.is_empty()
+        && schema.comb_observers.is_empty()
+        && schema.sample_shadows.is_empty()
+        && events.iter().all(|(event, _)| {
+            matches!(
+                edges[event.id()].kind,
+                Some(
+                    celox_design::DomainKind::ClockPosedge | celox_design::DomainKind::ClockNegedge
+                )
+            )
+        });
+    if !direct_edges
+        && sim.dirty
+        && let Err(error) = settle_testbench(sim)
     {
         sim.component_simulation = Some(state);
         return ExecResult::Fail(format!("eval_comb: {error}"));
@@ -2005,18 +1482,41 @@ fn step_process_events<B: SimBackend>(
     }
     // Submit all simultaneous edges before stepping: every clocked process
     // samples pre-edge values, before any nonblocking assignment is committed.
-    for &(event, value) in events {
-        state.schedule(
-            event,
-            sim.backend.resolve_signal(&event.addr()),
-            time,
-            value,
-        );
-    }
-    let result = if events.is_empty() {
-        state.settle_at(sim, time)
+    let result = if direct_edges {
+        moves.clear();
+        moves.extend(events.iter().map(|&(event, value)| {
+            (
+                event,
+                if value == 0 {
+                    celox_runtime::Edge::Falling
+                } else {
+                    celox_runtime::Edge::Rising
+                },
+            )
+        }));
+        let result = clock_batch
+            .and_then(|batch| batch.run(sim, events, time))
+            .unwrap_or_else(|| sim.edges(moves).map_err(|error| error.to_string()))
+            .map(|()| None);
+        // A later reset can return to the queue. Its pre-write baseline must
+        // include every clock and derived-domain update performed here.
+        state.synchronize_event_values(&sim.backend);
+        result
     } else {
-        state.step(sim)
+        for &(event, value) in events {
+            state.schedule(
+                event,
+                sim.backend.resolve_signal(&event.addr()),
+                time,
+                value,
+            );
+        }
+        if events.is_empty() {
+            state.settle_at(sim, time)
+        } else {
+            state.step(sim)
+        }
+        .map_err(|error| error.to_string())
     };
     sim.components.end_reset_cycles();
     sim.component_simulation = Some(state);
@@ -2032,30 +1532,6 @@ fn step_process_events<B: SimBackend>(
     }
     if drained.finished || sim.components.finish_requested() {
         return ExecResult::Finished;
-    }
-    ExecResult::Continue
-}
-
-/// Like [`exec`] but collects assertion results into `ctx` instead of
-/// short-circuiting on the first failure.
-fn exec_detailed<B: SimBackend>(
-    sim: &mut Simulator<B>,
-    stmts: &[TestbenchStatement<B>],
-    ctx: &mut DetailedExecContext,
-) -> ExecResult {
-    for stmt in stmts {
-        let r = exec_one_detailed(sim, stmt, ctx);
-        // Only a single process runs here, so between statements every string
-        // handle is in state memory.
-        sim.maybe_collect_heap([]);
-        // Stop on control-flow transfers or hard errors. Assertion failures that
-        // are allowed to continue return `Continue` and are recorded in `ctx`.
-        if matches!(
-            r,
-            ExecResult::Break | ExecResult::Finished | ExecResult::Fail(_)
-        ) {
-            return r;
-        }
     }
     ExecResult::Continue
 }
@@ -2203,17 +1679,33 @@ fn exec_one_detailed<B: SimBackend>(
             message,
             location,
         } => {
-            if let Err(e) = sim.eval_comb() {
+            let settle = if message.is_some() {
+                settle_testbench(sim)
+            } else {
+                settle_testbench_expr(sim, expr)
+            };
+            if let Err(e) = settle {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let passed = !eval_expr(sim, expr).is_zero();
             if passed {
-                let rendered_message = render_assert_message(sim, message, ctx.simulation_time());
-                ctx.assertions.push(AssertionResult {
-                    passed,
-                    message: rendered_message.clone(),
-                    location: location.clone(),
-                });
+                if ctx.record_passes {
+                    let rendered_message =
+                        render_assert_message(sim, message, ctx.simulation_time());
+                    ctx.assertions.push(AssertionResult {
+                        passed,
+                        message: rendered_message,
+                        location: location.clone(),
+                    });
+                } else {
+                    // The message is not rendered, but what its arguments
+                    // write still happens.
+                    for arg in assert_event_args(message) {
+                        if arg.expr.bytecode().writes_state() {
+                            eval_expr(sim, &arg.expr);
+                        }
+                    }
+                }
                 ExecResult::Continue
             } else {
                 publish_tb_assert_event(sim, *site_id, message);
@@ -2230,7 +1722,7 @@ fn exec_one_detailed<B: SimBackend>(
             }
         }
         GenericTestbenchStatement::Display { message, newline } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let rendered =
@@ -2238,57 +1730,23 @@ fn exec_one_detailed<B: SimBackend>(
             forward_display(&rendered, *newline);
             ExecResult::Continue
         }
-        GenericTestbenchStatement::If {
-            expr,
-            then_block,
-            else_block,
-        } => {
-            if let Err(e) = sim.eval_comb() {
-                return ExecResult::Fail(format!("eval_comb: {e}"));
-            }
-            if !eval_expr(sim, expr).is_zero() {
-                exec_detailed(sim, then_block, ctx)
-            } else {
-                exec_detailed(sim, else_block, ctx)
-            }
-        }
-        GenericTestbenchStatement::For {
-            loop_var,
-            start,
-            end,
-            inclusive,
-            step,
-            step_op,
-            reverse,
-            body,
-        } => exec_for_loop(
-            sim,
-            loop_var,
-            start,
-            end,
-            *inclusive,
-            *step,
-            *step_op,
-            *reverse,
-            |sim| exec_detailed(sim, body, ctx),
-        ),
-        GenericTestbenchStatement::Assign { dst, expr } => {
-            if let Err(e) = sim.eval_comb() {
-                return ExecResult::Fail(format!("eval_comb: {e}"));
-            }
-            let val = eval_expr(sim, expr);
-            sim_set_target(sim, dst, val);
-            ExecResult::Continue
+        GenericTestbenchStatement::If { .. }
+        | GenericTestbenchStatement::For { .. }
+        | GenericTestbenchStatement::Assign { .. }
+        | GenericTestbenchStatement::Break => {
+            unreachable!("statement is compiled into the process kernel")
         }
         GenericTestbenchStatement::WriteMemory { signal, writes } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
-            sim.apply_testbench_memory_writes(*signal, writes);
+            write_testbench_signal(sim, *signal, |sim| {
+                sim.apply_testbench_memory_writes(*signal, writes)
+            });
             ExecResult::Continue
         }
         GenericTestbenchStatement::RandomSeed { handle, value } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             ctx.random.seed(handle, eval_expr(sim, value).to_u64());
@@ -2303,7 +1761,7 @@ fn exec_one_detailed<B: SimBackend>(
             let value = ctx.random.get(handle, *width);
             if let Some(ret) = ret {
                 if ret.selection.is_some()
-                    && let Err(e) = sim.eval_comb()
+                    && let Err(e) = settle_testbench(sim)
                 {
                     return ExecResult::Fail(format!("eval_comb: {e}"));
                 }
@@ -2319,7 +1777,7 @@ fn exec_one_detailed<B: SimBackend>(
             signed,
             ret,
         } => {
-            if let Err(e) = sim.eval_comb() {
+            if let Err(e) = settle_testbench(sim) {
                 return ExecResult::Fail(format!("eval_comb: {e}"));
             }
             let min = eval_expr(sim, min).to_u64();
@@ -2334,7 +1792,7 @@ fn exec_one_detailed<B: SimBackend>(
             let seed = ctx.random.get_seed(handle);
             if let Some(ret) = ret {
                 if ret.selection.is_some()
-                    && let Err(e) = sim.eval_comb()
+                    && let Err(e) = settle_testbench(sim)
                 {
                     return ExecResult::Fail(format!("eval_comb: {e}"));
                 }
@@ -2352,7 +1810,7 @@ fn exec_one_detailed<B: SimBackend>(
             ret_strict,
         } => {
             if sim.dirty
-                && let Err(error) = sim.eval_comb()
+                && let Err(error) = settle_testbench(sim)
             {
                 return ExecResult::Fail(format!("eval_comb: {error}"));
             }
@@ -2412,7 +1870,6 @@ fn exec_one_detailed<B: SimBackend>(
             );
             ExecResult::Continue
         }
-        GenericTestbenchStatement::Break => ExecResult::Break,
         GenericTestbenchStatement::Finish => ExecResult::Finished,
     }
 }
@@ -2458,7 +1915,7 @@ fn tick_component_clock<B: SimBackend>(
         .take()
         .ok_or_else(|| "component event scheduler is not initialized".to_string())?;
     if sim.dirty {
-        if let Err(error) = sim.eval_comb() {
+        if let Err(error) = settle_testbench(sim) {
             sim.component_simulation = Some(state);
             return Err(error.to_string());
         }
@@ -2533,6 +1990,7 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
+
     use crate::{Simulator, TestResult};
 
     #[test]
@@ -2632,24 +2090,1511 @@ mod tests {
     }
 
     #[test]
-    fn expression_stores_notify_vcd_without_exposing_memory() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut sim = Simulator::builder("module Top (a: input logic<8>) {}", "Top")
-            .vcd(dir.path().join("expression.vcd"))
-            .build()
+    fn private_tb_writes_do_not_invalidate_hardware_but_port_aliases_do() {
+        let source = r#"
+            module Dut(a: input logic<8>, q: output logic<8>) { assign q = a + 1; }
+            #[test(Top)] module Top {
+                var a: logic<8>;
+                var q: logic<8>;
+                var scratch: logic<8>;
+                inst dut: Dut(a, q);
+                initial { scratch = 3; a = scratch; $assert(q == 4); $finish(); }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .build_interpreter()
             .unwrap();
+        let scratch = sim.signal("scratch");
         let a = sim.signal("a");
-        let expr = celox_testbench::CompiledExpr::new(celox_testbench::ExprBytecode::new(vec![
-            celox_testbench::ExprOpcode::ConstU64(7),
-            celox_testbench::ExprOpcode::StoreU64 {
-                location: a.offset,
-                byte_size: 1,
-            },
-            celox_testbench::ExprOpcode::ConstU64(7),
-        ]));
+        let q = sim.signal("q");
+        settle_testbench(&mut sim).unwrap();
+        sim_set_u64(&mut sim, scratch, 3);
+        assert!(!sim.dirty);
+        sim_set_u64(&mut sim, a, 3);
+        assert!(sim.dirty);
+        settle_testbench(&mut sim).unwrap();
+        assert_eq!(sim.get_as::<u8>(q), 4);
+    }
+
+    // Retained comb state keeps TB edges out of the compiled scheduler, so a
+    // two-state case covering every selector value must not retain any.
+    #[test]
+    fn complete_binary_case_retains_no_comb_state() {
+        let arms = (0..4)
+            .map(|i| format!("2'd{i}: q = d + 8'd{i};"))
+            .collect::<String>();
+        let source = format!(
+            "module Top(s: input logic<2>, d: input logic<8>, q: output logic<8>) {{
+                always_comb {{ case s {{ {arms} }} }}
+            }}"
+        );
+        let sim = Simulator::builder(&source, "Top")
+            .build_interpreter()
+            .unwrap();
+        assert!(sim.program.runtime_schema.persistent_comb_state.is_empty());
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn native_image_retains_latch_observation_and_tb_dependencies() {
+        let source = include_str!("../testdata/veryl/latch_initial.veryl");
+        let image = Simulator::builder(source, "Top")
+            .allow_inferred_latches(true)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        let image =
+            crate::NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap())
+                .unwrap();
+        let mut sim = Simulator::builder("", "Top")
+            .build_native_from_image(image)
+            .unwrap();
+        assert!(!sim.program.runtime_schema.persistent_comb_state.is_empty());
+        assert!(!sim.program.rtl_accesses.is_empty());
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn native_clock_batches_preserve_odd_periods_and_tb_before_edge_order() {
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset_async_low, q: output logic<8>) {
+                always_ff (clk, rst) { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst fast: $tb::clock_gen #(period: 3);
+                inst slow: $tb::clock_gen #(period: 4);
+                var rst_n: reset_async_low;
+                var enable: logic;
+                var gated: reset_async_low;
+                assign gated = rst_n && enable;
+                var a: logic<8>;
+                var b: logic<8>;
+                inst ca: Counter(clk: fast, rst: gated, q: a);
+                inst cb: Counter(clk: slow, rst: gated, q: b);
+                initial {
+                    rst_n = 1;
+                    enable = 0;
+                    fast.next(4);
+                    $assert(a == 0 && b == 0);
+                    enable = 1;
+                    fast.next(4);
+                    // At time 24 both clocks are due, but the TB runs first.
+                    $assert(a == 4 && b == 3);
+                    fast.next(4);
+                    $assert(a == 8 && b == 6);
+                    $finish();
+                }
+                initial { slow.next(100); }
+            }
+        "#;
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let batch = clock_batch::ClockBatch::new(&sim);
+            assert_eq!(batch.is_some(), mode != crate::SchedulerMode::Reference);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            if let Some(batch) = batch {
+                assert_eq!(sim.backend.get_as::<u64>(batch.count_slot()), 1);
+            }
+        }
+    }
+
+    #[test]
+    fn native_tb_scheduler_runs_processes_and_multiple_clocks_without_host_roundtrips() {
+        let source = r#"
+            module Counter(clk: input clock, q: output bit<32>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst fast: $tb::clock_gen #(period: 3);
+                inst slow: $tb::clock_gen #(period: 4);
+                var a: u32; var b: u32; var observed: u32;
+                inst ca: Counter(clk: fast, q: a);
+                inst cb: Counter(clk: slow, q: b);
+                initial { for i in 0..128 { fast.next(); observed = a; } $finish(); }
+                initial { for i in 0..128 { slow.next(); } }
+            }
+        "#;
+        // No clock-wait batching in the source: both TB processes resume each cycle.
+        let mut results = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters(&mut sim);
+            results.push((
+                sim.get_as::<u32>(sim.signal("a")),
+                sim.get_as::<u32>(sim.signal("b")),
+                sim.get_as::<u32>(sim.signal("observed")),
+            ));
+            if mode == crate::SchedulerMode::Compiled {
+                assert!(counters.0 < 10, "native entries: {counters:?}");
+                assert!(counters.1 < 3, "host edge batches: {counters:?}");
+            }
+        }
+        assert_eq!(results[0], results[1]);
+        assert_eq!(results[1], (128, 96, 128));
+    }
+
+    /// Run `source` with the reference loop and with the compiled TB
+    /// scheduler, and return each result with the compiled run's counters.
+    fn run_both_schedulers(
+        source: &str,
+        signals: &[&str],
+    ) -> [(TestResult, Vec<u64>, (usize, usize, usize)); 2] {
+        [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ]
+        .map(|mode| {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            let result = run_compiled_testbench(&mut sim, &tb);
+            let counters = compiled::take_counters(&mut sim);
+            assert_eq!(
+                counters.0 != 0,
+                mode == crate::SchedulerMode::Compiled,
+                "generated scheduler runs: {counters:?}"
+            );
+            let values = signals
+                .iter()
+                .map(|name| sim.get_as::<u64>(sim.signal(name)))
+                .collect();
+            (result, values, counters)
+        })
+    }
+
+    #[test]
+    fn compiled_tb_statements_stay_in_the_generated_scheduler() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                var total: logic<16>;
+                inst dut: Counter(clk, q);
+                initial {
+                    total = 0;
+                    for round in 0..4 {
+                        clk.next(5);
+                        $assert(q == 5 * (round as 8 + 1), "round %d q=%d", round, q);
+                        $display("round %d q=%d at %t", round, q);
+                        total += q as 16;
+                    }
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "total"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.1, vec![20, 50]);
+        // Assertions, displays and the finish run in generated code.
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_resets_and_their_edges_stay_in_the_generated_scheduler() {
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset, q: output logic<8>) {
+                always_ff { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                inst rst: $tb::reset_gen (clk);
+                var q: logic<8>;
+                var total: logic<16>;
+                inst dut: Counter(clk, rst, q);
+                initial {
+                    total = 0;
+                    for round in 0..4 {
+                        rst.assert(2);
+                        $assert(q == 0);
+                        clk.next(5);
+                        $assert(q == 5);
+                        total += q as 16;
+                    }
+                    // A reset the TB assigns moves its event too.
+                    rst = 0;
+                    clk.next(1);
+                    $assert(q == 0);
+                    rst = 1;
+                    clk.next(3);
+                    total += q as 16;
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "total"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.1, vec![3, 23]);
+        // The resets, their releases and their edges run in generated code.
+        assert_eq!(compiled.2.1, 0, "host edge batches: {:?}", compiled.2);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_resets_with_derived_resets_match_the_reference() {
+        // The design derives its own reset from the TB's: those writes stay
+        // in the host, without costing every slot of the run.
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset, run: input logic,
+                           q: output logic<8>) {
+                let core_rst: reset = rst & run;
+                always_ff (clk, core_rst) { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                inst rst: $tb::reset_gen (clk);
+                var run: logic;
+                var q: logic<8>;
+                inst dut: Counter(clk, rst, run, q);
+                initial {
+                    run = 1;
+                    rst.assert(2);
+                    clk.next(5);
+                    $assert(q == 5);
+                    rst.assert(1);
+                    $assert(q == 0);
+                    clk.next(3);
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_failures_keep_their_messages_and_times() {
+        // A second process reports physical event times instead of ticks.
+        for (extra, expected) in [
+            ("", "continue t=3 q=3\nfatal t=5 q=5"),
+            (
+                "initial { clk.next(100); }",
+                "continue t=6 q=3\nfatal t=10 q=5",
+            ),
+        ] {
+            let source = format!(
+                r#"
+                module Counter(clk: input clock, q: output logic<8>) {{
+                    always_ff {{ q += 1; }}
+                }}
+                #[test(Top)] module Top {{
+                    inst clk: $tb::clock_gen;
+                    var q: logic<8>;
+                    inst dut: Counter(clk, q);
+                    initial {{
+                        clk.next(3);
+                        $assert_continue(q == 100, "continue t=%t q=%d", q);
+                        clk.next(2);
+                        $assert(q == 200, "fatal t=%t q=%d", q);
+                        clk.next(2);
+                        $finish();
+                    }}
+                    {extra}
+                }}
+            "#
+            );
+            let [reference, compiled] = run_both_schedulers(&source, &["q"]);
+            assert_eq!(reference.0, TestResult::Fail(expected.into()));
+            assert_eq!(reference.0, compiled.0);
+            assert_eq!(reference.1, compiled.1);
+            assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+        }
+    }
+
+    #[test]
+    fn compiled_tb_rtl_reports_keep_their_times() {
+        // The generated scheduler runs many times before the host drains
+        // these reports.
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff {
+                    q += 1;
+                    if q[1:0] == 2'd2 { $assert_continue(1'b0, "rtl t=%t q=%d", q); }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(12); $finish(); }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert!(
+            matches!(&reference.0, TestResult::Fail(message) if message.lines().count() == 3),
+            "{:?}",
+            reference.0
+        );
+        assert_eq!(reference.0, compiled.0);
+        assert_eq!(compiled.2.1, 0, "host edge batches: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn tb_messages_format_unknown_bits() {
+        // Digits whose bits are all unknown print `x`, partly unknown ones
+        // `X` (IEEE 1800-2023 21.2.1.3). Veryl prints any unknown decimal as
+        // `x`.
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var mem: logic<16> [4];
+                var padded: logic<12> [4];
+                var p: logic<8>;
+                var u: logic<8>;
+                assign p = 8'bxx0x0101;
+                initial {
+                    clk.next(1);
+                    $assert_continue(1'b0, "m=%h n=%h p=%h d=%d", mem[2], padded[1], p, u);
+                    $assert(1'b1, "p=%h", p);
+                    $finish();
+                }
+            }
+        "#;
+        fn check<B: SimBackend>(build: impl Fn() -> Simulator<B>, context: &str) {
+            let mut sim = build();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            let detailed = run_testbench_detailed(&mut sim, &tb);
+            let messages: Vec<_> = detailed
+                .assertions
+                .iter()
+                .map(|assertion| {
+                    (
+                        assertion.passed,
+                        String::from_utf8(assertion.message.clone().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                messages,
+                [
+                    (false, "m=xxxx n=xxx p=X5 d=x".to_string()),
+                    (true, "p=X5".to_string())
+                ],
+                "{context}"
+            );
+            let mut sim = build();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench(&mut sim, &tb),
+                TestResult::Fail("m=xxxx n=xxx p=X5 d=x".into()),
+                "{context}"
+            );
+        }
+        let builder = |mode| {
+            Simulator::builder(source, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+        };
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            check(
+                || builder(mode).build_native().unwrap(),
+                &format!("native {mode:?}"),
+            );
+            #[cfg(feature = "cranelift")]
+            check(
+                || builder(mode).build_cranelift().unwrap(),
+                &format!("cranelift {mode:?}"),
+            );
+            check(
+                || builder(mode).build_interpreter().unwrap(),
+                &format!("interpreter {mode:?}"),
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_tb_finish_in_one_process_stops_the_others() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                var loops: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(10); $finish(); }
+                initial {
+                    loops = 0;
+                    for i in 0..100 { clk.next(); loops += 1; }
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "loops"]);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_drains_events_before_the_buffer_overflows() {
+        // More records in one time than the runtime event buffer holds.
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                initial {
+                    for i in 0..3000 { $write(""); }
+                    clk.next();
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &[]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn detailed_compiled_tb_runs_record_passing_assertions() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial {
+                    for i in 0..3 {
+                        clk.next();
+                        $assert(q != 0, "q=%d", q);
+                    }
+                    $finish();
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .four_state(false)
+            .build_native()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let detailed = run_testbench_detailed(&mut sim, &tb);
+        assert!(detailed.passed);
+        let messages: Vec<_> = detailed
+            .assertions
+            .iter()
+            .map(|assertion| (assertion.passed, assertion.message.clone()))
+            .collect();
+        assert_eq!(
+            messages,
+            [1, 2, 3].map(|q| (true, Some(format!("q={q}").into_bytes())))
+        );
+    }
+
+    #[test]
+    fn passing_assertions_keep_the_writes_of_their_messages() {
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var count: u8;
+                function bump() -> u8 {
+                    count = count + 1;
+                    return count;
+                }
+                initial {
+                    count = 0;
+                    $assert(1'b1, "%d", bump());
+                    $assert(count == 1, "%d", bump());
+                    clk.next();
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["count"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, vec![2]);
+        assert_eq!(compiled.1, vec![2]);
+    }
+
+    #[test]
+    fn compiled_tb_drains_rtl_event_bursts() {
+        // Bursts of records in successive times that fit the runtime event
+        // buffer one at a time, but not together.
+        let source = r#"
+            module Burst(clk: input clock, q: output logic<8>) {
+                always_ff {
+                    q += 1;
+                    if q == 1 { for i in 0..400 { $write(""); } }
+                    if q == 2 { for i in 0..800 { $write(""); } }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Burst(clk, q);
+                initial { clk.next(4); $finish(); }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(compiled.1, reference.1);
+    }
+
+    #[test]
+    fn compiled_tb_settle_continuations_are_not_limited_to_one_byte() {
+        let mut source =
+            String::from("#[test(Top)] module Top { var a: bit<8>; let q: bit<8> = a + 1; ");
+        for _ in 0..260 {
+            source.push_str("initial { $assert(q == 1); } ");
+        }
+        source.push_str("initial { $finish(); } }");
+        let mut sim = Simulator::builder(&source, "Top")
+            .four_state(false)
+            .build_interpreter()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+
+    #[test]
+    fn native_tb_dynamic_clock_count_preserves_dut_writes() {
+        let source = r#"
+            module Register(clk: input clock, d: input bit<32>, q: output bit<32>) {
+                let next_value: bit<32> = d + 1;
+                always_ff { q = next_value; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var d: u32; var q: u32;
+                inst dut: Register(clk, d, q);
+                function change_input() -> u32 { d = 7; return 1; }
+                initial {
+                    d=1; clk.next(); $assert(q==2);
+                    clk.next(change_input()); $assert(q==8); $finish();
+                }
+            }
+        "#;
+        fn run<B: SimBackend>(mut sim: Simulator<B>) {
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+        }
+        run(Simulator::builder(source, "Top")
+            .four_state(false)
+            .build_native()
+            .unwrap());
+        run(Simulator::builder(source, "Top")
+            .four_state(false)
+            .build_interpreter()
+            .unwrap());
+        #[cfg(feature = "cranelift")]
+        run(Simulator::builder(source, "Top")
+            .four_state(false)
+            .build()
+            .unwrap());
+    }
+
+    #[test]
+    fn concurrent_tb_preserves_direct_async_reset_writes() {
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset_async_high,
+                           q: output logic<8>) {
+                always_ff (clk, rst) { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst fast: $tb::clock_gen #(period: 2);
+                inst slow: $tb::clock_gen #(period: 20);
+                var rst: reset_async_high;
+                var q: logic<8>;
+                inst dut: Counter(clk: slow, rst, q);
+                initial {
+                    rst = 0;
+                    fast.next();
+                    $assert(q == 1);
+                    rst = 1;
+                    __OBSERVE__
+                    fast.next();
+                    $assert(q == 0);
+                    $finish();
+                }
+                initial { slow.next(100); }
+            }
+        "#;
+        // Reading the reset settles hardware and clears `dirty`; its edge
+        // must still be detected against the queue's previous sample.
+        for observation in ["", "$assert(rst == 1);"] {
+            let source = source.replace("__OBSERVE__", observation);
+            let mut sim = Simulator::builder(&source, "Top")
+                .build_interpreter()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+        }
+    }
+
+    /// A reset that `rst.assert` moves and a TB write then makes unknown
+    /// keeps its unknown level when its edges fall back to the host. The
+    /// move from 1 is a negedge (IEEE 1800-2023 9.4.2), and the flip-flop's
+    /// unknown reset condition is false (12.4): it counts once more.
+    fn unknown_tb_reset_levels<B: SimBackend>(
+        build: impl Fn(crate::SchedulerMode) -> Simulator<B>,
+    ) {
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = build(mode);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let [rst, count, c0] =
+                ["rst", "count", "c0"].map(|name| sim.get_four_state(sim.signal(name)));
+            assert_ne!(rst.1, 0u8.into(), "{mode:?}: rst stays unknown: {rst:?}");
+            assert_eq!(c0, (4u8.into(), 0u8.into()), "{mode:?}");
+            // The reference scheduler does not run the negedge of a TB
+            // write to an unknown level (#2650).
+            if mode == crate::SchedulerMode::Compiled {
+                assert_eq!(count, (9u8.into(), 0u8.into()), "{mode:?}");
+            }
+        }
+    }
+
+    const UNKNOWN_TB_RESET: &str = r#"
+        module Counter(clk: input clock, rst: input reset, count: output logic<8>) {
+            always_ff (clk, rst) { if_reset { count = 0; } else { count += 1; } }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen (clk);
+            var unknown: logic;
+            var count: logic<8>;
+            var c0: logic<8>;
+            inst dut: Counter(clk, rst, count);
+            initial {
+                rst.assert(2);
+                clk.next(4);
+                c0 = count;
+                rst = unknown;
+                clk.next(4);
+                $finish();
+            }
+        }
+    "#;
+
+    #[test]
+    fn unknown_tb_reset_levels_survive_host_edges_on_the_interpreter() {
+        unknown_tb_reset_levels(|mode| {
+            Simulator::builder(UNKNOWN_TB_RESET, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn unknown_tb_reset_levels_survive_host_edges_natively() {
+        unknown_tb_reset_levels(|mode| {
+            Simulator::builder(UNKNOWN_TB_RESET, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
+    /// A four-state design's TB edges run in the generated scheduler, as
+    /// the edge engine runs them: a reset, a clock enable and so a gated
+    /// clock that the TB sets to x or z, and flip-flops that start at x.
+    fn four_state_tb_edges<B: SimBackend>(build: impl Fn(crate::SchedulerMode) -> Simulator<B>) {
+        let names = [
+            "count", "gated", "c0", "c1", "c2", "c3", "c4", "g1", "g2", "g3", "g4",
+        ];
+        let mut results = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = build(mode);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters(&mut sim);
+            let values: Vec<_> = names
+                .iter()
+                .map(|name| sim.get_four_state(sim.signal(name)))
+                .collect();
+            results.push((values, counters.1));
+        }
+        // The reference scheduler misses the negedge of `rst = 'x` (#2650):
+        // from then on its count is one lower.
+        let mut reference = results[0].0.clone();
+        for (index, name) in names.iter().enumerate() {
+            if ["count", "c3", "c4"].contains(name) {
+                reference[index].0 += 1u8;
+            }
+        }
+        assert_eq!(reference, results[1].0);
+        // A TB write moves the reset in the unit unless the reset moves to
+        // or from x or z: its writes from its initial x to 0, from 1 to x,
+        // from x to z and from z to 1 go to the host, and so does the first
+        // step.
+        assert_eq!(results[1].1, 5, "host edge batches");
+        let (value, mask) = &results[1].0[2];
+        assert!(*mask != 0u8.into(), "count starts at x: {value}/{mask}");
+    }
+
+    const FOUR_STATE_TB: &str = r#"
+        module Gate(clk: input clock, rst: input reset_async_low, en: input logic,
+                    count: output logic<8>, gated: output logic<8>) {
+            let gclk: '_ clock = clk & en;
+            always_ff (clk, rst) { if_reset { count = 0; } else { count += 1; } }
+            always_ff (gclk) { gated += 1; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var rst: reset_async_low;
+            var en: logic;
+            var count: logic<8>;
+            var gated: logic<8>;
+            var c0: logic<8>; var c1: logic<8>; var c2: logic<8>;
+            var c3: logic<8>; var c4: logic<8>;
+            var g1: logic<8>; var g2: logic<8>; var g3: logic<8>; var g4: logic<8>;
+            inst dut: Gate(clk, rst, en, count, gated);
+            initial {
+                clk.next(8);
+                c0 = count;
+                rst = 0;
+                clk.next(1);
+                rst = 1;
+                en = 'x;
+                clk.next(8);
+                c1 = count; g1 = gated;
+                en = 1;
+                clk.next(8);
+                c2 = count; g2 = gated;
+                rst = 'x;
+                clk.next(8);
+                c3 = count; g3 = gated;
+                rst = 'z;
+                en = 'z;
+                clk.next(4);
+                rst = 1;
+                en = 0;
+                clk.next(8);
+                c4 = count; g4 = gated;
+                $finish();
+            }
+        }
+    "#;
+
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_on_the_interpreter() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_natively() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "cranelift")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_with_cranelift() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_cranelift()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "wasm-runtime")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_on_wasm() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_wasm()
+                .unwrap()
+        });
+    }
+
+    const UNKNOWN_WRITES_TB: &str = r#"
+        module Top2(clk: input clock, a: input logic, q: output logic) {
+            always_ff (clk) { q = a; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var r: logic; var s: logic; var a: logic; var q: logic;
+            var w: logic<8>; var m: logic<8>;
+            var n: logic; var o: logic; var e: logic; var t: logic<8>;
+            var i1: logic<8>; var i2: logic<8>;
+            var v: logic<8>; var idx: logic<3>; var b: bit<8>;
+            var y: logic; var f: bit;
+            var k4: logic<4>; var wm: logic; var ux: logic<8>; var cb: bit<8>;
+            var ir: logic; var ua: logic<8> [4]; var idx2: logic<2>; var ue: logic<8>;
+            var pz: logic<4>; var sel: logic;
+            inst dut: Top2(clk, a, q);
+            function pass_bit(x: input bit) -> bit {
+                return x;
+            }
+            initial {
+                r = 1; s = 0; a = 0; v = 0;
+                clk.next(1);
+                r = 'x; s = 'z; a = 'x;
+                w = 'x;
+                m = 8'b01xz01xz;
+                n = r & 1; o = r | 1; e = r == 1;
+                t = if r ? 8'd3 : 8'd5;
+                if r { i1 = 1; } else { i1 = 2; }
+                if r == 1 { i2 = 1; } else { i2 = 2; }
+                idx = 'x;
+                v[idx] = 1;
+                b = m as u8;
+                y = s;
+                f = pass_bit(r);
+                k4 = 4'b0101;
+                wm = k4 ==? 4'b01xx;
+                ux = 'x;
+                cb = (ux as u8) + 1;
+                ir = v[idx];
+                ua[0] = 8'h12;
+                idx2 = 'x;
+                ue = ua[idx2];
+                pz = 4'b0z10;
+                sel = pz[2];
+                clk.next(2);
+                $finish();
+            }
+        }
+    "#;
+
+    /// A TB write stores x and z bits in a four-state build, in both
+    /// schedulers: constants, operator results, and through the DUT. An
+    /// unknown condition is false (IEEE 1800-2023 12.4), an unknown ternary
+    /// condition combines both arms (11.4.11), a write at an unknown index
+    /// writes nothing and a read there is x (11.5.1), a copy or a selection keeps z bits, a
+    /// wildcard pattern's unknown bits match anything (11.4.6), and a
+    /// two-state cast, variable or function argument reads unknown bits as
+    /// 0 (6.11.2). A two-state build reads every unknown bit as 0, a
+    /// wildcard pattern's too. A two-state build reads every unknown bit as 0.
+    fn tb_writes_keep_unknown_bits<B: SimBackend>(
+        build: impl Fn(bool, crate::SchedulerMode) -> Simulator<B>,
+    ) {
+        let names = [
+            "r", "s", "a", "q", "w", "m", "n", "o", "e", "t", "i1", "i2", "v", "b", "y", "f", "wm",
+            "cb", "ir", "ue", "sel",
+        ];
+        // Celox encodes an X bit as (1, 1) and a Z bit as (0, 1).
+        let four_state: [(u64, u64); 21] = [
+            (1, 1),
+            (0, 1),
+            (1, 1),
+            (1, 1),
+            (0xff, 0xff),
+            (0x66, 0x33),
+            (1, 1),
+            (1, 0),
+            (1, 1),
+            (7, 6),
+            (2, 0),
+            (2, 0),
+            (0, 0),
+            (0x44, 0),
+            (0, 1),
+            (0, 0),
+            (1, 0),
+            (1, 0),
+            (1, 1),
+            (0xff, 0xff),
+            (0, 1),
+        ];
+        let two_state: [(u64, u64); 21] = [
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0x44, 0),
+            (0, 0),
+            (1, 0),
+            (0, 0),
+            (5, 0),
+            (2, 0),
+            (2, 0),
+            (1, 0),
+            (0x44, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (1, 0),
+            (1, 0),
+            (0x12, 0),
+            (0, 0),
+        ];
+        for (four, expected) in [(true, four_state), (false, two_state)] {
+            for mode in [
+                crate::SchedulerMode::Reference,
+                crate::SchedulerMode::Compiled,
+            ] {
+                let mut sim = build(four, mode);
+                let tb = compile_initial_testbench(&sim).unwrap();
+                assert_eq!(
+                    run_compiled_testbench_to_finish(&mut sim, &tb),
+                    TestResult::Pass
+                );
+                let values: Vec<_> = names
+                    .iter()
+                    .map(|name| sim.get_four_state(sim.signal(name)))
+                    .collect();
+                let expected: Vec<_> = expected
+                    .iter()
+                    .map(|&(value, mask)| (BigUint::from(value), BigUint::from(mask)))
+                    .collect();
+                assert_eq!(values, expected, "four_state={four} {mode:?} {names:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tb_writes_keep_unknown_bits_on_the_interpreter() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_natively() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "cranelift")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_with_cranelift() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_cranelift()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "wasm-runtime")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_on_wasm() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_wasm()
+                .unwrap()
+        });
+    }
+
+    /// An immediate assertion of an unknown value fails (IEEE 1800-2023
+    /// 16.3), and its message keeps the unknown bits of a computed argument.
+    #[test]
+    fn tb_assertions_of_unknown_values_fail() {
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var r: logic; var p: logic<8>;
+                initial {
+                    r = 'x;
+                    p = 8'b0000_01x1;
+                    clk.next(1);
+                    $assert(r | 1, "known");
+                    $assert_continue(r == 1, "eq=%b sum=%h", r == 1, p + 1);
+                    $assert_continue(r, "plain");
+                    $finish();
+                }
+            }
+        "#;
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            let detailed = run_testbench_detailed(&mut sim, &tb);
+            let messages: Vec<_> = detailed
+                .assertions
+                .iter()
+                .map(|assertion| {
+                    (
+                        assertion.passed,
+                        String::from_utf8(assertion.message.clone().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                messages,
+                [
+                    (true, "known".to_string()),
+                    (false, "eq=x sum=xxxxxxxx".to_string()),
+                    (false, "plain".to_string()),
+                ],
+                "{mode:?}"
+            );
+        }
+    }
+
+    // Latches, including ones that read the clock, keep TB edges in the
+    // generated scheduler: a TB write settles there before the edges.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn latch_designs_run_tb_edges_natively() {
+        let icg = r#"
+            module Icg(clk: input clock, en: input logic, count: output logic<8>) {
+                var en_l: logic;
+                always_comb { if !clk { en_l = en; } }
+                let gclk: '_ clock = clk & en_l;
+                always_ff (gclk) { count += 1; }
+            }
+            module Pipeline(clk: input clock, upstream: output logic<8>,
+                            held: output logic<8>, downstream: output logic<8>) {
+                always_ff (clk) { upstream += 1; downstream = held; }
+                always_comb { if !clk { held = upstream; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var en: logic;
+                var count: logic<8>;
+                var upstream: logic<8>;
+                var held: logic<8>;
+                var downstream: logic<8>;
+                inst gate: Icg(clk, en, count);
+                inst pipe: Pipeline(clk, upstream, held, downstream);
+                initial {
+                    en = 0;
+                    clk.next(3);
+                    $assert(count == 0);
+                    $assert(upstream == 3 && held == 3 && downstream == 2);
+                    en = 1;
+                    clk.next(4);
+                    $assert(count == 4);
+                    en = 0;
+                    clk.next(2);
+                    $assert(count == 4);
+                    en = 1;
+                    clk.next(1);
+                    $assert(count == 5);
+                    $finish();
+                }
+            }
+        "#;
+        for source in [include_str!("../testdata/veryl/latch_initial.veryl"), icg] {
+            let mut sim = Simulator::builder(source, "Top")
+                .allow_inferred_latches(true)
+                .build_native()
+                .unwrap();
+            assert!(!sim.program.runtime_schema.persistent_comb_state.is_empty());
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters(&mut sim);
+            assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+        }
+    }
+
+    #[test]
+    fn concurrent_tb_preserves_low_phase_latch_updates() {
+        let source = r#"
+            module Pipeline(clk: input clock, upstream: output logic<8>,
+                            held: output logic<8>, downstream: output logic<8>) {
+                always_ff (clk) { upstream += 1; downstream = held; }
+                always_comb { if !clk { held = upstream; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen #(period: 2);
+                var upstream: logic<8>;
+                var held: logic<8>;
+                var downstream: logic<8>;
+                inst dut: Pipeline(clk, upstream, held, downstream);
+                initial {
+                    clk.next(4);
+                    $assert(upstream == 4);
+                    $assert(held == 4);
+                    $assert(downstream == 3);
+                    $finish();
+                }
+                initial { clk.next(100); }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .allow_inferred_latches(true)
+            .build_interpreter()
+            .unwrap();
+        assert!(!sim.program.runtime_schema.persistent_comb_state.is_empty());
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+
+    // Clocks that only pace TB processes, with no RTL domain, still run
+    // their edges in the generated scheduler.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn tb_only_clocks_run_edges_natively() {
+        let source = r#"
+            #[test(Top)]
+            module Top {
+                inst slow: $tb::clock_gen #(period: 10);
+                inst fast: $tb::clock_gen #(period: 2);
+                var observed: logic;
+                initial {
+                    slow.next(1);
+                    $assert(observed == 1'd1);
+                    $finish();
+                }
+                initial {
+                    fast.next(3);
+                    observed = 1'd1;
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top").build_native().unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        compiled::take_counters(&mut sim);
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        let counters = compiled::take_counters(&mut sim);
+        assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+    }
+
+    #[test]
+    fn concurrent_tb_publishes_each_clock_phase_to_vcd() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff (clk) { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen #(period: 2);
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(4); $assert(q == 4); $finish(); }
+                initial { clk.next(100); }
+            }
+        "#;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("concurrent.vcd");
+        let mut sim = Simulator::builder(source, "Top")
+            .vcd(&path)
+            .build_interpreter()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        sim.flush_vcd().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Native edges publish each time step the same way.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let native_path = directory.path().join("native.vcd");
+            let mut sim = Simulator::builder(source, "Top")
+                .vcd(&native_path)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters(&mut sim);
+            assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+            sim.flush_vcd().unwrap();
+            let native = std::fs::read_to_string(&native_path).unwrap();
+            let body = |text: &str| text.split_once("$enddefinitions").unwrap().1.to_string();
+            assert_eq!(body(&native), body(&text));
+        }
+        let timestamps: Vec<_> = text
+            .lines()
+            .filter_map(|line| line.strip_prefix('#'))
+            .map(|time| time.parse::<u64>().unwrap())
+            .collect();
+        for falling_edge in [1, 3, 5, 7] {
+            assert!(
+                timestamps.contains(&falling_edge),
+                "missing low phase {falling_edge}: {timestamps:?}"
+            );
+        }
+    }
+
+    // A `$finish` an RTL domain runs on a native edge still publishes the
+    // terminating time step to the VCD.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn rtl_finish_on_native_edge_publishes_terminal_step() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff (clk) {
+                    q += 1;
+                    if q == 3 { $finish(); }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen #(period: 2);
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(100); }
+            }
+        "#;
+        let directory = tempfile::tempdir().unwrap();
+        let unpublished = {
+            let mut sim = Simulator::builder(source, "Top").build_native().unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1000)
+        };
+        assert_eq!(unpublished.result, TestResult::Pass);
+        let mut bodies = Vec::new();
+        for native in [false, true] {
+            let path = directory.path().join(format!("{native}.vcd"));
+            let builder = Simulator::builder(source, "Top").vcd(&path);
+            let result = if native {
+                let mut sim = builder.build_native().unwrap();
+                let tb = compile_initial_testbench(&sim).unwrap();
+                compiled::take_counters(&mut sim);
+                let result = run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1000);
+                let counters = compiled::take_counters(&mut sim);
+                assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+                sim.flush_vcd().unwrap();
+                // Publishing the step does not drop its tick.
+                assert_eq!(result, unpublished);
+                result.result
+            } else {
+                let mut sim = builder.build_interpreter().unwrap();
+                let tb = compile_initial_testbench(&sim).unwrap();
+                let result = run_compiled_testbench_to_finish(&mut sim, &tb);
+                sim.flush_vcd().unwrap();
+                result
+            };
+            assert_eq!(result, TestResult::Pass);
+            let text = std::fs::read_to_string(&path).unwrap();
+            bodies.push(text.split_once("$enddefinitions").unwrap().1.to_string());
+        }
+        assert_eq!(bodies[1], bodies[0]);
+        assert!(bodies[0].contains("#6\n"), "{}", bodies[0]);
+    }
+
+    #[test]
+    fn constant_clock_wait_loop_binds_as_one_wait() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<32>) {
+                always_ff (clk) { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<32>;
+                inst dut: Counter(clk, q);
+                initial {
+                    for _i in 0..(2 * (2 + 2)) { clk.next(1); }
+                    $assert(q == 8);
+                    $finish();
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .build_interpreter()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        assert!(matches!(
+            tb.statements().first(),
+            Some(GenericTestbenchStatement::ClockNext {
+                count: ClockCount::Static(8),
+                ..
+            })
+        ));
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass,
+            "q={}, counters={:?}",
+            sim.get_as::<u32>(sim.signal("q")),
+            compiled::take_counters(&mut sim)
+        );
+    }
+
+    #[test]
+    fn compiled_reads_share_settlement_until_the_next_hardware_write() {
+        let mut sim = Simulator::builder(
+            r#"
+            #[test(Top)] module Top {
+                var a: logic<8>; var q: logic<8>;
+                var x: logic<8>; var y: logic<8>; var z: logic<8>;
+                assign q = a + 1;
+                initial {
+                    a = 1;
+                    x = q;
+                    y = q;
+                    a = 7;
+                    z = q;
+                    $assert(x == 2 && y == 2 && z == 8);
+                    $finish();
+                }
+            }
+        "#,
+            "Top",
+        )
+        .build()
+        .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let settlements = tb.kernels()[0]
+            .requests
+            .iter()
+            .filter(|request| matches!(request, celox_testbench::KernelRequest::Settle { .. }))
+            .count();
+        assert_eq!(settlements, 2);
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+    }
+
+    #[test]
+    fn compiled_kernel_stores_invalidate_settled_hardware() {
+        let mut sim = Simulator::builder(
+            r#"
+            #[test(Top)] module Top {
+                var a: logic<8>; var q: logic<8>;
+                assign q = a + 1;
+                initial { a = 7; $finish(); }
+            }
+        "#,
+            "Top",
+        )
+        .dead_store_policy(crate::DeadStorePolicy::Off)
+        .build_interpreter()
+        .unwrap();
+        let q = sim.signal("q");
+        let tb = compile_initial_testbench(&sim).unwrap();
+        settle_testbench(&mut sim).unwrap();
+        let GenericTestbenchStatement::Assign { expr, .. } = &tb.statements()[0] else {
+            panic!("assignment")
+        };
+        assert_eq!(eval_expr(&mut sim, expr).to_u64(), 7);
+        assert!(!sim.dirty);
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        assert!(sim.dirty);
+        settle_testbench(&mut sim).unwrap();
+        assert_eq!(sim.get_as::<u8>(q), 8);
+    }
+
+    #[test]
+    fn compiled_kernel_stores_notify_vcd_without_exposing_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sim = Simulator::builder(
+            r#"
+            #[test(Top)] module Top {var a: logic<8>; initial {a=7; $finish();}}
+        "#,
+            "Top",
+        )
+        .vcd(dir.path().join("expression.vcd"))
+        .build()
+        .unwrap();
+        let a = sim.signal("a");
+        let tb = compile_initial_testbench(&sim).unwrap();
         sim.dump(0);
         let before = sim.vcd_statistics().unwrap();
-        assert_eq!(eval_expr(&mut sim, &expr).to_u64(), 7);
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
         assert_eq!(sim.get_as::<u8>(a), 7);
         sim.dump(1);
         let after = sim.vcd_statistics().unwrap();
@@ -2710,5 +3655,24 @@ mod tests {
                 tick_limit_reached: true,
             }
         );
+    }
+    #[test]
+    fn zero_tick_limit_does_not_evaluate_compiled_control_flow() {
+        let source = r#"
+            #[test(Top)] module Top {
+                var touched: u32;
+                function touch() -> u32 { touched = 1; return 1; }
+                initial { if touch() == 1 { $finish(); } }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .build_interpreter()
+            .unwrap();
+        let touched = sim.signal("touched");
+        let program = compile_initial_testbench(&sim).unwrap();
+        let result = run_compiled_testbench_with_tick_limit(&mut sim, &program, 0);
+        assert!(result.tick_limit_reached);
+        assert_eq!(result.ticks, 0);
+        assert_eq!(sim.get_as::<u32>(touched), 0);
     }
 }

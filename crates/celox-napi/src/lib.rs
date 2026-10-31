@@ -4343,8 +4343,12 @@ mod tests {
     }
 
     #[test]
-    fn native_handle_edges_of_clocks_comb_logic_does_not_read_stay_settled() {
-        for (seen, comb_read) in [("1'b1", false), ("clk", true)] {
+    fn native_handle_edges_preserve_settledness_for_unused_clocks_and_wiring() {
+        for (seen, settled, value) in [
+            ("1'b1", true, Some(1)),
+            ("clk", true, Some(0)),
+            ("~clk", false, None),
+        ] {
             let source = format!(
                 "module Top (clk: input clock, count: output logic<8>, seen: output logic) {{
                     always_ff (clk) {{ count += 1; }}
@@ -4356,13 +4360,22 @@ mod tests {
             let events: HashMap<String, u32> = serde_json::from_str(&handle.events_json()).unwrap();
             let clk = events["clk"];
             assert!(handle.edges(vec![clk], vec![true], None).unwrap());
-            // Moving `clk` without running a domain leaves combinational
-            // logic stale only when it reads `clk`, or already was.
+            // Unused clocks and direct wiring remain settled after an
+            // inactive edge. Other clock-dependent logic still needs a settle.
             assert_eq!(
                 handle.edges(vec![clk], vec![false], Some(false)).unwrap(),
-                !comb_read,
+                settled,
                 "{seen}"
             );
+            if let Some(value) = value {
+                let layout: serde_json::Value =
+                    serde_json::from_str(&handle.layout_json()).unwrap();
+                let offset = layout["seen"]["offset"].as_u64().unwrap() as usize;
+                let (memory, len) = handle.backend.as_mut().unwrap().memory_as_mut_ptr();
+                assert!(offset < len);
+                // Read the stored result without implicitly evaluating comb.
+                assert_eq!(unsafe { *memory.add(offset) }, value, "{seen}");
+            }
             assert!(handle.edges(vec![clk], vec![true], Some(true)).unwrap());
             assert!(!handle.edges(vec![clk], vec![false], Some(true)).unwrap());
             handle.dispose().unwrap();

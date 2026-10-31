@@ -1,0 +1,28 @@
+{
+  "case": "class::scoped_typedef_handles",
+  "source": "src/sv/cases/class.vtest",
+  "standard": "IEEE 1800-2023 8.25: each set of parameter values of a parameterized class is a specialization of its own, so `Registry #(UnitComp, \"unit\")`, which the typedef `UnitComp::type_id` names, has Tname \"unit\" whatever other specializations exist.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "package p;\n class Registry #(type T = int, string Tname = \"<unknown>\");\n  function string name(); return Tname; endfunction\n endclass\n class PkgComp; typedef Registry #(PkgComp, \"pkg\") type_id; endclass\nendpackage\nimport p::*;\nclass UnitComp; typedef Registry #(UnitComp, \"unit\") type_id; endclass\nmodule Top;\n initial begin\n  automatic UnitComp::type_id u = new;\n  $display(\"[%s]\", u.name());\n end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "[unit]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "xd.sv:2: syntax error\nI give up.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[pkg]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[unit]\n"
+    }
+  ]
+}

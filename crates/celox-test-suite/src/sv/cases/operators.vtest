@@ -1782,3 +1782,416 @@ endmodule
   (assert_eq hit 0)
   (assert_eq field_minus_one 0xffffffff)
   (assert_eq q 0xab))
+
+(case logical_implication
+  ; IEEE 1800-2023 11.4.7: implication short-circuits for a false antecedent.
+  (source "logical_implication.sv" #"
+        module Top(input logic [3:0] a, input logic b, output logic y,
+                   output logic hit, output logic constant_result);
+            localparam bit C = 2 -> 0;
+            function automatic logic mark();
+                hit = 1;
+                return b;
+            endfunction
+            always_comb begin
+                hit = 0;
+                y = a -> mark();
+            end
+            assign constant_result = C;
+        endmodule
+    "#)
+  (top Top)
+  (modify (set a 2) (set b 0))
+  (assert_eq y 0)
+  (assert_eq hit 1)
+  (assert_eq constant_result 0)
+  (set a 0)
+  (assert_eq y 1)
+  (modify (set a 2) (set b 1))
+  (assert_eq y 1))
+
+(case logical_implication_unknown
+  (four_state)
+  (source "logical_implication_unknown.sv" #"
+        module Top(input logic a, input logic b, output logic y, output logic hit);
+            function automatic logic mark();
+                hit = 1;
+                return b;
+            endfunction
+            always_comb begin
+                hit = 0;
+                y = a -> mark();
+            end
+        endmodule
+    "#)
+  (top Top)
+  (set a (fourstate 1 1))
+  (set b 0)
+  (assert_eq y (fourstate 1 1))
+  (assert_eq hit 1)
+  (set b 1)
+  (assert_eq y 1)
+  (assert_eq hit 1))
+
+(case logical_implication_short_circuit
+  (source "logical_implication_short_circuit.sv" #"
+        module Top(output logic hit, output logic y);
+            function automatic logic mark();
+                hit = 1;
+                return 0;
+            endfunction
+            initial begin
+                hit = 0;
+                y = 1'b0 -> mark();
+            end
+        endmodule
+    "#)
+  (top Top)
+  (assert_eq hit 0)
+  (assert_eq y 1))
+
+(case logical_equivalence
+  (source "logical_equivalence.sv" #"
+    module Top(input logic [3:0] a, b, output logic y, output logic c);
+      localparam bit C = 4 <-> 2;
+      assign y = a <-> b;
+      assign c = C;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0) (set b 0))
+  (assert_eq y 1)
+  (assert_eq c 1)
+  (modify (set a 2) (set b 0))
+  (assert_eq y 0)
+  (modify (set a 2) (set b 4))
+  (assert_eq y 1)
+  (modify (set a 0) (set b 4))
+  (assert_eq y 0))
+
+(case logical_equivalence_unknown
+  (four_state)
+  (source "logical_equivalence_unknown.sv" #"
+    module Top(input logic [1:0] a, b, output logic y);
+      assign y = a <-> b;
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a (fourstate 1 1)) (set b 0))
+  (assert_eq y (fourstate 1 1))
+  (set b 1)
+  (assert_eq y (fourstate 1 1))
+  (set a (fourstate 3 1))
+  (assert_eq y 1))
+
+(case logical_equivalence_evaluates_operands_once
+  (source "logical_equivalence_calls.sv" #"
+    module Top(output logic [7:0] a_count, b_count, output logic y);
+      function automatic logic left(); a_count = a_count + 1; return 0; endfunction
+      function automatic logic right(); b_count = b_count + 1; return 1; endfunction
+      initial begin
+        a_count = 0;
+        b_count = 0;
+        y = left() <-> right();
+      end
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq a_count 1)
+  (assert_eq b_count 1)
+  (assert_eq y 0))
+
+(case two_state_case_equality_preserves_unknown_literals
+  ; IEEE 1800-2023 11.4.5 and 12.5: X/Z participate in exact comparisons.
+  (source "two_state_case_literals.sv" #"
+    module Top(input bit clk, input bit [7:0] b,
+      output logic parity_x, reversed_x, exact_z, different_x,
+      output logic ordinary_case, output logic [3:0] registered,
+      output logic [7:0] guarded);
+      assign parity_x = ((^b) === 1'bx);
+      assign reversed_x = (1'bx === (^b));
+      assign exact_z = (b === 8'b1001_011z);
+      assign different_x = (b !== 8'b1001_011x);
+      assign guarded = ((^b) === 1'bx) ? 8'b0 : b;
+      always_comb begin
+        case (b)
+          8'b1001_011z: ordinary_case = 1;
+          default: ordinary_case = 0;
+        endcase
+      end
+      always_ff @(posedge clk) begin
+        registered[0] <= ((^b) === 1'bx);
+        registered[1] <= (b === 8'b1001_011x);
+        registered[2] <= (b !== 8'b1001_011z);
+        case (b)
+          8'b1001_011x: registered[3] <= 1;
+          default: registered[3] <= 0;
+        endcase
+      end
+    endmodule
+  "#)
+  (top Top)
+  (set b 0x96)
+  (assert_eq parity_x 0)
+  (assert_eq reversed_x 0)
+  (assert_eq exact_z 0)
+  (assert_eq different_x 1)
+  (assert_eq ordinary_case 0)
+  (assert_eq guarded 0x96)
+  (tick clk)
+  (assert_eq registered 4)
+  (set b 0x97)
+  (assert_eq parity_x 0)
+  (assert_eq different_x 1)
+  (assert_eq guarded 0x97)
+  (tick clk)
+  (assert_eq registered 4)
+  (set b 0)
+  (assert_eq parity_x 0)
+  (assert_eq guarded 0))
+
+(case two_state_case_equality_compares_literal_structure
+  (source "two_state_case_structure.sv" #"
+    module Top(input bit [7:0] b, input bit [128:0] wide,
+      output logic same_x, x_vs_z, mixed_equal, signed_x, signed_z,
+      output logic unsigned_x, wide_x, bit_cast);
+      function automatic bit to_bit(input logic value); return value; endfunction
+      assign same_x = ({b,1'bx} === {b,1'bx});
+      assign x_vs_z = ({b,1'bx} === {b,1'bz});
+      assign mixed_equal = ({b,1'bx} === {8'h96,1'bx});
+      assign signed_x = (4'sbx001 === 8'sbxxxxx001);
+      assign signed_z = (4'sbz001 === 8'sbzzzzz001);
+      assign unsigned_x = (4'sbx001 === 8'bxxxxx001);
+      assign wide_x = (wide === {64'd0,1'bx,64'd0});
+      assign bit_cast = (to_bit(1'bx) === 1'b0);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set b 0x96) (set wide 0))
+  (assert_eq same_x 1)
+  (assert_eq x_vs_z 0)
+  (assert_eq mixed_equal 1)
+  (assert_eq signed_x 1)
+  (assert_eq signed_z 1)
+  (assert_eq unsigned_x 0)
+  (assert_eq wide_x 0)
+  (assert_eq bit_cast 1)
+  (set b 0x97)
+  (assert_eq mixed_equal 0))
+
+(case two_state_case_equality_preserves_conditional_unknowns
+  (source "two_state_case_mux.sv" #"
+    module Top(input bit s, output logic x_match, z_match, same_known,
+      output logic ordinary_case);
+      assign x_match = ((s ? 1'bx : 1'b0) === 1'bx);
+      assign z_match = ((s ? 1'bz : 1'b0) === 1'bz);
+      assign same_known = ((s ? 1'bx : 1'b0) === 1'b0);
+      always_comb begin
+        case (s ? 1'bz : 1'b0)
+          1'bz: ordinary_case = 1;
+          default: ordinary_case = 0;
+        endcase
+      end
+    endmodule
+  "#)
+  (top Top)
+  (set s 0)
+  (assert_eq x_match 0)
+  (assert_eq z_match 0)
+  (assert_eq same_known 1)
+  (assert_eq ordinary_case 0)
+  (set s 1)
+  (assert_eq x_match 1)
+  (assert_eq z_match 1)
+  (assert_eq same_known 0)
+  (assert_eq ordinary_case 1))
+
+(case two_state_case_equality_keeps_call_effects_and_loaded_bytes
+  (source "two_state_case_effects.sv" #"
+    module Top(input bit [7:0] b, output int calls,
+      output logic compared, selected, output logic [7:0] loaded);
+      function automatic logic [7:0] mark();
+        calls = calls + 1;
+        return b;
+      endfunction
+      initial begin
+        calls = 0;
+        #1;
+        compared = (mark() === 8'b1001_011x);
+        case (mark())
+          8'b1001_011z: selected = 1;
+          default: selected = 0;
+        endcase
+        loaded = ((^b) === 1'bx) ? 8'b0 : b;
+        #1 $finish;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (set b 0x96)
+  (run_until 1)
+  (assert_eq calls 2)
+  (assert_eq compared 0)
+  (assert_eq selected 0)
+  (assert_eq loaded 0x96)
+  (run_to_finish))
+
+(case two_state_case_equality_keeps_unknown_expression_bits
+  (source "two_state_case_expression.sv" #"
+    module Top(input bit b, output logic [16:0] q);
+      assign q[0] = ((b & 1'bx) === 1'bx);
+      assign q[1] = ((b | 1'bx) === 1'bx);
+      assign q[2] = ((b ^ 1'bz) === 1'bx);
+      assign q[3] = ((b && 1'bx) === 1'bx);
+      assign q[4] = ((b || 1'bx) === 1'bx);
+      assign q[5] = (({b,b} + 2'b0x) === 2'bxx);
+      assign q[6] = (({b,b} >> 1'bx) === 2'bxx);
+      assign q[7] = ((^{b,1'bx}) === 1'bx);
+      assign q[8] = ((&{b,1'bx}) === 1'bx);
+      assign q[9] = ((|{b,1'bz}) === 1'bx);
+      assign q[10] = ((!{b,1'bz}) === 1'bx);
+      assign q[11] = ((~{b,1'bz}) === {~b,1'bx});
+      assign q[12] = ((b == 1'bx) === 1'bx);
+      assign q[13] = (({b,1'b0} == {1'bx,1'b1}) === 1'b0);
+      assign q[14] = ((1'b1 / b) === 1'bx);
+      assign q[15] = ((1'bx ? {b,1'bz} : {b,1'bz}) === {b,1'bz});
+      assign q[16] = ((1'bx ? b : ~b) === 1'bx);
+    endmodule
+  "#)
+  (top Top)
+  (set b 0)
+  (assert_eq q 0x1fef6)
+  (set b 1)
+  (assert_eq q 0x1b9ed))
+
+(case constant_function_case_context
+  ; Explicit local assignments avoid an Icarus 13.0 automatic-initializer abort.
+  (source "constant_case.sv" #"
+    module Top(output logic [3:0] q, output logic [3:0] p);
+      function automatic logic mixed();
+        logic signed [7:0] x;
+        x = 8'hff;
+        case (x)
+          16'shffff: return 0;
+          16'h0000: return 0;
+          default: return 1;
+        endcase
+      endfunction
+      function automatic logic arithmetic();
+        case (8'hff + 8'h01)
+          8'h00: return 0;
+          16'h100: return 1;
+          default: return 0;
+        endcase
+      endfunction
+      function automatic logic all_signed();
+        logic signed [7:0] x;
+        x = -1;
+        case (x)
+          16'shffff: return 1;
+          16'sh0000: return 0;
+          default: return 0;
+        endcase
+      endfunction
+      function automatic logic fill();
+        case ('1)
+          8'hff: return 1;
+          default: return 0;
+        endcase
+      endfunction
+      localparam logic [3:0] P = {fill(), all_signed(), arithmetic(), mixed()};
+      assign p = P;
+      assign q = {fill(), all_signed(), arithmetic(), mixed()};
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq q 15)
+  (assert_eq p 15))
+
+(case constant_function_case_unknowns
+  (four_state)
+  (source "constant_case_unknown.sv" #"
+    module Top(output logic q, output logic p);
+      function automatic logic exact_unknown();
+        case (1'bx)
+          1'bz: return 0;
+          1'bx: return 1;
+          default: return 0;
+        endcase
+      endfunction
+      localparam logic P = exact_unknown();
+      assign p = P;
+      assign q = exact_unknown();
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq q 1)
+  (assert_eq p 1))
+
+
+(case constant_function_conditional_types
+  (source "constant_conditional_types.sv" #"
+    module Top(input bit choose, output logic [255:0] folded, elaborated,
+               output logic [31:0] runtime_sign);
+      function automatic int sign_true(); return 1'b1 ? 8'shff : 8'h00; endfunction
+      function automatic int sign_false(); return 1'b0 ? 8'h00 : 8'shff; endfunction
+      function automatic logic [31:0] concat_true();
+        return {8'hab, (1'b1 ? 8'hff : 16'h0), 8'hcd};
+      endfunction
+      function automatic logic [31:0] concat_false();
+        return {8'hab, (1'b0 ? 16'h0 : 8'hff), 8'hcd};
+      endfunction
+      function automatic logic [31:0] arm_carry();
+        return {(1'b1 ? (8'hff + 8'h01) : 16'h0)};
+      endfunction
+      function automatic int mixed_shift(); return 1'b1 ? (8'sh80 >>> 1) : 8'h00; endfunction
+      function automatic int assignment_carry(); return 1'b1 ? (8'hff + 8'h01) : 8'h0; endfunction
+      function automatic int all_signed(); return 1'b1 ? 8'shff : 16'sh0; endfunction
+      function automatic int runtime_value(input bit condition);
+        return condition ? 8'shff : 8'h00;
+      endfunction
+      localparam logic [255:0] P = {
+        all_signed(), assignment_carry(), mixed_shift(), arm_carry(),
+        concat_false(), concat_true(), sign_false(), sign_true()
+      };
+      assign folded = {
+        all_signed(), assignment_carry(), mixed_shift(), arm_carry(),
+        concat_false(), concat_true(), sign_false(), sign_true()
+      };
+      assign elaborated = P;
+      assign runtime_sign = runtime_value(choose);
+    endmodule
+  "#)
+  (top Top)
+  (modify (set choose 0))
+  (assert_eq runtime_sign 0)
+  (assert_eq folded 0xffffffff000001000000004000000100ab00ffcdab00ffcd000000ff000000ff)
+  (assert_eq elaborated 0xffffffff000001000000004000000100ab00ffcdab00ffcd000000ff000000ff)
+  (modify (set choose 1))
+  (assert_eq runtime_sign 255)
+  (modify (set choose 0))
+  (assert_eq runtime_sign 0))
+
+(case constant_function_conditional_unknown_types
+  (four_state)
+  (source "constant_conditional_unknown_types.sv" #"
+    module Top(output logic [95:0] folded, elaborated);
+      function automatic logic predicate(); return 1'bx; endfunction
+      function automatic logic [31:0] same_value();
+        return {8'hab, (predicate() ? 8'hff : 16'h00ff), 8'hcd};
+      endfunction
+      function automatic logic [31:0] different_bits();
+        return {8'hab, (predicate() ? 8'shff : 16'h00fe), 8'hcd};
+      endfunction
+      function automatic logic [31:0] arithmetic_context();
+        return {8'hab, (predicate() ? (8'hff + 8'h01) : 16'h0100), 8'hcd};
+      endfunction
+      localparam logic [95:0] P = {arithmetic_context(), different_bits(), same_value()};
+      assign folded = {arithmetic_context(), different_bits(), same_value()};
+      assign elaborated = P;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq folded (fourstate 0xab0100cdab00ffcdab00ffcd 0x000000000000010000000000))
+  (assert_eq elaborated (fourstate 0xab0100cdab00ffcdab00ffcd 0x000000000000010000000000)))

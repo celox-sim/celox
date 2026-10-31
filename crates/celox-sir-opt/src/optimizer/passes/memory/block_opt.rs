@@ -6,6 +6,28 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_SCALAR_COALESCED_STORE_BITS: usize = 64;
 
+/// A Store consumes only its low `width` bits, whereas Concat consumes the
+/// entire register. Preserve each store's truncation before joining lanes.
+pub(in crate::optimizer) fn store_concat_source<A>(
+    source: RegisterId,
+    width: usize,
+    register_map: &mut HashMap<RegisterId, RegisterType>,
+    counter: &mut usize,
+    instructions: &mut Vec<SIRInstruction<A>>,
+) -> RegisterId {
+    if register_map[&source].width() == width {
+        return source;
+    }
+    *counter += 1;
+    while register_map.contains_key(&RegisterId(*counter)) {
+        *counter += 1;
+    }
+    let narrowed = RegisterId(*counter);
+    register_map.insert(narrowed, RegisterType::Logic { width });
+    instructions.push(SIRInstruction::Slice(narrowed, source, 0, width));
+    narrowed
+}
+
 fn union_u32<I: IntoIterator<Item = u32>>(items: I) -> Vec<u32> {
     let mut out = Vec::new();
     for item in items {
@@ -506,7 +528,14 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                 if safe {
                     let total_width: usize = segment.iter().map(|s| s.width).sum();
                     let start_offset = segment[0].offset;
-                    let args: Vec<RegisterId> = segment.iter().rev().map(|s| s.src).collect();
+                    let mut new_ops = Vec::new();
+                    let args: Vec<RegisterId> = segment
+                        .iter()
+                        .rev()
+                        .map(|s| {
+                            store_concat_source(s.src, s.width, register_map, next_id, &mut new_ops)
+                        })
+                        .collect();
                     let triggers: Vec<crate::ir::TriggerIdWithKind> =
                         segment.iter().flat_map(|s| s.triggers.clone()).collect();
                     let comb_capture_sites = union_u32(
@@ -534,7 +563,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                         segment_start = segment_end + 1;
                         continue;
                     };
-                    let new_ops = vec![
+                    new_ops.extend([
                         SIRInstruction::Concat(new_reg_id, args),
                         SIRInstruction::Store(
                             addr.clone(),
@@ -544,7 +573,7 @@ fn coalesce_static_stores<A: Clone + std::fmt::Debug + PartialEq + Ord + std::ha
                             triggers,
                             comb_capture_sites,
                         ),
-                    ];
+                    ]);
 
                     insertions
                         .entry(insert_at_index)
@@ -1343,6 +1372,48 @@ mod tests {
 
     fn logic(width: usize) -> RegisterType {
         RegisterType::Logic { width }
+    }
+
+    #[test]
+    fn store_coalescing_preserves_each_sources_truncated_width() {
+        for source_width in [8, 64, 129] {
+            let mut instructions = vec![
+                SIRInstruction::Imm(RegisterId(0), SIRValue::new(0xffu8)),
+                SIRInstruction::Imm(RegisterId(1), SIRValue::new(0xfeu8)),
+                SIRInstruction::Store(7u32, SIROffset::Static(0), 1, RegisterId(0), vec![], vec![]),
+                SIRInstruction::Store(7, SIROffset::Static(1), 2, RegisterId(1), vec![], vec![]),
+            ];
+            let mut registers: HashMap<_, _> = [
+                (RegisterId(0), logic(source_width)),
+                (RegisterId(1), logic(source_width)),
+            ]
+            .into_iter()
+            .collect();
+            verify(instructions.clone(), registers.clone());
+            let mut counter = 1;
+            assert!(coalesce_static_stores_with_types(
+                &mut instructions,
+                &mut registers,
+                &mut counter,
+                &HashMap::default()
+            ));
+            // Each Store originally discards high source bits. In particular,
+            // Concat's operand widths must total three, not 2 * source_width.
+            verify(instructions.clone(), registers.clone());
+            let args = instructions
+                .iter()
+                .find_map(|inst| match inst {
+                    SIRInstruction::Concat(_, args) => Some(args),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                args.iter()
+                    .map(|arg| registers[arg].width())
+                    .collect::<Vec<_>>(),
+                [2, 1]
+            );
+        }
     }
 
     fn subsume_static_loads(instructions: &mut [SIRInstruction<u32>]) -> bool {

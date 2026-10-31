@@ -1,32 +1,18 @@
 //! Native interface scope analysis and public type contracts.
 use super::*;
 
-type ActiveInstance = (
+pub(super) type ActiveInstance = (
     std::path::PathBuf,
     String,
     HashMap<String, ConstExpr>,
     Vec<(String, Type)>,
 );
-#[derive(Default)]
-pub(super) struct State {
-    active_instances: RefCell<Vec<ActiveInstance>>,
-}
-struct InstanceGuard {
-    state: std::rc::Rc<AnalysisState>,
-    revision: u64,
-}
-impl Drop for InstanceGuard {
-    fn drop(&mut self) {
-        self.state.interfaces.active_instances.borrow_mut().pop();
-        self.state.revision.restore(self.revision);
-    }
-}
-
 /// Analyze the original interface body and retain its symbols for the scope
 /// that instantiates it. The structural view borrows every token's original
 /// source location, including the lexical time scope of processes/functions.
 pub(super) fn analyze(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     path: &Path,
     packages: &packages::Packages,
     overrides: &HashMap<String, ConstExpr>,
@@ -44,30 +30,32 @@ pub(super) fn analyze(
         overrides.clone(),
         types.to_vec(),
     );
-    {
-        let mut instances = tree.state.interfaces.active_instances.borrow_mut();
-        if instances.len() >= 64 {
-            return Err(unsupported("interface instance nesting exceeds 64 levels"));
-        }
-        if instances.contains(&instance) {
-            return Err(unsupported(format!(
-                "recursive interface instantiation `{name}`"
-            )));
-        }
-        instances.push(instance);
+    if tree.active_interfaces.len() >= 64 {
+        return Err(unsupported("interface instance nesting exceeds 64 levels"));
     }
-    let _instance = InstanceGuard {
-        state: tree.state.clone(),
-        revision: tree.state.revision.change(),
+    if tree.active_interfaces.contains(&instance) {
+        return Err(unsupported(format!(
+            "recursive interface instantiation `{name}`"
+        )));
+    }
+    let mut active = (*tree.active_interfaces).clone();
+    active.push(instance);
+    let tree = &AnalysisContext {
+        active_interfaces: Arc::new(active),
+        ..tree.clone()
     };
-    let _timescales =
-        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
+    let timed = AnalysisContext {
+        timescale: timescales::for_tree(packages.timescales.clone(), tree)?,
+        ..tree.clone()
+    };
+    let tree = &timed;
     let lookup = InterfaceLookup {
         local: interfaces,
         extra: &ModuleInterfaces::default(),
     };
     let nested = interface_binding::analyze_module(
         tree,
+        session,
         path,
         packages,
         interface_binding::Bindings {
@@ -82,7 +70,15 @@ pub(super) fn analyze(
     let mut module = if let Some(module) = nested {
         module
     } else {
-        Module::from_scope_with_symbols(tree, &name, overrides, &lookup, Arc::new(imported), true)?
+        Module::from_scope_with_symbols(
+            tree,
+            session,
+            &name,
+            overrides,
+            &lookup,
+            Arc::new(imported),
+            true,
+        )?
     };
     let symbols = module.symbols.as_mut().unwrap();
     let mut parameters = module.imported_parameters.clone();
@@ -110,12 +106,16 @@ pub(super) fn signature(
     members: &[String],
     names: &HashSet<String>,
 ) -> Converted<crate::ir::Module> {
+    let session = &mut Session::default();
     let projected_tree = interface_binding::declaration_view(tree)?;
     let context = AnalysisContext::unspecialized(&projected_tree);
     let tree = &context;
     let imported = imports::imported_symbols(tree, packages, packages.unit(path))?;
-    let _timescales =
-        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
+    let timed = AnalysisContext {
+        timescale: timescales::for_tree(packages.timescales.clone(), tree)?,
+        ..tree.clone()
+    };
+    let tree = &timed;
     let empty = ModuleInterfaces::default();
     let interfaces = InterfaceLookup {
         local: &empty,
@@ -123,6 +123,7 @@ pub(super) fn signature(
     };
     let mut module = Module::from_scope_with_parameter_overrides(
         tree,
+        session,
         "",
         &HashMap::default(),
         &interfaces,
@@ -131,22 +132,33 @@ pub(super) fn signature(
     // Internal signal lowering freezes localparam-dependent dimensions for
     // execution. A public declaration must retain those dependencies so its
     // consumers can specialize the interface with different header values.
-    let _scope = scope::install(&tree.state, Arc::new(imported.clone()));
-    let _functions = const_functions::install(&tree.state, module.constant_functions.clone());
+    let tree = &tree.importing(Arc::new(imported.clone()));
+    let tree = &tree.with_functions(module.constant_functions.clone());
     let mut env = imported.const_env.clone();
-    extend_const_env_with_parameters(&tree.state, &mut env, &module.parameters);
-    let aliases = type_aliases_from_scope_with_env(tree, &env)?;
-    let declarations =
-        declarations::signals_from_scope_with_declaration_ranges(tree, &env, &aliases, true)?;
+    extend_const_env_with_parameters(tree, session, &mut env, &module.parameters);
+    let aliases = type_aliases_from_scope_with_env(tree, session, &env)?;
+    let declarations = declarations::signals_from_scope_with_declaration_ranges(
+        tree, session, &env, &aliases, true,
+    )?;
     let names = names
         .iter()
         .map(|name| (name.clone(), format!("h${name}")))
         .collect::<HashMap<_, _>>();
     let rename = scope::Renamer { names: &names };
     module.name = name;
+    let header_ports = module.ports.clone();
     module.ports = members
         .iter()
         .map(|name| {
+            if let Some(port) = header_ports.iter().find(|port| port.name == *name) {
+                return Ok(Port::new(
+                    rename.name(name),
+                    PortDirection::Input,
+                    rename.r#type(port.r#type.clone()),
+                    port.is_net,
+                )
+                .with_unresolved_net(port.unresolved_net));
+            }
             let signal = declarations
                 .iter()
                 .find(|signal| signal.name() == name)
@@ -156,7 +168,8 @@ pub(super) fn signature(
                 PortDirection::Input,
                 rename.r#type(signal.r#type.clone()),
                 signal.is_net,
-            ))
+            )
+            .with_unresolved_net(signal.unresolved_net))
         })
         .collect::<Converted<_>>()?;
     module

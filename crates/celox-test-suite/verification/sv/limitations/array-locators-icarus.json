@@ -1,0 +1,70 @@
+{
+  "tool": "icarus",
+  "version": "Icarus Verilog 13.0",
+  "source": "src/sv/cases/array_locators.vtest",
+  "method": "Each unchanged shared case fails in a verify-sv-icarus run with --include-ignored. The reduced source below, run with iverilog -g2012 -s Top, reproduces the failure without the adapter: Icarus reports the same syntax error at the locator call.",
+  "reduced_source": "module Top;\n    int q[$] = '{5, 1, 4};\n    int r[$];\n    initial begin\n        r = q.find with (item > 3);\n        $display(\"%0d\", r.size());\n    end\nendmodule\n",
+  "reduced_stderr": "r.sv:5: syntax error\nr.sv:5: error: Malformed statement\n",
+  "cases": [
+    {
+      "case": "array_locators::array_locator_associative",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_class_predicates",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_find",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_fixed",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_fixed_struct_enum",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_four_state",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_index_argument",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_iterator_names",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_min_max_unique",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n"
+    },
+    {
+      "case": "array_locators::array_locator_struct_elements",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:13: syntax error\n"
+    }
+  ]
+}

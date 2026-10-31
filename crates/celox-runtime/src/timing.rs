@@ -104,6 +104,91 @@ impl CountedRefs {
     }
 }
 
+/// The `iff` gate of a wait term ([`celox_design::WaitGate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateRefs {
+    pub signal: SignalRef,
+    pub at_write: bool,
+    /// The counters of a gate judged at each write
+    /// ([`celox_design::GateCounters`]).
+    pub counters: Option<GateCounterRefs>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GateCounterRefs {
+    pub gated: SignalRef,
+    pub all: SignalRef,
+}
+
+/// Whether the least significant bit of `gate` is a known 1.
+pub fn gate_holds<B: SimBackend>(backend: &B, gate: SignalRef) -> bool {
+    StateView::new(backend).gate_holds(gate).unwrap_or_else(|| {
+        let (value, unknown) = read(backend, gate);
+        value.bit(0) && !unknown.bit(0)
+    })
+}
+
+/// A gated term whose counters a write of its signal by the runtime or the
+/// host bumps.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GatedWriteRefs {
+    pub signal: SignalRef,
+    pub kind: CounterKind,
+    pub gate: SignalRef,
+    pub counters: GateCounterRefs,
+}
+
+impl GatedWriteRefs {
+    /// Count a change from `old` to `new`, judging the gate after it.
+    pub fn bump<B: SimBackend>(&self, backend: &mut B, old: &Value, new: &Value) {
+        if occurs(self.kind, old, new) {
+            self.count(backend);
+        }
+    }
+
+    /// Count one occurrence, judging the gate as it is now.
+    pub fn count<B: SimBackend>(&self, backend: &mut B) {
+        let all: u32 = backend.get_as(self.counters.all);
+        backend.set(self.counters.all, all.wrapping_add(1));
+        if gate_holds(backend, self.gate) {
+            let gated: u32 = backend.get_as(self.counters.gated);
+            backend.set(self.counters.gated, gated.wrapping_add(1));
+        }
+    }
+}
+
+/// Run `write`, which writes `signal` in `backend`, and count it in the
+/// gated `terms` on the signal, comparing the signal's planes in place.
+pub fn write_gated<B: SimBackend>(
+    backend: &mut B,
+    signal: SignalRef,
+    terms: &[GatedWriteRefs],
+    write: impl FnOnce(&mut B),
+) {
+    // A plain signal's planes fit a small buffer; others are read as values.
+    const SMALL: usize = 32;
+    let len = planes(backend, signal).map_or(usize::MAX, <[u8]>::len);
+    if len > SMALL {
+        let old = read(backend, signal);
+        write(backend);
+        let new = read(backend, signal);
+        for term in terms {
+            term.bump(backend, &old, &new);
+        }
+        return;
+    }
+    let mut old = [0u8; SMALL];
+    old[..len].copy_from_slice(planes(backend, signal).expect("a plain signal"));
+    write(backend);
+    let mut new = [0u8; SMALL];
+    new[..len].copy_from_slice(planes(backend, signal).expect("a plain signal"));
+    for term in terms {
+        if planes_occur(term.kind, &old[..len], &new[..len], signal.width) {
+            term.count(backend);
+        }
+    }
+}
+
 /// A bit range whose changes bump an occurrence counter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProbeRefs {
@@ -223,6 +308,19 @@ impl<'a> StateView<'a> {
         }
     }
 
+    /// Whether the least significant bit of a plain `gate` is a known 1.
+    pub fn gate_holds(&self, gate: SignalRef) -> Option<bool> {
+        let image = self.planes(gate)?;
+        let bytes = gate.width.div_ceil(8).max(1);
+        Some(image[0] & 1 == 1 && image.get(bytes).is_none_or(|unknown| unknown & 1 == 0))
+    }
+
+    /// The value of a 32-bit two-state counter.
+    pub fn counter(&self, counter: SignalRef) -> u32 {
+        let bytes = &self.memory[counter.offset..counter.offset + 4];
+        u32::from_le_bytes(bytes.try_into().expect("four bytes"))
+    }
+
     /// See [`planes`].
     pub fn planes(&self, signal: SignalRef) -> Option<&'a [u8]> {
         if signal.array_layout.is_some() {
@@ -312,7 +410,7 @@ pub fn encode_planes(value: &Value, width: usize, len: usize) -> Vec<u8> {
 /// Whether the change from plane image `old` to `new` of a `width`-bit
 /// signal is an occurrence of `kind` (Table 9-2 on the least significant
 /// bit).
-#[inline]
+#[inline(always)]
 pub fn planes_occur(kind: CounterKind, old: &[u8], new: &[u8], width: usize) -> bool {
     if kind == CounterKind::Changes {
         return !planes_equal(old, new, width);
@@ -330,7 +428,7 @@ pub fn planes_occur(kind: CounterKind, old: &[u8], new: &[u8], width: usize) -> 
 /// Mutable process scheduling state beyond the delay queue: who waits for
 /// what, the inactive and post-NBA queues, and the queued nonblocking
 /// assignments. All of it is empty in a design without process kernels.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProcessState {
     pub activations: Vec<crate::simulation::Activation>,
     pub cells: Vec<Value>,
@@ -345,6 +443,9 @@ pub struct ProcessState {
     /// Program processes ready to run in the Reactive region of the current
     /// time (IEEE 1800-2023 4.4.2.6).
     pub reactive: std::collections::BTreeSet<usize>,
+    /// Assertion predicates waiting for Active/NBA quiescence.
+    #[serde(default)]
+    pub observed: std::collections::BTreeSet<usize>,
     /// Program processes that resume in the Re-Inactive region (`#0`,
     /// 4.4.2.7).
     pub re_inactive: std::collections::BTreeSet<usize>,
@@ -354,6 +455,110 @@ pub struct ProcessState {
     /// Counter values each counted domain last triggered on, by counted
     /// signal index and kind.
     pub domain_counters: Vec<[u32; 3]>,
+    /// The named events that were triggered or waited for, by handle (IEEE
+    /// 1800-2023 15.5).
+    #[serde(default)]
+    pub events: std::collections::BTreeMap<u32, NamedEvent>,
+    /// Events `->>` triggers in the nonblocking assignment region of the
+    /// current time (15.5.1), in issue order.
+    #[serde(default)]
+    pub nba_events: Vec<u32>,
+    /// The time [`Self::events`] was last cleared of expired events.
+    #[serde(default)]
+    pub event_time: u64,
+    /// The semaphores, by handle (IEEE 1800-2023 15.3).
+    #[serde(default)]
+    pub semaphores: std::collections::BTreeMap<u32, Semaphore>,
+    /// The number of semaphores at which the next new one first forgets
+    /// those the heap collected.
+    #[serde(default)]
+    pub semaphore_limit: usize,
+    /// The mailboxes, by the handle of the heap object holding their
+    /// messages (IEEE 1800-2023 15.4).
+    #[serde(default)]
+    pub mailboxes: std::collections::BTreeMap<u32, Mailbox>,
+    /// The number of mailboxes at which the next new one first forgets
+    /// those the heap collected.
+    #[serde(default)]
+    pub mailbox_limit: usize,
+}
+
+/// A mailbox: its bound and the processes waiting for it (IEEE 1800-2023
+/// 15.4). Its messages are a queue in the heap, held by the mailbox's heap
+/// object so that the collector keeps the handles in them alive; so are the
+/// messages of [`Mailbox::handed`] and [`Mailbox::putters`]. A waiting entry
+/// is stale once the process no longer waits for this mailbox in
+/// [`crate::simulation::ProcessControl::mailbox`].
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Mailbox {
+    /// The most messages it holds, or 0 if it is unbounded (15.4.1).
+    pub bound: u32,
+    /// The heap container parameter of its message queue.
+    pub layout: u64,
+    /// Processes in `get`, in arrival order (15.4.5).
+    pub getters: std::collections::VecDeque<usize>,
+    /// Processes in `peek`.
+    pub peekers: Vec<usize>,
+    /// Processes in `put` on a full mailbox, in arrival order (15.4.3), with
+    /// their messages in the same order in the heap.
+    pub putters: std::collections::VecDeque<usize>,
+    /// Woken processes in `get` or `peek` whose messages wait in the heap, in
+    /// the same order, for them to collect.
+    #[serde(default)]
+    pub handed: Vec<usize>,
+    /// Woken processes in `put` whose messages entered the mailbox.
+    #[serde(default)]
+    pub delivered: Vec<usize>,
+}
+
+/// The entry of [`Mailbox::handed`] or [`Mailbox::putters`] of a process
+/// that ended, whose message the next operation on the mailbox drops.
+pub(crate) const ENDED: usize = usize::MAX;
+
+impl Mailbox {
+    /// Forget process `process`, which ended or waits anew.
+    pub(crate) fn forget(&mut self, process: usize) {
+        self.getters.retain(|&waiter| waiter != process);
+        self.peekers.retain(|&waiter| waiter != process);
+        self.delivered.retain(|&waiter| waiter != process);
+        for waiter in self.putters.iter_mut().chain(self.handed.iter_mut()) {
+            if *waiter == process {
+                *waiter = ENDED;
+            }
+        }
+    }
+
+    /// Whether no process waits for it or has something to collect.
+    pub(crate) fn is_idle(&self) -> bool {
+        self.getters.is_empty()
+            && self.peekers.is_empty()
+            && self.putters.is_empty()
+            && self.handed.is_empty()
+            && self.delivered.is_empty()
+    }
+}
+
+/// A semaphore: its keys and the processes waiting for them (IEEE 1800-2023
+/// 15.3).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Semaphore {
+    /// The available keys; the initial count may be negative (15.3.1).
+    pub keys: i64,
+    /// The blocked `get` calls as (process, keys), in arrival order (15.3.3).
+    /// An entry is stale once the process no longer waits for this semaphore
+    /// in [`crate::simulation::ProcessControl::semaphore`].
+    pub queue: std::collections::VecDeque<(usize, u32)>,
+}
+
+/// The synchronization object of a named event (IEEE 1800-2023 15.5).
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NamedEvent {
+    /// The time of its last trigger, which `triggered` compares with the
+    /// current time (15.5.3).
+    pub triggered: Option<u64>,
+    /// The processes blocked on it. An entry is stale once the process no
+    /// longer lists the event in [`crate::simulation::ProcessControl::events`].
+    pub waiters: Vec<usize>,
 }
 
 pub(crate) fn kind_index(kind: CounterKind) -> usize {

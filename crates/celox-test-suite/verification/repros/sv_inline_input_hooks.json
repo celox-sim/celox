@@ -1,0 +1,17 @@
+{
+  "specification": "IEEE 1800-2023 18.6.2, 18.7",
+  "observations": [
+    {
+      "tool": "icarus",
+      "case": "class::constrained_randomize_inline_input_hooks",
+      "status": "compile_error",
+      "log": "<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:17: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:17: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:17: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:17: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:21: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:21: error: Malformed conditional expression.\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:24: syntax error\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:24: error: Operand of unary ! is not a primary expression.\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:25: error: Malformed statement\n<target>/sv-icarus/class/constrained_randomize_inline_input_hooks/source_0.sv:24: error: Malformed conditional expression.\n"
+    },
+    {
+      "tool": "verilator",
+      "case": "class::constrained_randomize_inline_input_hooks",
+      "status": "runtime_error",
+      "log": "[0] %Fatal: source_0.sv:19: Assertion failed in TOP.celox_suite_tb.dut: input sampled before hook\n%Error: <target>/sv-verilator/class/constrained_randomize_inline_input_hooks/source_0.sv:19: Verilog $stop\nAborting...\n"
+    }
+  ]
+}

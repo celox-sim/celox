@@ -1356,8 +1356,14 @@ pub(super) fn lower_instruction(
                             ..
                         } => {
                             if *width_bits > 64 {
-                                // Wide mask store: chunk-by-chunk
-                                if let Some(mchunks) = ctx.wide_masks.get(src_reg).cloned() {
+                                // Wide mask store: chunk-by-chunk. A source
+                                // without wide mask chunks (e.g. a load of a
+                                // two-state variable) still defines every
+                                // destination mask bit: its scalar mask, if
+                                // any, covers the low chunk and the rest is 0.
+                                {
+                                    let mchunks =
+                                        wide_mask_store_chunks(ctx, block, src_reg, *width_bits);
                                     let mut bit_pos = 0usize;
                                     let mut store_remaining = *width_bits;
                                     for (chunk_vreg, chunk_width) in &mchunks {
@@ -2811,6 +2817,10 @@ pub(super) fn lower_instruction(
                 );
                 return;
             }
+            if matches!(op, UnaryOp::ToPlanes | UnaryOp::FromPlanes) {
+                lower_planes(ctx, block, *dst, op, *src);
+                return;
+            }
             let d_width = ctx.sir_width(dst);
             let src_width = ctx.sir_width(src);
             debug_assert!(src_width > 64 || !ctx.wide_regs.contains_key(src));
@@ -2831,8 +2841,8 @@ pub(super) fn lower_instruction(
             let src_vreg = ctx.reg_map.get(*src);
 
             match op {
-                UnaryOp::Float { .. } => {
-                    unreachable!("float operations are lowered before integer operations")
+                UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+                    unreachable!("float and plane operations are lowered before integer operations")
                 }
                 UnaryOp::Ident | UnaryOp::ToTwoState => {
                     ctx.emit_mov(block, dst_vreg, src_vreg);
@@ -3284,4 +3294,26 @@ pub(super) fn lower_instruction(
             }
         }
     }
+}
+
+/// The mask chunks a wide store writes for `src`, with their widths.
+///
+/// Registers produced without wide mask chunks (a load of a two-state
+/// variable, a two-state operation) are known by at most a scalar mask for
+/// their low chunk; every higher chunk is known (zero mask).
+fn wide_mask_store_chunks(
+    ctx: &mut ISelContext,
+    block: &mut MBlock,
+    src: &RegisterId,
+    width_bits: usize,
+) -> Vec<(VReg, usize)> {
+    if let Some(chunks) = ctx.wide_masks.get(src).cloned() {
+        return chunks;
+    }
+    let n_chunks = ISelContext::num_chunks(width_bits);
+    get_wide_mask_chunks(ctx, block, src, n_chunks)
+        .into_iter()
+        .enumerate()
+        .map(|(index, vreg)| (vreg, (width_bits - index * 64).min(64)))
+        .collect()
 }

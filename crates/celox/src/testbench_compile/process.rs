@@ -1,0 +1,1025 @@
+//! Veryl statements lowered with the same resumable SIR builder as SV.
+use crate::HashSet;
+use crate::ir::{AbsoluteAddr as Addr, RuntimeProgram, SirProgram};
+use celox_design::{
+    BinaryOp, ProcessKind, ProcessSlots, RegionedVarAddrBase, STABLE_REGION, UnaryOp,
+};
+use celox_frontend_core::process::ProcessKernelBuilder;
+use celox_sir::{
+    BlockId, RegisterId, SIRInstruction as Inst, SIROffset, SIRTerminator as Term, SIRValue,
+};
+use celox_testbench::*;
+use num_bigint::BigUint;
+
+type Expr = ExprBytecode<StateLocation<Addr>>;
+fn stable(var_id: Addr) -> RegionedVarAddrBase<Addr> {
+    RegionedVarAddrBase {
+        region: STABLE_REGION,
+        var_id,
+    }
+}
+struct Lower<'a> {
+    runtime: &'a mut RuntimeProgram,
+    four_state: bool,
+    kernel: ProcessKernelBuilder<Addr>,
+    requests: Vec<KernelRequest<Addr>>,
+    site: usize,
+    external_observers: bool,
+    settled: bool,
+    /// The DUT storage the settles of the current segment computed.
+    settled_reads: HashSet<Addr>,
+}
+impl Lower<'_> {
+    fn slot(&mut self, width: usize, string: bool) -> Addr {
+        let address = self.runtime.design.allocate_testbench_slot(width, string);
+        self.runtime
+            .runtime_schema
+            .testbench_read_roots
+            .insert(address);
+        address
+    }
+    /// A slot that saves `value` with its unknown bits.
+    fn saved_slot(&mut self, width: usize, string: bool, value: RegisterId) -> Addr {
+        if !self.is_logic(value) {
+            return self.slot(width, string);
+        }
+        let address = self.runtime.design.allocate_testbench_logic_slot(width);
+        self.runtime
+            .runtime_schema
+            .testbench_read_roots
+            .insert(address);
+        address
+    }
+    /// Whether loads of `address` keep its unknown bits.
+    fn holds_logic(&self, address: Addr) -> bool {
+        self.four_state
+            && self
+                .runtime
+                .design
+                .state_objects
+                .get(&address)
+                .is_some_and(|object| object.is_4state)
+    }
+    fn is_logic(&mut self, register: RegisterId) -> bool {
+        matches!(
+            self.kernel.builder().register(&register),
+            celox_sir::RegisterType::Logic { .. }
+        )
+    }
+    /// A `width`-bit register for a result computed from `operands`.
+    fn alloc(&mut self, width: usize, signed: bool, operands: &[RegisterId]) -> RegisterId {
+        if operands.iter().any(|&operand| self.is_logic(operand)) {
+            self.kernel.builder().alloc_logic(width.max(1))
+        } else {
+            self.kernel.builder().alloc_bit(width.max(1), signed)
+        }
+    }
+    /// The bit offset of a selected write: an offset with unknown bits is
+    /// invalid and selects nothing (IEEE 1800-2023 11.5.1).
+    fn index(&mut self, offset: RegisterId) -> RegisterId {
+        if !self.is_logic(offset) {
+            return offset;
+        }
+        let known = self.two_state(offset);
+        let valid = self.kernel.builder().alloc_bit(1, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Binary(valid, offset, BinaryOp::EqCase, known));
+        // At least 64 bits, so that the replacement lies past every object.
+        let width = self.kernel.builder().register(&offset).width().max(64);
+        let known = self.cast(known, width, false);
+        let past = self.imm(width, (BigUint::from(1u8) << width) - BigUint::from(1u8));
+        let index = self.kernel.builder().alloc_bit(width, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Mux(index, valid, known, past));
+        index
+    }
+    /// `value` with its unknown bits read as 0, as a two-state use reads them
+    /// (IEEE 1800-2023 6.11.2).
+    fn two_state(&mut self, value: RegisterId) -> RegisterId {
+        if !self.is_logic(value) {
+            return value;
+        }
+        let width = self.kernel.builder().register(&value).width();
+        let reg = self.kernel.builder().alloc_bit(width, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Unary(reg, UnaryOp::ToTwoState, value));
+        reg
+    }
+    fn imm(&mut self, width: usize, value: impl Into<BigUint>) -> RegisterId {
+        let reg = self.kernel.builder().alloc_bit(width.max(1), false);
+        self.kernel.builder().emit(Inst::Imm(
+            reg,
+            SIRValue::new(
+                value.into() & ((BigUint::from(1u8) << width.max(1)) - BigUint::from(1u8)),
+            ),
+        ));
+        reg
+    }
+    fn load(&mut self, address: Addr, width: usize, signed: bool) -> RegisterId {
+        let reg = if self.holds_logic(address) {
+            self.kernel.builder().alloc_logic(width.max(1))
+        } else {
+            self.kernel.builder().alloc_bit(width.max(1), signed)
+        };
+        self.kernel.builder().emit(Inst::Load(
+            reg,
+            stable(address),
+            SIROffset::Static(0),
+            width.max(1),
+        ));
+        reg
+    }
+    fn store(&mut self, address: Addr, width: usize, value: RegisterId) {
+        self.kernel.builder().emit(Inst::Store(
+            stable(address),
+            SIROffset::Static(0),
+            width.max(1),
+            value,
+            vec![],
+            vec![],
+        ));
+    }
+    /// Store `width` bits saved in `saved` at the dynamic bit `offset` of
+    /// a `total`-bit object. An offset past the object writes nothing, and a
+    /// selection that runs past its end writes only its in-range bits, as a
+    /// selected write does (IEEE 1800-2023 7.4.6, 11.5.1).
+    fn selected_store(
+        &mut self,
+        address: Addr,
+        total: usize,
+        width: usize,
+        offset: RegisterId,
+        saved: Addr,
+        string: bool,
+    ) {
+        let offset_width = self.kernel.builder().register(&offset).width();
+        let bound = self.cast(offset, offset_width.max(64), false);
+        let last_full = self.imm(offset_width.max(64), total.saturating_sub(width) as u64);
+        let fits = self.binary(BinaryOp::LeU, bound, last_full, 1);
+        let full = self.kernel.builder().new_block();
+        let partial_check = self.kernel.builder().new_block();
+        let join = self.kernel.builder().new_block();
+        self.kernel.builder().seal_block(Term::Branch {
+            cond: fits,
+            true_block: (full, vec![]),
+            false_block: (partial_check, vec![]),
+        });
+        self.kernel.builder().switch_to_block(full);
+        let value = self.load(saved, width, false);
+        self.kernel.builder().emit(Inst::Store(
+            stable(address),
+            SIROffset::Dynamic(offset),
+            width,
+            value,
+            vec![],
+            vec![],
+        ));
+        self.kernel.builder().seal_block(Term::Jump(join, vec![]));
+        self.kernel.builder().switch_to_block(partial_check);
+        // Only a multi-bit selection can overlap the end. A string element
+        // is a whole handle and never does.
+        if width > 1 && total > width && !string {
+            let end = self.imm(offset_width.max(64), total as u64);
+            let inside = self.binary(BinaryOp::LtU, bound, end, 1);
+            let partial = self.kernel.builder().new_block();
+            self.kernel.builder().seal_block(Term::Branch {
+                cond: inside,
+                true_block: (partial, vec![]),
+                false_block: (join, vec![]),
+            });
+            self.kernel.builder().switch_to_block(partial);
+            // The overlap lies in the last `width` bits: merge into them.
+            let tail = total - width;
+            let start = self.imm(offset_width.max(64), tail as u64);
+            let shift = self.binary(BinaryOp::Sub, bound, start, offset_width.max(64));
+            let shift = self.cast(shift, 64, false);
+            let old = if self.holds_logic(address) {
+                self.kernel.builder().alloc_logic(width)
+            } else {
+                self.kernel.builder().alloc_bit(width, false)
+            };
+            self.kernel.builder().emit(Inst::Load(
+                old,
+                stable(address),
+                SIROffset::Static(tail),
+                width,
+            ));
+            let ones = self.imm(width, (BigUint::from(1u8) << width) - BigUint::from(1u8));
+            let mask = self.binary(BinaryOp::Shl, ones, shift, width);
+            let keep = self.kernel.builder().alloc_bit(width, false);
+            self.kernel
+                .builder()
+                .emit(Inst::Unary(keep, UnaryOp::BitNot, mask));
+            let old = self.binary(BinaryOp::And, old, keep, width);
+            let value = self.load(saved, width, false);
+            let value = self.binary(BinaryOp::Shl, value, shift, width);
+            let merged = self.binary(BinaryOp::Or, old, value, width);
+            self.kernel.builder().emit(Inst::Store(
+                stable(address),
+                SIROffset::Static(tail),
+                width,
+                merged,
+                vec![],
+                vec![],
+            ));
+        }
+        if self.kernel.builder().has_open_block() {
+            self.kernel.builder().seal_block(Term::Jump(join, vec![]));
+        }
+        self.kernel.builder().switch_to_block(join);
+    }
+    fn cast(&mut self, value: RegisterId, width: usize, signed: bool) -> RegisterId {
+        let source = self.kernel.builder().register(&value).width();
+        let extend = self.kernel.builder().register(&value).is_signed() && width > source;
+        let reg = self.alloc(width, signed, &[value]);
+        if width < source {
+            self.kernel
+                .builder()
+                .emit(Inst::Slice(reg, value, 0, width.max(1)));
+        } else {
+            self.kernel
+                .builder()
+                .emit(Inst::Unary(reg, UnaryOp::Ident, value));
+        }
+        if extend {
+            let shift = self.imm(64, (width - source) as u64);
+            let reg = self.binary(BinaryOp::Shl, reg, shift, width);
+            let reg = self.binary(BinaryOp::Sar, reg, shift, width);
+            let typed = self.alloc(width, signed, &[reg]);
+            self.kernel
+                .builder()
+                .emit(Inst::Unary(typed, UnaryOp::Ident, reg));
+            typed
+        } else {
+            reg
+        }
+    }
+    fn binary(
+        &mut self,
+        op: BinaryOp,
+        mut l: RegisterId,
+        mut r: RegisterId,
+        width: usize,
+    ) -> RegisterId {
+        if matches!(
+            op,
+            BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::LtS
+                | BinaryOp::LtU
+                | BinaryOp::LeS
+                | BinaryOp::LeU
+                | BinaryOp::GtS
+                | BinaryOp::GtU
+                | BinaryOp::GeS
+                | BinaryOp::GeU
+        ) {
+            let signed = matches!(
+                op,
+                BinaryOp::LtS | BinaryOp::LeS | BinaryOp::GtS | BinaryOp::GeS
+            );
+            let lw = self.kernel.builder().register(&l).width();
+            let rw = self.kernel.builder().register(&r).width();
+            l = self.cast(l, lw, signed);
+            r = self.cast(r, rw, signed);
+            l = self.cast(l, lw.max(rw), signed);
+            r = self.cast(r, lw.max(rw), signed);
+        }
+        let reg = self.alloc(width, false, &[l, r]);
+        self.kernel.builder().emit(Inst::Binary(reg, l, op, r));
+        reg
+    }
+    fn request(&mut self, request: KernelRequest<Addr>) -> Result<(), String> {
+        self.settled = matches!(request, KernelRequest::Settle { .. });
+        let index = self.requests.len();
+        self.requests.push(request);
+        self.kernel
+            .host_request(celox_design::HostRequestKind::Testbench, index as u32)
+            .map_err(|e| e.to_string())
+    }
+    fn expression(&mut self, expr: &Expr) -> Result<lowering::Value, String> {
+        let expr = expr.clone().try_map_locations(|location| {
+            Ok::<_, String>(StateLocation {
+                address: stable(location.address),
+                byte_offset: location.byte_offset,
+            })
+        })?;
+        let state_objects = &self.runtime.design.state_objects;
+        let four_state = self.four_state;
+        let logic = |address: &RegionedVarAddrBase<Addr>| {
+            four_state
+                && state_objects
+                    .get(&address.var_id)
+                    .is_some_and(|object| object.is_4state)
+        };
+        let value = lowering::Expressions {
+            builder: self.kernel.builder(),
+            four_state,
+            logic: &logic,
+        }
+        .compile(&expr)?;
+        let writes: Vec<_> = expr
+            .ops()
+            .iter()
+            .filter_map(|op| {
+                let address = match op {
+                    ExprOpcode::StoreU64 { location, .. }
+                    | ExprOpcode::StoreString { location } => location.address.var_id,
+                    _ => return None,
+                };
+                self.writes_observable(address).then_some(address)
+            })
+            .collect();
+        if writes.is_empty() {
+            return Ok(value);
+        }
+        // Host requests resume through a fresh kernel entry. Preserve the
+        // expression result in layout-owned state across that boundary.
+        let width = self.kernel.builder().register(&value.register).width();
+        let saved = self.saved_slot(width, value.string, value.register);
+        self.store(saved, width, value.register);
+        for address in writes {
+            let width = self.runtime.design.state_objects[&address].width;
+            self.request(KernelRequest::Written { address, width })?;
+        }
+        Ok(lowering::Value {
+            register: self.load(saved, width, false),
+            string: value.string,
+        })
+    }
+    fn writes_observable(&self, address: Addr) -> bool {
+        self.external_observers || self.runtime.rtl_accesses.contains(&address)
+    }
+    /// The DUT storage `expr` loads.
+    fn dut_reads(&self, expr: &Expr) -> HashSet<Addr> {
+        expr.ops()
+            .iter()
+            .filter_map(|op| match op {
+                ExprOpcode::LoadU64 { location, .. }
+                | ExprOpcode::LoadWide { location, .. }
+                | ExprOpcode::LoadIndexed { location, .. }
+                | ExprOpcode::LoadBitSelect { location, .. }
+                | ExprOpcode::LoadString { location, .. } => self
+                    .runtime
+                    .rtl_accesses
+                    .contains(&location.address)
+                    .then_some(location.address),
+                _ => None,
+            })
+            .collect()
+    }
+    fn settled_expression(&mut self, expr: &Expr) -> Result<lowering::Value, String> {
+        // Reads within one straight-line segment see the same settled DUT.
+        // A write, host service or control-flow boundary invalidates this fact.
+        // External observers see every settle, so theirs settle everything.
+        let reads = self.dut_reads(expr);
+        if self.external_observers {
+            self.request(KernelRequest::Settle { reads: Vec::new() })?;
+        } else if !reads.is_empty() {
+            if !self.settled {
+                self.settled_reads.clear();
+            }
+            let mut missing: Vec<Addr> = reads
+                .into_iter()
+                .filter(|address| !self.settled_reads.contains(address))
+                .collect();
+            if !missing.is_empty() {
+                missing.sort_unstable();
+                self.settled_reads.extend(missing.iter().copied());
+                self.request(KernelRequest::Settle { reads: missing })?;
+            }
+        }
+        self.expression(expr)
+    }
+    fn block(
+        &mut self,
+        body: &[SemanticStatement<Addr>],
+        break_to: Option<BlockId>,
+    ) -> Result<(), String> {
+        for statement in body {
+            let site = self.site;
+            self.site += 1;
+            if !self.kernel.builder().has_open_block() {
+                let dead = self.kernel.builder().new_block();
+                self.kernel.builder().switch_to_block(dead);
+            }
+            match statement {
+                TestbenchStatement::If {
+                    expr,
+                    then_block,
+                    else_block,
+                } => {
+                    let cond = self.settled_expression(expr)?.register;
+                    let cond = lowering::Expressions {
+                        builder: self.kernel.builder(),
+                        four_state: self.four_state,
+                        logic: &|_| false,
+                    }
+                    .condition(cond);
+                    let yes = self.kernel.builder().new_block();
+                    let no = self.kernel.builder().new_block();
+                    let join = self.kernel.builder().new_block();
+                    self.kernel.builder().seal_block(Term::Branch {
+                        cond,
+                        true_block: (yes, vec![]),
+                        false_block: (no, vec![]),
+                    });
+                    for (block, body) in [(yes, then_block), (no, else_block)] {
+                        self.kernel.builder().switch_to_block(block);
+                        self.settled = false;
+                        self.block(body, break_to)?;
+                        if self.kernel.builder().has_open_block() {
+                            self.kernel.builder().seal_block(Term::Jump(join, vec![]));
+                        }
+                    }
+                    self.kernel.builder().switch_to_block(join);
+                    self.settled = false;
+                }
+                TestbenchStatement::Assign { dst, expr } => {
+                    let expression = self.settled_expression(expr)?;
+                    let value = self.cast(expression.register, dst.width, false);
+                    // A two-state destination stores no unknown bits.
+                    let value = if self.holds_logic(dst.signal.address) {
+                        value
+                    } else {
+                        self.two_state(value)
+                    };
+                    let saved = if dst.selection.is_some() {
+                        let saved = self.saved_slot(dst.width, expression.string, value);
+                        self.store(saved, dst.width, value);
+                        Some(saved)
+                    } else {
+                        None
+                    };
+                    if let Some(selection) = &dst.selection {
+                        let offset = self.settled_expression(&selection.offset)?.register;
+                        let offset = self.index(offset);
+                        let saved = saved.expect("selected assignments save their value");
+                        self.selected_store(
+                            dst.signal.address,
+                            dst.signal.width,
+                            dst.width,
+                            offset,
+                            saved,
+                            expression.string,
+                        );
+                    } else {
+                        self.store(dst.signal.address, dst.width, value);
+                    }
+                    if self.writes_observable(dst.signal.address) {
+                        self.request(KernelRequest::Written {
+                            address: dst.signal.address,
+                            width: dst.signal.width,
+                        })?;
+                    }
+                }
+                TestbenchStatement::For {
+                    loop_var,
+                    start,
+                    end,
+                    inclusive,
+                    step,
+                    step_op,
+                    reverse,
+                    body,
+                } => {
+                    self.for_loop(
+                        *loop_var, start, end, *inclusive, *step, *step_op, *reverse, body,
+                        break_to,
+                    )?;
+                }
+                TestbenchStatement::Break => {
+                    if let Some(target) = break_to {
+                        self.kernel.builder().seal_block(Term::Jump(target, vec![]));
+                    } else {
+                        self.kernel.complete();
+                    }
+                }
+                _ => self.request(KernelRequest::Statement(site))?,
+            }
+        }
+        Ok(())
+    }
+    fn bound(&mut self, bound: &LoopBound<Expr>) -> Result<(RegisterId, usize, bool), String> {
+        Ok(match bound {
+            LoopBound::Static(value) => {
+                let width = (usize::BITS as usize - value.leading_zeros() as usize).max(32);
+                let value = self.imm(width, *value as u64);
+                (self.cast(value, width, true), width, true)
+            }
+            LoopBound::Dynamic {
+                expr,
+                width,
+                signed,
+            } => {
+                let value = self.settled_expression(expr)?.register;
+                let value = self.two_state(value);
+                (self.cast(value, *width, *signed), *width, *signed)
+            }
+        })
+    }
+    fn bound_fits(
+        &mut self,
+        value: RegisterId,
+        width: usize,
+        signed: bool,
+        extra: bool,
+    ) -> RegisterId {
+        let source = self.kernel.builder().register(&value).clone();
+        let common = source.width().max(width + 1);
+        let value = self.cast(value, common, source.is_signed());
+        let max = (BigUint::from(1u8) << (width - usize::from(signed))) - BigUint::from(1u8)
+            + BigUint::from(u8::from(extra));
+        let max = self.imm(common, max);
+        let upper = self.binary(
+            if source.is_signed() {
+                BinaryOp::LeS
+            } else {
+                BinaryOp::LeU
+            },
+            value,
+            max,
+            1,
+        );
+        if source.is_signed() {
+            let min = if signed {
+                (BigUint::from(1u8) << common) - (BigUint::from(1u8) << (width - 1))
+            } else {
+                BigUint::ZERO
+            };
+            let min = self.imm(common, min);
+            let lower = self.binary(BinaryOp::GeS, value, min, 1);
+            self.binary(BinaryOp::And, upper, lower, 1)
+        } else {
+            upper
+        }
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn for_loop(
+        &mut self,
+        variable: Option<(SemanticSignal<Addr>, usize, bool)>,
+        start: &LoopBound<Expr>,
+        end: &LoopBound<Expr>,
+        inclusive: bool,
+        step: usize,
+        step_op: Option<TestbenchOperator>,
+        reverse: bool,
+        body: &[SemanticStatement<Addr>],
+        _outer_break: Option<BlockId>,
+    ) -> Result<(), String> {
+        let (first, fw, fs) = self.bound(start)?;
+        // A bound can call host services: save the first value across them.
+        let first_slot = self.slot(fw, false);
+        self.store(first_slot, fw, first);
+        let (last, lw, ls) = self.bound(end)?;
+        let first = self.load(first_slot, fw, fs);
+        let (width, signed) = variable.map_or((fw.max(lw).max(64), fs || ls), |(_, w, s)| (w, s));
+        // A fixed-width induction variable cannot traverse an unrepresentable
+        // endpoint. Diagnose that before entering an otherwise enormous loop.
+        let singleton = if inclusive && fw.max(lw) > 64 {
+            let equal = self.binary(BinaryOp::Eq, first, last, 1);
+            let max = self.imm(fw.max(lw), u64::MAX);
+            let wide = self.binary(BinaryOp::GtU, first, max, 1);
+            self.binary(BinaryOp::And, equal, wide, 1)
+        } else {
+            self.imm(1, 0u8)
+        };
+        // An empty range runs nothing, even when an endpoint does not fit the
+        // induction variable: run it in single mode with no iteration left.
+        // Compare as the loop condition does: signed only when the induction
+        // variable and its limit endpoint both are.
+        let empty = if variable.is_some() {
+            let common = fw.max(lw);
+            let compare_signed = signed && if reverse { fs } else { ls };
+            let from = self.cast(first, common, fs);
+            let to = self.cast(last, common, ls);
+            let op = match (inclusive, compare_signed) {
+                (true, true) => BinaryOp::GtS,
+                (true, false) => BinaryOp::GtU,
+                (false, true) => BinaryOp::GeS,
+                (false, false) => BinaryOp::GeU,
+            };
+            self.binary(op, from, to, 1)
+        } else {
+            self.imm(1, 0u8)
+        };
+        let mode = self.binary(BinaryOp::Or, singleton, empty, 1);
+        let mode_slot = self.slot(1, false);
+        self.store(mode_slot, 1, mode);
+        let remaining_slot = self.slot(1, false);
+        let one = self.imm(1, 1u8);
+        let remaining = self.binary(BinaryOp::Xor, empty, one, 1);
+        self.store(remaining_slot, 1, remaining);
+        if variable.is_some() {
+            let first_fits = self.bound_fits(first, width, signed, false);
+            let last_fits = self.bound_fits(last, width, signed, !inclusive);
+            let fits = self.binary(BinaryOp::And, first_fits, last_fits, 1);
+            let fits = self.binary(BinaryOp::Or, fits, mode, 1);
+            let valid = self.kernel.builder().new_block();
+            let invalid = self.kernel.builder().new_block();
+            self.kernel.builder().seal_block(Term::Branch {
+                cond: fits,
+                true_block: (valid, vec![]),
+                false_block: (invalid, vec![]),
+            });
+            self.kernel.builder().switch_to_block(invalid);
+            self.request(KernelRequest::Error(
+                "non-progressing stepped for loop".into(),
+            ))?;
+            self.kernel.complete();
+            self.kernel.builder().switch_to_block(valid);
+        }
+        let limit_width = if reverse { fw } else { lw };
+        let limit_signed = if reverse { fs } else { ls };
+        let current_slot = self.slot(width, false);
+        let limit_slot = self.slot(limit_width, false);
+        self.store(limit_slot, limit_width, if reverse { first } else { last });
+        let current = if reverse && !inclusive {
+            let one = self.imm(lw, 1u8);
+            self.binary(BinaryOp::Sub, last, one, lw)
+        } else if reverse {
+            last
+        } else {
+            first
+        };
+        let current = self.cast(current, width, signed);
+        self.store(current_slot, width, current);
+        let check = self.kernel.builder().new_block();
+        let body_entry = self.kernel.builder().new_block();
+        let advance = self.kernel.builder().new_block();
+        let exit = self.kernel.builder().new_block();
+        self.kernel.builder().seal_block(Term::Jump(check, vec![]));
+        self.kernel.builder().switch_to_block(check);
+        let current = self.load(current_slot, width, signed);
+        let limit = self.load(limit_slot, limit_width, limit_signed);
+        let cmp = match (reverse, inclusive, signed && limit_signed) {
+            (true, _, true) => BinaryOp::GeS,
+            (true, _, false) => BinaryOp::GeU,
+            (false, true, true) => BinaryOp::LeS,
+            (false, true, false) => BinaryOp::LeU,
+            (false, false, true) => BinaryOp::LtS,
+            (false, false, false) => BinaryOp::LtU,
+        };
+        let cond = self.binary(cmp, current, limit, 1);
+        let mode = self.load(mode_slot, 1, false);
+        let remaining = self.load(remaining_slot, 1, false);
+        let selected = self.kernel.builder().alloc_bit(1, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Mux(selected, mode, remaining, cond));
+        let cond = selected;
+        self.kernel.builder().seal_block(Term::Branch {
+            cond,
+            true_block: (body_entry, vec![]),
+            false_block: (exit, vec![]),
+        });
+        self.kernel.builder().switch_to_block(body_entry);
+        self.settled = false;
+        if let Some((var, _, _)) = variable {
+            self.store(var.address, width, current);
+        }
+        self.block(body, Some(exit))?;
+        if self.kernel.builder().has_open_block() {
+            self.kernel
+                .builder()
+                .seal_block(Term::Jump(advance, vec![]));
+        }
+        self.kernel.builder().switch_to_block(advance);
+        let current = self.load(current_slot, width, signed);
+        let shift = !reverse
+            && matches!(
+                step_op,
+                Some(TestbenchOperator::LogicShiftL | TestbenchOperator::ArithShiftL)
+            );
+        // A shift count at or above the width shifts every bit out; clamp it
+        // instead of truncating it to the counter width.
+        let step = self.imm(width, if shift { step.min(width) } else { step } as u64);
+        let op = if reverse {
+            BinaryOp::Sub
+        } else {
+            match step_op {
+                Some(TestbenchOperator::Mul) => BinaryOp::Mul,
+                Some(TestbenchOperator::BitOr) => BinaryOp::Or,
+                Some(TestbenchOperator::BitXor) => BinaryOp::Xor,
+                Some(TestbenchOperator::LogicShiftL | TestbenchOperator::ArithShiftL) => {
+                    BinaryOp::Shl
+                }
+                _ => BinaryOp::Add,
+            }
+        };
+        let next = self.binary(op, current, step, width);
+        let next = self.cast(next, width, signed);
+        let progress = self.binary(
+            match (reverse, signed) {
+                (true, true) => BinaryOp::LtS,
+                (true, false) => BinaryOp::LtU,
+                (false, true) => BinaryOp::GtS,
+                (false, false) => BinaryOp::GtU,
+            },
+            next,
+            current,
+            1,
+        );
+        self.store(current_slot, width, next);
+        let zero = self.imm(1, 0u8);
+        self.store(remaining_slot, 1, zero);
+        let failure = self.kernel.builder().new_block();
+        self.kernel.builder().seal_block(Term::Branch {
+            cond: progress,
+            true_block: (check, vec![]),
+            false_block: (failure, vec![]),
+        });
+        self.kernel.builder().switch_to_block(failure);
+        self.request(KernelRequest::Error(
+            "non-progressing stepped for loop".into(),
+        ))?;
+        self.kernel.complete();
+        self.kernel.builder().switch_to_block(exit);
+        self.settled = false;
+        Ok(())
+    }
+}
+
+pub(crate) fn lower(
+    sir: &mut SirProgram,
+    runtime: &mut RuntimeProgram,
+    program: &mut TestbenchProgram<Addr>,
+    four_state: bool,
+) -> Result<(), String> {
+    let mut kernels = Vec::new();
+    let external_observers = !program.component_bindings().is_empty()
+        || !runtime.runtime_schema.persistent_comb_state.is_empty()
+        || !runtime.runtime_schema.comb_observers.is_empty()
+        || runtime
+            .runtime_schema
+            .processes
+            .iter()
+            .any(|p| p.kind != ProcessKind::Callable);
+    let marker_site = event_site(runtime, marker_event_site());
+    let mut display_sites = Vec::new();
+    for body in program.processes() {
+        let mut statements = Vec::new();
+        statement_sites(body, &mut statements);
+        display_sites.push(
+            statements
+                .into_iter()
+                .enumerate()
+                .filter_map(|(site, statement)| {
+                    let SemanticStatement::Display { message, newline } = statement else {
+                        return None;
+                    };
+                    Some((
+                        site,
+                        event_site(runtime, display_event_site(message, *newline)?),
+                    ))
+                })
+                .collect::<Vec<_>>(),
+        );
+    }
+    for (body, display_sites) in program.processes().zip(display_sites) {
+        let slots = ProcessSlots {
+            kind: ProcessKind::Callable,
+            requires_timed_simulation: false,
+            const_delays: false,
+            program: None,
+            resume: runtime.design.allocate_testbench_slot(16, false),
+            status: runtime.design.allocate_testbench_slot(8, false),
+            delay: runtime.design.allocate_testbench_slot(64, false),
+        };
+        for slot in [slots.resume, slots.status, slots.delay] {
+            runtime.runtime_schema.testbench_read_roots.insert(slot);
+        }
+        let mut lower = Lower {
+            runtime,
+            four_state,
+            kernel: ProcessKernelBuilder::new(slots),
+            requests: vec![],
+            site: 0,
+            external_observers,
+            settled: false,
+            settled_reads: HashSet::default(),
+        };
+        lower.block(body, None)?;
+        let entry = sir.processes.len();
+        let mut unit = lower.kernel.build().into_map_addr(&mut |address| {
+            celox_design::RegionedStateAddr::from_absolute_addr(address.region, address.var_id)
+        });
+        super::memory::normalize(&mut unit, &lower.runtime.design);
+        unit.verify_result().map_err(|error| error.to_string())?;
+        sir.processes.push(unit);
+        lower.runtime.runtime_schema.processes.push(slots);
+        lower.runtime.runtime_schema.process_frames.push(None);
+        lower
+            .runtime
+            .runtime_schema
+            .process_origins
+            .push(Default::default());
+        kernels.push(TestbenchKernel {
+            entry,
+            resume: slots.resume,
+            status: slots.status,
+            request: slots.delay,
+            requests: lower.requests,
+            display_sites,
+        });
+    }
+    program.set_kernels(kernels);
+    allocate_scheduler(runtime, program, marker_site);
+    Ok(())
+}
+
+/// The statements of `body` in site order: each statement before the
+/// statements it contains.
+fn statement_sites<'a>(
+    body: &'a [SemanticStatement<Addr>],
+    out: &mut Vec<&'a SemanticStatement<Addr>>,
+) {
+    for statement in body {
+        out.push(statement);
+        match statement {
+            SemanticStatement::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                statement_sites(then_block, out);
+                statement_sites(else_block, out);
+            }
+            SemanticStatement::For { body, .. } => statement_sites(body, out),
+            _ => {}
+        }
+    }
+}
+
+fn event_site(runtime: &mut RuntimeProgram, site: celox_design::RuntimeEventSite) -> u32 {
+    let sites = &mut runtime.runtime_schema.runtime_event_sites;
+    sites.push(site);
+    (sites.len() - 1) as u32
+}
+
+/// A record that prints nothing and carries a simulation time.
+fn marker_event_site() -> celox_design::RuntimeEventSite {
+    celox_design::RuntimeEventSite {
+        kind: celox_design::RuntimeEventKind::Write,
+        template: Some(String::new()),
+        sizing: celox_design::DisplaySizing::Veryl,
+        scope: None,
+        location: None,
+        assertion: None,
+        deferred: None,
+        timestamp_arg: false,
+        arg_widths: vec![64],
+        arg_signed: vec![false],
+        arg_is_string: vec![false],
+        arg_float_precision: vec![None],
+        arg_is_handle: Vec::new(),
+    }
+}
+
+/// The site a `$display` records its message at, formatted as the host
+/// formats it. String arguments are heap handles in compiled code, which
+/// the host formats itself: `None` for those.
+pub(crate) fn display_event_site(
+    message: &Option<AssertMessage<SemanticArgument<Addr>>>,
+    newline: bool,
+) -> Option<celox_design::RuntimeEventSite> {
+    let (template, args) = match message {
+        None => (Some(String::new()), &[][..]),
+        Some(AssertMessage::Formatted { template, args }) => (Some(template.clone()), &args[..]),
+        Some(AssertMessage::DynamicArgs(args)) => (None, &args[..]),
+    };
+    if args.iter().any(|arg| arg.is_string) {
+        return None;
+    }
+    Some(celox_design::RuntimeEventSite {
+        kind: if newline {
+            celox_design::RuntimeEventKind::Display
+        } else {
+            celox_design::RuntimeEventKind::Write
+        },
+        template,
+        sizing: celox_design::DisplaySizing::Veryl,
+        scope: None,
+        location: None,
+        assertion: None,
+        deferred: None,
+        timestamp_arg: false,
+        arg_widths: args.iter().map(|arg| arg.width.max(1)).collect(),
+        arg_signed: args.iter().map(|arg| arg.signed).collect(),
+        arg_is_string: vec![false; args.len()],
+        arg_float_precision: args.iter().map(|arg| arg.float_precision).collect(),
+        arg_is_handle: Vec::new(),
+    })
+}
+
+fn allocate_scheduler(
+    runtime: &mut RuntimeProgram,
+    program: &mut TestbenchProgram<Addr>,
+    marker_site: u32,
+) {
+    fn collect(body: &[SemanticStatement<Addr>], clocks: &mut Vec<(Addr, u64)>) {
+        for statement in body {
+            match statement {
+                SemanticStatement::ClockNext {
+                    clock_event,
+                    period,
+                    ..
+                }
+                | SemanticStatement::ResetAssert {
+                    clock_event,
+                    period,
+                    ..
+                } => {
+                    if !clocks.iter().any(|(a, _)| a == clock_event) {
+                        clocks.push((*clock_event, (*period).max(2)));
+                    }
+                }
+                SemanticStatement::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    collect(then_block, clocks);
+                    collect(else_block, clocks);
+                }
+                SemanticStatement::For { body, .. } => collect(body, clocks),
+                _ => {}
+            }
+        }
+    }
+    let mut clocks: Vec<_> = program
+        .clocks()
+        .iter()
+        .map(|c| (c.event, c.period.max(2)))
+        .collect();
+    let declared = clocks.len();
+    collect(program.statements(), &mut clocks);
+    let mut slot = || {
+        let a = runtime.design.allocate_testbench_slot(64, false);
+        runtime.runtime_schema.testbench_read_roots.insert(a);
+        a
+    };
+    let control = std::array::from_fn(|_| slot());
+    let processes = program
+        .kernels()
+        .iter()
+        .map(|_| std::array::from_fn(|_| slot()))
+        .collect();
+    let clock_slots = clocks
+        .iter()
+        .map(|_| std::array::from_fn(|_| slot()))
+        .collect();
+    let locals = program
+        .kernels()
+        .iter()
+        .map(|_| {
+            program
+                .private_variables()
+                .iter()
+                .map(|&a| {
+                    let copy = runtime.design.allocate_testbench_copy(a);
+                    runtime.runtime_schema.testbench_read_roots.insert(copy);
+                    (a, copy)
+                })
+                .collect()
+        })
+        .collect();
+    let event_sources: Vec<_> = runtime
+        .design
+        .state_objects
+        .iter()
+        .filter(|(_, m)| {
+            matches!(
+                m.kind,
+                celox_design::DomainKind::ClockPosedge
+                    | celox_design::DomainKind::ClockNegedge
+                    | celox_design::DomainKind::ResetAsyncLow
+                    | celox_design::DomainKind::ResetAsyncHigh
+            )
+        })
+        .map(|(&a, _)| a)
+        .collect();
+    let baselines = event_sources
+        .into_iter()
+        .map(|a| {
+            let copy = runtime.design.allocate_testbench_copy(a);
+            runtime.runtime_schema.testbench_read_roots.insert(copy);
+            (a, copy)
+        })
+        .collect();
+    program.set_scheduler(TestbenchScheduler {
+        entry: None,
+        control,
+        processes,
+        clocks: clock_slots,
+        events: clocks.iter().map(|c| c.0).collect(),
+        periods: clocks.iter().map(|c| c.1).collect(),
+        declared,
+        locals,
+        baselines,
+        marker_site: Some(marker_site),
+    });
+}
