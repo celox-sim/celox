@@ -15,6 +15,8 @@ pub(super) fn run<B: SimBackend>(
     sim: &mut Simulator<B>,
     tb: &CompiledTestbench<B>,
     ctx: &mut DetailedExecContext,
+    // Distinct clocks of the testbench, declared or waited on.
+    testbench_clocks: usize,
 ) -> Option<ExecResult> {
     let m = tb.scheduler()?;
     let entry = m.entry?;
@@ -121,11 +123,10 @@ pub(super) fn run<B: SimBackend>(
             sim.backend.set(a, 0u64);
         }
     }
-    for (i, c) in m.clocks.iter().enumerate() {
+    for c in &m.clocks {
         for &a in c {
             sim.backend.set(a, 0u64);
         }
-        sim.backend.set(c[3], u64::from(i < m.declared));
     }
     for k in tb.kernels() {
         sim.backend.set(k.resume, 0u16);
@@ -133,6 +134,9 @@ pub(super) fn run<B: SimBackend>(
     let dirty = sim
         .backend
         .resolve_signal(&sim.program.runtime_schema.scheduler.as_ref()?.slots.dirty);
+    // One process on at most one clock reports time in cycles, as the
+    // synchronous path does.
+    let untimed = m.processes.len() == 1 && testbench_clocks <= 1;
     let mut reset_edges = vec![];
     let mut moves = vec![];
     let batch = clock_batch::ClockBatch::new(sim);
@@ -206,7 +210,7 @@ pub(super) fn run<B: SimBackend>(
         }
         sim.backend.clear_triggered_bits();
         let now = sim.backend.get_as::<u64>(m.control[TB_NOW]);
-        ctx.scheduler_time = if m.processes.len() == 1 && clocks.len() <= 1 {
+        ctx.scheduler_time = if untimed {
             None
         } else {
             Some(sim.backend.get_as(m.control[TB_REPORT_TIME]))
@@ -306,10 +310,7 @@ pub(super) fn run<B: SimBackend>(
                                 sim.backend.set(p[0], 1u64);
                                 sim.backend.set(p[1], count);
                                 sim.backend.set(p[2], clock as u64);
-                                if sim.backend.get_as::<u64>(m.clocks[clock][3]) == 0 {
-                                    sim.backend.set(m.clocks[clock][3], 1u64);
-                                    sim.backend.set(m.clocks[clock][0], now);
-                                }
+                                wait_on_clock(sim, m.clocks[clock], now);
                                 sim.backend.set(
                                     m.control[TB_PHASE],
                                     2 + 2 * m.processes.len() as u64 + index as u64,
@@ -348,10 +349,7 @@ pub(super) fn run<B: SimBackend>(
                                 sim.backend.set(p[1], count);
                                 sim.backend.set(p[2], clock as u64);
                                 sim.backend.set(p[4], request as u64 + 1);
-                                if sim.backend.get_as::<u64>(m.clocks[clock][3]) == 0 {
-                                    sim.backend.set(m.clocks[clock][3], 1u64);
-                                    sim.backend.set(m.clocks[clock][0], now);
-                                }
+                                wait_on_clock(sim, m.clocks[clock], now);
                                 sim.backend.set(
                                     m.control[TB_PHASE],
                                     2 + 2 * m.processes.len() as u64 + index as u64,
@@ -360,7 +358,7 @@ pub(super) fn run<B: SimBackend>(
                         } else {
                             let result = exec_one_detailed(sim, statement, ctx);
                             if matches!(result, ExecResult::Finished) {
-                                if m.processes.len() == 1 && clocks.len() <= 1 {
+                                if untimed {
                                     return Some(result);
                                 }
                                 sim.backend.set(m.control[TB_STOPPED], 1u64);
@@ -540,4 +538,14 @@ impl Drop for Exits {
             "[testbench-exits]"
         );
     }
+}
+
+/// A process starts waiting on a clock (`clock` holds its scheduler slots):
+/// the next rise is at the later of now and the previous rise plus the
+/// period, and the generator runs while it has waiters.
+fn wait_on_clock<B: SimBackend>(sim: &mut Simulator<B>, clock: [SignalRef; 4], now: u64) {
+    let next = sim.backend.get_as::<u64>(clock[0]).max(now);
+    sim.backend.set(clock[0], next);
+    let waiters = sim.backend.get_as::<u64>(clock[3]);
+    sim.backend.set(clock[3], waiters + 1);
 }
