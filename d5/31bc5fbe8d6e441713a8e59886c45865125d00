@@ -1,0 +1,1 @@
+Fix review r4431811272: the built-in Nix extractor does not expose a current release value for tag-only inputs. Use custom.regex to extract and replace the xezim release tag and test dependency extraction and replacement.
