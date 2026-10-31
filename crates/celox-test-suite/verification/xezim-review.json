@@ -943,6 +943,10 @@
       "title": "An unpacked structure value with string members used as an item of a structure assignment pattern stores both members' text, padded, in each string member: '{a, \"first\"} with a = '{\"*\", \"agent\"} gives name and regex \"*<spaces>agent\"",
       "standard": "IEEE 1800-2023 10.9.2"
     },
+    "sv_pattern_enum_values": {
+      "title": "%p prints enum constants, casts, method results, conditionals and associative array keys as their values instead of their names, and a string returned by $sformatf as its packed value",
+      "standard": "IEEE 1800-2023 21.2.1.6"
+    },
     "sv_pattern_structure_members": {
       "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
       "standard": "IEEE 1800-2023 21.2.1.6"
@@ -4903,6 +4907,14 @@
       "classification": "xezim_bug",
       "bug": "sv_pattern_structure_item_strings",
       "note": "by_name[\"b\"] = '{a, \"first\"} stores \"*\" and \"agent\" padded together in both name and regex, so %p of by_name prints them in each; the other patterns print as expected."
+    },
+    {
+      "suite": "sv",
+      "name": "string_format::pattern_format_enums",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_pattern_enum_values",
+      "note": "%p of ON, sw.next(), switch_e'(0) and i > 0 ? ON : OFF prints 0, the enum keys of m print as 0, 1 and 2, and the string resource.convert2string() returns prints as a number; enum variables and members and elements of structures and containers print by name. See verification/sv/limitations/pattern-format.json."
     },
     {
       "suite": "sv",

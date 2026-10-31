@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use super::direct::call_name;
 use super::*;
-use crate::ast::enums::EnumDomain;
+use crate::ast::enums::{EnumDomain, EnumMember};
 
 /// An enumerated type method.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -491,41 +491,99 @@ pub(super) fn call(
                 lookup(domain.width, domain.signed, position, pairs, default)
             }
         }
-        Method::Name => {
-            // The bytes of each name, which a value that is no member
-            // replaces by the empty string (6.19.5.6).
-            let width = 8 * members
-                .iter()
-                .map(|member| member.name.len())
-                .max()
-                .unwrap_or(0)
-                .max(1);
-            let pairs = (0..count_members)
-                .map(|index| {
-                    let bytes = members[index].name.as_bytes();
-                    let name = if bytes.is_empty() {
-                        "8'h0".to_string()
-                    } else {
-                        format!(
-                            "{}'h{}",
-                            8 * bytes.len(),
-                            bytes
-                                .iter()
-                                .map(|byte| format!("{byte:02x}"))
-                                .collect::<String>()
-                        )
-                    };
-                    (member(index), Expr::Literal(name))
-                })
-                .collect();
-            let bytes = lookup(
-                width,
-                false,
-                receiver.clone(),
-                pairs,
-                Expr::Literal(format!("{width}'h0")),
-            );
-            strings::call(StringOp::FromBits, vec![bytes])
-        }
+        Method::Name => strings::call(
+            StringOp::FromBits,
+            vec![name_bytes(domain, receiver.clone())],
+        ),
     })
+}
+
+/// A lookup of `receiver` among the members of `domain` that gives the
+/// value of the pair of its member, or `default` for a value that is no
+/// member.
+fn member_lookup(
+    domain: &EnumDomain,
+    receiver: Expr,
+    width: usize,
+    value: impl Fn(&EnumMember) -> Expr,
+    default: Expr,
+) -> Expr {
+    Expr::Call {
+        callee: Callee::Lookup {
+            width,
+            signed: false,
+        },
+        args: std::iter::once(Some(receiver))
+            .chain(domain.members.iter().flat_map(|member| {
+                [
+                    Some(Expr::Literal(format_typed_parameter_literal(
+                        member.value,
+                        domain.width,
+                        domain.signed,
+                    ))),
+                    Some(value(member)),
+                ]
+            }))
+            .chain(std::iter::once(Some(default)))
+            .collect(),
+        arg_order: Vec::new(),
+    }
+}
+
+/// The bytes of the name of the member that `receiver` has the value of,
+/// which a value that is no member replaces by the empty string (6.19.5.6).
+fn name_bytes(domain: &EnumDomain, receiver: Expr) -> Expr {
+    let width = 8 * domain
+        .members
+        .iter()
+        .map(|member| member.name.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    member_lookup(
+        domain,
+        receiver,
+        width,
+        |member| {
+            let bytes = member.name.as_bytes();
+            Expr::Literal(if bytes.is_empty() {
+                "8'h0".to_string()
+            } else {
+                format!(
+                    "{}'h{}",
+                    8 * bytes.len(),
+                    bytes
+                        .iter()
+                        .map(|byte| format!("{byte:02x}"))
+                        .collect::<String>()
+                )
+            })
+        },
+        Expr::Literal(format!("{width}'h0")),
+    )
+}
+
+/// The `%p` text of `value` of enumerated type `domain`: the name of its
+/// member, or for a value that is no member, the value as its base type
+/// prints (IEEE 1800-2023 21.2.1.6). `value` is evaluated more than once,
+/// so it has no effects.
+pub(in crate::ast) fn pattern_text(domain: &EnumDomain, value: Expr) -> Expr {
+    let named = member_lookup(
+        domain,
+        value.clone(),
+        1,
+        |_| Expr::Literal("1'b1".into()),
+        Expr::Literal("1'b0".into()),
+    );
+    Expr::Mux {
+        condition: Box::new(named),
+        then_expr: Box::new(strings::call(
+            StringOp::FromBits,
+            vec![name_bytes(domain, value.clone())],
+        )),
+        else_expr: Box::new(strings::call(
+            StringOp::Format { ticks_per_unit: 1 },
+            vec![super::format_patterns::bytes_literal(b"%0d"), value],
+        )),
+    }
 }
