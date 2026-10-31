@@ -13,9 +13,16 @@ and standard-library microbenchmarks remain available in the
 | logikbench LZ77 | 2,944 reconstructed bytes | Compression and history memory |
 | tarunes | Qualified headless video/audio probe; measurement pending | CPU, video and audio together |
 
-Heliodor retains its [existing comparison suite](./heliodor.md). rica retains
-`scripts/run-rica-bench.sh`, now using a [Veryl native TB](https://github.com/celox-sim/celox/tree/master/benchmarks/rica) by default; its results are currently local, not a published
-collection history. tarunes has no accepted performance samples yet. Its synthetic-ROM
+Heliodor retains its [existing comparison suite](./heliodor.md). rica uses
+`scripts/run-rica-bench.sh` with a [Veryl TB](https://github.com/celox-sim/celox/tree/master/benchmarks/rica)
+and publishes Celox tiered / Veryl simulator tiered comparisons in the **rica** dashboard tab.
+The `rica Benchmark` workflow runs daily at 04:47 UTC or by manual dispatch.
+It runs all five pinned ELF kernels (tasks, syscalls, atomics, user and supervisor)
+on one host. Each point is the median total process time of three fresh runs,
+including compilation, board memory, stimulus and assertions. Publication requires
+successful mailbox negative controls, matching cycles and commits across both
+simulators, and all five complete kernel pairs. Source or workload changes start
+new charts; different architectures and host CPUs remain separate. tarunes has no accepted performance samples yet. Its synthetic-ROM
 qualification probe agrees with Verilator, including HDMI RGB, but still needs a
 fixed measurement recipe and collection runner.
 The paired Veryl/SV probes and reproduction instructions live in `benchmarks/tarunes/`.

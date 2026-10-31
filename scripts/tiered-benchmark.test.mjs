@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync, readFileSync, readdirSync, rmSync, existsSy
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { kernels, metrics as ricaMetrics } from './publish-rica-bench.mjs';
 import { executeTiered, parseTiered, parseTiming } from './tiered-benchmark.mjs';
 
 const celox = 'CELOX_TIERED_STATS test=tb tier=interpreter promotion=pending interpreted_evaluations=10 compiled_evaluations=0';
@@ -77,6 +78,21 @@ console.log(v ? ${JSON.stringify(veryl.replaceAll('test=tb', 'test=test_rica'))}
     assert.throws(() => execFileSync('node', [script.pathname, projects, join(dir, 'mismatch'), binary, binary, '1']));
     const mismatch = JSON.parse(readFileSync(join(dir, 'mismatch/results.json')));
     assert.deepEqual(mismatch.results.map(r => r.status), ['failed', 'failed']);
+    // Exercise the real producer/consumer boundary for a complete publication.
+    for (const kernel of kernels.filter(k => k !== 'kernel-user')) {
+      execFileSync('cp', ['-r', join(projects, 'kernel-user'), join(projects, kernel)]);
+    }
+    writeFileSync(binary, passingRunner.replace("console.log('RICA_COMPLETE kernel-user cycles=1 commits=1');",
+      "console.log('RICA_COMPLETE ' + require('node:path').basename(process.argv[process.argv.indexOf('--project') + 1]) + ' cycles=1 commits=1');"));
+    execFileSync('node', [script.pathname, projects, join(dir, 'complete'), binary, binary, '3'], {
+      env: { ...process.env, RICA_SOURCE_REVISION: readFileSync(new URL('./rica-revision', import.meta.url), 'utf8').trim() },
+    });
+    const complete = JSON.parse(readFileSync(join(dir, 'complete/results.json')));
+    assert.match(complete.celox.commit, /^[a-f0-9]{40}$/);
+    assert.equal(typeof complete.celox.dirty, 'boolean');
+    // This test itself is executed from a modified worktree.
+    complete.celox.dirty = false;
+    assert.equal(ricaMetrics(complete, complete.celox.commit).length, 10);
     writeFileSync(binary, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     assert.throws(() => execFileSync('node', [script.pathname, projects, join(dir, 'failed'), binary, binary, '1']));
   } finally { rmSync(dir, { recursive: true, force: true }); }
