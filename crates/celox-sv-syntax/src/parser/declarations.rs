@@ -1324,6 +1324,7 @@ impl Parser<'_> {
                 data_type,
                 dimensions,
                 default,
+                declared_type: None,
                 tokens: self.range(start),
             };
             inherited = Some(port.clone());

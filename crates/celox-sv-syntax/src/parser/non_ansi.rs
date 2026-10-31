@@ -72,7 +72,7 @@ impl Parser<'_> {
                 return Err(self.error(format!("port `{name}` has no port declaration")));
             };
             let (_, declaration) = declarations.swap_remove(index);
-            let (net_type, variable, data_type) = if declaration.net_type.is_some()
+            let (net_type, variable, data_type, declared_type) = if declaration.net_type.is_some()
                 || declaration.variable
                 || !matches!(
                     self.types[declaration.data_type.0].kind,
@@ -89,6 +89,7 @@ impl Parser<'_> {
                     declaration.net_type,
                     declaration.variable,
                     declaration.data_type,
+                    None,
                 )
             } else {
                 // The port is completed by a net or variable declaration of
@@ -104,13 +105,14 @@ impl Parser<'_> {
                     declaration.data_type,
                 )? {
                     Some(object) => object,
-                    None => (None, false, declaration.data_type),
+                    None => (None, false, declaration.data_type, None),
                 }
             };
             port.direction = Some(declaration.direction);
             port.net_type = net_type;
             port.variable = variable;
             port.data_type = Some(data_type);
+            port.declared_type = declared_type;
             port.dimensions = declaration.dimensions;
             port.default = declaration.default;
             port.tokens = declaration.tokens;
@@ -187,10 +189,12 @@ impl Parser<'_> {
     }
 
     /// Remove the declarator of `name` from the module-scope net or variable
-    /// declarations, returning the port's net type, `var` and type. The
-    /// port declaration's packed range and signing carry over to a type
-    /// that has neither (IEEE 1800-2023 23.2.2.1). A net declaration
-    /// assignment stays as the continuous assignment it is (10.3.1).
+    /// declarations, returning the port's net type, `var` and type, and the
+    /// port declaration's type when its range must be checked against the
+    /// object's (see [`Self::merge_port_type`]). The port declaration's
+    /// packed range and signing carry over to a type that has neither (IEEE
+    /// 1800-2023 23.2.2.1). A net declaration assignment stays as the
+    /// continuous assignment it is (10.3.1).
     fn take_port_object(
         &mut self,
         items: &mut Vec<BodyItemId>,
@@ -201,7 +205,7 @@ impl Parser<'_> {
         ),
         name: &str,
         port_type: TypeId,
-    ) -> Result<Option<(Option<String>, bool, TypeId)>> {
+    ) -> Result<Option<(Option<String>, bool, TypeId, Option<TypeId>)>> {
         let qualified = items
             .iter()
             .any(|&item| match self.body_items[item.0].kind {
@@ -297,11 +301,8 @@ impl Parser<'_> {
             }
             (None, false) => {}
         }
-        Ok(Some((
-            net_type,
-            variable,
-            self.merge_port_type(port_type, object_type)?,
-        )))
+        let (data_type, declared_type) = self.merge_port_type(port_type, object_type)?;
+        Ok(Some((net_type, variable, data_type, declared_type)))
     }
 
     /// The continuous assignment `name = right` of a net declaration
@@ -357,16 +358,23 @@ impl Parser<'_> {
     }
 
     /// The type of a port declared by a port declaration of type
-    /// `port_type` and a net or variable declaration of type `object_type`.
-    fn merge_port_type(&mut self, port_type: TypeId, object_type: TypeId) -> Result<TypeId> {
+    /// `port_type` and a net or variable declaration of type `object_type`,
+    /// and `port_type` when both give a range in other words: the ranges
+    /// must be identical (IEEE 1800-2023 23.2.2.1), so their bounds are
+    /// compared once parameters have values.
+    fn merge_port_type(
+        &mut self,
+        port_type: TypeId,
+        object_type: TypeId,
+    ) -> Result<(TypeId, Option<TypeId>)> {
         let port = self.types[port_type.0].clone();
         let mut object = self.types[object_type.0].clone();
         let mut changed = false;
+        let mut declared = None;
         if object.packed_dimensions.is_empty() {
             changed |= !port.packed_dimensions.is_empty();
             object.packed_dimensions = port.packed_dimensions.clone();
         } else {
-            // A vector net or variable repeats the port's range exactly.
             let text = |dimensions: &[Dimension]| {
                 dimensions
                     .iter()
@@ -379,11 +387,14 @@ impl Parser<'_> {
                     })
                     .collect::<Vec<_>>()
             };
-            if text(&port.packed_dimensions) != text(&object.packed_dimensions) {
+            if port.packed_dimensions.is_empty() {
                 return Err(self.error(
                     "the ranges of a non-ANSI port declaration and its net or variable \
                      declaration differ",
                 ));
+            }
+            if text(&port.packed_dimensions) != text(&object.packed_dimensions) {
+                declared = Some(port_type);
             }
         }
         if port.signed == Some(true) && object.signed != Some(true) {
@@ -391,13 +402,13 @@ impl Parser<'_> {
             changed = true;
         }
         if !changed {
-            return Ok(object_type);
+            return Ok((object_type, declared));
         }
         if self.types.len() >= 1_000_000 {
             return Err(self.unsupported("native type arena exceeds one million nodes"));
         }
         let id = TypeId(self.types.len());
         self.types.push(object);
-        Ok(id)
+        Ok((id, declared))
     }
 }

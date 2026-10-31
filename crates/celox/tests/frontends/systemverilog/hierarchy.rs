@@ -746,7 +746,11 @@ fn rejects_malformed_non_ansi_port_declarations() {
         ),
         (
             "module Top(a); input [3:0] a; wire [7:0] a; endmodule",
-            "its net or variable declaration differ",
+            "its net or variable declaration of `a` differ",
+        ),
+        (
+            "module Top(a); parameter N = 8; input [3:0] a; wire [N-1:0] a; endmodule",
+            "its net or variable declaration of `a` differ",
         ),
         (
             "module Top(a); input a; wire [3:0] a; endmodule",
@@ -780,5 +784,9 @@ fn rejects_malformed_non_ansi_port_declarations() {
 sv_backends! {
     fn many_sibling_parameter_specializations(sim) {
         @case "hierarchy::many_sibling_parameter_specializations";
+    }
+
+    fn non_ansi_port_ranges_compare_bounds(sim) {
+        @case "hierarchy::non_ansi_port_ranges_compare_bounds";
     }
 }
