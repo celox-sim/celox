@@ -1908,6 +1908,12 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     stmts.extend(assignment);
                     return Ok(stmts);
                 }
+                if let Some(assignment) =
+                    self.element_select_assignment(operator, *nonblocking, *left, *right)?
+                {
+                    stmts.extend(assignment);
+                    return Ok(stmts);
+                }
                 stmts.push(self.assignment_value(
                     if *nonblocking { "=" } else { operator },
                     *nonblocking,
@@ -4699,6 +4705,208 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(Some(body))
     }
 
+    /// `c[k][i] op value` for an element of a dynamic array, queue or
+    /// associative array: the element is read into a local, the select
+    /// assigned there, and the local stored back as the element, so the
+    /// select keeps the semantics of a select of a variable (IEEE 1800-2023
+    /// 11.5.1).
+    fn element_select_assignment(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        left: celox_sv_syntax::ExprId,
+        right: celox_sv_syntax::ExprId,
+    ) -> Converted<Option<Vec<Stmt>>> {
+        let Some((element, target, mut container, mut index)) =
+            containers::selected_element(left, self.tree, self.session, &self.dims)?
+        else {
+            return Ok(None);
+        };
+        if nonblocking {
+            return Err(unsupported("nonblocking dynamic element assignment"));
+        }
+        // The container and the index are evaluated for both the load and
+        // the store.
+        if inlining::effectful(&container) || inlining::effectful(&index) {
+            return Err(unsupported(
+                "select of a dynamic element selected with a side effect",
+            ));
+        }
+        // An index captured before a value with effects keeps its width,
+        // signedness and unknown bits, so one out of range stays out of
+        // range.
+        let index_type = target.key.clone().or_else(|| {
+            dimensions::bound_bits_type(self.tree, &index, &self.dims)
+                .map(|ty| vector_type(ty.width, ty.signed))
+        });
+        self.rename_expr(&mut container);
+        self.rename_expr(&mut index);
+        let native = self.tree.declarations();
+        let mut body = Vec::new();
+        // Only the target is bound against the local; the value reads the
+        // container.
+        self.push_scope();
+        let local = self.declare(ELEMENT_SELECT, target.element.clone());
+        self.dims.element_select = Some((element, ELEMENT_SELECT.to_owned()));
+        let lhs = expression_binding::variable_lvalue(
+            left,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+            false,
+        );
+        let lhs = lhs.and_then(|lhs| self.hoist_index_calls(lhs, op != "=", &mut body));
+        // A position that changes the container, such as `q[0][q.pop_front()]`,
+        // would be evaluated after the element is read.
+        let lhs = lhs.and_then(|lhs| match &lhs {
+            LValue::Select {
+                msb,
+                lsb,
+                array_slice_width,
+                ..
+            } if [Some(msb), Some(lsb), array_slice_width.as_ref()]
+                .into_iter()
+                .flatten()
+                .any(inlining::effectful_position) =>
+            {
+                Err(unsupported(
+                    "select of a dynamic element at a position with effects",
+                ))
+            }
+            _ => Ok(lhs),
+        });
+        // The width of the selection, the context of the value: an indexed
+        // part-select at a runtime position, `[i -: 4]`, has the width it
+        // states.
+        let width = lhs
+            .as_ref()
+            .ok()
+            .and_then(|lhs| {
+                statements::lvalue_expr_type(&self.tree.functions, lhs, &self.dims)
+                    .map(|ty| ty.width)
+            })
+            .or_else(|| {
+                match &native
+                    .expression(expression_binding::ungroup(left, native))
+                    .kind
+                {
+                    celox_sv_syntax::ExprKind::Select { dimension, .. }
+                        if target.element.packed_ranges.len() <= 1 =>
+                    {
+                        match dimension.kind {
+                            celox_sv_syntax::DimensionKind::Indexed { width, .. } => {
+                                constant_binding::bind(width, self.tree, self.session, &self.dims)
+                                    .ok()
+                                    .flatten()
+                                    .and_then(|width| {
+                                        eval_ast_const_expr(
+                                            &self.tree.functions,
+                                            &width,
+                                            &self.dims.const_env,
+                                        )
+                                    })
+                                    .and_then(|width| usize::try_from(width).ok())
+                                    .filter(|&width| width > 0)
+                            }
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                }
+            });
+        let rhs = lhs.and_then(|lhs| {
+            let rhs = if op == "=" {
+                expression_binding::expression(
+                    right,
+                    native,
+                    &lhs,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                )
+            } else {
+                expression_binding::value(right, native, self.tree, self.session, &self.dims)
+                    .and_then(|value| {
+                        assignment_op_expr(self.tree, self.session, &lhs, op, value, &self.dims)
+                    })
+            };
+            let mut lhs = lhs;
+            self.rename_lvalue(&mut lhs);
+            rhs.map(|mut rhs| {
+                self.rename_expr(&mut rhs);
+                (lhs, rhs)
+            })
+        });
+        self.dims.element_select = None;
+        self.pop_scope();
+        let (lhs, rhs) = rhs?;
+        // A value with effects, a call or a container method, may write the
+        // container or what its index reads: the index is evaluated before
+        // it, so the element read is the one written, and the bits it does
+        // not replace are read after it (IEEE 1800-2023 11.4.1).
+        let effects = inlining::calls_subroutine(&rhs) || inlining::effectful(&rhs);
+        if effects {
+            if !matches!(container, Expr::Ident(_)) {
+                return Err(unsupported(
+                    "select of an element of a selected container assigned a value with effects",
+                ));
+            }
+            let index_type =
+                index_type.ok_or_else(|| unsupported("index of a dynamic element select"))?;
+            let (_, captured) = self.hidden(index_type);
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(captured.clone()),
+                rhs: index,
+                nonblocking: false,
+            });
+            index = Expr::Ident(captured);
+        }
+        let load = Stmt::Assign {
+            lhs: LValue::Ident(local.clone()),
+            rhs: containers::element_read(
+                &target,
+                containers::call(
+                    system_functions::ContainerOp::Get,
+                    target.layout,
+                    vec![container.clone(), index.clone()],
+                ),
+            ),
+            nonblocking: false,
+        };
+        let rhs = if effects {
+            // The value is evaluated in the context of the selection.
+            let width = width.ok_or_else(|| unsupported("select of a dynamic element"))?;
+            let (_, value) = self.hidden(vector_type(width, false));
+            if op != "=" {
+                // The operator reads the target as it is before the call.
+                body.push(load.clone());
+            }
+            body.push(Stmt::Assign {
+                lhs: LValue::Ident(value.clone()),
+                rhs,
+                nonblocking: false,
+            });
+            Expr::Ident(value)
+        } else {
+            rhs
+        };
+        body.extend([
+            load,
+            Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: false,
+            },
+            Stmt::Eval(containers::call(
+                system_functions::ContainerOp::Set,
+                target.layout,
+                vec![container, index, Expr::Ident(local)],
+            )),
+        ]);
+        Ok(Some(body))
+    }
+
     /// `lhs` with each subroutine call in its selection evaluated before
     /// it, into a local that `body` assigns: the call may write the property
     /// whose value the selection is written into.
@@ -5127,6 +5335,8 @@ fn lower_class(
 /// The formals of [`classes::Class::cast_name`].
 pub(super) const CAST_DESTINATION: &str = "destination";
 pub(super) const CAST_SOURCE: &str = "source";
+/// The local that a select of a dynamic container element is assigned in.
+const ELEMENT_SELECT: &str = "$element_select";
 
 /// The subroutine `$cast` to a variable of class `name` calls: it assigns
 /// the source handle to the destination and returns 1 when the source is

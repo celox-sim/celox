@@ -547,7 +547,11 @@ structure's default members. Containers of elements wider than 64 bits are
 not compared with `==`, sorted, reduced or printed with `%p`. Containers of unpacked structures with a string
 or handle member, or wider than 64 bits, are not compared with `==` or sorted
 without `with`; a member of such an element is read, not written (assign
-the whole element). Positional assignment patterns and element concatenations construct
+the whole element). A bit-select or part-select of an integral element up to
+64 bits wide, `q[i][3] = b` or `m[k][7:4] += 1`, also of an element of a
+container passed by reference, writes those bits of the element; its
+container and index are evaluated for both the read and the write of the
+element, so they may not have side effects. Positional assignment patterns and element concatenations construct
 sequences; assignments between dynamic arrays and queues copy values and
 respect the destination queue's bound. Associative assignment requires the
 same key type. Equality (`==`, `!=`, `===`, `!==`) between equivalent container types compares contents,

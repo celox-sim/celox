@@ -695,6 +695,22 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "string_format::pattern_format_enums") => {
                             ("compile_error", "compile", "Unpacked structs not supported")
                         }
+                        (
+                            "icarus",
+                            "container_formals::selects_of_four_state_container_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "failed assertion name_tail.index.size() == 1",
+                        ),
+                        (
+                            "icarus",
+                            "container_formals::selects_of_reference_container_elements",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

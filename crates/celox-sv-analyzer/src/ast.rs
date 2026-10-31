@@ -3529,6 +3529,10 @@ struct PackedDimensions {
     /// the property's template; every other property is read through its
     /// object.
     property_select_base: Option<celox_sv_syntax::ExprId>,
+    /// The element of a dynamic container whose select is being bound
+    /// against a local of its type, with the local's name (see
+    /// `containers::selected_element`).
+    element_select: Option<(celox_sv_syntax::ExprId, String)>,
 }
 
 impl PackedDimensions {
@@ -3557,6 +3561,7 @@ impl PackedDimensions {
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),
             property_select_base: None,
+            element_select: None,
         }
     }
 }
