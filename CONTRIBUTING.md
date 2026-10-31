@@ -211,6 +211,10 @@ See GitHub's [advanced setup migration instructions](https://docs.github.com/en/
 
 ### Product checks
 
+Validation workflows disable LTO for development, test, and release-profile
+builds, including dependency cache warming. Benchmark and publication workflows
+retain the workspace LTO settings.
+
 Rust caches in `ci.yml` are restored on every branch but saved only on the
 default branch. A PR's merge-ref cache cannot be restored by another PR, so
 saving one copy per PR consumes the shared cache quota without warming other

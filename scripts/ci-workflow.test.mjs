@@ -698,3 +698,17 @@ test("every rust-cache job of CI has a warm job that computes the same key", () 
     assert.deepEqual(keyEnv(twin), [], id);
   }
 });
+
+test("validation disables LTO without changing benchmark or publication profiles", () => {
+  for (const name of ["ci", "rust-cache"]) {
+    const source = readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8");
+    const env = source.split("\nenv:\n")[1].split("\njobs:")[0];
+    for (const profile of ["DEV", "VTEST", "RELEASE", "WASM_RELEASE"]) {
+      assert.ok(env.includes(`CARGO_PROFILE_${profile}_LTO: "off"`), `${name}: ${profile}`);
+    }
+  }
+  for (const name of ["bench", "heliodor-bench", "rica-bench", "circuit-bench", "taxi-bench", "ci-napi"]) {
+    const source = readFileSync(new URL(`../.github/workflows/${name}.yml`, import.meta.url), "utf8");
+    assert.doesNotMatch(source, /CARGO_PROFILE_\w+_LTO/);
+  }
+});
