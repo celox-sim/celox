@@ -45,6 +45,10 @@ mod unix {
         pub(super) fn take_request(&self) -> bool {
             REQUESTED.swap(false, Ordering::Relaxed)
         }
+
+        pub(super) fn pending(&self) -> bool {
+            REQUESTED.load(Ordering::Relaxed)
+        }
     }
 
     impl Drop for Registration {
@@ -75,6 +79,18 @@ impl StateSignal {
         #[cfg(not(unix))]
         {
             Err("SIGUSR1 checkpoint handling requires Unix".into())
+        }
+    }
+
+    /// Whether a request awaits [`Self::take_request`].
+    pub(super) fn pending(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.registration.pending()
+        }
+        #[cfg(not(unix))]
+        {
+            false
         }
     }
 
