@@ -1,0 +1,59 @@
+name: Keep the Nix reference simulator on a released xezim
+pipelineid: xezim-release
+version: v0.120.1
+
+scms:
+  default:
+    kind: github
+    spec:
+      branch: master
+      commitusingapi: true
+      email: "41898282+github-actions[bot]@users.noreply.github.com"
+      owner: celox-sim
+      repository: celox
+      token: '{{ requiredEnv "UPDATECLI_GITHUB_TOKEN" }}'
+      user: "github-actions[bot]"
+      username: '{{ requiredEnv "UPDATECLI_GITHUB_ACTOR" }}'
+
+actions:
+  pull-request:
+    kind: github/pullrequest
+    scmid: default
+    title: 'test(xezim): update reference simulator to {{ source "release" }}'
+    spec:
+      description: |
+        Update xezim to stable release {{ source "release" }}.
+
+        Updatecli updates flake.nix, regenerates flake.lock and
+        nix/xezim/Cargo.lock, and verifies the Nix build and executable version
+        before opening this PR. No manual lockfile regeneration is required.
+        Review external simulator differences before adoption.
+      labels:
+        - dependencies
+      mergemethod: squash
+
+sources:
+  release:
+    name: Get the newest stable xezim release
+    kind: githubrelease
+    spec:
+      owner: aionhw
+      repository: xezim
+      token: '{{ requiredEnv "UPDATECLI_GITHUB_TOKEN" }}'
+      username: '{{ requiredEnv "UPDATECLI_GITHUB_ACTOR" }}'
+      typefilter:
+        draft: false
+        prerelease: false
+        release: true
+      versionfilter:
+        kind: semver
+        pattern: "*"
+
+targets:
+  released-package:
+    name: Update the release and both locks, then verify the package
+    kind: shell
+    scmid: default
+    sourceid: release
+    spec:
+      command: python3 .updatecli/scripts/update_xezim.py

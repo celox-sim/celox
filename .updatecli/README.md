@@ -1,8 +1,16 @@
 # Updatecli
 
-Updatecli owns the Python runtime and cocotb versions used by the Rust CI job.
+Updatecli owns the Python runtime and cocotb versions used by the Rust CI job,
+and the stable xezim release used by the Nix reference simulator.
 Renovate remains responsible for the repository's other dependencies and is
 configured not to update the `actions/setup-python` runtime input.
+
+The xezim pipeline selects the newest stable GitHub release, updates the tag in
+`flake.nix`, regenerates `flake.lock` and `nix/xezim/Cargo.lock`, and builds and
+checks the resulting Nix executable before opening a single PR containing all
+three files. An unchanged release is a no-op. Drafts and prereleases are excluded.
+Failed regeneration or validation prevents the PR and restores the input files.
+Renovate does not update xezim. No manual lockfile update is required.
 
 The Python/cocotb pipeline selects the newest stable cocotb release from PyPI,
 then chooses the newest stable CPython minor that has both:
