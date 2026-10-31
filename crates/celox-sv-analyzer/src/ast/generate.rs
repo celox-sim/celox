@@ -7,7 +7,7 @@ use super::*;
 use celox_sv_syntax::ExprId;
 mod elaboration;
 mod memo;
-pub(super) use memo::{CallSites, memoize};
+pub(super) use memo::{CallSites, memoize, restore};
 
 mod dependency_order;
 use dependency_order::DependencyOrder;
@@ -507,7 +507,6 @@ impl Item {
 
 #[derive(Clone, Default)]
 struct Scope {
-    state: std::rc::Rc<AnalysisState>,
     imported: Arc<scope::ScopeSymbols>,
     path: String,
     in_loop: bool,
@@ -551,6 +550,7 @@ struct Elaborator<'a, 'b> {
     /// The context of the scope being elaborated, whose constant functions
     /// change with the imports of each generate block.
     tree: AnalysisContext<'a>,
+    session: &'b mut Session,
     module_aliases: &'b HashMap<String, Type>,
     /// The type aliases of the scope being elaborated.
     aliases: Cow<'b, HashMap<String, Type>>,
@@ -564,21 +564,24 @@ pub(super) type Memo = memo::State;
 
 pub(super) fn items(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item>, AnalyzerError> {
-    items_with_literal_use(tree, env, aliases, LiteralUse::All)
+    items_with_literal_use(tree, session, env, aliases, LiteralUse::All)
 }
 
 /// Elaborate the same scopes and diagnostics, retaining module parameter
 /// literals needed by subroutines, declarations and generate constructs.
 pub(super) fn subroutine_items(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Item>, AnalyzerError> {
     items_with_literal_use(
         tree,
+        session,
         env,
         aliases,
         if tree.root_subroutines {
@@ -598,46 +601,55 @@ enum LiteralUse {
 
 fn items_with_literal_use(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     literal_use: LiteralUse,
 ) -> Result<Vec<Item>, AnalyzerError> {
-    memo::items(tree, env, aliases, literal_use, || {
-        elaborate(tree, env, aliases, literal_use)
+    memo::items(tree, session, env, aliases, literal_use, |session| {
+        elaborate(tree, session, env, aliases, literal_use)
     })
 }
 
 fn elaborate(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     literal_use: LiteralUse,
 ) -> Result<Vec<Item>, AnalyzerError> {
-    let mut elaborator = Elaborator {
-        tree: tree.clone(),
-        module_aliases: aliases,
-        aliases: Cow::Borrowed(aliases),
-        remaining: MAX_GENERATE_LOOP_EXPANSION,
-        functions: HashMap::default(),
-        items: Vec::new(),
-    };
-    let parameters = parameters_from_scope(tree, aliases, env, &tree.parameter_overrides)?;
+    let parameters = parameters_from_scope(tree, session, aliases, env, &tree.parameter_overrides)?;
     let references = parameter_literal_references(tree, literal_use)?;
-    let mut literals =
-        parameters::parameter_value_env_for_references(tree, &parameters, env, &references);
-    if elaboration::needs_functions(tree)? {
-        elaborator.functions = module_constant_functions(tree, env, aliases, &literals)?;
-    }
+    let mut literals = parameters::parameter_value_env_for_references(
+        tree,
+        session,
+        &parameters,
+        env,
+        &references,
+    );
+    let functions = if elaboration::needs_functions(tree)? {
+        module_constant_functions(tree, session, env, aliases, &literals)?
+    } else {
+        HashMap::default()
+    };
     // Numeric values and their type markers are already carried by `env`.
     literals.retain(|name, _| !env.contains_key(name));
     let scope = Scope {
-        state: tree.state.clone(),
         imported: scope::imported(tree),
         env: env.clone().into(),
         literals: literals.into(),
         parameter_dimensions: Arc::new(parameter_packed_dimensions(&parameters)),
         parameters,
         ..Scope::default()
+    };
+    let mut elaborator = Elaborator {
+        tree: tree.clone(),
+        session,
+        module_aliases: aliases,
+        aliases: Cow::Borrowed(aliases),
+        remaining: MAX_GENERATE_LOOP_EXPANSION,
+        functions,
+        items: Vec::new(),
     };
     let is_package = tree
         .scope_handle()
@@ -717,11 +729,16 @@ fn parameter_literal_references(
 impl<'a> Elaborator<'a, '_> {
     /// A constant expression in this scope, or `None` when it has no
     /// constant value Celox can determine.
-    fn expression(&self, root: ExprId, scope: &Scope) -> Result<Option<ConstExpr>, AnalyzerError> {
+    fn expression(
+        &mut self,
+        root: ExprId,
+        scope: &Scope,
+    ) -> Result<Option<ConstExpr>, AnalyzerError> {
         let Some(expr) = constant_binding::expression(
             root,
             self.tree.declarations(),
             &self.tree,
+            self.session,
             &scope.env,
             &self.aliases,
         )?
@@ -734,27 +751,35 @@ impl<'a> Elaborator<'a, '_> {
         };
         let Some(mut expr) = expr_to_index_const(
             &self.tree,
+            self.session,
             substitute_expr_idents(const_expr_to_expr(expr), &scope.literals),
             &dimensions,
         ) else {
             return Ok(None);
         };
-        Ok(self
-            .expand_constant_calls(&self.tree, &mut expr, scope)
-            .map(|()| expr))
+        Ok(
+            Self::expand_constant_calls(
+                &self.functions,
+                &self.tree,
+                self.session,
+                &mut expr,
+                scope,
+            )
+            .map(|()| expr),
+        )
     }
 
     fn expand_constant_calls(
-        &self,
+        functions: &HashMap<String, Function>,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         expr: &mut ConstExpr,
         scope: &Scope,
     ) -> Option<()> {
-        let state = &*tree.state;
         match expr {
             ConstExpr::Function { callee, args, .. } => {
                 for arg in args {
-                    self.expand_constant_calls(tree, arg, scope)?;
+                    Self::expand_constant_calls(functions, tree, session, arg, scope)?;
                 }
                 // A block import binds the call to the qualified declaration,
                 // which the installed constant functions evaluate.
@@ -767,7 +792,7 @@ impl<'a> Elaborator<'a, '_> {
                     *name = target.clone();
                 }
                 if let Callee::Subroutine(name) = callee
-                    && self.functions.contains_key(name)
+                    && functions.contains_key(name)
                 {
                     if scope.shadowed.contains(name) {
                         return None;
@@ -778,57 +803,63 @@ impl<'a> Elaborator<'a, '_> {
                         .collect();
                     let expanded = expand_expr_calls(
                         const_expr_to_expr(expr.clone()),
-                        &self.functions,
+                        functions,
                         &signedness,
                         0,
                         true,
                     );
-                    let expanded = simplify_constant_mux_conditions(tree, expanded, &scope.env);
+                    let expanded =
+                        simplify_constant_mux_conditions(tree, session, expanded, &scope.env);
+                    let folded = fold_const_integral_expr_preserving_mask(
+                        tree, session, expanded, &scope.env,
+                    );
                     // Fold only the call: surrounding case arithmetic still needs
                     // the common comparison width, while function results are self-determined.
-                    *expr = expr_to_const(
-                        state,
-                        fold_const_integral_expr_preserving_mask(tree, expanded, &scope.env),
-                    )?;
+                    *expr = expr_to_const(session, folded)?;
                 }
             }
             ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
-                self.expand_constant_calls(tree, expr, scope)?
+                Self::expand_constant_calls(functions, tree, session, expr, scope)?
             }
             ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                self.expand_constant_calls(tree, expr, scope)?;
-                self.expand_constant_calls(tree, msb, scope)?;
-                self.expand_constant_calls(tree, lsb, scope)?;
+                Self::expand_constant_calls(functions, tree, session, expr, scope)?;
+                Self::expand_constant_calls(functions, tree, session, msb, scope)?;
+                Self::expand_constant_calls(functions, tree, session, lsb, scope)?;
             }
             ConstExpr::Select { expr, bit } => {
-                self.expand_constant_calls(tree, expr, scope)?;
-                self.expand_constant_calls(tree, bit, scope)?;
+                Self::expand_constant_calls(functions, tree, session, expr, scope)?;
+                Self::expand_constant_calls(functions, tree, session, bit, scope)?;
             }
             ConstExpr::Binary { left, right, .. } => {
-                self.expand_constant_calls(tree, left, scope)?;
-                self.expand_constant_calls(tree, right, scope)?;
+                Self::expand_constant_calls(functions, tree, session, left, scope)?;
+                Self::expand_constant_calls(functions, tree, session, right, scope)?;
             }
             ConstExpr::Mux {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                self.expand_constant_calls(tree, condition, scope)?;
-                self.expand_constant_calls(tree, then_expr, scope)?;
-                self.expand_constant_calls(tree, else_expr, scope)?;
+                Self::expand_constant_calls(functions, tree, session, condition, scope)?;
+                Self::expand_constant_calls(functions, tree, session, then_expr, scope)?;
+                Self::expand_constant_calls(functions, tree, session, else_expr, scope)?;
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => {}
         }
         Some(())
     }
 
-    fn value(&self, root: ExprId, scope: &Scope, detail: &str) -> Result<i128, AnalyzerError> {
+    fn value(&mut self, root: ExprId, scope: &Scope, detail: &str) -> Result<i128, AnalyzerError> {
         self.expression(root, scope)?
             .and_then(|expr| eval_ast_const_expr(&self.tree.functions, &expr, &scope.env))
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
 
-    fn condition(&self, root: ExprId, scope: &Scope, detail: &str) -> Result<bool, AnalyzerError> {
+    fn condition(
+        &mut self,
+        root: ExprId,
+        scope: &Scope,
+        detail: &str,
+    ) -> Result<bool, AnalyzerError> {
         let types = parameter_types_from_const_env(&scope.env)
             .into_iter()
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
@@ -872,7 +903,7 @@ impl<'a> Elaborator<'a, '_> {
     }
 
     fn constants_and_signal_types(
-        &self,
+        &mut self,
         children: &[celox_sv_syntax::BodyItemId],
         scope: &mut Scope,
         declared: &mut HashSet<String>,
@@ -1037,6 +1068,7 @@ impl<'a> Elaborator<'a, '_> {
                 signals_from_body_item(
                     id,
                     &self.tree,
+                    self.session,
                     &self.aliases,
                     &scope.env,
                     Some(&name),
@@ -1086,6 +1118,7 @@ impl<'a> Elaborator<'a, '_> {
                     let base = scope.env.clone();
                     let mut environment = parameters::ParameterEnvironment::new(
                         &self.tree,
+                        self.session,
                         &scope.parameters,
                         &base,
                         &pending
@@ -1104,6 +1137,7 @@ impl<'a> Elaborator<'a, '_> {
                         parameters::parameters_from_native_with_environment(
                             &parameters::ownership::body(id, &self.tree)?,
                             &self.tree,
+                            self.session,
                             &mut scope.parameters,
                             true,
                             &base,
@@ -1123,6 +1157,7 @@ impl<'a> Elaborator<'a, '_> {
                             })?;
                         constants::bind_generate_parameter_with_types(
                             &self.tree,
+                            self.session,
                             parameter,
                             &mut scope.env,
                             &mut scope.literals,
@@ -1154,6 +1189,7 @@ impl<'a> Elaborator<'a, '_> {
                 parameters::parameters_from_native(
                     &parameters::ownership::body(id, &self.tree)?,
                     &self.tree,
+                    self.session,
                     &mut scope.parameters,
                     true,
                     &scope.env,
@@ -1168,7 +1204,13 @@ impl<'a> Elaborator<'a, '_> {
                         AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
                     })?;
                 scope.parameters.push(parameter.clone());
-                bind_generate_parameter(&self.tree, parameter, &mut scope.env, &mut scope.literals);
+                bind_generate_parameter(
+                    &self.tree,
+                    self.session,
+                    parameter,
+                    &mut scope.env,
+                    &mut scope.literals,
+                );
             }
             order.complete(index);
         }
@@ -1235,6 +1277,7 @@ impl<'a> Elaborator<'a, '_> {
             }
             let mut aliases = types::type_aliases_of_generate_scope(
                 &self.tree,
+                self.session,
                 children,
                 &scope.env,
                 &self.aliases,
@@ -1242,6 +1285,7 @@ impl<'a> Elaborator<'a, '_> {
             )?;
             let enums = parameters::enum_member_constants_from_items(
                 &self.tree,
+                self.session,
                 children,
                 &scope.env,
                 &aliases,
@@ -1323,6 +1367,7 @@ impl<'a> Elaborator<'a, '_> {
             signals_from_body_item(
                 *id,
                 &self.tree,
+                self.session,
                 &self.aliases,
                 &scope.env,
                 None,
@@ -1357,7 +1402,7 @@ impl<'a> Elaborator<'a, '_> {
 
 /// Make `name` in `scope` denote the package item `target`, as an import of
 /// the generate block does.
-fn bind_import(scope: &mut Scope, name: &str, target: &str) {
+fn bind_import(scope: &mut Scope, name: &str, target: &str, session: &mut Session) {
     let imported = scope.imported.clone();
     Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
     scope.names.insert(name.to_string(), target.to_string());
@@ -1408,7 +1453,7 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
         // The exported literal is already evaluated in the package scope.
         // Keep that snapshot when rebuilding declaration-order environments;
         // the initializer may name a package dependency absent from this scope.
-        if let Some(value) = literal.and_then(|expr| expr_to_const(&scope.state, expr)) {
+        if let Some(value) = literal.and_then(|expr| expr_to_const(session, expr)) {
             parameter.value = Some(value);
         }
         scope.parameters.push(parameter);
@@ -1419,6 +1464,7 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str) {
 // itself elaborate generate blocks and recurse into the conditions being decided.
 fn module_constant_functions(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     literals: &HashMap<String, Expr>,
@@ -1461,6 +1507,7 @@ fn module_constant_functions(
     let mut functions = functions::native_functions(
         &roots,
         tree,
+        session,
         &dimensions,
         lifetimes::automatic_by_default(tree),
     )?;
@@ -1683,6 +1730,7 @@ mod tests {
 
     #[test]
     fn consecutive_parameter_runs_bind_each_prefix_once() {
+        let session = &mut Session::default();
         for count in [16, 64, 256] {
             let mut code = String::from("module Top(); if (1) begin : g\n");
             for index in 0..count {
@@ -1702,7 +1750,7 @@ mod tests {
             .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
             parameters::PARAMETER_BINDINGS.with(|bindings| bindings.set(0));
-            let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
+            let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
             let bindings = parameters::PARAMETER_BINDINGS.with(|bindings| bindings.get());
             assert!(
                 bindings <= 3 * count,
@@ -1725,6 +1773,7 @@ mod tests {
 
     #[test]
     fn cached_generate_types_match_rebuilt_types_for_imports_and_four_state_values() {
+        let session = &mut Session::default();
         let syntax = crate::source_tree::SourceTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
         let mut base = HashMap::from_iter([("pkg::IMPORTED".into(), -1)]);
@@ -1767,12 +1816,14 @@ mod tests {
             );
             bind_generate_parameter(
                 &tree,
+                session,
                 parameter.clone(),
                 &mut rebuilt_env,
                 &mut rebuilt_literals,
             );
             constants::bind_generate_parameter_with_types(
                 &tree,
+                session,
                 parameter,
                 &mut cached_env,
                 &mut cached_literals,
@@ -1786,13 +1837,14 @@ mod tests {
 
     #[test]
     fn generated_items_share_names_but_keep_mutations_in_their_own_snapshot() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_scope_fixture(
             "module Top(); if (1) begin : g logic x; logic y; end endmodule",
             Path::new("generate_name_snapshots.sv"),
         )
         .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
+        let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
         assert_eq!(active.len(), 2);
         assert!(std::ptr::eq(&*active[0].names, &*active[1].names));
         assert!(Arc::ptr_eq(&active[0].shadowed, &active[1].shadowed));
@@ -1828,6 +1880,7 @@ mod tests {
             let tree = AnalysisContext::unspecialized(&tree);
             let active = items(
                 &tree,
+                &mut Session::default(),
                 &HashMap::from_iter([("B".into(), 99)]),
                 &HashMap::default(),
             )
@@ -2054,6 +2107,7 @@ mod tests {
 
     #[test]
     fn scopes_all_function_return_metadata_and_keeps_hidden_outer_binding() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_scope_fixture(
             r#"
             module Top();
@@ -2066,7 +2120,7 @@ mod tests {
         )
         .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
+        let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
         let outer = FunctionReturnMetadata {
             arguments: None,
             width: Some(8),
@@ -2141,6 +2195,7 @@ mod tests {
 
     #[test]
     fn genvar_scopes_discard_all_inherited_packed_bounds() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_scope_fixture(
             "module Top(output logic [1:0] y); localparam logic signed [2:1][4:0] i=9; for (genvar i=0; i<2; i++) begin : g assign y[i]=i; end endmodule",
             Path::new("genvar_packed_bounds.sv"),
@@ -2148,15 +2203,16 @@ mod tests {
         let tree = AnalysisContext::unspecialized(&tree);
         let parameters = parameters_from_scope(
             &tree,
+            session,
             &HashMap::default(),
             &HashMap::default(),
             &HashMap::default(),
         )
         .unwrap();
         let mut env = HashMap::default();
-        extend_const_env_with_parameters(&tree, &mut env, &parameters);
+        extend_const_env_with_parameters(&tree, session, &mut env, &parameters);
         assert_eq!(env[&parameter_dimensions_marker("i")], 2);
-        let active = items(&tree, &env, &HashMap::default()).unwrap();
+        let active = items(&tree, &mut Session::default(), &env, &HashMap::default()).unwrap();
         let iterations: Vec<_> = active
             .iter()
             .filter(|item| !item.scope.is_empty())
@@ -2468,6 +2524,7 @@ mod tests {
 
     #[test]
     fn unused_unresolved_chains_do_not_populate_item_literals() {
+        let session = &mut Session::default();
         use std::fmt::Write;
 
         for count in [16, 64, 256] {
@@ -2495,7 +2552,8 @@ mod tests {
                     crate::source_tree::parse_scope_fixture(&code, Path::new("unused_chain.sv"))
                         .unwrap();
                 let tree = AnalysisContext::unspecialized(&tree);
-                let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
+                let active =
+                    items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
                 assert!(active.iter().all(|item| item.literals.is_empty()));
                 let ir =
                     crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
@@ -2515,15 +2573,17 @@ mod tests {
 
     #[test]
     fn referenced_four_state_dependencies_keep_their_full_values() {
+        let session = &mut Session::default();
         let code = "module Top(output logic [7:0] out); localparam logic [7:0] A=8'bxz010101; localparam logic [7:0] B=A; localparam logic [7:0] UNUSED='x; assign out=B; endmodule";
         let tree =
             crate::source_tree::parse_scope_fixture(code, Path::new("needed_literals.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let env = HashMap::default();
         let aliases = HashMap::default();
-        let parameters = parameters_from_scope(&tree, &aliases, &env, &HashMap::default()).unwrap();
-        let full = parameter_value_env(&tree, &parameters, &env);
-        let active = items(&tree, &env, &aliases).unwrap();
+        let parameters =
+            parameters_from_scope(&tree, session, &aliases, &env, &HashMap::default()).unwrap();
+        let full = parameter_value_env(&tree, session, &parameters, &env);
+        let active = items(&tree, session, &env, &aliases).unwrap();
         for item in active {
             assert_eq!(item.literals.get("B"), full.get("B"));
             assert_eq!(item.literals.get("A"), full.get("A"));
@@ -2604,6 +2664,7 @@ mod tests {
 
     #[test]
     fn subroutine_literals_preserve_functions_tasks_and_generate_scopes() {
+        let session = &mut Session::default();
         let code = r#"
             module Top(output logic [7:0] out);
                 localparam logic [7:0] A = 8'bxz010101;
@@ -2625,8 +2686,8 @@ mod tests {
         let tree = AnalysisContext::unspecialized(&tree);
         let env = HashMap::default();
         let aliases = HashMap::default();
-        let full = items(&tree, &env, &aliases).unwrap();
-        let projected = subroutine_items(&tree, &env, &aliases).unwrap();
+        let full = items(&tree, session, &env, &aliases).unwrap();
+        let projected = subroutine_items(&tree, session, &env, &aliases).unwrap();
         assert_eq!(projected.len(), full.len());
         for (full, projected) in full.iter().zip(&projected) {
             assert_eq!(projected.env, full.env);
@@ -2653,6 +2714,7 @@ mod tests {
 
     #[test]
     fn rtl_referenced_unresolved_chains_do_not_expand_during_subroutine_discovery() {
+        let session = &mut Session::default();
         use std::fmt::Write;
 
         for count in [16, 64, 256] {
@@ -2678,7 +2740,8 @@ mod tests {
                         .unwrap();
                 let tree = AnalysisContext::unspecialized(&tree);
                 let active =
-                    subroutine_items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
+                    subroutine_items(&tree, session, &HashMap::default(), &HashMap::default())
+                        .unwrap();
                 assert!(active.iter().all(|item| item.literals.is_empty()));
                 let ir =
                     crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
@@ -2715,6 +2778,7 @@ mod tests {
 
     #[test]
     fn subroutine_projection_preserves_generate_diagnostics() {
+        let session = &mut Session::default();
         for body in [
             "if (UNKNOWN) begin : g logic x; end",
             "if (1) begin : g parameter type T=logic; end",
@@ -2728,12 +2792,13 @@ mod tests {
             )
             .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
-            let full = items(&tree, &HashMap::default(), &HashMap::default())
+            let full = items(&tree, session, &HashMap::default(), &HashMap::default())
                 .err()
                 .expect(body);
-            let projected = subroutine_items(&tree, &HashMap::default(), &HashMap::default())
-                .err()
-                .expect(body);
+            let projected =
+                subroutine_items(&tree, session, &HashMap::default(), &HashMap::default())
+                    .err()
+                    .expect(body);
             assert_eq!(projected.to_string(), full.to_string(), "{body}");
         }
     }

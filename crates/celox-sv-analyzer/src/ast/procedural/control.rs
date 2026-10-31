@@ -119,11 +119,11 @@ impl BodyBuilder<'_, '_, '_> {
                 pending.extend(kind.children());
             }
         }
-        let depth = self.scopes.len();
+        let depth = self.names.scopes.len();
         let result = self.native_body_machine(ids);
         // Restore lexical bindings on every diagnostic path, just as the old
         // recursive block/for wrappers did; no native failure is retried.
-        while self.scopes.len() > depth {
+        while self.names.scopes.len() > depth {
             self.pop_scope();
         }
         result
@@ -343,6 +343,7 @@ impl BodyBuilder<'_, '_, '_> {
                         // `wait(e.triggered)` (IEEE 1800-2023 15.5.3).
                         if let Some(event) = events::triggered(
                             self.tree,
+                            self.session,
                             *condition,
                             self.tree.declarations(),
                             &self.dims,
@@ -495,6 +496,7 @@ impl BodyBuilder<'_, '_, '_> {
                             {
                                 array_compatibility::check_native_unpacked_assignment(
                                     self.tree,
+                                    self.session,
                                     *id,
                                     target,
                                     || "return value".into(),
@@ -508,6 +510,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     id,
                                     native,
                                     self.tree,
+                                    self.session,
                                     &self.dims,
                                     if expression_binding::is_stream(id, native) {
                                         self.stream_return_shape.as_ref()
@@ -785,7 +788,7 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(output)
     }
     fn native_case_labels(
-        &self,
+        &mut self,
         labels: &[celox_sv_syntax::CaseMatch],
         inside: bool,
     ) -> Result<Vec<CaseLabel<Expr>>, AnalyzerError> {
@@ -815,6 +818,7 @@ mod tests {
     use super::*;
     #[test]
     fn native_scope_jobs_restore_bindings_after_a_typed_leaf_error() {
+        let session = &mut Session::default();
         let tree=crate::source_tree::parse_source("module M;initial begin automatic int outer_value=1;begin automatic int inner_value=2;disable target;end end endmodule",std::path::Path::new("scope-error.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let mut locals = Vec::new();
@@ -834,6 +838,7 @@ mod tests {
         };
         let mut builder = BodyBuilder::new(
             &tree,
+            session,
             &PackedDimensions::default(),
             &mut state,
             system_functions::Body::Initial,
@@ -846,11 +851,11 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("disable statement"), "{error}");
-        assert_eq!(builder.scopes.len(), 1);
+        assert_eq!(builder.names.scopes.len(), 1);
         for name in ["outer_value", "inner_value"] {
-            assert!(builder.lookup(name).is_none());
+            assert!(builder.names.lookup(name).is_none());
             assert!(builder.dims.get(name).is_none());
-            assert!(!builder.local_constants.contains_key(name));
+            assert!(!builder.names.local_constants.contains_key(name));
         }
     }
 }

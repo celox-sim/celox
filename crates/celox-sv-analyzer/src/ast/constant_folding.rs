@@ -9,10 +9,10 @@ pub(super) const MAX_CONSTANT_CONCAT_BITS: usize = 65_536;
 
 pub(super) fn simplify_constant_mux_conditions(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Expr {
-    let state = &*tree.state;
     let functions = &tree.functions;
     match expr {
         Expr::Select {
@@ -21,7 +21,9 @@ pub(super) fn simplify_constant_mux_conditions(
             lsb,
             signed,
         } => Expr::Select {
-            expr: Box::new(simplify_constant_mux_conditions(tree, *expr, const_env)),
+            expr: Box::new(simplify_constant_mux_conditions(
+                tree, session, *expr, const_env,
+            )),
             msb,
             lsb,
             signed,
@@ -29,14 +31,14 @@ pub(super) fn simplify_constant_mux_conditions(
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|part| simplify_constant_mux_conditions(tree, part, const_env))
+                .map(|part| simplify_constant_mux_conditions(tree, session, part, const_env))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|part| simplify_constant_mux_conditions(tree, part, const_env))
+                .map(|part| simplify_constant_mux_conditions(tree, session, part, const_env))
                 .collect(),
         },
         Expr::Resize {
@@ -44,8 +46,8 @@ pub(super) fn simplify_constant_mux_conditions(
             width,
             signed,
         } => {
-            let expr = simplify_constant_mux_conditions(tree, *expr, const_env);
-            if let Some(constant) = expr_to_const(state, expr.clone()) {
+            let expr = simplify_constant_mux_conditions(tree, session, *expr, const_env);
+            if let Some(constant) = expr_to_const(session, expr.clone()) {
                 let parameter_types = parameter_types_from_const_env(const_env)
                     .into_iter()
                     .map(|(name, r#type)| (name, (r#type.width, r#type.signed)))
@@ -71,23 +73,31 @@ pub(super) fn simplify_constant_mux_conditions(
         }
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(simplify_constant_mux_conditions(tree, *expr, const_env)),
+            expr: Box::new(simplify_constant_mux_conditions(
+                tree, session, *expr, const_env,
+            )),
         },
         Expr::Binary { left, op, right } => Expr::Binary {
-            left: Box::new(simplify_constant_mux_conditions(tree, *left, const_env)),
+            left: Box::new(simplify_constant_mux_conditions(
+                tree, session, *left, const_env,
+            )),
             op,
-            right: Box::new(simplify_constant_mux_conditions(tree, *right, const_env)),
+            right: Box::new(simplify_constant_mux_conditions(
+                tree, session, *right, const_env,
+            )),
         },
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => {
-            let condition = simplify_constant_mux_conditions(tree, *condition, const_env);
-            let mut then_expr = simplify_constant_mux_conditions(tree, *then_expr, const_env);
-            let mut else_expr = simplify_constant_mux_conditions(tree, *else_expr, const_env);
+            let condition = simplify_constant_mux_conditions(tree, session, *condition, const_env);
+            let mut then_expr =
+                simplify_constant_mux_conditions(tree, session, *then_expr, const_env);
+            let mut else_expr =
+                simplify_constant_mux_conditions(tree, session, *else_expr, const_env);
             let parameter_types = parameter_types_from_const_env(const_env);
-            let arm_type = |arm: &Expr| {
+            let arm_type = |session: &mut Session, arm: &Expr| {
                 if let Expr::Literal(literal) = arm
                     && resize_unbased_fill_literal_for_cast(literal, 1, false).is_some()
                 {
@@ -101,16 +111,15 @@ pub(super) fn simplify_constant_mux_conditions(
                         signed: *signed,
                     })
                 } else {
-                    infer_const_expr_type(&expr_to_const(state, arm.clone())?, &parameter_types)
+                    infer_const_expr_type(&expr_to_const(session, arm.clone())?, &parameter_types)
                 }
             };
-            let result_type =
-                arm_type(&then_expr)
-                    .zip(arm_type(&else_expr))
-                    .map(|(then_type, else_type)| ExprType {
-                        width: then_type.width.max(else_type.width),
-                        signed: then_type.signed && else_type.signed,
-                    });
+            let result_type = arm_type(session, &then_expr)
+                .zip(arm_type(session, &else_expr))
+                .map(|(then_type, else_type)| ExprType {
+                    width: then_type.width.max(else_type.width),
+                    signed: then_type.signed && else_type.signed,
+                });
             // Repeated-condition mux folding is only valid for a condition
             // that cannot be X/Z. Procedural guards are explicitly coerced
             // to two state, but source-level ternaries need not be.
@@ -138,11 +147,11 @@ pub(super) fn simplify_constant_mux_conditions(
                 return then_expr;
             }
             if let Some(value) =
-                equivalent_constant_mux_value(state, &then_expr, &else_expr, const_env)
+                equivalent_constant_mux_value(session, &then_expr, &else_expr, const_env)
             {
                 return value;
             }
-            match expr_to_const(state, condition.clone())
+            match expr_to_const(session, condition.clone())
                 .and_then(|condition| eval_ast_const_expr(functions, &condition, const_env))
             {
                 Some(value) => {
@@ -163,7 +172,7 @@ pub(super) fn simplify_constant_mux_conditions(
                             return Expr::Literal(resized);
                         }
                     }
-                    let Some(selected_type) = arm_type(&selected) else {
+                    let Some(selected_type) = arm_type(session, &selected) else {
                         return selected;
                     };
                     // A signed ternary is extended in the context of its
@@ -192,6 +201,7 @@ pub(super) fn simplify_constant_mux_conditions(
                     };
                     simplify_constant_mux_conditions(
                         tree,
+                        session,
                         Expr::Resize {
                             expr: Box::new(selected),
                             width: result_type.width,
@@ -208,12 +218,14 @@ pub(super) fn simplify_constant_mux_conditions(
             }
         }
         Expr::Inside { expr, items } => Expr::Inside {
-            expr: Box::new(simplify_constant_mux_conditions(tree, *expr, const_env)),
+            expr: Box::new(simplify_constant_mux_conditions(
+                tree, session, *expr, const_env,
+            )),
             items: items
                 .into_iter()
                 .map(|item| {
                     item.map(&mut |operand| {
-                        simplify_constant_mux_conditions(tree, operand, const_env)
+                        simplify_constant_mux_conditions(tree, session, operand, const_env)
                     })
                 })
                 .collect(),
@@ -227,7 +239,9 @@ pub(super) fn simplify_constant_mux_conditions(
             callee,
             args: args
                 .into_iter()
-                .map(|arg| arg.map(|arg| simplify_constant_mux_conditions(tree, arg, const_env)))
+                .map(|arg| {
+                    arg.map(|arg| simplify_constant_mux_conditions(tree, session, arg, const_env))
+                })
                 .collect(),
         },
         Expr::Ident(_) | Expr::Literal(_) => expr,
@@ -236,6 +250,7 @@ pub(super) fn simplify_constant_mux_conditions(
 
 pub(super) fn fold_const_integral_expr_preserving_mask(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Expr {
@@ -248,13 +263,14 @@ pub(super) fn fold_const_integral_expr_preserving_mask(
     // conversion. Do not scan every visible binding to fold each such value.
     let parameter_types =
         |name: &str| parameter_type_from_const_env(const_env, name).map(|ty| (ty.width, ty.signed));
-    eval_const_integral_expr_preserving_mask(tree, &expr, const_env, &parameter_types)
+    eval_const_integral_expr_preserving_mask(tree, session, &expr, const_env, &parameter_types)
         .map(|literal| Expr::Literal(typecheck::format_integral_literal_binary(&literal)))
         .unwrap_or(expr)
 }
 
 fn eval_const_integral_expr_preserving_mask(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: &Expr,
     const_env: &HashMap<String, i128>,
     parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
@@ -273,8 +289,13 @@ fn eval_const_integral_expr_preserving_mask(
             if width > MAX_CONSTANT_CONCAT_BITS {
                 return None;
             }
-            let operand =
-                eval_const_integral_expr_preserving_mask(tree, expr, const_env, parameter_types)?;
+            let operand = eval_const_integral_expr_preserving_mask(
+                tree,
+                session,
+                expr,
+                const_env,
+                parameter_types,
+            )?;
             let mut value = num_bigint::BigUint::default();
             let mut mask = num_bigint::BigUint::default();
             for offset in 0..width {
@@ -304,8 +325,13 @@ fn eval_const_integral_expr_preserving_mask(
             width,
             signed,
         } => {
-            let operand =
-                eval_const_integral_expr_preserving_mask(tree, expr, const_env, parameter_types)?;
+            let operand = eval_const_integral_expr_preserving_mask(
+                tree,
+                session,
+                expr,
+                const_env,
+                parameter_types,
+            )?;
             typecheck::parse_integral_literal(&resize_integral_literal_for_cast(
                 operand, *width, *signed,
             ))
@@ -314,7 +340,13 @@ fn eval_const_integral_expr_preserving_mask(
             parts
                 .iter()
                 .map(|part| {
-                    eval_const_integral_expr_preserving_mask(tree, part, const_env, parameter_types)
+                    eval_const_integral_expr_preserving_mask(
+                        tree,
+                        session,
+                        part,
+                        const_env,
+                        parameter_types,
+                    )
                 })
                 .collect::<Option<Vec<_>>>()?,
         ),
@@ -326,6 +358,7 @@ fn eval_const_integral_expr_preserving_mask(
                     .map(|part| {
                         eval_const_integral_expr_preserving_mask(
                             tree,
+                            session,
                             part,
                             const_env,
                             parameter_types,
@@ -343,6 +376,7 @@ fn eval_const_integral_expr_preserving_mask(
         _ => {
             let constant: crate::ir::ConstExpr = constant_with_folded_selections_with_lookup(
                 tree,
+                session,
                 expr,
                 const_env,
                 parameter_types,
@@ -361,51 +395,57 @@ fn eval_const_integral_expr_preserving_mask(
 // constant evaluator can propagate expression widths across compound trees.
 pub(super) fn constant_with_folded_selections(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: &Expr,
     const_env: &HashMap<String, i128>,
     parameter_types: &HashMap<String, (usize, bool)>,
 ) -> Option<ConstExpr> {
-    constant_with_folded_selections_with_lookup(tree, expr, const_env, &|name| {
+    constant_with_folded_selections_with_lookup(tree, session, expr, const_env, &|name| {
         parameter_types.get(name).copied()
     })
 }
 
 fn constant_with_folded_selections_with_lookup(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: &Expr,
     const_env: &HashMap<String, i128>,
     parameter_types: &impl Fn(&str) -> Option<(usize, bool)>,
 ) -> Option<ConstExpr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
-    let convert = |expr: &Expr| {
-        constant_with_folded_selections_with_lookup(tree, expr, const_env, parameter_types)
+    let convert = |session: &mut Session, expr: &Expr| {
+        constant_with_folded_selections_with_lookup(tree, session, expr, const_env, parameter_types)
     };
     match expr {
         Expr::Select { .. } | Expr::Concat(_) | Expr::RepeatConcat { .. } | Expr::Resize { .. } => {
-            let literal =
-                eval_const_integral_expr_preserving_mask(tree, expr, const_env, parameter_types)?;
+            let literal = eval_const_integral_expr_preserving_mask(
+                tree,
+                session,
+                expr,
+                const_env,
+                parameter_types,
+            )?;
             Some(ConstExpr::Literal(
                 typecheck::format_integral_literal_binary(&literal),
             ))
         }
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op: *op,
-            expr: Box::new(convert(expr)?),
+            expr: Box::new(convert(session, expr)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(convert(left)?),
+            left: Box::new(convert(session, left)?),
             op: *op,
-            right: Box::new(convert(right)?),
+            right: Box::new(convert(session, right)?),
         }),
         Expr::Mux {
             condition,
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(convert(condition)?),
-            then_expr: Box::new(convert(then_expr)?),
-            else_expr: Box::new(convert(else_expr)?),
+            condition: Box::new(convert(session, condition)?),
+            then_expr: Box::new(convert(session, then_expr)?),
+            else_expr: Box::new(convert(session, else_expr)?),
         }),
         Expr::Call { callee, args, .. } => {
             // Materialize a constant function's self-determined return type
@@ -418,14 +458,14 @@ fn constant_with_folded_selections_with_lookup(
                 ));
             }
             Some(ConstExpr::call(
-                state,
                 callee.clone(),
                 args.iter()
-                    .map(|arg| convert(arg.as_ref()?))
+                    .map(|arg| convert(session, arg.as_ref()?))
                     .collect::<Option<Vec<_>>>()?,
+                session,
             ))
         }
-        _ => expr_to_const(state, expr.clone()),
+        _ => expr_to_const(session, expr.clone()),
     }
 }
 
@@ -478,7 +518,7 @@ fn expr_is_intrinsically_two_state(expr: &Expr, const_env: &HashMap<String, i128
 }
 
 fn equivalent_constant_mux_value(
-    state: &AnalysisState,
+    state: &mut Session,
     then_expr: &Expr,
     else_expr: &Expr,
     const_env: &HashMap<String, i128>,
@@ -511,6 +551,7 @@ mod constant_concat_limits_tests {
 
     #[test]
     fn bounds_repeated_constant_concatenation() {
+        let session = &mut Session::default();
         let syntax = crate::source_tree::SourceTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
         for (count, accepted) in [(65_536, true), (65_537, false), (1_000_000_000, false)] {
@@ -520,6 +561,7 @@ mod constant_concat_limits_tests {
             };
             let result = eval_const_integral_expr_preserving_mask(
                 &tree,
+                session,
                 &expr,
                 &HashMap::default(),
                 &|_| None,
@@ -535,8 +577,14 @@ mod constant_concat_limits_tests {
             parts: vec![Expr::Literal("2'bxz".to_string())],
         };
         assert!(
-            eval_const_integral_expr_preserving_mask(&tree, &expr, &HashMap::default(), &|_| None,)
-                .is_none()
+            eval_const_integral_expr_preserving_mask(
+                &tree,
+                session,
+                &expr,
+                &HashMap::default(),
+                &|_| None
+            )
+            .is_none()
         );
     }
 }

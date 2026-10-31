@@ -180,6 +180,7 @@ fn parse(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Call>> {
     let (method_call, predicate) = match &native.expression(id).kind {
@@ -211,7 +212,7 @@ fn parse(
     if separator != "." {
         return Ok(None);
     }
-    let Some(array) = array(*base, native, tree, dims)? else {
+    let Some(array) = array(*base, native, tree, session, dims)? else {
         return Ok(None);
     };
     // `a.min()` lists one empty argument.
@@ -264,9 +265,10 @@ fn array(
     base: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Array>> {
-    if let Some(container) = containers::native_type(base, native, tree, dims)? {
+    if let Some(container) = containers::native_type(base, native, tree, session, dims)? {
         if matches!(container.layout.kind, ContainerKind::Associative { .. })
             && container.key.is_none()
         {
@@ -357,9 +359,10 @@ pub(super) fn result_type(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<ContainerType>>> {
-    let Some(call) = parse(id, native, tree, dims)? else {
+    let Some(call) = parse(id, native, tree, session, dims)? else {
         return Ok(None);
     };
     let record = match &call.array {
@@ -383,9 +386,10 @@ pub(super) fn bind(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
-    let Some(call) = parse(id, native, tree, dims)? else {
+    let Some(call) = parse(id, native, tree, session, dims)? else {
         return Ok(None);
     };
     let sink = dims
@@ -461,7 +465,7 @@ pub(super) fn bind(
             scope
                 .expression_signedness
                 .insert(index.clone(), index_type.is_signed());
-            let mut value = expression_binding::value(predicate, native, tree, &scope)?;
+            let mut value = expression_binding::value(predicate, native, tree, session, &scope)?;
             let key = if call.method.finds() {
                 None
             } else if expression_binding::string_value(&value, &scope) {
@@ -527,7 +531,7 @@ pub(super) fn bind(
     let (source, array) = match &call.array {
         Array::Container(container) => (
             LocatorSource::Container(container.layout),
-            expression_binding::value(call.base, native, tree, dims)?,
+            expression_binding::value(call.base, native, tree, session, dims)?,
         ),
         Array::Fixed { left, right, .. } => {
             let ExprKind::Name(name) = &native
@@ -591,6 +595,7 @@ pub(super) fn index(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
     if dims.locator_iterators.is_empty() {
@@ -640,9 +645,11 @@ pub(super) fn index(
         [] => {}
         [argument] if argument.name.is_none() => {
             let dimension = match argument.value {
-                Some(value) => constant_binding::bind(value, tree, dims)?.and_then(|value| {
-                    eval_ast_const_expr(&tree.functions, &value, &dims.const_env)
-                }),
+                Some(value) => {
+                    constant_binding::bind(value, tree, session, dims)?.and_then(|value| {
+                        eval_ast_const_expr(&tree.functions, &value, &dims.const_env)
+                    })
+                }
                 None => None,
             };
             if dimension != Some(1) {

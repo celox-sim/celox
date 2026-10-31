@@ -56,6 +56,7 @@ impl Method {
 /// with the expression it is called on and that expression's type.
 pub(super) fn method(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -74,7 +75,8 @@ pub(super) fn method(
     let Some(method) = Method::parse(&instances::normalize_identifier(&name.spelling)) else {
         return Ok(None);
     };
-    Ok(domain(tree, *expression, native, dimensions)?.map(|domain| (method, *expression, domain)))
+    Ok(domain(tree, session, *expression, native, dimensions)?
+        .map(|domain| (method, *expression, domain)))
 }
 
 /// The enumerated type of native expression `id`, judged before it is
@@ -83,12 +85,13 @@ pub(super) fn method(
 /// process.
 pub(super) fn domain(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Arc<EnumDomain>>> {
     // `process::state` (9.7).
-    if let Some(domain) = processes::state(tree, id, native, dimensions) {
+    if let Some(domain) = processes::state(tree, session, id, native, dimensions) {
         return Ok(Some(domain));
     }
     Ok(match &native.expression(ungroup(id, native)).kind {
@@ -96,16 +99,16 @@ pub(super) fn domain(
             let name = instances::normalize_identifier(&name.spelling);
             match dimensions.get(&name) {
                 Some(shape) => variable(shape),
-                None => match objects::property(tree, id, native, dimensions)? {
+                None => match objects::property(tree, session, id, native, dimensions)? {
                     Some((property, _)) => scalar(&property.r#type),
                     None => constant(tree, &name, dimensions),
                 },
             }
         }
-        ExprKind::Member { .. } => match method(tree, id, native, dimensions)? {
+        ExprKind::Member { .. } => match method(tree, session, id, native, dimensions)? {
             // A method called without parentheses (6.19.5.7).
             Some((method, _, domain)) => method.returns_member().then_some(domain),
-            None => match objects::static_property(tree, id, native, dimensions)?
+            None => match objects::static_property(tree, session, id, native, dimensions)?
                 .or_else(|| call_name(tree, id, native))
                 .and_then(|name| dimensions.get(&name))
             {
@@ -117,7 +120,7 @@ pub(super) fn domain(
                 {
                     Some(domain)
                 }
-                None => match objects::property(tree, id, native, dimensions)? {
+                None => match objects::property(tree, session, id, native, dimensions)? {
                     Some((property, _)) => scalar(&property.r#type),
                     // A member of a container element of unpacked structure
                     // type.
@@ -125,22 +128,25 @@ pub(super) fn domain(
                         ungroup(id, native),
                         native,
                         tree,
+                        session,
                         dimensions,
                     )? =>
                     {
                         scalar(&ty)
                     }
                     // A member of a packed struct.
-                    None => dimensions::operand_shape(id, tree, dimensions)
+                    None => dimensions::operand_shape(id, tree, session, dimensions)
                         .ok()
                         .flatten()
                         .and_then(|shape| variable(&shape)),
                 },
             },
         },
-        ExprKind::Select { .. } => element(tree, id, native, dimensions)?,
+        ExprKind::Select { .. } => element(tree, session, id, native, dimensions)?,
         ExprKind::Call { expression, .. } => {
-            if let Some((method, _, domain)) = method(tree, *expression, native, dimensions)? {
+            if let Some((method, _, domain)) =
+                method(tree, session, *expression, native, dimensions)?
+            {
                 method.returns_member().then_some(domain)
             } else if let ExprKind::Member {
                 expression: base,
@@ -148,12 +154,13 @@ pub(super) fn domain(
                 ..
             } = &native.expression(ungroup(*expression, native)).kind
                 && matches!(name.spelling.as_str(), "pop_front" | "pop_back")
-                && let Some(container) = containers::native_type(*base, native, tree, dimensions)?
+                && let Some(container) =
+                    containers::native_type(*base, native, tree, session, dimensions)?
             {
                 // An element popped from a queue (7.10.2.4, 7.10.2.5).
                 scalar(&container.element)
             } else {
-                let name = match objects::method(tree, *expression, native, dimensions)? {
+                let name = match objects::method(tree, session, *expression, native, dimensions)? {
                     Some((name, _, _)) => Some(name),
                     None => call_name(tree, *expression, native),
                 };
@@ -171,7 +178,7 @@ pub(super) fn domain(
                 })
             }
         }
-        ExprKind::Cast { target, .. } => cast_type(tree, *target, native, dimensions)?
+        ExprKind::Cast { target, .. } => cast_type(tree, session, *target, native, dimensions)?
             .as_ref()
             .and_then(scalar),
         ExprKind::Conditional {
@@ -179,8 +186,8 @@ pub(super) fn domain(
             else_expression,
             ..
         } => {
-            let then_domain = domain(tree, *then_expression, native, dimensions)?;
-            let else_domain = domain(tree, *else_expression, native, dimensions)?;
+            let then_domain = domain(tree, session, *then_expression, native, dimensions)?;
+            let else_domain = domain(tree, session, *else_expression, native, dimensions)?;
             then_domain.filter(|domain| else_domain.as_ref() == Some(domain))
         }
         _ => None,
@@ -191,6 +198,7 @@ pub(super) fn domain(
 /// type rather than a width or signedness.
 pub(super) fn cast_type(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     target: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -199,7 +207,7 @@ pub(super) fn cast_type(
     Ok(if let Some(name) = call_name(tree, target, native) {
         dimensions.type_aliases.get(&name).cloned()
     } else if let ExprKind::Type(id) = native.expression(target).kind {
-        type_binding::binding::bind_in(id, native, tree, dimensions)?
+        type_binding::binding::bind_in(id, native, tree, session, dimensions)?
     } else {
         None
     })
@@ -266,6 +274,7 @@ fn constant(
 /// container whose elements are of one.
 fn element(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -281,7 +290,8 @@ fn element(
             return Ok(None);
         }
         if selects == 0
-            && let Some(container) = containers::native_type(*expression, native, tree, dimensions)?
+            && let Some(container) =
+                containers::native_type(*expression, native, tree, session, dimensions)?
         {
             return Ok(scalar(&container.element));
         }
@@ -304,9 +314,10 @@ fn element(
         }
         // A static property or a package variable.
         ExprKind::Member { .. }
-            if let Some(shape) = objects::static_property(tree, root, native, dimensions)?
-                .or_else(|| call_name(tree, root, native))
-                .and_then(|name| dimensions.get(&name)) =>
+            if let Some(shape) =
+                objects::static_property(tree, session, root, native, dimensions)?
+                    .or_else(|| call_name(tree, root, native))
+                    .and_then(|name| dimensions.get(&name)) =>
         {
             if shape.container.is_some() {
                 return Ok(None);
@@ -318,7 +329,7 @@ fn element(
             )
         }
         ExprKind::Name(_) | ExprKind::Member { .. } => {
-            match objects::property(tree, root, native, dimensions)? {
+            match objects::property(tree, session, root, native, dimensions)? {
                 Some((property, _)) if property.r#type.container.is_none() => (
                     property.r#type.unpacked_ranges.len(),
                     property.r#type.enum_domain.clone(),
@@ -340,13 +351,13 @@ fn element(
 /// The value of `method` of `domain` called on `receiver` with `count`.
 pub(super) fn call(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     method: Method,
     domain: &EnumDomain,
     receiver: Option<Expr>,
     count: Option<Expr>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
     let members = &domain.members;
     let member = |index: usize| {
@@ -413,7 +424,7 @@ pub(super) fn call(
                 count.unwrap_or_else(|| int(1)),
                 dimensions,
             )?;
-            let constant = expr_to_const(state, count.clone())
+            let constant = expr_to_const(session, count.clone())
                 .and_then(|count| eval_ast_const_expr(functions, &count, &dimensions.const_env))
                 .map(|count| (count as u32 as usize) % count_members);
             if let Some(shift) = constant {

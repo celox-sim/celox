@@ -3,8 +3,13 @@
 use super::*;
 use celox_sv_syntax::{DimensionKind, ExprId, ExprKind};
 
-fn integer(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> Converted<i128> {
-    constant_binding::bind(root, tree, dims)?
+fn integer(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<i128> {
+    constant_binding::bind(root, tree, session, dims)?
         .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
         .ok_or_else(|| unsupported("parameter shape expression that is not a known constant"))
 }
@@ -13,9 +18,10 @@ fn bound(
     root: ExprId,
     unknown: bool,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
-    let value = constant_binding::bind(root, tree, dims)?
+    let value = constant_binding::bind(root, tree, session, dims)?
         .ok_or_else(|| unsupported("parameter selection bound that is not constant"))?;
     if eval_ast_const_expr(&tree.functions, &value, &dims.const_env).is_none()
         && !(unknown && selects::const_index_has_unknown_value(&value, dims))
@@ -31,26 +37,27 @@ fn dimension(
     kind: &DimensionKind,
     stream: bool,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<()> {
     match kind {
-        DimensionKind::Index(index) => bound(*index, !stream, tree, dims),
+        DimensionKind::Index(index) => bound(*index, !stream, tree, session, dims),
         DimensionKind::Range { left, right } => {
-            bound(*left, false, tree, dims)?;
-            bound(*right, false, tree, dims)
+            bound(*left, false, tree, session, dims)?;
+            bound(*right, false, tree, session, dims)
         }
         DimensionKind::Indexed {
             base,
             width,
             operator,
         } => {
-            bound(*base, !stream, tree, dims)?;
-            let width = integer(*width, tree, dims)?;
+            bound(*base, !stream, tree, session, dims)?;
+            let width = integer(*width, tree, session, dims)?;
             if width <= 0 {
                 return Err(unsupported("indexed selection width must be positive"));
             }
             if stream {
-                let start = integer(*base, tree, dims)?;
+                let start = integer(*base, tree, session, dims)?;
                 let end = if operator == "+:" {
                     start.checked_add(width - 1)
                 } else {
@@ -109,12 +116,13 @@ fn value_name(
 pub(in crate::ast) fn validate(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     unavailable: &HashSet<String>,
     names: bool,
 ) -> Converted<()> {
     let native = tree.declarations();
-    let mut context = dimensions::query_context_for_operand(root, tree, dims)?;
+    let mut context = dimensions::query_context_for_operand(root, tree, session, dims)?;
     context.constant_indexed_base = true;
     let dims = &context;
     // Receiving shapes propagate only through groups, casts and function actuals.
@@ -226,7 +234,7 @@ pub(in crate::ast) fn validate(
                 expression,
                 dimension: selection,
             } => {
-                dimension(&selection.kind, false, tree, dims)?;
+                dimension(&selection.kind, false, tree, session, dims)?;
                 // Named aggregate selectors need declared rank/member checks. A
                 // concatenation's huge payload remains unevaluated.
                 let mut base = *expression;
@@ -239,7 +247,7 @@ pub(in crate::ast) fn validate(
                     }
                 }
                 if matches!(native.expression(base).kind, ExprKind::Name(_)) {
-                    dimensions::operand_shape(id, tree, dims)?
+                    dimensions::operand_shape(id, tree, session, dims)?
                         .ok_or_else(|| unsupported("parameter selection shape"))?;
                 }
                 push(&mut jobs, *expression);
@@ -249,8 +257,8 @@ pub(in crate::ast) fn validate(
                 expression,
                 dimension: selection,
             } => {
-                dimension(&selection.kind, true, tree, dims)?;
-                let shape = dimensions::operand_shape(*expression, tree, dims)?
+                dimension(&selection.kind, true, tree, session, dims)?;
+                let shape = dimensions::operand_shape(*expression, tree, session, dims)?
                     .ok_or_else(|| unsupported("streaming with operand shape"))?;
                 if shape.unpacked.len() != 1 {
                     return Err(unsupported(
@@ -266,6 +274,7 @@ pub(in crate::ast) fn validate(
                     *expression,
                     native,
                     tree,
+                    session,
                     dims,
                 )?;
                 let shape =
@@ -300,7 +309,7 @@ pub(in crate::ast) fn validate(
                 }
             }
             ExprKind::Replication { count, expressions } => {
-                if integer(*count, tree, dims)? < 0 {
+                if integer(*count, tree, session, dims)? < 0 {
                     return Err(unsupported(
                         "parameter repetition count must be a nonnegative known constant",
                     ));
@@ -315,7 +324,7 @@ pub(in crate::ast) fn validate(
             } => {
                 if let Some(slice) = slice {
                     let valid = if let ExprKind::Type(ty) = native.expression(*slice).kind {
-                        type_binding::bind(ty, tree, dims)?
+                        type_binding::bind(ty, tree, session, dims)?
                             .and_then(|ty| {
                                 casts::expr_type_from_type(&tree.functions, &ty, &dims.const_env)
                             })
@@ -328,7 +337,7 @@ pub(in crate::ast) fn validate(
                                 casts::expr_type_from_type(&tree.functions, ty, &dims.const_env)
                             })
                             .is_some_and(|ty| ty.width > 0)
-                            || integer(*slice, tree, dims).is_ok_and(|size| size > 0)
+                            || integer(*slice, tree, session, dims).is_ok_and(|size| size > 0)
                     };
                     if !valid {
                         return Err(unsupported(
@@ -344,7 +353,7 @@ pub(in crate::ast) fn validate(
                 let shape = patterns::typed_shape(id, tree, dims)?
                     .or(receiving)
                     .ok_or_else(|| unsupported("assignment pattern without a target type"))?;
-                for (value, shape) in pattern_items(id, &shape, tree, dims)? {
+                for (value, shape) in pattern_items(id, &shape, tree, session, dims)? {
                     jobs.push((value, query, Some(shape)));
                 }
             }
@@ -404,10 +413,11 @@ fn pattern_items(
     root: ExprId,
     shape: &VariableDimensions,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Vec<(ExprId, VariableDimensions)>> {
     use bound_patterns::{Key, NativeKind};
-    let plan = bound_patterns::prepare_native(root, tree, dims, Some(shape))?;
+    let plan = bound_patterns::prepare_native(root, tree, session, dims, Some(shape))?;
     let wrong = || unsupported("assignment pattern items do not match the target shape");
     if shape.unpacked.is_empty() && shape.packed.len() <= 1 && !shape.members.is_empty() {
         if shape
@@ -579,6 +589,7 @@ fn pattern_items(
 pub(in crate::ast) fn literal_widths(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<ConstExpr>> {
     let native = tree.declarations();
@@ -737,8 +748,8 @@ pub(in crate::ast) fn literal_widths(
     if oversized.is_none() && !replication {
         return Ok(None);
     }
-    let proof = proof(root, tree, dims)?;
-    if let Some(proof) = expr_to_const(&tree.state, proof)
+    let proof = proof(root, tree, session, dims)?;
+    if let Some(proof) = expr_to_const(session, proof)
         && let Some(ty) = infer_const_expr_type_inner(
             &proof,
             &parameter_types_from_const_env(&dims.const_env),
@@ -782,6 +793,7 @@ pub(in crate::ast) fn literal_widths(
                         *expression,
                         native,
                         tree,
+                        session,
                         dims,
                     )?;
                 }
@@ -796,7 +808,12 @@ pub(in crate::ast) fn literal_widths(
     Ok(None)
 }
 
-fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> Converted<Expr> {
+fn proof(
+    root: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Expr> {
     enum Job {
         Enter(ExprId),
         Unary(String),
@@ -869,10 +886,10 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                     values.push(if safe {
                         let mut context = dims.clone();
                         context.constant_indexed_base = true;
-                        expression_binding::bind(id, tree, &context)
+                        expression_binding::bind(id, tree, session, &context)
                             .ok()
                             .and_then(|value| {
-                                selects::indexed_expression_value(tree, value, &context)
+                                selects::indexed_expression_value(tree, session, value, &context)
                             })
                             .map(const_expr_to_expr)
                             .unwrap_or_else(unknown)
@@ -922,6 +939,7 @@ pub(in crate::ast) fn validate_scope(
     owner: Option<celox_sv_syntax::BodyItemId>,
     is_module: bool,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
     use celox_sv_syntax::{BodyItemKind, LocalDeclaration, ParameterKind, StatementKind};
@@ -1049,11 +1067,11 @@ pub(in crate::ast) fn validate_scope(
             );
         }
         validate_operators(tree, root, native)?;
-        if literal_widths(root, scope, dimensions)?.is_some() {
-            validate(root, scope, dimensions, &unavailable, true)?;
+        if literal_widths(root, scope, session, dimensions)?.is_some() {
+            validate(root, scope, session, dimensions, &unavailable, true)?;
         } else if needs_selected(tree, root, native) {
-            let context = dimensions::query_context_for_operand(root, scope, dimensions)?;
-            selects::selected_parameter_initializer(root, scope, &context, None)?;
+            let context = dimensions::query_context_for_operand(root, scope, session, dimensions)?;
+            selects::selected_parameter_initializer(root, scope, session, &context, None)?;
         }
     }
     Ok(())
@@ -1305,6 +1323,7 @@ mod tests {
     }
     #[test]
     fn skipped_streaming_with_validates_ranges_without_lowering_arrays() {
+        let session = &mut Session::default();
         for (range, valid) in [
             ("0", true),
             ("0:1", true),
@@ -1336,6 +1355,7 @@ mod tests {
             let result = validate(
                 root,
                 &tree,
+                session,
                 &PackedDimensions::default(),
                 &HashSet::default(),
                 false,
@@ -1345,6 +1365,7 @@ mod tests {
     }
     #[test]
     fn skipped_patterns_validate_billion_element_targets_without_expanding_them() {
+        let session = &mut Session::default();
         for (items, valid) in [
             ("default:0", true),
             ("0:1, default:0", true),
@@ -1363,6 +1384,7 @@ mod tests {
             let result = validate(
                 root,
                 &tree,
+                session,
                 &PackedDimensions::default(),
                 &HashSet::default(),
                 false,
@@ -1372,6 +1394,7 @@ mod tests {
     }
     #[test]
     fn native_bounded_proof_retains_precedence_without_parsing_huge_payloads() {
+        let session = &mut Session::default();
         for (value, expected) in [
             ("0&&1000000000'd0", 0),
             ("1||1000000000'bx&&0", 1),
@@ -1381,7 +1404,7 @@ mod tests {
             let tree = AnalysisContext::unspecialized(&tree);
             let parameter = &tree.declarations().parameter_declarations[0].parameters[0];
             let root = ownership::default(parameter).unwrap();
-            let value = literal_widths(root, &tree, &PackedDimensions::default())
+            let value = literal_widths(root, &tree, session, &PackedDimensions::default())
                 .unwrap()
                 .unwrap();
             assert_eq!(
@@ -1392,13 +1415,14 @@ mod tests {
     }
     #[test]
     fn nested_query_type_ranges_keep_materialization_guards() {
+        let session = &mut Session::default();
         let tree = parse(
             "module M;localparam N=0&&$bits(struct packed{logic[1000000000'd1:0]x;});endmodule",
         );
         let tree = AnalysisContext::unspecialized(&tree);
         let root = ownership::default(&tree.declarations().parameter_declarations[0].parameters[0])
             .unwrap();
-        let error = literal_widths(root, &tree, &PackedDimensions::default()).unwrap_err();
+        let error = literal_widths(root, &tree, session, &PackedDimensions::default()).unwrap_err();
         assert!(
             error.to_string().contains("constant materialization limit"),
             "{error}"

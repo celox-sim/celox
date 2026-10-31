@@ -12,6 +12,7 @@ pub(super) type ActiveInstance = (
 /// source location, including the lexical time scope of processes/functions.
 pub(super) fn analyze(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     path: &Path,
     packages: &packages::Packages,
     overrides: &HashMap<String, ConstExpr>,
@@ -54,6 +55,7 @@ pub(super) fn analyze(
     };
     let nested = interface_binding::analyze_module(
         tree,
+        session,
         path,
         packages,
         interface_binding::Bindings {
@@ -68,7 +70,15 @@ pub(super) fn analyze(
     let mut module = if let Some(module) = nested {
         module
     } else {
-        Module::from_scope_with_symbols(tree, &name, overrides, &lookup, Arc::new(imported), true)?
+        Module::from_scope_with_symbols(
+            tree,
+            session,
+            &name,
+            overrides,
+            &lookup,
+            Arc::new(imported),
+            true,
+        )?
     };
     let symbols = module.symbols.as_mut().unwrap();
     let mut parameters = module.imported_parameters.clone();
@@ -96,6 +106,7 @@ pub(super) fn signature(
     members: &[String],
     names: &HashSet<String>,
 ) -> Converted<crate::ir::Module> {
+    let session = &mut Session::default();
     let projected_tree = interface_binding::declaration_view(tree)?;
     let context = AnalysisContext::unspecialized(&projected_tree);
     let tree = &context;
@@ -112,6 +123,7 @@ pub(super) fn signature(
     };
     let mut module = Module::from_scope_with_parameter_overrides(
         tree,
+        session,
         "",
         &HashMap::default(),
         &interfaces,
@@ -123,10 +135,11 @@ pub(super) fn signature(
     let tree = &tree.importing(Arc::new(imported.clone()));
     let tree = &tree.with_functions(module.constant_functions.clone());
     let mut env = imported.const_env.clone();
-    extend_const_env_with_parameters(tree, &mut env, &module.parameters);
-    let aliases = type_aliases_from_scope_with_env(tree, &env)?;
-    let declarations =
-        declarations::signals_from_scope_with_declaration_ranges(tree, &env, &aliases, true)?;
+    extend_const_env_with_parameters(tree, session, &mut env, &module.parameters);
+    let aliases = type_aliases_from_scope_with_env(tree, session, &env)?;
+    let declarations = declarations::signals_from_scope_with_declaration_ranges(
+        tree, session, &env, &aliases, true,
+    )?;
     let names = names
         .iter()
         .map(|name| (name.clone(), format!("h${name}")))

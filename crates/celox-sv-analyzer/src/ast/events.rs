@@ -34,6 +34,7 @@ pub(super) fn call(op: ProcessOp, events: Vec<Expr>) -> Expr {
 /// Subroutines returning events are rejected, so a call is never one.
 pub(super) fn is_handle(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -52,17 +53,19 @@ pub(super) fn is_handle(
                 ExprKind::Literal(value) if value == "null"
             )
         };
-        let event = |id| is_handle(tree, id, native, dimensions);
+        let mut event = |id| is_handle(tree, session, id, native, dimensions);
         return (event(*then_expression) || null(*then_expression))
             && (event(*else_expression) || null(*else_expression))
             && !(null(*then_expression) && null(*else_expression));
     }
-    expression_binding::object_native_class(tree, id, native, dimensions).as_deref() == Some(CLASS)
+    expression_binding::object_native_class(tree, session, id, native, dimensions).as_deref()
+        == Some(CLASS)
 }
 
 /// The event of `e.triggered` or `e.triggered()` (15.5.3).
 pub(super) fn triggered(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -93,7 +96,7 @@ pub(super) fn triggered(
     };
     Ok((separator == "."
         && instances::normalize_identifier(&name.spelling) == "triggered"
-        && is_handle(tree, *expression, native, dimensions))
+        && is_handle(tree, session, *expression, native, dimensions))
     .then_some(*expression))
 }
 

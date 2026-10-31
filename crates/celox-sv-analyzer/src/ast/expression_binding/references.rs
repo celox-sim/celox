@@ -12,6 +12,7 @@ pub(super) fn check_actual(
     actual: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
     if !dimensions
@@ -48,14 +49,16 @@ pub(super) fn check_actual(
                         "a constant is not a variable (IEEE 1800-2023 13.5.2)",
                     ));
                 }
-                None => property_shape(tree, actual, native, dimensions)?,
+                None => property_shape(tree, session, actual, native, dimensions)?,
             }
         }
-        ExprKind::Member { .. } => match property_shape(tree, actual, native, dimensions)? {
+        ExprKind::Member { .. } => match property_shape(tree, session, actual, native, dimensions)?
+        {
             Some(shape) => Some(shape),
             // A member of a variable of unpacked structure type is a
             // variable of its own (see `unpacked_structs`).
-            None if let (parts, None) = direct::path(actual, native, tree, dimensions)?
+            None if let (parts, None) =
+                direct::path(actual, native, tree, session, dimensions)?
                 && let [variable] = parts.as_slice()
                 && let Some(shape) = dimensions.get(variable)
                 && !dimensions.const_env.contains_key(variable) =>
@@ -64,7 +67,7 @@ pub(super) fn check_actual(
             }
             // A static property is a variable of its class's scope.
             None if let Some(variable) =
-                objects::static_property(tree, actual, native, dimensions)? =>
+                objects::static_property(tree, session, actual, native, dimensions)? =>
             {
                 match dimensions.get(&variable) {
                     Some(shape) => Some(shape.clone()),
@@ -169,16 +172,18 @@ pub(super) fn check_actual(
 /// The shape of class property `actual`, also of unpacked structure type.
 fn property_shape(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     actual: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<VariableDimensions>> {
-    if let Some((property, _)) = objects::property(tree, actual, native, dimensions)? {
+    if let Some((property, _)) = objects::property(tree, session, actual, native, dimensions)? {
         return Ok(Some(procedural::dimensions_from_type(&property.r#type)));
     }
     // `objects::aggregate_load` rejects a receiver that calls a subroutine,
     // which each member would evaluate again.
-    let Some((aggregate, _, _)) = objects::aggregate_property(tree, actual, native, dimensions)?
+    let Some((aggregate, _, _)) =
+        objects::aggregate_property(tree, session, actual, native, dimensions)?
     else {
         return Ok(None);
     };

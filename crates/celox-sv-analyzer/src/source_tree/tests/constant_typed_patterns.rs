@@ -45,6 +45,7 @@ fn initialized(pattern: BoundPattern, declaration: &str) -> Vec<i128> {
             &[("P".into(), pattern)],
             &ModuleInterfaces::default(),
             &packages,
+            &mut packages.design(),
         )
         .unwrap();
     let crate::ir::Stmt::Assign { rhs, .. } = &ir.modules()[0].initial_processes()[0].body()[0]

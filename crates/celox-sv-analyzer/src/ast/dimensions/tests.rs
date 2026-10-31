@@ -28,6 +28,7 @@ fn native_calls(tree: &SyntaxTree) -> Vec<celox_sv_syntax::ExprId> {
 fn query_number(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     context: Option<&PackedDimensions>,
@@ -37,10 +38,10 @@ fn query_number(
         .unwrap_or_else(|| PackedDimensions::new(HashMap::default(), env, aliases));
     context.const_env = env.clone().into();
     context.type_aliases = aliases.clone().into();
-    query_value(root, tree, &context)
+    query_value(root, tree, session, &context)
         .ok()
         .flatten()
-        .and_then(|value| expr_to_const(&tree.state, value))
+        .and_then(|value| expr_to_const(session, value))
         .and_then(|value| eval_ast_const_expr(&tree.functions, &value, env))
         .and_then(|value| usize::try_from(value).ok())
 }
@@ -70,6 +71,7 @@ fn repeated_literal_port_defaults_do_not_rediscover_declarations() {
 
 #[test]
 fn literal_arithmetic_queries_keep_widths_and_skip_scope_discovery() {
+    let session = &mut Session::default();
     let code = "module Top; assign y=$bits(8'd60-1)+$bits(-8'sd1+16'sd2)+$bits(1'b0 ? 8'hff : 16'hffff)+$bits(~8'hff)+$bits(32'd1<<64'd40); endmodule";
     let tree =
         crate::source_tree::parse_scope_fixture(code, Path::new("literal-query-types.sv")).unwrap();
@@ -82,6 +84,7 @@ fn literal_arithmetic_queries_keep_widths_and_skip_scope_discovery() {
             query_number(
                 root,
                 &tree,
+                session,
                 &HashMap::default(),
                 &HashMap::default(),
                 Some(&input),
@@ -94,6 +97,7 @@ fn literal_arithmetic_queries_keep_widths_and_skip_scope_discovery() {
 
 #[test]
 fn queries_still_discover_names_in_unselected_conditional_arms() {
+    let session = &mut Session::default();
     let code = "module Top; logic [15:0] data; assign y=$bits(1'b0 ? data : 8'hff); endmodule";
     let tree =
         crate::source_tree::parse_scope_fixture(code, Path::new("conditional-query-types.sv"))
@@ -104,9 +108,10 @@ fn queries_still_discover_names_in_unselected_conditional_arms() {
         query_number(
             native_calls(&tree)[0],
             &tree,
+            session,
             &HashMap::default(),
             &HashMap::default(),
-            Some(&PackedDimensions::default())
+            Some(&PackedDimensions::default()),
         ),
         Some(16)
     );
@@ -115,6 +120,7 @@ fn queries_still_discover_names_in_unselected_conditional_arms() {
 
 #[test]
 fn function_result_queries_preserve_expression_bodies() {
+    let session = &mut Session::default();
     let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top(output int y);
@@ -133,18 +139,20 @@ fn function_result_queries_preserve_expression_bodies() {
     let tree = AnalysisContext::unspecialized(&tree);
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
-    let env = const_env_from_parameters(&tree, module.parameters());
-    let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
+    let env = const_env_from_parameters(&tree, session, module.parameters());
+    let aliases = type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values = parameter_value_env(&tree, module.parameters(), &env).into();
-    let functions = functions_from_scope(&tree, &env, &dimensions).unwrap();
+    dimensions.parameter_values =
+        parameter_value_env(&tree, session, module.parameters(), &env).into();
+    let functions = functions_from_scope(&tree, session, &env, &dimensions).unwrap();
     assert!(functions["f"].body.is_some(), "{:?}", functions["f"]);
 }
 
 #[test]
 fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations() {
+    let session = &mut Session::default();
     let code = r#"
         module Top(input logic signed [1:0][3:0] a, input logic [7:0] b);
             typedef struct packed { logic signed [3:0] nibble; logic flag; } pair_t;
@@ -171,13 +179,14 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
     let tree = AnalysisContext::unspecialized(&tree);
     let source = Source::from_syntax(&tree).unwrap();
     let module = &source.modules()[0];
-    let env = const_env_from_parameters(&tree, module.parameters());
-    let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
+    let env = const_env_from_parameters(&tree, session, module.parameters());
+    let aliases = type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
     let mut dimensions =
         packed_dimensions_from_ports_and_signals(module.ports(), module.signals(), &env, &aliases);
     dimensions.extend(parameter_packed_dimensions(module.parameters()));
-    dimensions.parameter_values = parameter_value_env(&tree, module.parameters(), &env).into();
-    let functions = functions_from_scope(&tree, &env, &dimensions).unwrap();
+    dimensions.parameter_values =
+        parameter_value_env(&tree, session, module.parameters(), &env).into();
+    let functions = functions_from_scope(&tree, session, &env, &dimensions).unwrap();
     dimensions
         .function_return_types
         .extend(functions.iter().map(|(name, f)| {
@@ -200,10 +209,10 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
         }));
     dimensions.functions = Arc::new(functions);
     let calls: Vec<_> = native_calls(&tree);
-    let query = |dimensions: &PackedDimensions| {
+    let mut query = |dimensions: &PackedDimensions| {
         calls
             .iter()
-            .map(|call| query_number(*call, &tree, &env, &aliases, Some(dimensions)))
+            .map(|call| query_number(*call, &tree, session, &env, &aliases, Some(dimensions)))
             .collect::<Vec<_>>()
     };
     SYNTAX_TYPE_DISCOVERIES.with(|count| count.set(0));
@@ -249,6 +258,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
 
 #[test]
 fn preliminary_function_scope_discovers_shadowing_formals() {
+    let session = &mut Session::default();
     let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top;
@@ -269,6 +279,7 @@ fn preliminary_function_scope_discovers_shadowing_formals() {
     let ty = query_number(
         call,
         &tree,
+        session,
         &HashMap::default(),
         &HashMap::default(),
         Some(&dimensions),
@@ -306,6 +317,7 @@ fn completed_query_metadata_is_local_to_each_specialization() {
 
 #[test]
 fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
+    let session = &mut Session::default();
     for (declaration, expected_width) in [
         ("logic [3:0] T;", 4),
         ("localparam T = 1;", 32),
@@ -327,15 +339,15 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
         let tree = AnalysisContext::unspecialized(&tree);
         let source = Source::from_syntax(&tree).unwrap();
         let module = &source.modules()[0];
-        let env = const_env_from_parameters(&tree, module.parameters());
-        let aliases = type_aliases_from_scope_with_env(&tree, &env).unwrap();
+        let env = const_env_from_parameters(&tree, session, module.parameters());
+        let aliases = type_aliases_from_scope_with_env(&tree, session, &env).unwrap();
         let dimensions = packed_dimensions_from_ports_and_signals(
             module.ports(),
             module.signals(),
             &env,
             &aliases,
         );
-        let item = generate::items(&tree, &env, &aliases)
+        let item = generate::items(&tree, session, &env, &aliases)
             .unwrap()
             .into_iter()
             .find(|item| {
@@ -347,8 +359,8 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
             .unwrap();
         let call = native_calls(&tree)[0];
         let mut local = item.dimensions(&dimensions);
-        let query = |dimensions: &PackedDimensions| {
-            query_number(call, &tree, &item.env, &aliases, Some(dimensions))
+        let mut query = |dimensions: &PackedDimensions| {
+            query_number(call, &tree, session, &item.env, &aliases, Some(dimensions))
         };
         let discovered = query(&local);
         local.scope_types_complete = true;
@@ -366,6 +378,7 @@ fn local_values_shadow_outer_typedefs_in_completed_generate_scopes() {
 
 #[test]
 fn nonansi_validation_leaves_generate_queries_to_elaboration() {
+    let session = &mut Session::default();
     let code = r#"
         module Top(y);
             output y;
@@ -382,6 +395,7 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
     let tree = AnalysisContext::unspecialized(&tree);
     crate::ast::validation::reject_silently_ignored_constructs(
         &tree,
+        session,
         &HashMap::default(),
         &HashMap::default(),
         &ScopedMap::default(),
@@ -392,6 +406,7 @@ fn nonansi_validation_leaves_generate_queries_to_elaboration() {
 
 #[test]
 fn unpacked_dimensions_discovers_local_dpi_return_types() {
+    let session = &mut Session::default();
     let source = r#"
         module Top(output int y);
             import "DPI-C" function int f();
@@ -404,7 +419,14 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
     Source::from_syntax(&tree).unwrap();
     for call in native_calls(&tree) {
         assert_eq!(
-            query_number(call, &tree, &HashMap::default(), &HashMap::default(), None),
+            query_number(
+                call,
+                &tree,
+                session,
+                &HashMap::default(),
+                &HashMap::default(),
+                None
+            ),
             Some(0)
         );
     }
@@ -412,6 +434,7 @@ fn unpacked_dimensions_discovers_local_dpi_return_types() {
 
 #[test]
 fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
+    let session = &mut Session::default();
     let source = r#"
         module Top(input int index_value, output int y);
             logic [7:0] a [0:1][0:2];
@@ -424,13 +447,21 @@ fn unpacked_dimensions_preserves_runtime_indexed_range_types() {
     Source::from_syntax(&tree).unwrap();
     let call = native_calls(&tree)[0];
     assert_eq!(
-        query_number(call, &tree, &HashMap::default(), &HashMap::default(), None),
+        query_number(
+            call,
+            &tree,
+            session,
+            &HashMap::default(),
+            &HashMap::default(),
+            None
+        ),
         Some(1)
     );
 }
 
 #[test]
 fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
+    let session = &mut Session::default();
     for declaration in [
         "module Top; logic [7:0] a [0:1]; logic [$unpacked_dimensions(a):0] b;",
         "module Top(input logic [7:0] a [0:1], output logic [$unpacked_dimensions(a):0] b);",
@@ -442,15 +473,29 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
         let tree = crate::source_tree::parse_scope_fixture(&code, Path::new("preceding_query.sv"))
             .unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
-        let aliases = type_aliases_from_scope(&tree).unwrap();
+        let aliases = type_aliases_from_scope(&tree, session).unwrap();
         let calls = native_calls(&tree);
         assert_eq!(
-            query_number(calls[0], &tree, &HashMap::default(), &aliases, None),
+            query_number(
+                calls[0],
+                &tree,
+                session,
+                &HashMap::default(),
+                &aliases,
+                None
+            ),
             Some(1),
             "{declaration}",
         );
         assert_eq!(
-            query_number(calls[1], &tree, &HashMap::default(), &aliases, None),
+            query_number(
+                calls[1],
+                &tree,
+                session,
+                &HashMap::default(),
+                &aliases,
+                None
+            ),
             Some(if declaration.contains("b [") { 16 } else { 2 }),
             "{declaration}",
         );
@@ -459,6 +504,7 @@ fn preliminary_unpacked_queries_resolve_preceding_declaration_ranges() {
 
 #[test]
 fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_ranges() {
+    let session = &mut Session::default();
     for declaration in [
         "module Top #(parameter logic [7:0] A [0:1] = '{default:0}) (output logic [$unpacked_dimensions(A):0] b);",
         "module Top; localparam logic [7:0] A [0:1] = '{default:0}; logic [$unpacked_dimensions(A):0] b;",
@@ -474,9 +520,10 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
             query_number(
                 calls[0],
                 &tree,
+                session,
                 &HashMap::default(),
                 &HashMap::default(),
-                None
+                None,
             ),
             Some(1),
             "{declaration}"
@@ -485,9 +532,10 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
             query_number(
                 calls[1],
                 &tree,
+                session,
                 &HashMap::default(),
                 &HashMap::default(),
-                None
+                None,
             ),
             Some(2),
             "{declaration}"
@@ -497,6 +545,7 @@ fn preliminary_unpacked_queries_discover_array_parameters_before_dependent_range
 
 #[test]
 fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
+    let session = &mut Session::default();
     let tree = crate::source_tree::parse_scope_fixture(
         r#"
         package P;
@@ -512,7 +561,7 @@ fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
     )
     .unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
-    let aliases = type_aliases_from_scope(&tree).unwrap();
+    let aliases = type_aliases_from_scope(&tree, session).unwrap();
     // The aliases came from P; the query belongs to Top's native source unit.
     let module_scope = tree
         .root_scopes()
@@ -526,13 +575,14 @@ fn preliminary_unpacked_queries_prefer_values_over_imported_typedefs() {
     let tree = AnalysisContext::unspecialized(&tree);
     let call = native_calls(&tree)[0];
     assert_eq!(
-        query_number(call, &tree, &HashMap::default(), &aliases, None),
+        query_number(call, &tree, session, &HashMap::default(), &aliases, None),
         Some(0)
     );
 }
 
 #[test]
 fn recursive_generate_dimension_discovery_uses_explicit_specialization() {
+    let session = &mut Session::default();
     let tree = crate::source_tree::parse_scope_fixture(
         r#"
         module Top #(parameter logic [255:0] P = '0,
@@ -578,7 +628,8 @@ fn recursive_generate_dimension_discovery_uses_explicit_specialization() {
         (&default_context, 5),
     ] {
         let dimensions =
-            query_context_for_operand(operand, context, &PackedDimensions::default()).unwrap();
+            query_context_for_operand(operand, context, session, &PackedDimensions::default())
+                .unwrap();
         let data = dimensions.get("g.data").unwrap();
         assert_eq!(
             eval_ast_const_expr(
@@ -593,6 +644,7 @@ fn recursive_generate_dimension_discovery_uses_explicit_specialization() {
 
 #[test]
 fn preliminary_literal_queries_do_not_discover_scope_declarations() {
+    let session = &mut Session::default();
     let tree = crate::source_tree::parse_scope_fixture(
         r#"module Top;
             logic [7:0] unrelated [0:31];
@@ -619,10 +671,12 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
                 unreachable!()
             };
             let context =
-                query_operand_dimensions_id(arguments[0].value.unwrap(), &tree, &input).unwrap();
+                query_operand_dimensions_id(arguments[0].value.unwrap(), &tree, session, &input)
+                    .unwrap();
             query_number(
                 *call,
                 &tree,
+                session,
                 &HashMap::default(),
                 &HashMap::default(),
                 Some(&context),
@@ -636,6 +690,7 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
             query_number(
                 *call,
                 &tree,
+                session,
                 &HashMap::default(),
                 &HashMap::default(),
                 Some(&input),
@@ -649,6 +704,7 @@ fn preliminary_literal_queries_do_not_discover_scope_declarations() {
 
 #[test]
 fn discovery_prefix_does_not_copy_a_growing_symbol_overlay() {
+    let session = &mut Session::default();
     const COUNT: usize = 128;
     let declarations = (0..COUNT)
         .map(|index| format!("logic [7:0] v{index};"))
@@ -669,9 +725,10 @@ fn discovery_prefix_does_not_copy_a_growing_symbol_overlay() {
         query_number(
             calls[0],
             &tree,
+            session,
             &HashMap::default(),
             &HashMap::default(),
-            None
+            None,
         ),
         Some(8)
     );

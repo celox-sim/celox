@@ -945,12 +945,13 @@ fn package_warnings(
 /// instance each, numbered from `first`.
 fn lower_package_states(
     packages: &sv::Packages,
+    design: &sv::Design,
     first: usize,
     four_state: bool,
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
-    let states = packages.specialized_state_modules();
+    let states = packages.specialized_state_modules(design);
     let mut states = states.iter().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
     states
@@ -2200,6 +2201,12 @@ fn prepare_external_hierarchy_collecting(
         analysis_options,
     )?;
     package_warnings(&analyzed, warnings);
+    // The specializations that the modules request of package class
+    // templates, shared by all of their analyses.
+    let mut design = analyzed
+        .values()
+        .next()
+        .map_or_else(sv::Design::default, |module| module.packages.design());
     let dummy = sv::ParsedSource::parse(
         "module __celox_foreign(); endmodule",
         Path::new("<foreign-signature>"),
@@ -2211,6 +2218,7 @@ fn prepare_external_hierarchy_collecting(
         &[],
         &sv::ModuleInterfaces::default(),
         &sv::Packages::default(),
+        &mut sv::Design::default(),
     )?;
     let lower_foreign = |signature: &ExternalModule| {
         let variables: HashMap<_, _> = signature
@@ -2405,6 +2413,7 @@ fn prepare_external_hierarchy_collecting(
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         let lowered = specialize_module(
             base,
+            &mut design,
             &key,
             four_state,
             false,
@@ -2444,6 +2453,7 @@ fn prepare_external_hierarchy_collecting(
                 module_id,
                 specialize_module(
                     base,
+                    &mut design,
                     key,
                     four_state,
                     false,
@@ -2517,6 +2527,7 @@ fn prepare_external_hierarchy_collecting(
     };
     let package_states = lower_package_states(
         &any_module.packages,
+        &design,
         module_ids.len(),
         four_state,
         false,
@@ -2875,6 +2886,12 @@ fn schedule_sources_collecting(
     let found_warnings = warnings.len();
     let analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
     package_warnings(&analyzed, warnings);
+    // The specializations that the modules request of package class
+    // templates, shared by all of their analyses.
+    let mut design = analyzed
+        .values()
+        .next()
+        .map_or_else(sv::Design::default, |module| module.packages.design());
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
@@ -2921,6 +2938,7 @@ fn schedule_sources_collecting(
         let module_id = module_ids[&key];
         let module = match specialize_module(
             base,
+            &mut design,
             &key,
             four_state,
             false,
@@ -2938,7 +2956,7 @@ fn schedule_sources_collecting(
             // hierarchical names.
             Err(error) if hierarchical_reference_path(&error).is_some() => {
                 hierarchical_modules.push(module_id);
-                specialize_module_declarations(base, &key)?
+                specialize_module_declarations(base, &mut design, &key)?
             }
             Err(error) => return Err(error.into()),
         };
@@ -3018,7 +3036,13 @@ fn schedule_sources_collecting(
                 .iter()
                 .map(|reference| reference.signal.clone())
                 .collect();
-            match analyze_specialization(&analyzed[&key.name], key, &signals, &mut Vec::new()) {
+            match analyze_specialization(
+                &analyzed[&key.name],
+                &mut design,
+                key,
+                &signals,
+                &mut Vec::new(),
+            ) {
                 Ok(ir) => break ir,
                 // A name with an instance index that is a constant
                 // expression reaches the analysis with the index evaluated.
@@ -3096,6 +3120,7 @@ fn schedule_sources_collecting(
                 .collect();
             Ok(specialize_module(
                 base,
+                &mut design,
                 key,
                 four_state,
                 parallel.enabled(),
@@ -3185,6 +3210,7 @@ fn schedule_sources_collecting(
 
         let package_states = lower_package_states(
             &analyzed[&top].packages,
+            &design,
             module_ids.len(),
             four_state,
             parallel.enabled(),
@@ -3434,6 +3460,7 @@ fn specialization_overrides(
 /// `hierarchical`.
 fn analyze_specialization(
     module: &AnalyzedSvModule,
+    design: &mut sv::Design,
     key: &LoweredSvModuleKey,
     hierarchical: &[sv::ast::HierarchicalSignal],
     warnings: &mut Vec<crate::warning::PendingWarning>,
@@ -3446,6 +3473,7 @@ fn analyze_specialization(
         &pattern_overrides,
         &module.interfaces,
         &module.packages,
+        design,
         hierarchical,
     );
     if let Err(error) = &analyzed {
@@ -3459,6 +3487,7 @@ fn analyze_specialization(
 #[allow(clippy::too_many_arguments)]
 fn specialize_module(
     module: &AnalyzedSvModule,
+    design: &mut sv::Design,
     key: &LoweredSvModuleKey,
     four_state: bool,
     ff_parts: bool,
@@ -3473,7 +3502,7 @@ fn specialize_module(
             ir
         }
         None => {
-            analyzed = analyze_specialization(module, key, hierarchical.signals, warnings)?;
+            analyzed = analyze_specialization(module, design, key, hierarchical.signals, warnings)?;
             &analyzed
         }
     };
@@ -3570,6 +3599,7 @@ fn propagate_force_signals(instances: &mut [LoweredSvInstance], force_signals: &
 /// The declarations and instances of specialization `key`.
 fn specialize_module_declarations(
     module: &AnalyzedSvModule,
+    design: &mut sv::Design,
     key: &LoweredSvModuleKey,
 ) -> Result<hierarchy::ElaboratedModule, sv::AnalyzerError> {
     let (overrides, type_overrides, pattern_overrides) = specialization_overrides(key)?;
@@ -3580,6 +3610,7 @@ fn specialize_module_declarations(
         &pattern_overrides,
         &module.interfaces,
         &module.packages,
+        design,
     )?;
     let specialized = ir
         .modules()

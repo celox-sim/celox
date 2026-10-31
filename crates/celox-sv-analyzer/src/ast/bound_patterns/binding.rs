@@ -16,6 +16,7 @@ pub(in crate::ast) struct Plan {
 pub(in crate::ast) fn prepare_native(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     shape: Option<&VariableDimensions>,
 ) -> Converted<Plan> {
@@ -23,8 +24,8 @@ pub(in crate::ast) fn prepare_native(
     let ExprKind::Pattern { items, .. } = &native.expression(root).kind else {
         return Err(mismatch());
     };
-    let integer = |id| {
-        constant_binding::bind(id, tree, dims)?
+    let mut integer = |id| {
+        constant_binding::bind(id, tree, session, dims)?
             .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
             .ok_or_else(|| unsupported("nonconstant assignment pattern key or count"))
     };
@@ -85,14 +86,16 @@ pub(in crate::ast) fn prepare_native(
 pub(super) fn value(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Value> {
-    value_mode(root, tree, dims, true)
+    value_mode(root, tree, session, dims, true)
 }
 
 pub(super) fn value_mode(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
     constant: bool,
 ) -> Converted<Value> {
@@ -112,25 +115,26 @@ pub(super) fn value_mode(
                 }
                 match &native.expression(id).kind {
                     ExprKind::Pattern { target: None, .. } => {
-                        let plan = prepare_native(id, tree, dims, None)?;
+                        let plan = prepare_native(id, tree, session, dims, None)?;
                         jobs.push(Job::Finish(plan.kind, plan.bindings.len()));
                         jobs.extend(plan.bindings.into_iter().rev().map(Job::Enter));
                     }
                     ExprKind::Pattern { .. } if constant => {
-                        values.push(patterns::constant_native(id, tree, dims)?)
+                        values.push(patterns::constant_native(id, tree, session, dims)?)
                     }
                     _ => {
-                        let expr = expression_binding::bind(id, tree, dims)?;
+                        let expr = expression_binding::bind(id, tree, session, dims)?;
                         let (expr, signed, value_type) = if constant {
                             // Capture the self-determined type before folding the
                             // value into bits, just as for runtime port values.
-                            let types = dimensions::query_context_for_operand(id, tree, dims)?;
+                            let types =
+                                dimensions::query_context_for_operand(id, tree, session, dims)?;
                             let value_type = super::ports::ValueType::Known(
-                                super::ports::native_value_type(id, tree, &types)?,
+                                super::ports::native_value_type(id, tree, session, &types)?,
                             );
                             let signed =
                                 dimensions::expression_signedness(&expr, &types, &types.const_env);
-                            let expr = frozen(tree, expr, dims)?;
+                            let expr = frozen(tree, session, expr, dims)?;
                             let signed = Some(signed.unwrap_or_else(|| {
                                 dimensions::expression_signedness(&expr, &types, &types.const_env)
                                     .unwrap_or(false)
@@ -143,7 +147,7 @@ pub(super) fn value_mode(
                             (
                                 expr,
                                 signed,
-                                super::ports::native_value_type_plan(id, tree, dims)?,
+                                super::ports::native_value_type_plan(id, tree, session, dims)?,
                             )
                         };
                         values.push(Value::Expression {
@@ -190,6 +194,7 @@ mod tests {
     }
     #[test]
     fn deeply_nested_native_override_pattern_jobs_use_the_default_stack() {
+        let session = &mut Session::default();
         let tree = std::thread::Builder::new()
             .stack_size(128 * 1024 * 1024)
             .spawn(|| {
@@ -215,7 +220,7 @@ mod tests {
             .unwrap();
         let dims =
             PackedDimensions::new(HashMap::default(), &HashMap::default(), &HashMap::default());
-        let result = super::super::from_param(root, tree, &dims);
+        let result = super::super::from_param(root, tree, session, &dims);
         drop(context);
         drop(original);
         let pattern = result.unwrap();
