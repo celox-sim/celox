@@ -660,6 +660,7 @@ version = "0.12.0"
 dependencies = [
  "aplite",
  "fxhash",
+ "regex",
  "serde",
  "serde_json",
 ]

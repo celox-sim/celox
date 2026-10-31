@@ -1259,6 +1259,9 @@ impl Module {
                                 crate::ir::DpiType::Logic => {
                                     type_binding::builtin_type("logic", None)
                                 }
+                                crate::ir::DpiType::String => {
+                                    type_binding::builtin_type("string", None)
+                                }
                                 crate::ir::DpiType::Chandle => {
                                     type_binding::builtin_type("chandle", None)
                                 }
@@ -1288,7 +1291,17 @@ impl Module {
                 );
                 subroutine_directions.insert(
                     import.name().to_string(),
-                    vec![crate::procedural::ParamDirection::Input; import.arguments().len()],
+                    import
+                        .arguments()
+                        .iter()
+                        .map(|argument| {
+                            if argument.is_output() {
+                                crate::procedural::ParamDirection::Output
+                            } else {
+                                crate::procedural::ParamDirection::Input
+                            }
+                        })
+                        .collect(),
                 );
             }
             packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
@@ -1494,7 +1507,7 @@ impl Module {
                             )),
                             signed: r#type.is_signed(),
                             is_2state: !r#type.is_4state(),
-                            string: false,
+                            string: r#type == crate::ir::DpiType::String,
                             chandle: r#type == crate::ir::DpiType::Chandle,
                             pattern_type: None,
                             enum_domain: None,
@@ -3210,7 +3223,11 @@ fn dpi_argument_metadata(import: &crate::ir::DpiImport) -> Arc<[FunctionArgument
         .iter()
         .map(|argument| FunctionArgumentMetadata {
             name: argument.name().to_string(),
-            direction: ParamDirection::Input,
+            direction: if argument.is_output() {
+                ParamDirection::Output
+            } else {
+                ParamDirection::Input
+            },
             has_default: false,
         })
         .collect()

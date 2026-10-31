@@ -2002,6 +2002,8 @@ pub enum DpiType {
     /// `byte`, `shortint`, `int` or `longint`, passed as the C integer of
     /// that width.
     Integer { width: usize, signed: bool },
+    /// `string`, only for a [`DpiBuiltin`]: a heap handle.
+    String,
     /// `chandle`, passed as a C pointer (IEEE 1800-2023 6.14).
     Chandle,
 }
@@ -2011,6 +2013,7 @@ impl DpiType {
         match self {
             DpiType::Bit | DpiType::Logic => 1,
             DpiType::Integer { width, .. } => *width,
+            DpiType::String => celox_design::HANDLE_WIDTH,
             DpiType::Chandle => 64,
         }
     }
@@ -2024,16 +2027,55 @@ impl DpiType {
     }
 }
 
-/// An argument of a DPI-C import. Only `input` arguments are supported.
+/// A UVM DPI-C function that Celox provides itself, so UVM runs without
+/// its C library (UVM `src/dpi`). It binds by C name and UVM's prototype.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DpiBuiltin {
+    ReComp,
+    ReExec,
+    ReFree,
+    ReCompExec,
+    ReCompExecFree,
+    ReBuffer,
+    ReDeglobbed,
+    NextArg,
+    ToolName,
+    ToolVersion,
+    /// A function of UVM's C library that Celox does not provide yet: it
+    /// returns 0 (`null`, failure) and writes no output, so UVM reports the
+    /// facility as unavailable.
+    Unavailable,
+}
+
+/// An argument of a DPI-C import. Only `input` arguments are supported,
+/// except by a [`DpiBuiltin`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DpiArgument {
     name: String,
     r#type: DpiType,
+    output: bool,
 }
 
 impl DpiArgument {
     pub(crate) fn new(name: String, r#type: DpiType) -> Self {
-        Self { name, r#type }
+        Self {
+            name,
+            r#type,
+            output: false,
+        }
+    }
+
+    pub(crate) fn output(name: String, r#type: DpiType) -> Self {
+        Self {
+            name,
+            r#type,
+            output: true,
+        }
+    }
+
+    /// Whether the argument is an `output` (or `inout`), of a builtin.
+    pub fn is_output(&self) -> bool {
+        self.output
     }
 
     pub fn name(&self) -> &str {
@@ -2053,6 +2095,7 @@ pub struct DpiImport {
     pure: bool,
     return_type: Option<DpiType>,
     arguments: Vec<DpiArgument>,
+    builtin: Option<DpiBuiltin>,
 }
 
 impl DpiImport {
@@ -2077,7 +2120,19 @@ impl DpiImport {
             pure,
             return_type,
             arguments,
+            builtin: None,
         }
+    }
+
+    /// This import bound to a function Celox provides.
+    pub(crate) fn with_builtin(mut self, builtin: DpiBuiltin) -> Self {
+        self.builtin = Some(builtin);
+        self
+    }
+
+    /// The function Celox provides for this import, if any.
+    pub fn builtin(&self) -> Option<DpiBuiltin> {
+        self.builtin
     }
 
     /// The name SystemVerilog calls the function by.

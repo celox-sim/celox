@@ -1662,6 +1662,20 @@ C names are unique, and it takes no `ref` formals or class handles (35.7). An
 export does not change the subroutine (35.7), and only `context` imports may
 call exported subroutines (35.5.3), so no C code calls them.
 
+The functions of UVM's C library (UVM `src/dpi`) are provided by Celox, so UVM
+runs without `UVM_NO_DPI` or a C library, and without the `sv-dpi` feature: an
+import with one of their C names and UVM's prototype binds to Celox's version
+instead of a C function, and a user implementation under that name is not
+called. `uvm_re_comp`, `uvm_re_exec`, `uvm_re_free`, `uvm_re_compexec`,
+`uvm_re_compexecfree`, `uvm_re_buffer` and `uvm_re_deglobbed` behave like UVM's
+`uvm_regex.cc`, except that expressions are compiled with the Rust `regex`
+crate, whose syntax differs from POSIX extended regular expressions in some rare
+constructs, and
+`uvm_dpi_get_next_arg_c` returns `celox` followed by the plusargs, with
+`uvm_dpi_get_tool_name_c` returning `Celox`. The `uvm_hdl_*` and
+`uvm_polling_*` functions are not provided yet: they return 0 or `null` and
+leave their outputs unchanged, so UVM reports the facility as unavailable.
+
 ## SystemVerilog emitted by Veryl {#systemverilog-emitted-by-veryl}
 
 The Veryl conformance suite runs against the SystemVerilog that Veryl emits.
