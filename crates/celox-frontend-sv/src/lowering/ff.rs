@@ -1207,12 +1207,13 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Run `then_f` and `else_f` where the arms of a conditional operator
     /// are evaluated; an ambiguous condition evaluates both (IEEE 1800-2023
-    /// 11.4.11).
-    fn mux_arms<A, B>(
+    /// 11.4.11). Both arms are passed `state`.
+    fn mux_arms<S, A, B>(
         &mut self,
         condition: &sv::ir::Expr,
-        then_f: impl FnOnce(&mut Self) -> Result<A, sv::AnalyzerError>,
-        else_f: impl FnOnce(&mut Self) -> Result<B, sv::AnalyzerError>,
+        state: &mut S,
+        then_f: impl FnOnce(&mut Self, &mut S) -> Result<A, sv::AnalyzerError>,
+        else_f: impl FnOnce(&mut Self, &mut S) -> Result<B, sv::AnalyzerError>,
     ) -> Result<(A, B), sv::AnalyzerError> {
         if self.m.four_state {
             let mut arena = SLTNodeArena::new();
@@ -1225,8 +1226,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             let else_cond = slt_or(&mut arena, &mut consts, not_truth, unknown)?;
             let then_cond = self.lower_slt(&arena, then_cond)?;
             let else_cond = self.lower_slt(&arena, else_cond)?;
-            let then_result = self.when(then_cond, then_f)?;
-            let else_result = self.when(else_cond, else_f)?;
+            let then_result = self.when(then_cond, |this| then_f(this, state))?;
+            let else_result = self.when(else_cond, |this| else_f(this, state))?;
             return Ok((then_result, else_result));
         }
         let (truth, _) = self.eval_truth(condition)?;
@@ -1239,10 +1240,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             false_block: (else_block, Vec::new()),
         });
         self.b.switch_to_block(then_block);
-        let then_result = then_f(self)?;
+        let then_result = then_f(self, state)?;
         self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.b.switch_to_block(else_block);
-        let else_result = else_f(self)?;
+        let else_result = else_f(self, state)?;
         self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.b.switch_to_block(join);
         Ok((then_result, else_result))
@@ -1384,11 +1385,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                         }
                         // `calls` is shared by both arms, which run one after
                         // the other.
-                        let calls = std::cell::RefCell::new(calls);
                         self.mux_arms(
                             &operand(&condition)?,
-                            |this| this.hoist_const(then_expr, &mut calls.borrow_mut()),
-                            |this| this.hoist_const(else_expr, &mut calls.borrow_mut()),
+                            calls,
+                            |this, calls| this.hoist_const(then_expr, calls),
+                            |this, calls| this.hoist_const(else_expr, calls),
                         )?
                     } else {
                         ((**then_expr).clone(), (**else_expr).clone())
@@ -1885,8 +1886,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let condition = self.hoist(condition)?;
                 let (then_expr, else_expr) = self.mux_arms(
                     &condition,
-                    |this| this.hoist(then_expr),
-                    |this| this.hoist(else_expr),
+                    &mut (),
+                    |this, ()| this.hoist(then_expr),
+                    |this, ()| this.hoist(else_expr),
                 )?;
                 Expr::Mux {
                     condition: Box::new(condition),
@@ -7877,8 +7879,8 @@ fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     let mut defaults = HashSet::default();
     loop {
         while let Some(expr) = pending.pop() {
-            let found = std::cell::RefCell::new(None);
-            expr_calls(&expr, &|callee| {
+            let mut found = None;
+            expr_calls(&expr, &mut |callee| {
                 if let sv::ir::Callee::Object(op) = callee
                     && matches!(
                         **op,
@@ -7887,11 +7889,11 @@ fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                             | sv::ir::ObjectOp::ConstraintModeGet(_)
                     )
                 {
-                    found.borrow_mut().get_or_insert(op.to_string());
+                    found.get_or_insert(op.to_string());
                 }
                 false
             });
-            if let Some(op) = found.into_inner() {
+            if let Some(op) = found {
                 return Some(op);
             }
             collect_calls(&expr, &mut calls);
@@ -7933,12 +7935,12 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     let mut pending = vec![expr.clone()];
     let mut visited = HashSet::default();
     while let Some(expr) = pending.pop() {
-        let callees = std::cell::RefCell::new(Vec::new());
-        expr_calls(&expr, &|callee| {
-            callees.borrow_mut().push(callee.clone());
+        let mut callees = Vec::new();
+        expr_calls(&expr, &mut |callee| {
+            callees.push(callee.clone());
             false
         });
-        for callee in callees.into_inner() {
+        for callee in callees {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     if function.reads_simulation_state() {
@@ -8174,14 +8176,12 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
 
 /// The names of the user subroutines `expr` calls.
 fn collect_call_names(expr: &sv::ir::Expr, names: &mut Vec<String>) {
-    let called = std::cell::RefCell::new(Vec::new());
-    expr_calls(expr, &|callee| {
+    expr_calls(expr, &mut |callee| {
         if let Some(name) = callee.subroutine() {
-            called.borrow_mut().push(name.to_string());
+            names.push(name.to_string());
         }
         false
     });
-    names.extend(called.into_inner());
 }
 
 fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {
