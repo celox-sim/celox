@@ -678,17 +678,38 @@ pub(in crate::ast) fn all_class_signatures(
     tree: &AnalysisContext<'_>,
     context: &mut PackedDimensions,
 ) {
+    bind_class_signatures(tree, context, false);
+}
+
+/// [`all_class_signatures`]; with `retry`, the classes whose signatures fail
+/// are bound again while that publishes more of them, as a signature may
+/// name a method of a class bound after it. A class publishes its
+/// signatures only when all of them bind.
+fn bind_class_signatures(tree: &AnalysisContext<'_>, context: &mut PackedDimensions, retry: bool) {
     classes::specializations::collect(tree, context);
     // The classes of other scopes keep the signatures their scopes publish.
     let mut scopes =
         classes::specializations::ClassScopes::new(&context.const_env, &context.type_aliases);
+    let mut failed = Vec::new();
     for class in classes::scope_declarations(tree) {
         for class_name in classes::specializations_of(tree, class) {
-            let _ = class_signatures(class, &class_name, tree, context, &mut scopes);
+            if class_signatures(class, &class_name, tree, context, &mut scopes).is_err() {
+                failed.push((class, class_name));
+            }
+        }
+    }
+    while retry && !failed.is_empty() {
+        let before = failed.len();
+        failed.retain(|(class, class_name)| {
+            class_signatures(class, class_name, tree, context, &mut scopes).is_err()
+        });
+        if failed.len() == before {
+            break;
         }
     }
     tree.state.class_specializations_frozen.set(true);
 }
+
 /// The signatures of the classes of the current scope and of its other
 /// subroutines, bound once from `base` and the scope's own declarations
 /// `scope`, without those around a query, and kept while `base` and the set
@@ -807,70 +828,132 @@ fn settle(
     // Resolve forward return-range dependencies using the same published prefix
     // as value declarations. Each pass publishes useful metadata before queries
     // in subsequent ranges recurse; no native call stack follows dependency depth.
-    let native = tree.declarations();
     let declarations = frames.iter().map(Vec::len).sum::<usize>();
-    for _ in 0..=declarations {
+    let Classes::Bind = classes else {
+        for _ in 0..=declarations {
+            let before = context.clone();
+            subroutine_signatures(frames, tree, key, context);
+            classes.publish(tree, context);
+            publish(&tree.state.dimensions, key, context);
+            declare(frames, tree, key, context)?;
+            if *context == before {
+                break;
+            }
+        }
+        return Ok(());
+    };
+    // The class signatures are bound once the declarations settle, and bound
+    // again only when the declarations or the specializations change after
+    // that: a pass that changes neither would bind the same signatures. A
+    // signature naming a method of a class bound after it is retried within
+    // the binding.
+    // The first pass makes the specializations the declarations may name
+    // before declaring them, as binding the signatures does.
+    let mut bound: Option<(PackedDimensions, usize)> = None;
+    let specializations = || tree.state.class_specializations.borrow().len();
+    let unchanged = |bound: &Option<(PackedDimensions, usize)>, context: &PackedDimensions| {
+        bound
+            .as_ref()
+            .is_some_and(|(after, count)| after == context && *count == specializations())
+    };
+    for pass in 0..=2 * declarations + 1 {
         let before = context.clone();
-        for frame in frames {
-            for id in frame {
-                if let BodyItemKind::Subroutine(id) = native.body_item(*id).kind
-                    && native.subroutine(id).scope.is_empty()
-                {
-                    let _ = signature(id, tree, context);
-                    publish(&tree.state.dimensions, key, context);
-                } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
-                    && let Ok(import) = dpi::import(id, native)
-                    && let Some(ty) = import.return_type()
-                {
-                    context.function_return_types.insert(
-                        import.name().to_string(),
-                        FunctionReturnMetadata {
-                            arguments: Some(dpi_argument_metadata(&import)),
-                            width: Some(ty.width()),
-                            first_packed_dimension_width: (ty.width() > 1).then_some(ty.width()),
-                            dimensions: Some(usize::from(ty.width() > 1)),
-                            signed: ty.is_signed(),
-                            is_2state: !ty.is_4state(),
-                            string: false,
-                            pattern_type: None,
-                            enum_domain: None,
-                            class: None,
-                            virtual_interface: None,
-                        },
-                    );
-                    publish(&tree.state.dimensions, key, context);
-                }
-            }
+        subroutine_signatures(frames, tree, key, context);
+        if pass == 0 {
+            classes::specializations::collect(tree, context);
+            tree.state.class_specializations_frozen.set(true);
         }
-        match classes {
-            Classes::Bind => all_class_signatures(tree, context),
-            Classes::Published(signatures) => signatures.publish(tree, context),
+        declare(frames, tree, key, context)?;
+        if *context != before {
+            continue;
         }
+        if unchanged(&bound, context) {
+            return Ok(());
+        }
+        #[cfg(test)]
+        super::SETTLE_CLASS_BINDINGS.with(|count| count.set(count.get() + 1));
+        bind_class_signatures(tree, context, true);
         publish(&tree.state.dimensions, key, context);
-        if let Ok(unit) = tree.root_unit() {
-            if let Some(parameters) = &unit.parameters {
-                for parameter_node in parameters {
-                    let _ = parameter(parameter_node, tree, context, key, false);
-                }
-            }
-            for index in tree.header_port_ids()? {
-                let port = &unit.ports[index];
-                if let Some(id) = port.data_type
-                    && let Ok(Some(base)) = type_binding::bind(id, tree, context)
-                    && let Ok(ty) = type_with_dimensions(base, &port.dimensions, tree, context)
-                    && let celox_sv_syntax::PortKind::Named(n) = &port.kind
-                {
-                    publish_shape(tree, key, context, name(n), &ty, false);
-                }
+        bound = Some((context.clone(), specializations()));
+    }
+    // Declarations that never settle still get the signatures of the last
+    // pass, as every pass binds them.
+    if !unchanged(&bound, context) {
+        bind_class_signatures(tree, context, true);
+        publish(&tree.state.dimensions, key, context);
+    }
+    Ok(())
+}
+
+/// Publish the signatures of the subroutines and DPI imports of `frames`.
+fn subroutine_signatures(
+    frames: &[Vec<BodyItemId>],
+    tree: &AnalysisContext<'_>,
+    key: &Key,
+    context: &mut PackedDimensions,
+) {
+    let native = tree.declarations();
+    for frame in frames {
+        for id in frame {
+            if let BodyItemKind::Subroutine(id) = native.body_item(*id).kind
+                && native.subroutine(id).scope.is_empty()
+            {
+                let _ = signature(id, tree, context);
+                publish(&tree.state.dimensions, key, context);
+            } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
+                && let Ok(import) = dpi::import(id, native)
+                && let Some(ty) = import.return_type()
+            {
+                context.function_return_types.insert(
+                    import.name().to_string(),
+                    FunctionReturnMetadata {
+                        arguments: Some(dpi_argument_metadata(&import)),
+                        width: Some(ty.width()),
+                        first_packed_dimension_width: (ty.width() > 1).then_some(ty.width()),
+                        dimensions: Some(usize::from(ty.width() > 1)),
+                        signed: ty.is_signed(),
+                        is_2state: !ty.is_4state(),
+                        string: false,
+                        pattern_type: None,
+                        enum_domain: None,
+                        class: None,
+                        virtual_interface: None,
+                    },
+                );
+                publish(&tree.state.dimensions, key, context);
             }
         }
-        for (depth, frame) in frames.iter().enumerate() {
-            for id in frame {
-                let _ = declaration(*id, tree, context, key, depth == 0);
+    }
+}
+
+/// Discover the header parameters and ports of the scope and the
+/// declarations of `frames`.
+fn declare(
+    frames: &[Vec<BodyItemId>],
+    tree: &AnalysisContext<'_>,
+    key: &Key,
+    context: &mut PackedDimensions,
+) -> Converted<()> {
+    if let Ok(unit) = tree.root_unit() {
+        if let Some(parameters) = &unit.parameters {
+            for parameter_node in parameters {
+                let _ = parameter(parameter_node, tree, context, key, false);
             }
         }
-        if *context == before {
-            break;
+        for index in tree.header_port_ids()? {
+            let port = &unit.ports[index];
+            if let Some(id) = port.data_type
+                && let Ok(Some(base)) = type_binding::bind(id, tree, context)
+                && let Ok(ty) = type_with_dimensions(base, &port.dimensions, tree, context)
+                && let celox_sv_syntax::PortKind::Named(n) = &port.kind
+            {
+                publish_shape(tree, key, context, name(n), &ty, false);
+            }
+        }
+    }
+    for (depth, frame) in frames.iter().enumerate() {
+        for id in frame {
+            let _ = declaration(*id, tree, context, key, depth == 0);
         }
     }
     Ok(())
@@ -878,10 +961,19 @@ fn settle(
 
 #[derive(Clone, Copy)]
 enum Classes<'a> {
-    /// Bind the signatures of the scope's classes in each pass.
+    /// Bind the signatures of the scope's classes once its declarations
+    /// settle.
     Bind,
     /// Publish signatures bound before.
     Published(&'a ClassSignatures),
+}
+
+impl Classes<'_> {
+    fn publish(self, tree: &AnalysisContext<'_>, context: &mut PackedDimensions) {
+        if let Self::Published(signatures) = self {
+            signatures.publish(tree, context);
+        }
+    }
 }
 
 fn publish_signature(

@@ -1510,4 +1510,27 @@ sv_backends! {
         sim.run_until(0).unwrap();
         assert_eq!(sim.get(sim.signal("ok")), 1u32.into());
     }
+
+    // A method's return type may name a method of a class declared after it,
+    // which declaration-time queries see (8.25).
+    fn class_signatures_naming_later_classes(sim) {
+        @setup {
+            let source = r#"package p;
+                class A;
+                    static function bit [$bits(B::g())-1:0] f(); return 0; endfunction
+                endclass
+                class B;
+                    static function bit [11:0] g(); return 0; endfunction
+                endclass
+                localparam int W = $bits(A::f());
+            endpackage
+            module Top(output int width);
+                import p::*;
+                assign width = W;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("signatures.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.get(sim.signal("width")), 12u32.into());
+    }
 }
