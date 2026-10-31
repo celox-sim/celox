@@ -39,6 +39,8 @@ fn evaluate_with_state(
     let mut builder = SIRBuilder::new();
     let result = Expressions {
         builder: &mut builder,
+        four_state: false,
+        logic: &|_| false,
     }
     .compile(&ExprBytecode::new(ops))
     .unwrap();
