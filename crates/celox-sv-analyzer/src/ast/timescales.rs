@@ -1148,6 +1148,7 @@ mod tests {
                 "Top",
                 &HashMap::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
             let values: Vec<_> = ir.modules()[0]
@@ -1178,6 +1179,7 @@ mod tests {
                 "Top",
                 &HashMap::default(),
                 &packages,
+                &mut packages.design(),
             );
             assert!(result.is_err(), "accepted mixed defaults for {module}");
             assert!(
@@ -1203,7 +1205,8 @@ mod tests {
                 Path::new("omitted.sv"),
                 "Top",
                 &HashMap::default(),
-                &packages
+                &packages,
+                &mut packages.design()
             )
             .is_err()
         );
@@ -1230,6 +1233,7 @@ mod tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         let values: Vec<_> = ir.modules()[0]
@@ -1471,6 +1475,7 @@ mod tests {
                 &[],
                 &ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap();
         let values: Vec<_> = ir.modules()[0]
@@ -1498,7 +1503,8 @@ mod tests {
                         &[],
                         &[],
                         &ModuleInterfaces::default(),
-                        &packages
+                        &packages,
+                        &mut packages.design()
                     )
                     .is_err(),
                 "accepted {expression}"
@@ -1642,6 +1648,7 @@ mod tests {
                     &[],
                     &ModuleInterfaces::default(),
                     &packages,
+                    &mut packages.design(),
                 )
                 .unwrap();
             let after = COLLECTIONS.with(std::cell::Cell::get);

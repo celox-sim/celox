@@ -138,11 +138,11 @@ pub(super) fn runtime_cast_target_expr(
 /// of the syntax adapter that supplied its target and operand.
 pub(super) fn cast_constant_target(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     operand: ConstExpr,
     target: RuntimeCastTarget,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
-    let state = &*tree.state;
     if let RuntimeCastTarget::Real { short } = target {
         let kind = if short {
             TypeKind::Shortreal
@@ -150,7 +150,7 @@ pub(super) fn cast_constant_target(
             TypeKind::Real
         };
         return expr_to_const(
-            state,
+            session,
             parameters::real_literal(&operand, kind, const_env, &HashMap::default())?,
         );
     }

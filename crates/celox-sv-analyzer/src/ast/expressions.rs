@@ -2,8 +2,11 @@
 
 use super::*;
 
-pub(super) fn guard_zero_divisions(tree: &AnalysisContext<'_>, expr: Expr) -> Expr {
-    let state = &*tree.state;
+pub(super) fn guard_zero_divisions(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expr: Expr,
+) -> Expr {
     let functions = &tree.functions;
     // Binding an enclosing expression can visit an already guarded operand.
     // Its children were guarded when it was constructed. Wrapping it again
@@ -21,7 +24,7 @@ pub(super) fn guard_zero_divisions(tree: &AnalysisContext<'_>, expr: Expr) -> Ex
             lsb,
             signed,
         } => Expr::Select {
-            expr: Box::new(guard_zero_divisions(tree, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             msb,
             lsb,
             signed,
@@ -29,14 +32,14 @@ pub(super) fn guard_zero_divisions(tree: &AnalysisContext<'_>, expr: Expr) -> Ex
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|expr| guard_zero_divisions(tree, expr))
+                .map(|expr| guard_zero_divisions(tree, session, expr))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|expr| guard_zero_divisions(tree, expr))
+                .map(|expr| guard_zero_divisions(tree, session, expr))
                 .collect(),
         },
         Expr::Resize {
@@ -44,23 +47,23 @@ pub(super) fn guard_zero_divisions(tree: &AnalysisContext<'_>, expr: Expr) -> Ex
             width,
             signed,
         } => Expr::Resize {
-            expr: Box::new(guard_zero_divisions(tree, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             width,
             signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(guard_zero_divisions(tree, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
         },
         Expr::Binary { left, op, right } => {
-            let left = Box::new(guard_zero_divisions(tree, *left));
-            let right = Box::new(guard_zero_divisions(tree, *right));
+            let left = Box::new(guard_zero_divisions(tree, session, *left));
+            let right = Box::new(guard_zero_divisions(tree, session, *right));
             let operation = Expr::Binary {
                 left,
                 op,
                 right: right.clone(),
             };
-            let divisor_is_nonzero = expr_to_const(state, (*right).clone())
+            let divisor_is_nonzero = expr_to_const(session, (*right).clone())
                 .and_then(|right| eval_ast_const_expr(functions, &right, &HashMap::default()))
                 .is_some_and(|right| right != 0);
             if matches!(op, BinaryOp::Div | BinaryOp::Mod) && !divisor_is_nonzero {
@@ -82,15 +85,15 @@ pub(super) fn guard_zero_divisions(tree: &AnalysisContext<'_>, expr: Expr) -> Ex
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(guard_zero_divisions(tree, *condition)),
-            then_expr: Box::new(guard_zero_divisions(tree, *then_expr)),
-            else_expr: Box::new(guard_zero_divisions(tree, *else_expr)),
+            condition: Box::new(guard_zero_divisions(tree, session, *condition)),
+            then_expr: Box::new(guard_zero_divisions(tree, session, *then_expr)),
+            else_expr: Box::new(guard_zero_divisions(tree, session, *else_expr)),
         },
         Expr::Inside { expr, items } => Expr::Inside {
-            expr: Box::new(guard_zero_divisions(tree, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             items: items
                 .into_iter()
-                .map(|item| item.map(&mut |operand| guard_zero_divisions(tree, operand)))
+                .map(|item| item.map(&mut |operand| guard_zero_divisions(tree, session, operand)))
                 .collect(),
         },
         Expr::Call {
@@ -102,7 +105,7 @@ pub(super) fn guard_zero_divisions(tree: &AnalysisContext<'_>, expr: Expr) -> Ex
             callee,
             args: args
                 .into_iter()
-                .map(|arg| arg.map(|expr| guard_zero_divisions(tree, expr)))
+                .map(|arg| arg.map(|expr| guard_zero_divisions(tree, session, expr)))
                 .collect(),
         },
     }
@@ -125,11 +128,11 @@ pub(super) fn identifier_expression(
 /// Numeric system-function semantics for already-bound native arguments.
 pub(super) fn numeric_system_function(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     function: SystemFunction,
     mut arguments: Vec<Expr>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
     let operand_error = || unsupported(format!("operand of `{}`", function.name()));
     match function {
@@ -163,7 +166,7 @@ pub(super) fn numeric_system_function(
             // reads as a literal.
             if function == SystemFunction::Past
                 && let Some(ticks) = arguments.get_mut(1)
-                && let Some(constant) = expr_to_const(state, ticks.clone())
+                && let Some(constant) = expr_to_const(session, ticks.clone())
                 && let Some(value) =
                     eval_ast_const_expr(functions, &constant, &dimensions.const_env)
             {
@@ -222,7 +225,7 @@ pub(super) fn numeric_system_function(
         | SystemFunction::Countbits => {
             if function == SystemFunction::Clog2
                 && let [argument] = arguments.as_slice()
-                && let Some(argument) = expr_to_const(state, argument.clone())
+                && let Some(argument) = expr_to_const(session, argument.clone())
                 && let Some(value) = eval_ast_const_expr(
                     functions,
                     &ConstExpr::Function {

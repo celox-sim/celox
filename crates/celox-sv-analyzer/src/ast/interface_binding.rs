@@ -39,6 +39,7 @@ pub(super) struct ArrayBinding {
 pub(super) fn unindexed_parameter(
     path: &[String],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     root: celox_sv_syntax::ExprId,
 ) -> Option<String> {
@@ -60,7 +61,7 @@ pub(super) fn unindexed_parameter(
         return None;
     }
     warnings::append(
-        &mut tree.state.diagnostics.borrow_mut(),
+        &mut session.diagnostics,
         [warnings::AnalyzerWarning::InterfaceArrayParameter {
             path: path.join("."),
             element: element.clone(),
@@ -72,6 +73,7 @@ pub(super) fn unindexed_parameter(
 
 pub(super) fn analyze_module(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     path: &Path,
     packages: &packages::Packages,
     bindings: Bindings<'_>,
@@ -161,6 +163,7 @@ pub(super) fn analyze_module(
         header_imports.declarations_only = true;
         Some(Module::from_selected_scope(
             &tree.child(&header_tree, &overrides),
+            session,
             &name,
             &overrides,
             interfaces,
@@ -201,6 +204,7 @@ pub(super) fn analyze_module(
             &port.name,
             &dimensions,
             tree,
+            session,
             &array_symbols.const_env,
             &array_symbols.type_aliases,
         )?;
@@ -232,7 +236,7 @@ pub(super) fn analyze_module(
             imported
                 .state_signals
                 .extend(virtual_interfaces::port_identity_signal(
-                    &tree.state,
+                    session,
                     handle,
                     &port.interface,
                 ));
@@ -251,6 +255,7 @@ pub(super) fn analyze_module(
                 };
                 interface_ast::analyze(
                     &tree.child(definition_tree, &values),
+                    session,
                     definition_path,
                     packages,
                     &values,
@@ -343,6 +348,7 @@ pub(super) fn analyze_module(
     header_imports.declarations_only = true;
     let caller = Module::from_selected_scope(
         &tree.child(&header_tree, &overrides),
+        session,
         &name,
         &overrides,
         interfaces,
@@ -371,6 +377,7 @@ pub(super) fn analyze_module(
             header_imports.declarations_only = true;
             let caller = Module::from_selected_scope(
                 &tree.child(&header_tree, &overrides),
+                session,
                 &name,
                 &overrides,
                 interfaces,
@@ -385,7 +392,7 @@ pub(super) fn analyze_module(
             current.extend(&imported);
             let tree = &tree.importing(Arc::new(current.clone()));
             let tree = &tree.with_functions(current.constant_functions.clone());
-            for item in generate::items(tree, &current.const_env, &current.type_aliases)? {
+            for item in generate::items(tree, session, &current.const_env, &current.type_aliases)? {
                 if let celox_sv_syntax::BodyItemKind::Instance(native) =
                     tree.declarations().body_item(item.id).kind
                     && definitions.contains_key(&instances::normalize_identifier(
@@ -414,6 +421,7 @@ pub(super) fn analyze_module(
             header_imports.declarations_only = true;
             let caller = Module::from_selected_scope(
                 &tree.child(&header_tree, &overrides),
+                session,
                 &name,
                 &overrides,
                 interfaces,
@@ -460,6 +468,7 @@ pub(super) fn analyze_module(
         let bindings = instances::parameter_overrides(
             native.parameters.as_deref(),
             tree,
+            session,
             Some(&interface),
             &dimensions,
             true,
@@ -487,6 +496,7 @@ pub(super) fn analyze_module(
                 &handle,
                 &authored.dimensions,
                 tree,
+                session,
                 &current.const_env,
                 &current.type_aliases,
             )?;
@@ -528,7 +538,7 @@ pub(super) fn analyze_module(
                 imported
                     .state_signals
                     .extend(virtual_interfaces::identity_signal(
-                        &tree.state,
+                        session,
                         &handle,
                         &interface_name,
                     ));
@@ -536,6 +546,7 @@ pub(super) fn analyze_module(
                     (id, index),
                     authored,
                     tree,
+                    session,
                     &dimensions,
                     Some(&interface),
                 )?;
@@ -549,6 +560,7 @@ pub(super) fn analyze_module(
                     };
                     interface_ast::analyze(
                         &tree.child(definition_tree, &values),
+                        session,
                         definition_path,
                         packages,
                         &values,
@@ -594,6 +606,7 @@ pub(super) fn analyze_module(
                         pattern.map_expressions(&mut |expr| {
                             let mut expr = substitute_expr_constants_with_parameter_literals(
                                 tree,
+                                session,
                                 expr,
                                 &dimensions.const_env,
                                 &current.parameter_values,
@@ -606,7 +619,7 @@ pub(super) fn analyze_module(
                         let shape = port_dimensions.get(&port.name).ok_or_else(|| {
                             unsupported("interface assignment pattern port shape")
                         })?;
-                        pattern.lower(&port_tree, shape, &port_dimensions)?
+                        pattern.lower(&port_tree, session, shape, &port_dimensions)?
                     } else if let Some(actual) = connection.actual_expr.clone() {
                         actual
                     } else {
@@ -631,7 +644,7 @@ pub(super) fn analyze_module(
                         let actual_shape = if let Some(root) =
                             connection_expression(authored, &port.name, Some(&interface))?
                         {
-                            dimensions::operand_shape(root, tree, &dimensions)?
+                            dimensions::operand_shape(root, tree, session, &dimensions)?
                         } else if let Expr::Ident(name) = &actual {
                             dimensions.get(name).cloned()
                         } else {
@@ -723,7 +736,7 @@ pub(super) fn analyze_module(
         current.extend(&imported);
         let tree = &tree.importing(Arc::new(current.clone()));
         let tree = &tree.with_functions(current.constant_functions.clone());
-        for item in generate::items(tree, &current.const_env, &current.type_aliases)? {
+        for item in generate::items(tree, session, &current.const_env, &current.type_aliases)? {
             let tree = &item.scoped(tree);
             let active_scope = scope::imported(tree);
             let celox_sv_syntax::BodyItemKind::Instance(native) =
@@ -744,7 +757,8 @@ pub(super) fn analyze_module(
                     let actual =
                         connection_expression(authored, &port.name, interfaces.get(&original))?;
                     let env = &item.env;
-                    let actuals = connection_array(actual, &port.name, tree, env, &active_scope)?;
+                    let actuals =
+                        connection_array(actual, &port.name, tree, session, env, &active_scope)?;
                     if actuals.shape.len() != port.array_rank {
                         return Err(unsupported(format!(
                             "interface array rank mismatch at `{original}.{}`",
@@ -813,7 +827,7 @@ pub(super) fn analyze_module(
                             .parameter_values
                             .get(bound)
                             .cloned()
-                            .and_then(|expr| expr_to_const(&tree.state, expr))
+                            .and_then(|expr| expr_to_const(session, expr))
                             .ok_or_else(|| {
                                 unsupported(format!("interface parameter `{handle}.{parameter}`"))
                             })?;
@@ -862,6 +876,7 @@ pub(super) fn analyze_module(
     }
     let module = Module::from_selected_scope(
         tree,
+        session,
         &name,
         &overrides,
         interfaces,
@@ -1328,11 +1343,12 @@ fn instance_elements(
     handle: &str,
     dimensions: &[celox_sv_syntax::Dimension],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<ArrayBinding> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
-    let ranges = constant_binding::bind_unpacked_ranges(dimensions, tree, &context)?;
+    let ranges = constant_binding::bind_unpacked_ranges(dimensions, tree, session, &context)?;
     validate_unpacked_dimension_sizes(&tree.functions, &ranges, env)?;
     let mut shape = Vec::new();
     let mut bounds = Vec::new();
@@ -1382,6 +1398,7 @@ fn connection_array(
     actual: Option<celox_sv_syntax::ExprId>,
     implicit: &str,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     scope: &scope::ScopeSymbols,
 ) -> Converted<ArrayBinding> {
@@ -1404,7 +1421,7 @@ fn connection_array(
         }
     }
     let handle = match root {
-        Some(root) => actual_handle_key(root, tree, env, &scope.type_aliases)?,
+        Some(root) => actual_handle_key(root, tree, session, env, &scope.type_aliases)?,
         None => implicit.to_string(),
     };
     let Some(array) = scope.interface_arrays.get(&handle) else {
@@ -1412,7 +1429,7 @@ fn connection_array(
         // retain the existing scalar-handle resolution for that case.
         return Ok(ArrayBinding {
             elements: vec![match actual {
-                Some(actual) => actual_handle_key(actual, tree, env, &scope.type_aliases)?,
+                Some(actual) => actual_handle_key(actual, tree, session, env, &scope.type_aliases)?,
                 None => handle,
             }],
             shape: Vec::new(),
@@ -1440,8 +1457,8 @@ fn connection_array(
         return Err(unsupported("interface array slices in multiple dimensions"));
     }
     let context = PackedDimensions::new(HashMap::default(), env, &scope.type_aliases);
-    let evaluate = |root| -> Converted<i128> {
-        constant_binding::bind(root, tree, &context)?
+    let mut evaluate = |root| -> Converted<i128> {
+        constant_binding::bind(root, tree, session, &context)?
             .and_then(|value| eval_ast_const_expr(&tree.functions, &value, env))
             .ok_or_else(|| unsupported("nonconstant interface array selection"))
     };
@@ -1457,7 +1474,7 @@ fn connection_array(
                 (index, index, false)
             }
             Some(selection) => {
-                let (start, end) = selection_range(selection, left <= right, &evaluate)?;
+                let (start, end) = selection_range(selection, left <= right, &mut evaluate)?;
                 (start, end, true)
             }
         };
@@ -1499,7 +1516,7 @@ fn connection_array(
 fn selection_range(
     selection: &celox_sv_syntax::DimensionKind,
     ascending: bool,
-    evaluate: &impl Fn(celox_sv_syntax::ExprId) -> Converted<i128>,
+    evaluate: &mut impl FnMut(celox_sv_syntax::ExprId) -> Converted<i128>,
 ) -> Converted<(i128, i128)> {
     use celox_sv_syntax::DimensionKind;
     match selection {
@@ -1532,6 +1549,7 @@ fn selection_range(
 pub(super) fn actual_handle_key(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<String> {
@@ -1578,7 +1596,7 @@ pub(super) fn actual_handle_key(
                 handle.push_str(&name);
             }
             Suffix::Index(root) => {
-                let value = constant_binding::bind(root, tree, &context)?
+                let value = constant_binding::bind(root, tree, session, &context)?
                     .and_then(|value| eval_ast_const_expr(&tree.functions, &value, env))
                     .ok_or_else(|| unsupported("nonconstant interface index"))?;
                 handle.push_str(&format!("[{value}]"));

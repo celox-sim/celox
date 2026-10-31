@@ -6,14 +6,16 @@ mod symbolic;
 
 pub(super) fn functions_from_scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     dimensions: &PackedDimensions,
 ) -> Converted<HashMap<String, Function>> {
-    let aliases = type_aliases_from_scope_with_env(tree, env)?;
-    let items = generate::items(tree, env, &aliases)?;
+    let aliases = type_aliases_from_scope_with_env(tree, session, env)?;
+    let items = generate::items(tree, session, env, &aliases)?;
     native_functions(
         &items,
         tree,
+        session,
         dimensions,
         lifetimes::automatic_by_default(tree),
     )
@@ -22,6 +24,7 @@ pub(super) fn functions_from_scope(
 pub(super) fn native_functions(
     items: &[generate::Item],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     automatic: bool,
 ) -> Converted<HashMap<String, Function>> {
@@ -64,8 +67,12 @@ pub(super) fn native_functions(
         let mut signature_context = item.dimensions(dimensions);
         signature_context.const_env = item.env.clone();
         signature_context.type_aliases = aliases.as_ref().clone().into();
-        let mut function =
-            native_signature(tree.declarations().subroutine(id), tree, &signature_context)?;
+        let mut function = native_signature(
+            tree.declarations().subroutine(id),
+            tree,
+            session,
+            &signature_context,
+        )?;
         let mut locals = Vec::new();
         let mut counter = 0;
         let mut state = procedural::BodyState {
@@ -84,6 +91,7 @@ pub(super) fn native_functions(
         match procedural::lower_subroutine(
             id,
             tree,
+            session,
             &item.env,
             &aliases,
             &dims,
@@ -174,6 +182,7 @@ pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr, wildcard: bo
 fn native_signature(
     native: &celox_sv_syntax::Subroutine,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Function> {
     let mut params = Vec::new();
@@ -196,9 +205,9 @@ fn native_signature(
         let ty = if port.direction.is_none() && omitted {
             previous
                 .clone()
-                .or(type_binding::bind(port.data_type, tree, context)?)
+                .or(type_binding::bind(port.data_type, tree, session, context)?)
         } else {
-            type_binding::bind(port.data_type, tree, context)?
+            type_binding::bind(port.data_type, tree, session, context)?
         };
         previous = ty.clone();
         let expr_type = ty
@@ -219,7 +228,7 @@ fn native_signature(
         });
     }
     let ty = match native.return_type {
-        Some(id) => type_binding::bind(id, tree, context)?,
+        Some(id) => type_binding::bind(id, tree, session, context)?,
         None => None,
     };
     let result = ty

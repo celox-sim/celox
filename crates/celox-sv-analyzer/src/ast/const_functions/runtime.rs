@@ -216,6 +216,7 @@ mod tests {
                 &[],
                 &crate::ModuleInterfaces::default(),
                 &packages,
+                &mut packages.design(),
             )
             .unwrap()
             .modules()[0]

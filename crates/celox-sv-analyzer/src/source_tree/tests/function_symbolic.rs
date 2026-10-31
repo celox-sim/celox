@@ -1,8 +1,10 @@
 //! Symbolic declaration consumers must use native execution ownership/values.
 use super::*;
+use crate::ast::Session;
 use crate::ast::{Callee, ConstExpr, Source};
 use celox_sv_syntax::{ExprKind, StatementKind};
 fn inline(tree: &SourceTree, input: i128) -> i128 {
+    let session = &mut Session::default();
     let source = Source::from_syntax(tree).unwrap();
     let expression = ConstExpr::Function {
         callee: Callee::Subroutine("f".into()),
@@ -12,6 +14,7 @@ fn inline(tree: &SourceTree, input: i128) -> i128 {
     let syntax = crate::source_tree::SourceTree::empty();
     let expression = source.modules()[0].declaration_expr(
         &crate::ast::AnalysisContext::unspecialized(&syntax),
+        session,
         &expression,
         &HashMap::default(),
     );

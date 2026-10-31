@@ -37,6 +37,7 @@ pub(in crate::ast) fn construction_member(
 
 pub(in crate::ast) fn construct(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     plan: Construction,
     value: Option<Expr>,
     dims: &PackedDimensions,
@@ -64,7 +65,7 @@ pub(in crate::ast) fn construct(
             let signed =
                 dimensions::expression_signedness(&value, dims, &dims.const_env).unwrap_or(false);
             parts.push(patterns::assignment_value(
-                tree, &value, signed, None, &shape, dims, false,
+                tree, session, &value, signed, None, &shape, dims, false,
             )?);
         }
         (None, None) => {}

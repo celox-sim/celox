@@ -4,28 +4,29 @@ use super::*;
 
 pub(super) fn two_state_conditions_are_complements(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     left: &Expr,
     right: &Expr,
     packed_dimensions: &PackedDimensions,
 ) -> bool {
     if let (Some((left, left_positive)), Some((right, right_positive))) = (
-        normalized_two_state_boolean(tree, left, packed_dimensions),
-        normalized_two_state_boolean(tree, right, packed_dimensions),
+        normalized_two_state_boolean(tree, session, left, packed_dimensions),
+        normalized_two_state_boolean(tree, session, right, packed_dimensions),
     ) && left == right
         && left_positive != right_positive
     {
         return true;
     }
-    let is_complement = |candidate: &Expr, other: &Expr| {
+    let is_complement = |session: &mut Session, candidate: &Expr, other: &Expr| {
         matches!(
             candidate,
             Expr::Unary {
                 op: UnaryOp::LogicNot,
                 expr,
-            } if &**expr == other && expr_is_two_state(tree, other, packed_dimensions)
+            } if &**expr == other && expr_is_two_state(tree, session, other, packed_dimensions)
         )
     };
-    let are_inverse_equalities = |left: &Expr, right: &Expr| {
+    let are_inverse_equalities = |session: &mut Session, left: &Expr, right: &Expr| {
         let (
             Expr::Binary {
                 left: left_lhs,
@@ -48,18 +49,21 @@ pub(super) fn two_state_conditions_are_complements(
         }
         match (left_op, right_op) {
             (BinaryOp::Eq, BinaryOp::Ne) | (BinaryOp::Ne, BinaryOp::Eq) => {
-                expr_is_two_state(tree, left_lhs, packed_dimensions)
-                    && expr_is_two_state(tree, left_rhs, packed_dimensions)
+                expr_is_two_state(tree, session, left_lhs, packed_dimensions)
+                    && expr_is_two_state(tree, session, left_rhs, packed_dimensions)
             }
             (BinaryOp::EqCase, BinaryOp::NeCase) | (BinaryOp::NeCase, BinaryOp::EqCase) => true,
             _ => false,
         }
     };
-    is_complement(left, right) || is_complement(right, left) || are_inverse_equalities(left, right)
+    is_complement(session, left, right)
+        || is_complement(session, right, left)
+        || are_inverse_equalities(session, left, right)
 }
 
 fn normalized_two_state_boolean<'a>(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: &'a Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Option<(&'a Expr, bool)> {
@@ -70,15 +74,15 @@ fn normalized_two_state_boolean<'a>(
             ..
         } if expr_static_width(tree, operand, packed_dimensions)
             .is_some_and(|source| source <= *width)
-            && expr_is_two_state(tree, operand, packed_dimensions) =>
+            && expr_is_two_state(tree, session, operand, packed_dimensions) =>
         {
-            return normalized_two_state_boolean(tree, operand, packed_dimensions);
+            return normalized_two_state_boolean(tree, session, operand, packed_dimensions);
         }
         Expr::Unary {
             op: UnaryOp::ToTwoState,
             expr: operand,
-        } if expr_is_two_state(tree, operand, packed_dimensions) => {
-            return normalized_two_state_boolean(tree, operand, packed_dimensions);
+        } if expr_is_two_state(tree, session, operand, packed_dimensions) => {
+            return normalized_two_state_boolean(tree, session, operand, packed_dimensions);
         }
         _ => {}
     }
@@ -86,9 +90,10 @@ fn normalized_two_state_boolean<'a>(
         && (*op == UnaryOp::LogicNot
             || (*op == UnaryOp::BitNot
                 && expr_static_width(tree, expr, packed_dimensions) == Some(1)
-                && expr_is_two_state(tree, expr, packed_dimensions)))
+                && expr_is_two_state(tree, session, expr, packed_dimensions)))
     {
-        let (expr, positive) = normalized_two_state_boolean(tree, expr, packed_dimensions)?;
+        let (expr, positive) =
+            normalized_two_state_boolean(tree, session, expr, packed_dimensions)?;
         return Some((expr, !positive));
     }
     if let Expr::Binary { left, op, right } = expr
@@ -97,28 +102,30 @@ fn normalized_two_state_boolean<'a>(
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::EqCase | BinaryOp::NeCase
         )
     {
-        let nonzero_side = if expr_is_constant_zero(tree, left, &packed_dimensions.const_env) {
-            &**right
-        } else if expr_is_constant_zero(tree, right, &packed_dimensions.const_env) {
-            &**left
-        } else {
-            return expr_is_two_state(tree, expr, packed_dimensions).then_some((expr, true));
-        };
-        if expr_is_two_state(tree, nonzero_side, packed_dimensions) {
+        let nonzero_side =
+            if expr_is_constant_zero(tree, session, left, &packed_dimensions.const_env) {
+                &**right
+            } else if expr_is_constant_zero(tree, session, right, &packed_dimensions.const_env) {
+                &**left
+            } else {
+                return expr_is_two_state(tree, session, expr, packed_dimensions)
+                    .then_some((expr, true));
+            };
+        if expr_is_two_state(tree, session, nonzero_side, packed_dimensions) {
             return Some((nonzero_side, matches!(op, BinaryOp::Ne | BinaryOp::NeCase)));
         }
     }
-    expr_is_two_state(tree, expr, packed_dimensions).then_some((expr, true))
+    expr_is_two_state(tree, session, expr, packed_dimensions).then_some((expr, true))
 }
 
 fn expr_is_constant_zero(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expr: &Expr,
     const_env: &HashMap<String, i128>,
 ) -> bool {
-    let state = &*tree.state;
     let functions = &tree.functions;
-    expr_to_const(state, expr.clone())
+    expr_to_const(session, expr.clone())
         .and_then(|expr| eval_ast_const_expr(functions, &expr, const_env))
         == Some(0)
 }

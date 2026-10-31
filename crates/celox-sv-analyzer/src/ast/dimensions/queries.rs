@@ -3,12 +3,12 @@ use super::*;
 
 pub(super) fn bound_query(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     query: ArrayQuery,
     bounds: &[(i128, i128)],
     dimension: Option<Expr>,
     context: &PackedDimensions,
 ) -> Option<Expr> {
-    let state = &*tree.state;
     let functions = &tree.functions;
     let integer = |value| Expr::Literal(format_typed_parameter_literal(value, 32, true));
     let env = &context.const_env;
@@ -29,7 +29,7 @@ pub(super) fn bound_query(
         })
     };
     let dimension = dimension.unwrap_or_else(|| integer(1));
-    if let Some(index) = expr_to_const(state, dimension.clone())
+    if let Some(index) = expr_to_const(session, dimension.clone())
         .and_then(|expr| eval_ast_const_expr(functions, &expr, env))
     {
         return Some(

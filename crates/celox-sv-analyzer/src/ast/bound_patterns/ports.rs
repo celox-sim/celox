@@ -52,9 +52,10 @@ impl ValueType {
 pub(in crate::ast) fn from_port(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<BoundPattern> {
-    match binding::value_mode(root, tree, dims, false)? {
+    match binding::value_mode(root, tree, session, dims, false)? {
         Value::Pattern(pattern) => Ok(pattern),
         _ => Err(unsupported("untyped port assignment pattern")),
     }
@@ -129,23 +130,25 @@ impl BoundPattern {
     }
 
     pub(crate) fn bind_structure_port(&self, target: &Type) -> Converted<Vec<crate::ir::Expr>> {
+        let session = &mut Session::default();
         let aggregate = target
             .unpacked_struct()
             .ok_or_else(|| unsupported("unpacked structure port type"))?;
         let syntax = SyntaxTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
         let shape = procedural::dimensions_from_type(target);
-        let value = self.lower(&tree, &shape, &PackedDimensions::default())?;
+        let value = self.lower(&tree, session, &shape, &PackedDimensions::default())?;
         unpacked_structs::leaf_parts(aggregate, &value)
             .ok_or_else(|| unsupported("unpacked structure port pattern layout"))
             .map(|parts| parts.into_iter().map(Into::into).collect())
     }
 
     pub(crate) fn bind_port(&self, target: &Type) -> Converted<crate::ir::Expr> {
+        let session = &mut Session::default();
         let syntax = SyntaxTree::empty();
         let tree = AnalysisContext::unspecialized(&syntax);
         let shape = procedural::dimensions_from_type(target);
-        self.lower(&tree, &shape, &PackedDimensions::default())
+        self.lower(&tree, session, &shape, &PackedDimensions::default())
             .map(Into::into)
     }
 }
@@ -190,14 +193,16 @@ impl Type {
 pub(in crate::ast) fn native_value_type(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    native_value_type_plan(root, tree, dims).map(|ty| ty.resolve(dims))
+    native_value_type_plan(root, tree, session, dims).map(|ty| ty.resolve(dims))
 }
 
 pub(super) fn native_value_type_plan(
     root: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<ValueType> {
     use celox_sv_syntax::ExprKind;
@@ -222,15 +227,15 @@ pub(super) fn native_value_type_plan(
                         jobs.push(Job::Enter(else_expression));
                         jobs.push(Job::Enter(then_expression));
                     }
-                    ExprKind::Call { .. } => {
-                        values.push(ValueType::Call(expression_binding::bind(root, tree, dims)?))
-                    }
+                    ExprKind::Call { .. } => values.push(ValueType::Call(
+                        expression_binding::bind(root, tree, session, dims)?,
+                    )),
                     _ => {
                         let shape =
                             if matches!(native.expression(root).kind, ExprKind::Pattern { .. }) {
                                 patterns::typed_shape(root, tree, dims)?
                             } else {
-                                dimensions::operand_shape(root, tree, dims)?
+                                dimensions::operand_shape(root, tree, session, dims)?
                             };
                         values.push(ValueType::Known(
                             shape

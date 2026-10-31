@@ -102,15 +102,15 @@ fn incompatible_types(
 /// the first may not be assigned to the second (see [`incompatible_types`]).
 pub(super) fn incompatible(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     actual: &VariableDimensions,
     target: &VariableDimensions,
     dims: &PackedDimensions,
 ) -> Option<(String, String)> {
-    let state = &*tree.state;
-    let functions = &tree.functions;
-    let of_shape =
-        |shape| semantic_types::of_shape(&state.types, functions, shape, &dims.const_env);
-    incompatible_types(&state.types, of_shape(actual)?, of_shape(target)?)
+    let table = &mut session.types;
+    let actual = semantic_types::of_shape(table, &tree.functions, actual, &dims.const_env)?;
+    let target = semantic_types::of_shape(table, &tree.functions, target, &dims.const_env)?;
+    incompatible_types(table, actual, target)
 }
 
 /// The shape of a variable `name` after `indices` index selects, when that
@@ -142,12 +142,13 @@ pub(super) fn selected_unpacked_shape(
 fn native_selection(
     mut id: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Option<(String, usize, Option<u128>)> {
     use celox_sv_syntax::{DimensionKind, ExprKind};
     let native = tree.declarations();
-    let constant = |id| {
-        constant_binding::bind(id, tree, dims)
+    let mut constant = |id| {
+        constant_binding::bind(id, tree, session, dims)
             .ok()
             .flatten()
             .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dims.const_env))
@@ -194,9 +195,10 @@ fn native_selection(
 pub(super) fn native_unpacked_shape(
     id: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Option<VariableDimensions> {
-    let (path, indices, slice) = native_selection(id, tree, dims)?;
+    let (path, indices, slice) = native_selection(id, tree, session, dims)?;
     let mut shape = selected_unpacked_shape(&path, indices, dims)?;
     if let Some(count) = slice {
         let count = ConstExpr::Literal(count.to_string());
@@ -219,21 +221,22 @@ pub(super) fn native_unpacked_shape(
 fn native_unpacked_type(
     id: celox_sv_syntax::ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Option<semantic_types::TyId> {
     use semantic_types::{ArrayKind, Range, TyData};
-    let (path, indices, slice) = native_selection(id, tree, dims)?;
-    let table = &tree.state.types;
+    let (path, indices, slice) = native_selection(id, tree, session, dims)?;
+    let table = &mut session.types;
     let mut ty =
         semantic_types::of_shape(table, &tree.functions, dims.get(&path)?, &dims.const_env)?;
     for _ in 0..indices {
         let TyData::Array { element, .. } = table.data(ty) else {
             return None;
         };
-        ty = element;
+        ty = *element;
     }
     if let Some(count) = slice {
-        let TyData::Array { element, .. } = table.data(ty) else {
+        let &TyData::Array { element, .. } = table.data(ty) else {
             return None;
         };
         ty = table.intern(TyData::Array {
@@ -273,15 +276,17 @@ fn dotted_path(
 /// conditional operator that selects the value is checked (11.4.11).
 pub(super) fn check_native_unpacked_assignment(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     target: &VariableDimensions,
     context: impl Fn() -> String,
     dims: &PackedDimensions,
 ) -> Converted<()> {
-    check_assignment(tree, id, target, &context, dims)
+    check_assignment(tree, session, id, target, &context, dims)
 }
 fn check_assignment(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::ExprId,
     target: &VariableDimensions,
     context: &dyn Fn() -> String,
@@ -296,14 +301,15 @@ fn check_assignment(
         .expression(expression_binding::ungroup(id, native))
         .kind
     {
-        check_assignment(tree, *then_expression, target, context, dims)?;
-        return check_assignment(tree, *else_expression, target, context, dims);
+        check_assignment(tree, session, *then_expression, target, context, dims)?;
+        return check_assignment(tree, session, *else_expression, target, context, dims);
     }
-    let table = &tree.state.types;
-    let Some((actual, target)) =
-        semantic_types::of_shape(table, &tree.functions, target, &dims.const_env)
-            .zip(native_unpacked_type(id, tree, dims))
-            .and_then(|(target, actual)| incompatible_types(table, actual, target))
+    let target =
+        semantic_types::of_shape(&mut session.types, &tree.functions, target, &dims.const_env);
+    let actual = native_unpacked_type(id, tree, session, dims);
+    let Some((actual, target)) = target
+        .zip(actual)
+        .and_then(|(target, actual)| incompatible_types(&session.types, actual, target))
     else {
         return Ok(());
     };

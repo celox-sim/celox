@@ -37,6 +37,7 @@ pub(super) fn shape_width(
 
 fn constant_pattern_value(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     value: Expr,
     shape: &VariableDimensions,
     dims: &PackedDimensions,
@@ -48,10 +49,15 @@ fn constant_pattern_value(
         .map(|(name, value)| (name.clone(), value.clone()))
         .collect();
     let value = substitute_expr_idents(value, &dims.array_parameter_values);
-    let value =
-        substitute_expr_constants_with_parameter_literals(tree, value, &dims.const_env, &values);
+    let value = substitute_expr_constants_with_parameter_literals(
+        tree,
+        session,
+        value,
+        &dims.const_env,
+        &values,
+    );
     let Expr::Literal(value) =
-        fold_const_integral_expr_preserving_mask(tree, value, &dims.const_env)
+        fold_const_integral_expr_preserving_mask(tree, session, value, &dims.const_env)
     else {
         return Err(unsupported("nonconstant typed parameter pattern"));
     };
@@ -136,6 +142,7 @@ fn dimension_bounds(
 /// the leaf so mixed bit/logic aggregates preserve their member types.
 pub(super) fn assignment_value(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     value: &Expr,
     signed: bool,
     value_type: Option<&Type>,
@@ -198,7 +205,7 @@ pub(super) fn assignment_value(
                 .ok_or_else(|| unsupported("pattern target array size"))?;
             return Ok(Expr::Concat(vec![
                 assignment_value(
-                    tree, value, signed, value_type, &element, dims, true
+                    tree, session, value, signed, value_type, &element, dims, true
                 )?;
                 count
             ]));
@@ -211,6 +218,7 @@ pub(super) fn assignment_value(
                     .map(|member| {
                         assignment_value(
                             tree,
+                            session,
                             value,
                             signed,
                             value_type,
@@ -239,6 +247,7 @@ pub(super) fn assignment_value(
                     .map(|member| {
                         assignment_value(
                             tree,
+                            session,
                             value,
                             signed,
                             value_type,
@@ -265,7 +274,7 @@ pub(super) fn assignment_value(
     let target = array_compatibility::unpacked_array_type(&tree.functions, shape, dims);
     if let Some((actual, target)) = actual_shape
         .as_ref()
-        .and_then(|actual| array_compatibility::incompatible(tree, actual, shape, dims))
+        .and_then(|actual| array_compatibility::incompatible(tree, session, actual, shape, dims))
     {
         return Err(AnalyzerError::IncompatibleUnpackedArray {
             context: "assignment pattern element".into(),

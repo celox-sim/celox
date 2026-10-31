@@ -4,7 +4,7 @@ use celox_sv_syntax::AssertionHeader;
 
 impl BodyBuilder<'_, '_, '_> {
     pub(super) fn native_assertion_condition(
-        &self,
+        &mut self,
         keyword: &str,
         header: &AssertionHeader,
     ) -> Result<Expr, AnalyzerError> {

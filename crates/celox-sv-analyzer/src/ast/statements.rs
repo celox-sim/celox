@@ -96,6 +96,7 @@ pub(super) fn lvalue_expr_type(
 
 pub(super) fn simplify_condition(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expression: Expr,
     packed_dimensions: &PackedDimensions,
 ) -> Expr {
@@ -106,7 +107,7 @@ pub(super) fn simplify_condition(
         op: BinaryOp::LogicOr,
         right,
     } = &expression
-        && two_state_conditions_are_complements(tree, left, right, packed_dimensions)
+        && two_state_conditions_are_complements(tree, session, left, right, packed_dimensions)
     {
         return Expr::Literal("1'b1".to_string());
     }
@@ -115,6 +116,7 @@ pub(super) fn simplify_condition(
 
 pub(super) fn assignment_op_expr(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     lhs: &LValue,
     op: &str,
     rhs: Expr,
@@ -149,6 +151,7 @@ pub(super) fn assignment_op_expr(
     Ok(expression_binding::remove_real_division_guards(
         guard_zero_divisions(
             tree,
+            session,
             Expr::Binary {
                 left: Box::new(left),
                 op,

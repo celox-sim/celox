@@ -30,6 +30,7 @@ pub(super) fn state_type() -> Type {
 /// The built-in scope, also available unambiguously through std (26.7).
 pub(super) fn scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -47,7 +48,7 @@ pub(super) fn scope(
                 return false;
             }
             !scope::imported(tree).package_scopes.contains(&name)
-                && classes::resolve(tree, &name).as_deref() == Some(CLASS)
+                && classes::resolve(tree, session, &name).as_deref() == Some(CLASS)
         }
         ExprKind::Member {
             expression,
@@ -69,6 +70,7 @@ pub(super) fn scope(
 pub(super) fn builtin_type(
     path: &[celox_sv_syntax::TypeSegment],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<Box<Type>>> {
     if let Some(ty) = qualified_type(path) {
@@ -78,7 +80,7 @@ pub(super) fn builtin_type(
         .last()
         .is_some_and(|part| part.name.spelling == "mailbox")
     {
-        return super::mailboxes::named_type(path, tree, context);
+        return super::mailboxes::named_type(path, tree, session, context);
     }
     Ok(None)
 }
@@ -111,6 +113,7 @@ pub(super) fn qualified_type(path: &[celox_sv_syntax::TypeSegment]) -> Option<Ty
 /// constant of that type or the result of `status()` of a process handle.
 pub(super) fn state(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -133,12 +136,14 @@ pub(super) fn state(
         "::" => {
             !called
                 && STATES.contains(&member.as_str())
-                && scope(tree, *receiver, native, dimensions)
+                && scope(tree, session, *receiver, native, dimensions)
         }
         "." => {
             member == "status"
-                && expression_binding::object_native_class(tree, *receiver, native, dimensions)
-                    .as_deref()
+                && expression_binding::object_native_class(
+                    tree, session, *receiver, native, dimensions,
+                )
+                .as_deref()
                     == Some(CLASS)
         }
         _ => false,
@@ -148,6 +153,7 @@ pub(super) fn state(
 
 pub(super) fn value(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     root: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -168,9 +174,10 @@ pub(super) fn value(
     else {
         return Ok(None);
     };
-    let static_receiver = separator == "::" && scope(tree, *receiver, native, dimensions);
+    let static_receiver = separator == "::" && scope(tree, session, *receiver, native, dimensions);
     let handle_receiver = separator == "."
-        && expression_binding::object_native_class(tree, *receiver, native, dimensions).as_deref()
+        && expression_binding::object_native_class(tree, session, *receiver, native, dimensions)
+            .as_deref()
             == Some(CLASS);
     if !static_receiver && !handle_receiver {
         return Ok(None);
@@ -219,7 +226,7 @@ pub(super) fn value(
     let mut bound = Vec::new();
     if op != ProcessOp::SelfHandle {
         bound.push(Some(expression_binding::value(
-            *receiver, native, tree, dimensions,
+            *receiver, native, tree, session, dimensions,
         )?));
     }
     for arg in args {
@@ -240,6 +247,7 @@ pub(super) fn value(
             arg.value.unwrap(),
             native,
             tree,
+            session,
             dimensions,
         )?));
     }

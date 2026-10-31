@@ -19,12 +19,12 @@ impl TyTable {
                     dims.push_str(&format!("[$:{bound}]"));
                 }
                 ArrayKind::Associative { key } => {
-                    dims.push_str(&format!("[{}]", self.spell(key)));
+                    dims.push_str(&format!("[{}]", self.spell(*key)));
                 }
             }
-            id = element;
+            id = *element;
         }
-        let element = self.spell_element(&self.data(id));
+        let element = self.spell_element(id);
         if dims.is_empty() {
             element
         } else {
@@ -32,8 +32,8 @@ impl TyTable {
         }
     }
 
-    fn spell_element(&self, data: &TyData) -> String {
-        match data {
+    fn spell_element(&self, id: TyId) -> String {
+        match self.data(id) {
             TyData::Packed(packed) => match &packed.element {
                 PackedElement::Enum { decl, array } => {
                     let name = format!("enum {}", spell_decl(decl));
@@ -64,7 +64,7 @@ impl TyTable {
                 None => format!("virtual {}", spell_decl(interface)),
             },
             TyData::UnpackedStruct(decl) => format!("struct {}", spell_decl(decl)),
-            TyData::Array { .. } => self.spell(self.intern(data.clone())),
+            TyData::Array { .. } => self.spell(id),
         }
     }
 }

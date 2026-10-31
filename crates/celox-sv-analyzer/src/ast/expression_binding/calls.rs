@@ -1,12 +1,15 @@
 use super::*;
 pub(super) fn callee_name(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
-    Ok(direct::bound_callable_name(tree, id, native, dimensions)?
-        .filter(|name| !name.starts_with('$') || name.contains("::")))
+    Ok(
+        direct::bound_callable_name(tree, session, id, native, dimensions)?
+            .filter(|name| !name.starts_with('$') || name.contains("::")),
+    )
 }
 
 pub(in crate::ast) fn statement_root(
@@ -46,6 +49,7 @@ pub(in crate::ast) fn statement(
     discarded: bool,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     signatures: &HashMap<String, Vec<String>>,
 ) -> Converted<Option<Expr>> {
@@ -54,7 +58,7 @@ pub(in crate::ast) fn statement(
         ExprKind::Call { expression, .. } => expression,
         _ => root,
     };
-    if callee_name(tree, callee, native, dimensions)?.is_none() {
+    if callee_name(tree, session, callee, native, dimensions)?.is_none() {
         return match &native.expression(callee).kind {
             ExprKind::Name(name) if name.spelling.starts_with('$') => Ok(None),
             ExprKind::Member { separator, .. } if separator == "." => Ok(None),
@@ -67,14 +71,15 @@ pub(in crate::ast) fn statement(
         native.expression(root).kind,
         ExprKind::Name(_) | ExprKind::Member { .. }
     ) {
-        let name = callee_name(tree, root, native, dimensions)?.ok_or_else(disagreement)?;
+        let name =
+            callee_name(tree, session, root, native, dimensions)?.ok_or_else(disagreement)?;
         return Ok(Some(Expr::Call {
             callee: Callee::Subroutine(name),
             args: Vec::new(),
             arg_order: Vec::new(),
         }));
     }
-    super::bind_value(root, native, tree, &context, None).map(Some)
+    super::bind_value(root, native, tree, session, &context, None).map(Some)
 }
 
 #[cfg(test)]
