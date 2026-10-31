@@ -98,6 +98,16 @@ pub trait StepObserver<E: SimulationExecutor> {
         false
     }
 
+    /// The most time slots the next run of the compiled scheduler may run.
+    fn budget(&self, _state: &SimulationState<E::Backend>) -> u64 {
+        u64::MAX
+    }
+
+    /// Whether the run returns before its next step.
+    fn interrupts(&mut self, _state: &SimulationState<E::Backend>) -> bool {
+        false
+    }
+
     /// Called before a step, with the state it starts from.
     fn before_step(&mut self, state: &SimulationState<E::Backend>, executor: &mut E);
 
@@ -269,6 +279,7 @@ impl<B: SimBackend> SimulationState<B> {
     where
         E: SimulationExecutor<Backend = B>,
     {
+        executor.await_runtime_event_room();
         self.stopped = false;
         if self.finalizing.is_some() {
             if self.scheduler.time > limit {
@@ -330,6 +341,48 @@ impl<B: SimBackend> SimulationState<B> {
             // describing different moments, so an earlier target is a no-op.
             return Ok(false);
         }
+        if !self.run_slots_to(executor, end, observer)? {
+            return Ok(false);
+        }
+        if self.finished {
+            return Ok(false);
+        }
+        if end > self.scheduler.time && !self.leave_time(executor)? {
+            return Ok(false);
+        }
+        self.advance_time(executor.backend_mut(), end);
+        Ok(true)
+    }
+
+    /// Run time slots, as [`Self::run_until`] runs them, until nothing is
+    /// due, the simulation stops or finishes, or `observer` interrupts the
+    /// run between two steps. Unlike [`Self::run_until`], time stays at the
+    /// last slot run.
+    pub fn run_slots_observed<E, O>(
+        &mut self,
+        executor: &mut E,
+        observer: &mut O,
+    ) -> Result<(), SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+        O: StepObserver<E>,
+    {
+        self.run_slots_to(executor, u64::MAX, observer).map(drop)
+    }
+
+    /// The steps of the slots up to `end`. Returns whether every slot up to
+    /// `end` ran: not when a process stopped the run or `observer`
+    /// interrupted it.
+    fn run_slots_to<E, O>(
+        &mut self,
+        executor: &mut E,
+        end: u64,
+        observer: &mut O,
+    ) -> Result<bool, SimulatorErrorCode>
+    where
+        E: SimulationExecutor<Backend = B>,
+        O: StepObserver<E>,
+    {
         let compiles = self.compiles_slots();
         let waiting_kernels = self
             .model
@@ -339,6 +392,9 @@ impl<B: SimBackend> SimulationState<B> {
         while let Some(next_time) = self.next_event_time() {
             if next_time > end {
                 break;
+            }
+            if observer.interrupts(self) {
+                return Ok(false);
             }
             // A process the scheduler does not run waits: the slot stays in
             // the reference loop. Test that first, as designs with such
@@ -359,7 +415,11 @@ impl<B: SimBackend> SimulationState<B> {
             }
             observer.before_step(self, executor);
             let result = match compiled {
-                Some(limit) => self.run_compiled(executor, limit),
+                Some(limit) => {
+                    executor.await_runtime_event_room();
+                    let budget = observer.budget(self);
+                    self.run_compiled(executor, limit, budget)
+                }
                 None => self.step_until(executor, end),
             };
             observer.after_step(self, executor, end, &result)?;
@@ -368,13 +428,6 @@ impl<B: SimBackend> SimulationState<B> {
                 return Ok(false);
             }
         }
-        if self.finished {
-            return Ok(false);
-        }
-        if end > self.scheduler.time && !self.leave_time(executor)? {
-            return Ok(false);
-        }
-        self.advance_time(executor.backend_mut(), end);
         Ok(true)
     }
 

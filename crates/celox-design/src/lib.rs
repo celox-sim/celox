@@ -1452,6 +1452,13 @@ pub struct SchedulerSlots<A> {
     pub defer_limit_settle: A,
     /// The number of time slots the run ran.
     pub count: A,
+    /// The most time slots the run may run: it returns at the end of the
+    /// slot that reaches this count, as at its limit.
+    pub budget: A,
+    /// The runtime events the run recorded. It returns at the end of the
+    /// slot in which they reach an eighth of the ring buffer, so that the
+    /// host can drain it before it overflows.
+    pub events: A,
     /// The kernel running when the run returned, `u64::MAX` for none.
     pub current: A,
     /// The levels of the event signals at the start of the last slot, one
@@ -1494,6 +1501,8 @@ impl<A> SchedulerSlots<A> {
             dirty: map(self.dirty),
             defer_limit_settle: map(self.defer_limit_settle),
             count: map(self.count),
+            budget: map(self.budget),
+            events: map(self.events),
             current: map(self.current),
             levels: map(self.levels),
             unknown_levels: map(self.unknown_levels),
@@ -1520,6 +1529,8 @@ impl<A> SchedulerSlots<A> {
             &self.dirty,
             &self.defer_limit_settle,
             &self.count,
+            &self.budget,
+            &self.events,
             &self.current,
             &self.levels,
             &self.unknown_levels,

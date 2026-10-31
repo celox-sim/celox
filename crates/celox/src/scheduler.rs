@@ -1109,6 +1109,11 @@ impl Plan {
                 .four_state
                 .then_some(&program.layout().is_4states),
             event_bits: self.event_bits,
+            event_batch: {
+                let capacity = program.layout().runtime_event_capacity;
+                (capacity > 0 && !schema.runtime_event_sites.is_empty())
+                    .then_some((capacity / 8).max(1) as u64)
+            },
         };
         let waits: Vec<(usize, &Wait)> = self
             .kernels
@@ -1837,7 +1842,23 @@ impl Plan {
             g.b.seal_block(SIRTerminator::Jump(rearmed, Vec::new()));
             g.b.switch_to_block(rearmed);
         }
-        g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
+        // The run returns after the slot that reaches its budget, or in
+        // which its runtime events reach a batch, so that the host drains
+        // them before the ring buffer overflows.
+        let count = g.load(slots.count, SCHEDULER_TIME_WIDTH);
+        let budget = g.load(slots.budget, SCHEDULER_TIME_WIDTH);
+        let mut returns = g.binary(1, count, BinaryOp::GeU, budget);
+        if let Some(batch) = g.event_batch {
+            let events = g.load(slots.events, SCHEDULER_TIME_WIDTH);
+            let batch = g.constant(batch, SCHEDULER_TIME_WIDTH);
+            let full = g.binary(1, events, BinaryOp::GeU, batch);
+            returns = g.binary(1, returns, BinaryOp::Or, full);
+        }
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: returns,
+            true_block: (stopped, Vec::new()),
+            false_block: (header, Vec::new()),
+        });
         g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
         if let Some(lazy) = &self.lazy {
             g.emit_eager(&lazy.eager, finish_exit, internal_exit);
@@ -2048,6 +2069,9 @@ struct Generator<'a> {
     four_state: Option<&'a crate::HashMap<AbsoluteAddr, bool>>,
     /// See [`Plan::event_bits`].
     event_bits: usize,
+    /// The runtime events after which a run returns at the end of its slot
+    /// ([`SchedulerSlots::events`]), when the inlined units count theirs.
+    event_batch: Option<u64>,
 }
 
 impl Generator<'_> {
@@ -2739,12 +2763,18 @@ impl Generator<'_> {
     /// Inline `unit`. A `$finish` record it emits ends the run after it, as
     /// the reference loop ends the slot after the unit that emitted one.
     fn inline(&mut self, unit: &Unit, finish_exit: celox_sir::BlockId) {
-        if self.finish_sites.is_empty() || !emits_finish(unit, self.finish_sites) {
+        let finishes = !self.finish_sites.is_empty() && emits_finish(unit, self.finish_sites);
+        let counts = self.event_batch.is_some()
+            && instructions(unit).any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }));
+        if !finishes && !counts {
             self.b.inline_execution_unit(unit);
             return;
         }
-        let instrumented = self.instrument(unit);
+        let instrumented = self.instrument(unit, counts);
         self.b.inline_execution_unit(&instrumented);
+        if !finishes {
+            return;
+        }
         let finished = self.load(self.slots.finish, SCHEDULER_FLAG_WIDTH);
         let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
         let set = self.binary(1, finished, BinaryOp::Ne, zero);
@@ -2758,8 +2788,8 @@ impl Generator<'_> {
     }
 
     /// A copy of `unit` that sets the finish slot after every `$finish`
-    /// record.
-    fn instrument(&self, unit: &Unit) -> Unit {
+    /// record, and when `counts`, counts every record in the events slot.
+    fn instrument(&self, unit: &Unit, counts: bool) -> Unit {
         let mut unit = unit.clone();
         let mut next = unit
             .register_map
@@ -2768,12 +2798,38 @@ impl Generator<'_> {
             .max()
             .unwrap_or(0);
         let mut registers = Vec::new();
+        let mut wide = Vec::new();
         for block in unit.blocks.values_mut() {
             let mut instructions = Vec::with_capacity(block.instructions.len());
             for inst in block.instructions.drain(..) {
                 let finish = matches!(&inst, SIRInstruction::RuntimeEvent { site_id, .. }
                     if self.finish_sites.contains(site_id));
+                let record = matches!(&inst, SIRInstruction::RuntimeEvent { .. });
                 instructions.push(inst);
+                if counts && record {
+                    let [count, one, sum] = std::array::from_fn(|index| RegisterId(next + index));
+                    next += 3;
+                    wide.extend([count, one, sum]);
+                    let events = stable(self.slots.events);
+                    instructions.extend([
+                        SIRInstruction::Load(
+                            count,
+                            events,
+                            SIROffset::Static(0),
+                            SCHEDULER_TIME_WIDTH,
+                        ),
+                        SIRInstruction::Imm(one, SIRValue::new(1u64)),
+                        SIRInstruction::Binary(sum, count, BinaryOp::Add, one),
+                        SIRInstruction::Store(
+                            events,
+                            SIROffset::Static(0),
+                            SCHEDULER_TIME_WIDTH,
+                            sum,
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ]);
+                }
                 if finish {
                     // Each site defines its own register.
                     let one = RegisterId(next);
@@ -2797,6 +2853,15 @@ impl Generator<'_> {
                 register,
                 crate::ir::RegisterType::Bit {
                     width: SCHEDULER_FLAG_WIDTH,
+                    signed: false,
+                },
+            );
+        }
+        for register in wide {
+            unit.register_map.insert(
+                register,
+                crate::ir::RegisterType::Bit {
+                    width: SCHEDULER_TIME_WIDTH,
                     signed: false,
                 },
             );
