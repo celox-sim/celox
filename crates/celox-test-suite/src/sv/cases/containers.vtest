@@ -1444,3 +1444,96 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "q 3 1 5 2\ntake 2\nsum 15\nrest 2 1\nempty 0\n"))
+
+; IEEE 1800-2023 12.7.3: each loop variable of a foreach over a container of
+; containers iterates one dimension, the first the outermost, in that
+; dimension's order: an associative array in index order, an empty inner
+; container not at all.
+(case nested_container_foreach
+  (source "nested_container_foreach.sv" #"
+module Top(output bit done);
+    typedef int iq_t[$];
+    iq_t all[int];
+    int d[$][];
+    string s[string][$];
+    int sum;
+    initial begin
+        all[3].push_back(30);
+        all[3].push_back(31);
+        all[1].push_back(10);
+        all[7] = {};
+        foreach (all[k, j]) $display("all %0d %0d %0d", k, j, all[k][j]);
+        foreach (all[k]) $display("outer %0d %0d", k, all[k].size());
+        d.push_back('{1, 2});
+        d.push_back('{});
+        d.push_back('{3});
+        foreach (d[i, j]) begin
+            sum += d[i][j];
+            $display("d %0d %0d %0d", i, j, d[i][j]);
+        end
+        s["b"].push_back("x");
+        s["a"].push_back("y");
+        s["a"].push_back("z");
+        foreach (s[k, i]) $display("s %s %0d %s", k, i, s[k][i]);
+        $display("sum %0d", sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "all 1 0 10\nall 3 0 30\nall 3 1 31\nouter 1 1\nouter 3 2\nouter 7 0\nd 0 0 1\nd 0 1 2\nd 2 0 3\ns a 0 y\ns a 1 z\ns b 0 x\nsum 6\n"))
+
+; IEEE 1800-2023 12.7.3: a skipped loop variable still iterates its dimension.
+(case nested_container_foreach_skipped_index
+  (source "nested_container_foreach_skipped.sv" #"
+module Top(output bit done);
+    typedef int iq_t[$];
+    iq_t all[int];
+    int n;
+    initial begin
+        all[3].push_back(30);
+        all[3].push_back(31);
+        all[1].push_back(10);
+        foreach (all[, j]) begin
+            n++;
+            $display("inner %0d", j);
+        end
+        $display("n %0d", n);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "inner 0\ninner 0\ninner 1\nn 3\n"))
+
+; IEEE 1800-2023 12.8: a break in a foreach with several loop variables
+; leaves the whole foreach, and a continue goes on with the next index of the
+; innermost one, over containers and fixed-size arrays alike.
+(case multidimensional_foreach_break
+  (source "multidimensional_foreach_break.sv" #"
+module Top(output bit done);
+    int q[$][$];
+    int a[2][3];
+    int n, m, c;
+    initial begin
+        q.push_back('{1, 2});
+        q.push_back('{3});
+        foreach (q[i, j]) begin
+            n++;
+            if (q[i][j] == 2) break;
+        end
+        foreach (a[i, j]) begin
+            m++;
+            if (j == 1) break;
+        end
+        foreach (q[i, j]) begin
+            if (j == 0) continue;
+            c++;
+        end
+        $display("%0d %0d %0d", n, m, c);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 2 1\n"))
