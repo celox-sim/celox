@@ -96,11 +96,13 @@ unnecessary:
 - a non-cascaded single domain may use a combined evaluate-and-commit kernel;
 - cascaded evaluation continues only while newly triggered domains exist.
 - an edge of an event with derived clock domains (gated clocks, dividers) runs
-  as generated units, which judge the gated clocks, run the domains and the
-  cascade rounds, instead of a walk of the derived-tick plan in Rust. These units
-  compile the clock's domain once more; the `derived_edge_units` selector
-  (`-sir:derived_edge_units`, `SirPass::DerivedEdgeUnits`) turns them off to
-  trade tick speed for build time.
+  in a generated unit, which judges the gated clocks, runs the domains and the
+  cascade rounds, instead of a walk of the derived-tick plan in Rust; a
+  testbench's `clk.next(n)` runs its periods in that unit, which the native
+  backends loop over like the fused tick, returning after a period that
+  records a runtime event. The unit compiles the clock's domain once more; the
+  `derived_edge_units` selector (`-sir:derived_edge_units`,
+  `SirPass::DerivedEdgeUnits`) turns it off to trade tick speed for build time.
 - the combinational settle can be cut into partitions, contiguous ranges of
   its schedule, that run only when their dirty flag is set
   (`partitioned_settle`, off unless enabled). A partition that runs sets the

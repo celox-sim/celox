@@ -97,6 +97,21 @@ pub trait SimBackend {
         })
     }
 
+    /// Run process unit `index` up to `count` times in a row, as
+    /// [`Self::eval_comb_apply_ff_many_at`] runs ticks, and return how many
+    /// runs completed: generated code may loop inside the unit, returning
+    /// after a runtime event; backends without that loop run it once.
+    fn run_process_many(
+        &mut self,
+        index: usize,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        if count == 0 {
+            return (0, Ok(()));
+        }
+        (1, self.run_process(index))
+    }
+
     // ── signal access ───────────────────────────────────────────
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef;
     fn resolve_event(&self, addr: &AbsoluteAddr) -> Self::Event;

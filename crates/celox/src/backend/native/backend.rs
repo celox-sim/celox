@@ -171,6 +171,9 @@ pub struct SharedNativeCode {
     comb_unit_funcs: Vec<NativeSimFunc>,
     /// One function per process kernel.
     process_funcs: Vec<NativeSimFunc>,
+    /// Per process, whether it was compiled in the tick loop: the
+    /// derived-edge units when the loop is on.
+    process_loops: Vec<bool>,
     /// Lane-partitioned kernels and their task functions.
     lane_kernels: Option<super::lanes::NativeLaneKernels>,
     /// Keep the combined executable image alive so every entry pointer remains
@@ -332,6 +335,14 @@ impl SharedNativeCode {
             .copied()
             .map(|offset| native_function_at(&jit_image, offset))
             .collect::<Result<Vec<_>, _>>()?;
+        let mut process_loops = vec![false; process_funcs.len()];
+        if program_image.options.native_tick_loop {
+            for units in &program_image.runtime_schema.derived_edges {
+                if let Some(loops) = process_loops.get_mut(units.unit) {
+                    *loops = true;
+                }
+            }
+        }
         let event_map = materialize_map(&program_image.event_map)?;
         let eval_only_event_map = materialize_map(&program_image.eval_only_event_map)?;
         let apply_event_map = materialize_map(&program_image.apply_event_map)?;
@@ -375,6 +386,7 @@ impl SharedNativeCode {
             clock_alias_funcs,
             comb_unit_funcs,
             process_funcs,
+            process_loops,
             lane_kernels,
             _jit_image: jit_image,
             event_map,
@@ -884,11 +896,13 @@ impl NativeProgramImage {
                     usize::MAX
                 }
             });
-        // Derived-edge units follow process and scheduler entries.
-        let derived_units = 2 * self.runtime_schema.derived_edges.len();
-        let derived_in_range = self.runtime_schema.derived_edges.iter().all(|units| {
-            units.rising < self.process_offsets.len() && units.falling < self.process_offsets.len()
-        });
+        // The derived-edge units follow process and scheduler entries.
+        let derived_units = self.runtime_schema.derived_edges.len();
+        let derived_in_range = self
+            .runtime_schema
+            .derived_edges
+            .iter()
+            .all(|units| units.unit < self.process_offsets.len());
         if !derived_in_range
             || self.process_offsets.len()
                 != self
@@ -2788,6 +2802,14 @@ fn compile_program_with_outlining_threshold(
         // registers, scratch values, or extern call area.
         process_options = process_options.with_native_callees([comb_jit.required_state_size]);
     }
+    // The derived-edge units run periods of their events in a loop.
+    let derived_units: crate::HashSet<usize> = sir
+        .runtime()
+        .runtime_schema
+        .derived_edges
+        .iter()
+        .map(|units| units.unit)
+        .collect();
     let derived_model = (!sir.deferred_derived_edges.is_empty()).then(|| {
         celox_design::schedule::ScheduleModel::derive(&sir.design, &sir.runtime().runtime_schema)
     });
@@ -2809,13 +2831,14 @@ fn compile_program_with_outlining_threshold(
                 },
                 |edge| {
                     if outline_comb {
-                        // The recipe estimate includes two complete comb
-                        // copies. Both now use a single call; its fixed CFG
-                        // allowance already covers those call instructions.
+                        // The recipe estimate includes four complete comb
+                        // copies, two per edge. All now use a single call;
+                        // its fixed CFG allowance already covers those call
+                        // instructions.
                         (
-                            edge.blocks.saturating_sub(comb_blocks.saturating_mul(2)),
+                            edge.blocks.saturating_sub(comb_blocks.saturating_mul(4)),
                             edge.instructions
-                                .saturating_sub(comb_instructions.saturating_mul(2)),
+                                .saturating_sub(comb_instructions.saturating_mul(4)),
                         )
                     } else {
                         (edge.blocks, edge.instructions)
@@ -2862,11 +2885,16 @@ fn compile_program_with_outlining_threshold(
             })
             .transpose()?;
         let unit = generated.as_ref().unwrap_or(unit);
+        let label = if derived_units.contains(&index) {
+            celox_backend_common::DERIVED_EDGE_LABEL.to_string()
+        } else {
+            format!("process[{index}]")
+        };
         compile_unit_refs(
             &[unit],
             layout,
             options.four_state,
-            &format!("process[{index}]"),
+            &label,
             NativeMergeKind::Complete,
             None,
             &process_options,
@@ -4091,7 +4119,31 @@ impl super::super::SimBackend for NativeBackend {
             .process_funcs
             .get(index)
             .ok_or(SimulatorErrorCode::InternalError)?;
+        // A unit compiled in the tick loop runs as many times as the header
+        // says, which a batch that returned early leaves above one.
+        if self.compiled.process_loops[index] {
+            return self.call_func_many_timed(func, 1).1;
+        }
         self.call_func_timed(func)
+    }
+
+    /// The derived-edge units are compiled with the tick loop when it is on
+    /// (see [`celox_backend_common::loops_ticks`]); any other unit runs once.
+    fn run_process_many(
+        &mut self,
+        index: usize,
+        count: u64,
+    ) -> (u64, Result<(), SimulatorErrorCode>) {
+        let Some(&func) = self.compiled.process_funcs.get(index) else {
+            return (0, Err(SimulatorErrorCode::InternalError));
+        };
+        if self.compiled.process_loops[index] {
+            self.call_func_many_timed(func, count)
+        } else if count == 0 {
+            (0, Ok(()))
+        } else {
+            (1, self.call_func_timed(func))
+        }
     }
 
     fn resolve_signal(&self, addr: &AbsoluteAddr) -> SignalRef {

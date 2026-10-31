@@ -4326,7 +4326,7 @@ mod host {
             let mut deferred = base;
             crate::derived_edge::attach_deferred(&mut deferred);
             crate::settle::instrument_processes_from(&mut deferred, first, false);
-            assert!(deferred.deferred_derived_edges.len() >= 4);
+            assert!(deferred.deferred_derived_edges.len() >= 2);
             assert_eq!(expanded.sir.processes.len(), deferred.sir.processes.len());
             assert_eq!(
                 expanded.runtime().runtime_schema.derived_edges,
@@ -4405,6 +4405,16 @@ mod host {
                         let clk = sim.event("clk");
                         if step % 5 == 0 {
                             sim.edge(clk, crate::Edge::Falling).unwrap();
+                        } else if step % 5 == 3 {
+                            // Periods in the unit's tick loop, which calls
+                            // the outlined settle.
+                            let mut left = 3;
+                            while left > 0 {
+                                let (ran, result) =
+                                    sim.derived_periods(clk, left).expect("a derived-edge unit");
+                                result.unwrap();
+                                left -= ran;
+                            }
                         } else {
                             sim.tick(clk).unwrap();
                         }
@@ -4926,6 +4936,28 @@ endmodule"#;
         );
         let first_tier = crate::scheduler::without_fused_domains(program.clone(), true);
         assert!(size(&first_tier) < size(&program));
+    }
+
+    /// Only the derived-edge units are compiled in the tick loop; a batch of
+    /// any other unit runs it once and says so.
+    #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]
+    #[test]
+    fn units_without_the_tick_loop_report_one_run() {
+        use crate::SimBackend;
+        let source = "module Top (clk: input clock, d: input bit<8>, q: output bit<8>) { always_ff { q = d; } }";
+        let (program, _, options, _, _) = crate::Simulation::builder(source, "Top")
+            .emit_triggers()
+            .four_state(false)
+            .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+            .unwrap();
+        assert!(options.x86_options.native_tick_loop);
+        let scheduler = program.runtime.runtime_schema.scheduler.clone().unwrap();
+        let mut backend = crate::NativeBackend::new(&program, &options).unwrap();
+        let limit = backend.resolve_signal(&scheduler.slots.limit);
+        backend.set(limit, 0u64);
+        let (runs, result) = backend.run_process_many(scheduler.unit.unwrap(), 3);
+        assert_eq!(runs, 1);
+        assert!(result.is_ok());
     }
 
     #[cfg(all(test, any(target_arch = "x86_64", target_arch = "aarch64")))]

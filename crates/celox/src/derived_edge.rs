@@ -15,8 +15,8 @@
 //! gate programs.
 
 use celox_design::{
-    DomainKind, GateOp, SCHEDULER_FLAG_WIDTH, STABLE_REGION, edges::active_level,
-    schedule::ScheduleModel,
+    DERIVED_EDGE_FALLING, DERIVED_EDGE_MOVED, DERIVED_EDGE_RISING, DomainKind, GateOp,
+    SCHEDULER_FLAG_WIDTH, STABLE_REGION, edges::active_level, schedule::ScheduleModel,
 };
 use celox_sir::{BinaryOp, BlockId, SIRBuilder, SIRTerminator, SIRValue, UnaryOp};
 use num_bigint::BigUint;
@@ -721,6 +721,14 @@ impl Emitter<'_> {
         self.b.switch_to_block(next);
     }
 
+    /// Whether `bit` is set in the mode `mode`.
+    fn mode_bit(&mut self, mode: RegisterId, bit: u8) -> RegisterId {
+        let selector = self.constant(u64::from(bit), SCHEDULER_FLAG_WIDTH);
+        let selected = self.binary(SCHEDULER_FLAG_WIDTH, mode, BinaryOp::And, selector);
+        let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+        self.binary(1, selected, BinaryOp::Ne, zero)
+    }
+
     /// Run `body` when bit `index` of `mask` is set.
     fn if_bit(&mut self, mask: RegisterId, index: usize, body: impl FnOnce(&mut Self)) {
         let selector = self.single(index, self.entry_bits);
@@ -741,24 +749,12 @@ impl Emitter<'_> {
     }
 }
 
-/// Where a generated edge unit learns whether combinational logic must
-/// settle before the domains evaluate.
-#[derive(Clone, Copy, Debug)]
-enum Settle {
-    #[cfg_attr(
-        not(all(test, feature = "systemverilog", feature = "cranelift")),
-        allow(dead_code)
-    )]
-    Fixed(bool),
-    /// A flag object, not zero when it must.
-    Flag(AbsoluteAddr),
-}
-
 impl EdgePlan {
     /// A unit that runs one edge of the event whose signal its caller
     /// already moved, rising or falling; `fires` says whether the event's own
-    /// domain sees its active edge.
-    fn unit(&self, comb: &[Unit], rising: bool, fires: bool, settle: Settle) -> Unit {
+    /// domain sees its active edge, `settle` whether logic settles first.
+    #[cfg(all(test, feature = "systemverilog", feature = "cranelift"))]
+    fn unit(&self, comb: &[Unit], rising: bool, fires: bool, settle: bool) -> Unit {
         let mut b = Builder::new();
         let constant = |b: &mut Builder, value: u64, width: usize| {
             let register = b.alloc_bit(width, false);
@@ -767,28 +763,25 @@ impl EdgePlan {
         };
         let from = constant(&mut b, u64::from(!rising), 1);
         let to = constant(&mut b, u64::from(rising), 1);
-        let source_fires = fires;
-        let fires = constant(&mut b, u64::from(fires), 1);
-        let settle = match settle {
-            Settle::Fixed(value) => constant(&mut b, u64::from(value), 1),
-            Settle::Flag(flag) => {
-                let value = b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
-                b.emit(SIRInstruction::Load(
-                    value,
-                    RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, flag),
-                    SIROffset::Static(0),
-                    SCHEDULER_FLAG_WIDTH,
-                ));
-                let zero = constant(&mut b, 0, SCHEDULER_FLAG_WIDTH);
-                let set = b.alloc_bit(1, false);
-                b.emit(SIRInstruction::Binary(set, value, BinaryOp::Ne, zero));
-                set
-            }
-        };
+        let fired = constant(&mut b, u64::from(fires), 1);
+        let settle = constant(&mut b, u64::from(settle), 1);
         let done = b.new_block();
-        // An edge that never fires the event's own domain leaves its units
-        // out of the unit.
-        let plan = if source_fires {
+        self.for_edge(fires)
+            .emit(&mut b, comb, from, to, fired, settle, done, done);
+        b.switch_to_block(done);
+        b.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = b.drain();
+        Unit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
+    /// The plan of an edge that `fires` the event's own domain or not: one
+    /// that never does leaves its units out.
+    fn for_edge(&self, fires: bool) -> std::borrow::Cow<'_, Self> {
+        if fires {
             std::borrow::Cow::Borrowed(self)
         } else {
             std::borrow::Cow::Owned(EdgePlan {
@@ -799,11 +792,151 @@ impl EdgePlan {
                 },
                 ..self.clone()
             })
+        }
+    }
+
+    /// The unit of [`celox_design::DerivedEdgeUnits`]: the edges of `event`
+    /// (a signal of `width` bits) that the mode in `slots.0` selects, with
+    /// `slots.1` the flag that says whether combinational logic has pending
+    /// changes, before and after, as the host keeps it: an edge settles first
+    /// when it is set or logic reads the signal (`comb_read`) that the edge
+    /// moved itself; an edge that ran domains leaves logic settled; one that
+    /// ran nothing leaves it as it found it, pending when logic reads the
+    /// signal the edge moved. `fires` says whether the rising
+    /// (`true`) or the falling edge fires the event's own domain.
+    fn edges_unit(
+        &self,
+        comb: &[Unit],
+        event: (AbsoluteAddr, usize),
+        comb_read: bool,
+        fires: impl Fn(bool) -> bool,
+        slots: (AbsoluteAddr, AbsoluteAddr),
+    ) -> Unit {
+        let (signal, width) = event;
+        let (mode_slot, flag) = slots;
+        let mut b = Builder::new();
+        let mut e = Emitter {
+            b: &mut b,
+            after: Vec::new(),
+            entry_bits: self.entry_bits(),
         };
-        plan.emit(&mut b, comb, from, to, fires, settle, done, done);
-        b.switch_to_block(done);
-        b.seal_block(SIRTerminator::Return);
-        let (blocks, register_map, _) = b.drain();
+        let mode = e.load(mode_slot, 0, SCHEDULER_FLAG_WIDTH);
+        let flag_value = e.load(flag, 0, SCHEDULER_FLAG_WIDTH);
+        let zero = e.constant(0, SCHEDULER_FLAG_WIDTH);
+        let mut dirty = e.binary(1, flag_value, BinaryOp::Ne, zero);
+        for rising in [true, false] {
+            let selected = e.mode_bit(
+                mode,
+                if rising {
+                    DERIVED_EDGE_RISING
+                } else {
+                    DERIVED_EDGE_FALLING
+                },
+            );
+            let run = e.b.new_block();
+            let after = e.b.alloc_bit(1, false);
+            let join = e.b.new_block_with(vec![after]);
+            e.b.seal_block(SIRTerminator::Branch {
+                cond: selected,
+                true_block: (run, Vec::new()),
+                false_block: (join, vec![dirty]),
+            });
+            // The host moved the signal for a single edge; otherwise the
+            // edge moves it, unless it is already at the edge's level.
+            e.b.switch_to_block(run);
+            let moved = e.mode_bit(mode, DERIVED_EDGE_MOVED);
+            // A host that moved the signal judged whether logic reading it
+            // must settle (it may have evaluated the clock's aliases) and
+            // put that in the flag.
+            let read = if comb_read {
+                let no = e.constant(0, 1);
+                e.binary(1, moved, BinaryOp::Eq, no)
+            } else {
+                e.constant(0, 1)
+            };
+            let body = e.b.new_block();
+            let check = e.b.new_block();
+            e.b.seal_block(SIRTerminator::Branch {
+                cond: moved,
+                true_block: (body, Vec::new()),
+                false_block: (check, Vec::new()),
+            });
+            e.b.switch_to_block(check);
+            let level = e.level(signal, width);
+            let target = e.constant(u64::from(rising), 1);
+            let there = e.binary(1, level, BinaryOp::Eq, target);
+            let store = e.b.new_block();
+            e.b.seal_block(SIRTerminator::Branch {
+                cond: there,
+                true_block: (join, vec![dirty]),
+                false_block: (store, Vec::new()),
+            });
+            e.b.switch_to_block(store);
+            let value = e.constant(u64::from(rising), width);
+            e.b.emit(SIRInstruction::Store(
+                RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, signal),
+                SIROffset::Static(0),
+                width,
+                value,
+                Vec::new(),
+                Vec::new(),
+            ));
+            e.b.seal_block(SIRTerminator::Jump(body, Vec::new()));
+
+            e.b.switch_to_block(body);
+            let settle = e.binary(1, dirty, BinaryOp::Or, read);
+            let from = e.constant(u64::from(!rising), 1);
+            let to = e.constant(u64::from(rising), 1);
+            let source_fires = fires(rising);
+            let fired = e.constant(u64::from(source_fires), 1);
+            let settled = e.b.new_block();
+            let unsettled = e.b.new_block();
+            self.for_edge(source_fires)
+                .emit(e.b, comb, from, to, fired, settle, settled, unsettled);
+            e.b.switch_to_block(settled);
+            let clean = e.constant(0, 1);
+            e.b.seal_block(SIRTerminator::Jump(join, vec![clean]));
+            e.b.switch_to_block(unsettled);
+            e.b.seal_block(SIRTerminator::Jump(join, vec![settle]));
+            e.b.switch_to_block(join);
+            dirty = after;
+        }
+        let set = e.constant(1, SCHEDULER_FLAG_WIDTH);
+        let clear = e.constant(0, SCHEDULER_FLAG_WIDTH);
+        let value = e.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
+        e.b.emit(SIRInstruction::Mux(value, dirty, set, clear));
+        e.b.emit(SIRInstruction::Store(
+            RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, flag),
+            SIROffset::Static(0),
+            SCHEDULER_FLAG_WIDTH,
+            value,
+            Vec::new(),
+            Vec::new(),
+        ));
+        e.b.seal_block(SIRTerminator::Return);
+        let (mut blocks, register_map, _) = b.drain();
+        // An edge whose domains always run never takes its unsettled exit.
+        let mut reached = crate::HashSet::default();
+        let mut pending = vec![BlockId(0)];
+        while let Some(block) = pending.pop() {
+            if !reached.insert(block) {
+                continue;
+            }
+            match &blocks[&block].terminator {
+                SIRTerminator::Jump(target, _) => pending.push(*target),
+                SIRTerminator::Branch {
+                    true_block,
+                    false_block,
+                    ..
+                } => pending.extend([true_block.0, false_block.0]),
+                SIRTerminator::Switch { cases, default, .. } => {
+                    pending.extend(cases.iter().map(|case| case.target));
+                    pending.push(*default);
+                }
+                SIRTerminator::Return | SIRTerminator::Error(_) => {}
+            }
+        }
+        blocks.retain(|block, _| reached.contains(block));
         Unit {
             entry_block_id: BlockId(0),
             blocks,
@@ -812,15 +945,17 @@ impl EdgePlan {
     }
 }
 
-/// Generate the edge units of every event whose plan this module emits and
+/// Generate the edge unit of every event whose plan this module emits and
 /// record them in [`celox_design::RuntimeSchema::derived_edges`]. A unit
-/// reads the scheduler's dirty flag to know whether to settle first.
+/// reads its mode from the scheduler's continuation slot and keeps the
+/// state of combinational logic in its dirty flag, which only the
+/// scheduler's own unit uses otherwise.
 pub(crate) fn attach(program: &mut LaidOutProgram) {
     attach_with_mode(program, false);
 }
 
 /// Reserve native entry indices without retaining a copy of the full circuit
-/// for both polarities of every derived-clock event.
+/// for the unit of every derived-clock event.
 pub(crate) fn attach_deferred(program: &mut LaidOutProgram) {
     attach_with_mode(program, true);
 }
@@ -828,9 +963,12 @@ pub(crate) fn attach_deferred(program: &mut LaidOutProgram) {
 #[derive(Clone, Debug)]
 pub(crate) struct DeferredEdge {
     event: AbsoluteAddr,
-    rising: bool,
-    fires: bool,
-    flag: AbsoluteAddr,
+    width: usize,
+    comb_read: bool,
+    /// Whether the rising and the falling edge fire the event's own domain.
+    fires: [bool; 2],
+    /// The mode slot and the dirty flag.
+    slots: (AbsoluteAddr, AbsoluteAddr),
     pub(crate) blocks: usize,
     pub(crate) instructions: usize,
 }
@@ -852,7 +990,13 @@ impl DeferredEdge {
     ) -> Result<Unit, &'static str> {
         let plan = EdgePlan::new(program, model, self.event)?
             .ok_or("deferred derived edge no longer has a plan")?;
-        let mut unit = plan.unit(comb, self.rising, self.fires, Settle::Flag(self.flag));
+        let mut unit = plan.edges_unit(
+            comb,
+            (self.event, self.width),
+            self.comb_read,
+            |rising| self.fires[usize::from(!rising)],
+            self.slots,
+        );
         crate::settle::instrument_unit(program, &mut unit);
         Ok(unit)
     }
@@ -860,10 +1004,10 @@ impl DeferredEdge {
 
 fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool) {
     let schema = &program.runtime.runtime_schema;
-    let Some(flag) = schema
+    let Some((mode, flag)) = schema
         .scheduler
         .as_ref()
-        .map(|scheduler| scheduler.slots.dirty)
+        .map(|scheduler| (scheduler.slots.cont, scheduler.slots.dirty))
     else {
         return;
     };
@@ -885,27 +1029,34 @@ fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool) {
             ) => rising == (active_level(kind) == 1),
             _ => true,
         };
-        let mut indices = [0usize; 2];
-        // Include both settles and every possible FF path. The control-flow
-        // allowance also covers gate expressions and per-unit continuations.
-        let (estimated_blocks, estimated_instructions) = if deferred {
-            let units = program
-                .sir
-                .eval_comb
-                .iter()
-                .chain(&program.sir.eval_comb)
-                .chain(plan.entries().flat_map(|units| {
-                    units
-                        .eval_apply
-                        .iter()
-                        .chain(units.eval_only.as_ref().unwrap_or(&units.eval_apply))
-                        .chain(units.apply.iter().flatten())
-                }));
+        let Some(&width) = program.layout().widths.get(&event) else {
+            continue;
+        };
+        let comb_read = model.events.combinationally_read.contains(&event);
+        let fires = [fires(true), fires(false)];
+        let index = program.sir.processes.len();
+        let unit = if deferred {
+            // Include both settles of both edges and every possible FF path
+            // of each. The control-flow allowance also covers gate
+            // expressions, the mode checks and per-unit continuations.
+            let units = std::iter::repeat_n(&program.sir.eval_comb, 4)
+                .flatten()
+                .chain(
+                    std::iter::repeat_n((), 2)
+                        .flat_map(|()| plan.entries())
+                        .flat_map(|units| {
+                            units
+                                .eval_apply
+                                .iter()
+                                .chain(units.eval_only.as_ref().unwrap_or(&units.eval_apply))
+                                .chain(units.apply.iter().flatten())
+                        }),
+                );
             let gate_ops = plan.gated.iter().map(|gate| gate.gate.len()).sum::<usize>();
-            units.fold(
+            let (blocks, instructions) = units.fold(
                 (
-                    1024usize,
-                    8192usize.saturating_add(gate_ops.saturating_mul(16)),
+                    2048usize,
+                    16384usize.saturating_add(gate_ops.saturating_mul(32)),
                 ),
                 |(blocks, instructions), unit| {
                     (
@@ -918,56 +1069,45 @@ fn attach_with_mode(program: &mut LaidOutProgram, deferred: bool) {
                         ),
                     )
                 },
-            )
-        } else {
-            (0, 0)
-        };
-        if deferred {
+            );
             tracing::debug!(
                 "[derived-edge-size] event={} kind={:?} blocks={} instructions={}",
                 program.get_path(&event),
                 kind,
-                estimated_blocks,
-                estimated_instructions,
+                blocks,
+                instructions,
             );
-        }
-        for (index, rising) in [true, false].into_iter().enumerate() {
-            indices[index] = program.sir.processes.len();
-            let unit = if deferred {
-                program.deferred_derived_edges.insert(
-                    indices[index],
-                    DeferredEdge {
-                        event,
-                        rising,
-                        fires: fires(rising),
-                        flag,
-                        blocks: estimated_blocks,
-                        instructions: estimated_instructions,
-                    },
-                );
-                let mut builder = Builder::new();
-                builder.seal_block(SIRTerminator::Return);
-                let (blocks, register_map, _) = builder.drain();
-                Unit {
-                    entry_block_id: BlockId(0),
+            program.deferred_derived_edges.insert(
+                index,
+                DeferredEdge {
+                    event,
+                    width,
+                    comb_read,
+                    fires,
+                    slots: (mode, flag),
                     blocks,
-                    register_map,
-                }
-            } else {
-                plan.unit(
-                    &program.sir.eval_comb,
-                    rising,
-                    fires(rising),
-                    Settle::Flag(flag),
-                )
-            };
-            program.sir.processes.push(unit);
-        }
-        edges.push(celox_design::DerivedEdgeUnits {
-            event,
-            rising: indices[0],
-            falling: indices[1],
-        });
+                    instructions,
+                },
+            );
+            let mut builder = Builder::new();
+            builder.seal_block(SIRTerminator::Return);
+            let (blocks, register_map, _) = builder.drain();
+            Unit {
+                entry_block_id: BlockId(0),
+                blocks,
+                register_map,
+            }
+        } else {
+            plan.edges_unit(
+                &program.sir.eval_comb,
+                (event, width),
+                comb_read,
+                |rising| fires[usize::from(!rising)],
+                (mode, flag),
+            )
+        };
+        edges.push(celox_design::DerivedEdgeUnits { event, unit: index });
+        program.sir.processes.push(unit);
     }
     program.runtime.runtime_schema.derived_edges = edges;
 }
@@ -982,7 +1122,7 @@ pub(crate) fn without_units(program: &LaidOutProgram) -> LaidOutProgram {
         .runtime_schema
         .derived_edges
         .iter()
-        .map(|units| units.rising.min(units.falling))
+        .map(|units| units.unit)
         .min();
     if let Some(first) = first {
         program.sir.processes.truncate(first);
@@ -1018,8 +1158,7 @@ pub(crate) fn attach_test_units(program: &mut LaidOutProgram, sink: &TestEdgeUni
         for rising in [false, true] {
             for settle in [false, true] {
                 for fires in [false, true] {
-                    let unit =
-                        plan.unit(&program.sir.eval_comb, rising, fires, Settle::Fixed(settle));
+                    let unit = plan.unit(&program.sir.eval_comb, rising, fires, settle);
                     let index = program.sir.processes.len();
                     program.sir.processes.push(unit);
                     sink.lock().expect("unpoisoned").push(TestEdgeUnit {
@@ -1086,6 +1225,19 @@ mod tests {
                 always_ff @(posedge half) h <= h + 8'd1;
                 always_ff @(posedge quarter) w <= w + h;
                 assign q = h + w;
+            endmodule";
+
+    /// Edges of `clk` that run nothing leave a host write of `en` for the
+    /// next edge to settle: logic does not read `clk`.
+    const DIVIDED_ENABLE: &str =
+        "module Top(input logic clk, input logic en, output logic [7:0] q);
+                logic half = 0;
+                logic [7:0] h = 0;
+                logic [7:0] w;
+                assign w = en ? 8'd3 : 8'd1;
+                always_ff @(posedge clk) half <= ~half;
+                always_ff @(posedge half) h <= h + w;
+                assign q = h;
             endmodule";
 
     const RAISED_ENABLE: &str = "module Top(input logic clk, output logic [7:0] q);
@@ -1300,9 +1452,251 @@ mod tests {
         }
     }
 
+    /// Run batches of periods of `clk` in the generated unit and as edges
+    /// through the plan walk, with host writes of `en` and single rising
+    /// edges in between, and compare every named signal after each batch.
+    fn periods_agree(source: &str) {
+        let build = || Simulator::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top");
+        let mut generated = build().build().unwrap();
+        let mut walked = build()
+            .disable_pass(crate::SirPass::DerivedEdgeUnits)
+            .build()
+            .unwrap();
+        let clk = generated.event("clk");
+        let en = generated.try_signal("en").ok();
+        let names: Vec<_> = walked.named_signals();
+        let mut longest = 0;
+        for step in 0..40u64 {
+            for sim in [&mut generated, &mut walked] {
+                if let Some(en) = en
+                    && step % 5 < 2
+                {
+                    sim.modify(|io| io.set(en, u8::from(step % 3 != 0)))
+                        .unwrap();
+                }
+            }
+            // A batch may start with the signal high: its first rise moves
+            // nothing.
+            if step % 4 == 3 {
+                generated.edge(clk, Edge::Rising).unwrap();
+                walked.edge(clk, Edge::Rising).unwrap();
+            }
+            let count = step % 7 + 1;
+            let mut left = count;
+            while left > 0 {
+                let (ran, result) = generated
+                    .derived_periods(clk, left)
+                    .expect("clk runs its generated unit");
+                result.unwrap();
+                assert!(ran >= 1 && ran <= left, "step {step}: {ran} of {left}");
+                longest = longest.max(ran);
+                left -= ran;
+            }
+            for _ in 0..count {
+                walked.edge(clk, Edge::Rising).unwrap();
+                walked.edge(clk, Edge::Falling).unwrap();
+            }
+            for named in &names {
+                assert_eq!(
+                    generated.get(named.signal),
+                    walked.get(named.signal),
+                    "step {step}: {}",
+                    named.name
+                );
+            }
+        }
+        // The native unit loops over the periods of a batch.
+        assert!(longest > 1, "no batch ran more than one period");
+    }
+
+    #[test]
+    fn periods_run_in_generated_units_as_the_plan_walk() {
+        for source in [
+            GATED,
+            INVERTED,
+            DIVIDERS,
+            DIVIDED_ENABLE,
+            RAISED_ENABLE,
+            INDEPENDENT,
+        ] {
+            periods_agree(source);
+        }
+    }
+
+    /// A batch of periods returns after the period whose derived domain
+    /// records a runtime event, which the host sees in order.
+    #[test]
+    fn periods_return_after_a_runtime_event() {
+        let source = "module Top(input logic clk, output logic [7:0] q);
+                logic half = 0;
+                logic [7:0] h = 0;
+                always_ff @(posedge clk) half <= ~half;
+                always_ff @(posedge half) begin
+                    h <= h + 8'd1;
+                    $display(\"h=%0d\", h);
+                end
+                assign q = h;
+            endmodule";
+        let build = || Simulator::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top");
+        let mut generated = build().build().unwrap();
+        let mut walked = build()
+            .disable_pass(crate::SirPass::DerivedEdgeUnits)
+            .build()
+            .unwrap();
+        let clk = generated.event("clk");
+        let mut displays = Vec::new();
+        let mut left = 9u64;
+        while left > 0 {
+            let (ran, result) = generated.derived_periods(clk, left).unwrap();
+            result.unwrap();
+            // A display every other period: a batch ends at one.
+            assert!(ran <= 2, "{ran} periods ran past a display");
+            displays.extend(generated.drain_runtime_events());
+            left -= ran;
+        }
+        let mut expected = Vec::new();
+        for _ in 0..9 {
+            walked.edge(clk, Edge::Rising).unwrap();
+            walked.edge(clk, Edge::Falling).unwrap();
+            expected.extend(walked.drain_runtime_events());
+        }
+        assert_eq!(displays, expected);
+        assert_eq!(expected.len(), 5);
+    }
+
+    /// How a host drives the periods of `clk`.
+    #[derive(Clone, Copy, Debug)]
+    enum Drive {
+        Ticks,
+        Edges,
+        Periods,
+    }
+
+    /// Drive up to `limit` periods of `clk` through `sim` and return the
+    /// period that failed and its error, if one did.
+    fn first_failure<B: SimBackend>(
+        sim: &mut Simulator<B>,
+        drive: Drive,
+        limit: u64,
+    ) -> Option<(u64, String)> {
+        let clk = sim.event("clk");
+        let period_edges = |sim: &mut Simulator<B>| {
+            sim.edge(clk, Edge::Rising)
+                .and_then(|()| sim.edge(clk, Edge::Falling))
+        };
+        let mut period = 0;
+        while period < limit {
+            // The periods a call ran, the one that failed included.
+            let (ran, result) = match drive {
+                Drive::Ticks => (1, sim.tick(clk)),
+                Drive::Edges => (1, period_edges(sim)),
+                Drive::Periods => sim
+                    .derived_periods(clk, limit - period)
+                    // The plan walk has no batches.
+                    .unwrap_or_else(|| (1, period_edges(sim))),
+            };
+            if let Err(error) = result {
+                return Some((period + ran.saturating_sub(1), error.to_string()));
+            }
+            period += ran;
+        }
+        None
+    }
+
+    /// A deferred assertion's action in a derived domain matures at the end
+    /// of the edge, the tick or the period that ran it, as in the plan walk.
+    #[test]
+    fn deferred_assertions_of_derived_domains_mature() {
+        let source = "module Top(input logic clk, output logic [7:0] q);
+                logic half = 0;
+                logic [7:0] h = 0;
+                always_ff @(posedge clk) half <= ~half;
+                always_ff @(posedge half) begin
+                    h <= h + 8'd1;
+                    assert #0 (h != 8'd3) else $fatal(1, \"h reached 3\");
+                end
+                assign q = h;
+            endmodule";
+        let build = || Simulator::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top");
+        for drive in [Drive::Ticks, Drive::Edges, Drive::Periods] {
+            let expected = first_failure(
+                &mut build()
+                    .disable_pass(crate::SirPass::DerivedEdgeUnits)
+                    .build()
+                    .unwrap(),
+                drive,
+                20,
+            );
+            assert!(expected.is_some(), "{drive:?}: the walk reports no failure");
+            let native = first_failure(&mut build().build().unwrap(), drive, 20);
+            assert_eq!(native, expected, "{drive:?} native");
+            let cranelift = first_failure(&mut build().build_cranelift().unwrap(), drive, 20);
+            assert_eq!(cranelift, expected, "{drive:?} cranelift");
+        }
+    }
+
+    /// A batch that returned after a runtime event leaves no periods for a
+    /// single edge afterwards to run.
+    #[test]
+    fn single_edges_after_a_batch_returned_early_run_once() {
+        let source = "module Top(input logic clk, output logic [7:0] q);
+                logic half = 0;
+                logic [7:0] h = 0;
+                always_ff @(posedge clk) half <= ~half;
+                always_ff @(posedge half) begin
+                    h <= h + 8'd1;
+                    $display(\"h=%0d\", h);
+                end
+                assign q = h;
+            endmodule";
+        let build = || Simulator::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top");
+        let mut generated = build().build().unwrap();
+        let mut walked = build()
+            .disable_pass(crate::SirPass::DerivedEdgeUnits)
+            .build()
+            .unwrap();
+        let clk = generated.event("clk");
+        let (ran, result) = generated.derived_periods(clk, 9).unwrap();
+        result.unwrap();
+        assert!(ran < 9, "the batch did not return at its display");
+        for _ in 0..ran {
+            walked.edge(clk, Edge::Rising).unwrap();
+            walked.edge(clk, Edge::Falling).unwrap();
+        }
+        let q = generated.signal("q");
+        for step in 0..6 {
+            match step % 3 {
+                0 => {
+                    generated.tick(clk).unwrap();
+                    walked.tick(clk).unwrap();
+                }
+                1 => {
+                    generated.edge(clk, Edge::Rising).unwrap();
+                    walked.edge(clk, Edge::Rising).unwrap();
+                }
+                _ => {
+                    generated.edge(clk, Edge::Falling).unwrap();
+                    walked.edge(clk, Edge::Falling).unwrap();
+                }
+            }
+            assert_eq!(generated.get(q), walked.get(q), "step {step}");
+        }
+        assert_eq!(
+            generated.drain_runtime_events(),
+            walked.drain_runtime_events()
+        );
+    }
+
     #[test]
     fn simulator_ticks_run_generated_edges_as_the_plan_walk() {
-        for source in [GATED, INVERTED, DIVIDERS, RAISED_ENABLE, INDEPENDENT] {
+        for source in [
+            GATED,
+            INVERTED,
+            DIVIDERS,
+            DIVIDED_ENABLE,
+            RAISED_ENABLE,
+            INDEPENDENT,
+        ] {
             ticks_agree(source);
         }
     }
