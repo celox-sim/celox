@@ -407,6 +407,11 @@ typedefs of different classes name the value parameters of one of them
 and gives `Name #(S)` inside a class the default of `S` instead of its value
 (`sv_class_parameter_passed_by_name`, see the
 [probe](verification/repros/sv_class_parameter_passed_by_name_xezim.json)).
+Class scopes that are themselves specialized or qualified, `C #(byte)::type_id`
+and `p::C::type_id`, are checked against 8.23 and 8.25.1; xezim 0.11.3 reads
+static properties through such a typedef with unknown bits
+(`sv_class_scoped_typedef_static_properties`, see the
+[probe](verification/repros/sv_class_scoped_typedef_static_properties_xezim.json)).
 
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
