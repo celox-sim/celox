@@ -189,7 +189,7 @@ pub(crate) fn lower_retained_comb_process(
         false_block: (done, Vec::new()),
     });
     b.switch_to_block(execute);
-    let lowerer = SLTToSIRLowerer::new(true).with_unpacked_input_types(arena, &element_widths);
+    let mut lowerer = SLTToSIRLowerer::new(true).with_unpacked_input_types(arena, &element_widths);
     let mut cache = HashMap::default();
     let values: Vec<_> = paths
         .iter()

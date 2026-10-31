@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn sparse_cost_cache_reset_matches_fresh_analysis_across_roots_and_arenas() {
-    let reused = SLTToSIRLowerer::new(false);
+    let mut reused = SLTToSIRLowerer::new(false);
     for padding in [2048, 4096, 1024] {
         let mut arena = SLTNodeArena::<u32>::new();
         for variable in 0..padding {
@@ -20,13 +20,13 @@ fn sparse_cost_cache_reset_matches_fresh_analysis_across_roots_and_arenas() {
             (vec![shared], true),
         ] {
             let materialized = [(shared, RegisterId(0))].into_iter().collect();
-            let fresh = SLTToSIRLowerer::new(false);
-            for lowerer in [&reused, &fresh] {
+            let mut fresh = SLTToSIRLowerer::new(false);
+            for lowerer in [&mut reused, &mut fresh] {
                 lowerer.reset_cost_cache_roots(&roots, &arena, &materialized, honor);
             }
             let new_variable = arena.len() as u32 + padding;
             let grown = input(&mut arena, new_variable, 32);
-            for lowerer in [&reused, &fresh] {
+            for lowerer in [&mut reused, &mut fresh] {
                 // Analyze a node outside the reset traversal as well as a
                 // materialized subtree. Both must be cleared next time.
                 for node in [root, shared, other, leaf, grown] {
@@ -38,8 +38,8 @@ fn sparse_cost_cache_reset_matches_fresh_analysis_across_roots_and_arenas() {
                     lowerer.contains_div_rem(node, &arena);
                 }
             }
-            let actual = reused.cost_cache.borrow();
-            let expected = fresh.cost_cache.borrow();
+            let actual = &reused.cost_cache;
+            let expected = &fresh.cost_cache;
             assert_eq!(actual.tree_costs, expected.tree_costs, "tree_costs");
             assert_eq!(
                 actual.contains_div_rem, expected.contains_div_rem,
@@ -157,7 +157,7 @@ fn nested_mux_analysis_is_linear_in_dag_size() {
             .unwrap();
     }
 
-    let lowerer = SLTToSIRLowerer::new(false);
+    let mut lowerer = SLTToSIRLowerer::new(false);
     let mut builder = SIRBuilder::new();
     lowerer.lower(&mut builder, value, &arena, &mut crate::HashMap::default());
     let visits = lowerer.analysis_node_visits();
@@ -186,7 +186,7 @@ fn unrelated_global_cache_does_not_enter_mux_analysis() {
         })
         .unwrap();
 
-    let empty_lowerer = SLTToSIRLowerer::new(false);
+    let mut empty_lowerer = SLTToSIRLowerer::new(false);
     let mut empty_builder = SIRBuilder::new();
     empty_lowerer.lower(
         &mut empty_builder,
@@ -201,7 +201,7 @@ fn unrelated_global_cache_does_not_enter_mux_analysis() {
     for index in 0..20_000usize {
         large_cache.insert(NodeId(arena.len() + index), RegisterId(index));
     }
-    let cached_lowerer = SLTToSIRLowerer::new(false);
+    let mut cached_lowerer = SLTToSIRLowerer::new(false);
     let mut cached_builder = SIRBuilder::new();
     cached_lowerer.lower(&mut cached_builder, mux, &arena, &mut large_cache);
     let cached_visits = cached_lowerer.analysis_node_visits();

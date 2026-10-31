@@ -64,7 +64,7 @@ impl Frame {
 
 impl SLTToSIRLowerer {
     pub(super) fn lower_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         root: NodeId,
         arena: &SLTNodeArena<A>,
@@ -76,7 +76,7 @@ impl SLTToSIRLowerer {
     }
 
     fn lower_worklist<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         request: Frame,
         arena: &SLTNodeArena<A>,
@@ -208,13 +208,12 @@ impl SLTToSIRLowerer {
                         && env.is_none()
                         && self
                             .cost_cache
-                            .borrow()
                             .fanout
                             .get(expr.0)
                             .is_some_and(|fanout| *fanout > 1)
                         && Self::is_nontrivial_node(expr, arena);
                     if cache_projection {
-                        if let Some(&reg) = self.region_slice_cache.borrow().get(&(expr, access)) {
+                        if let Some(&reg) = self.region_slice_cache.get(&(expr, access)) {
                             value = Some(reg);
                             continue;
                         }
@@ -309,11 +308,10 @@ impl SLTToSIRLowerer {
                     let key = (node, access);
                     let previous = self
                         .region_slice_cache
-                        .borrow_mut()
                         .insert(key, value.expect("projection produces a register"));
                     debug_assert!(previous.is_none());
                     if previous.is_none() {
-                        self.region_slice_cache_insert_log.borrow_mut().push(key);
+                        self.region_slice_cache_insert_log.push(key);
                     }
                 }
                 Frame::SliceRegister(access) => {
@@ -337,7 +335,7 @@ impl SLTToSIRLowerer {
                     let reg = value.expect("lowered node produces a register");
                     let previous = cache.insert(node, reg);
                     debug_assert!(previous.is_none());
-                    self.cache_insert_log.borrow_mut().push(node);
+                    self.cache_insert_log.push(node);
                 }
                 Frame::BinaryLeft(node, lhs, op, rhs) => {
                     work.push(Frame::BinaryRight(

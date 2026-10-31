@@ -163,7 +163,7 @@ impl SLTToSIRLowerer {
                 }
             };
 
-            let shared = self.cost_cache.borrow().fanout[node.0] > 1;
+            let shared = self.cost_cache.fanout[node.0] > 1;
             if !facts.unconditional_zero
                 && shared
                 && self.get_width(node, arena) == 1
@@ -337,7 +337,7 @@ impl SLTToSIRLowerer {
 
     #[allow(clippy::too_many_arguments)]
     fn lower_guarded_concat_cfg<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         plan: GuardedConcatPlan,
         parts: &[(NodeId, usize)],
@@ -372,7 +372,7 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn lower_concat_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         parts: &[(NodeId, usize)],
@@ -399,7 +399,7 @@ impl SLTToSIRLowerer {
     }
 
     fn lower_concat_eager_inner<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         parts: &[(NodeId, usize)],
         arena: &SLTNodeArena<A>,
