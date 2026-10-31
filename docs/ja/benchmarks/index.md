@@ -16,7 +16,9 @@ RTL 設計の性能を予測するものではありません。
 メイン画面にはHeliodorと、SHA-256・FFT・LZ77の代表回路を掲載します。
 代表回路は Celox と Veryl simulator の tiered 同士を比較し、主指標は
 空のコンパイルキャッシュでのプロセス起動から終了までの時間です。
-ricaの既存ランナー、tarunesの検証状況、固定リビジョン、合格条件、次フェーズの
+**rica** タブは5種類の自己検証付き RISC-V カーネルを Celox tiered / Veryl simulator tiered で比較します。
+毎日 04:47 UTC（13:47 JST）に計測し、コンパイルを含むプロセス総時間の3回の中央値を公開します。
+rica の計測条件、tarunesの検証状況、固定リビジョン、合格条件、次フェーズの
 SV frontend比較方針は[回路コレクション](../../benchmarks/collection.md)にまとめています。
 
 [API・カウンタ・標準ライブラリの測定](./diagnostics.md)は診断用として残しています。
