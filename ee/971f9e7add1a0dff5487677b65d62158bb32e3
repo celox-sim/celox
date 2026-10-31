@@ -1,1 +1,1 @@
-Sync the benchmark PR onto master after dependency PR #2746 merged; retain the benchmark collector, validation and dashboard changes.
+Sync after dependency PR #2746 merged and classify benchmark automation as ci so it does not request a simulator feature release.
