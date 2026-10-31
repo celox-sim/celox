@@ -5827,7 +5827,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "gate primitive instantiation",
             r#"
-            module Top(input logic a, b, output logic y); and (y, a, b); endmodule
+            module Top(input logic a, b, output logic y); tran (y, a); endmodule
         "#,
         ),
         (

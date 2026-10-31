@@ -1,0 +1,16 @@
+{
+  "source": "verification/repros/sv_gate_two_state_member.sv",
+  "standard": "IEEE 1800-2023 6.5 includes primitive outputs driving independent structure elements and requires automatic assignment type conversion.",
+  "icarus": {
+    "version": "13.0 (stable)",
+    "command": "iverilog -g2012 -s Top -o repro.vvp sv_gate_two_state_member.sv",
+    "exit_code": 2,
+    "diagnostic": "Variable 'y' cannot be driven by a primitive or continuous assignment with non-default strength. Failed to elaborate primitive output expression Top.y.clean."
+  },
+  "verilator": {
+    "version": "5.052",
+    "command": "verilator --lint-only --top-module Top sv_gate_two_state_member.sv",
+    "exit_code": 0,
+    "scope": "Syntax/elaboration acceptance only; this is not four-state execution evidence."
+  }
+}

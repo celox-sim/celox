@@ -8227,3 +8227,32 @@ fn wide_container_elements_reject_whole_container_operations() {
         );
     }
 }
+
+#[test]
+fn scalar_logic_gates_keep_unsupported_modifiers_explicit() {
+    for gate in [
+        "and #1 (y,a,b);",
+        "and (strong1,weak0) (y,a,b);",
+        "and g[1:0](y,a,b);",
+        "tran (y,a);",
+    ] {
+        let source = format!("module Top(input logic a,b,output wire y); {gate} endmodule");
+        let error = analyze_source(&source, Path::new("gates.sv")).unwrap_err();
+        assert!(
+            error.to_string().contains("gate primitive instantiation"),
+            "{error}"
+        );
+    }
+    for source in [
+        "module Top(input logic [1:0] a,b,output wire y); and (y,a,b); endmodule",
+        "module Top(input a,b,output wire [1:0] y); and ({y},a,b); endmodule",
+        "module Top(input a,b,output wire [1:0] y); and ({y[0],y[1]},a,b); endmodule",
+    ] {
+        assert!(
+            analyze_source(source, Path::new("wide_gate.sv"))
+                .unwrap_err()
+                .to_string()
+                .contains("non-scalar gate terminal")
+        );
+    }
+}

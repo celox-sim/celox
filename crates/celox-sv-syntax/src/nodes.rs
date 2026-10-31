@@ -294,6 +294,24 @@ pub struct AssignSyntax {
     pub tokens: TokenRange,
 }
 
+/// A scalar n-input logic gate declaration (IEEE 1800-2023 28.4).
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicGate {
+    pub kind: String,
+    pub strength: Option<DriveStrength>,
+    pub delay: Option<AssignmentDelay>,
+    pub instances: Vec<LogicGateInstance>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LogicGateInstance {
+    pub name: Option<Name>,
+    pub dimensions: Vec<Dimension>,
+    /// Output first, followed by one or more inputs.
+    pub terminals: Vec<ExprId>,
+    pub tokens: TokenRange,
+}
+
 /// Stable handle for an authored parameter/localparam statement in any scope.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct ParameterDeclarationId(pub(crate) usize);
@@ -663,6 +681,7 @@ pub enum BodyItemKind {
     Dpi(DpiId),
     Parameter(ParameterDeclarationId),
     Assign(AssignId),
+    LogicGate(Box<LogicGate>),
     Procedure(ProcedureId),
     Subroutine(SubroutineId),
     TypeAlias(TypeAliasId),

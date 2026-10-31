@@ -248,6 +248,11 @@ impl Parser<'_> {
                 Some(BodyItemKind::Time(self.time_declaration()?))
             } else if delimiters.is_empty() && matches!(self.peek(), "parameter" | "localparam") {
                 Some(BodyItemKind::Parameter(self.parameter_declaration()?))
+            } else if root
+                && pending.as_ref().is_some_and(|value| value.1 == self.at)
+                && self.logic_gate_start()
+            {
+                Some(BodyItemKind::LogicGate(Box::new(self.logic_gate()?)))
             } else if delimiters.is_empty() && self.peek() == "assign" {
                 Some(BodyItemKind::Assign(self.assign_statement()?))
             } else if delimiters.is_empty()
@@ -729,6 +734,16 @@ impl Parser<'_> {
                     frame.unit.body_parameters.extend(parameters);
                 }
                 frame.record(self, start, BodyItemKind::Parameter(id))?;
+                frame.conditional = frame.builder.active();
+                frame.prototype = false;
+                frame.item_start = true;
+                frames.push(frame);
+                continue;
+            }
+            if frame.delimiters.is_empty() && frame.item_start && self.logic_gate_start() {
+                let start = self.at;
+                let gate = self.logic_gate()?;
+                frame.record(self, start, BodyItemKind::LogicGate(Box::new(gate)))?;
                 frame.conditional = frame.builder.active();
                 frame.prototype = false;
                 frame.item_start = true;
