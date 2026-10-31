@@ -61,6 +61,8 @@ fn scope_component(name: &str) -> String {
 #[derive(Clone)]
 pub(super) struct Item {
     state: std::rc::Rc<AnalysisState>,
+    /// The symbols the scope that elaborated the item imports.
+    imported: Arc<scope::ScopeSymbols>,
     pub id: celox_sv_syntax::BodyItemId,
     pub env: SharedMap<i128>,
     pub literals: SharedMap<Expr>,
@@ -217,8 +219,17 @@ impl Item {
         &self.scope
     }
 
-    pub fn interface_scope(&self) -> Option<scope::Installed> {
-        let imported = scope::imported(&self.state);
+    /// `tree` analyzing the item, which sees the interface bindings of the
+    /// generate scopes that enclose it.
+    pub fn scoped<'a>(&self, tree: &AnalysisContext<'a>) -> AnalysisContext<'a> {
+        match self.interface_scope() {
+            Some(symbols) => tree.importing(symbols),
+            None => tree.clone(),
+        }
+    }
+
+    fn interface_scope(&self) -> Option<Arc<scope::ScopeSymbols>> {
+        let imported = &self.imported;
         if imported.interface_scopes.is_empty() {
             return None;
         }
@@ -237,14 +248,14 @@ impl Item {
             return None;
         }
         scopes.sort_by_key(|(name, _)| name.len());
-        let mut local = (*imported).clone();
+        let mut local = (**imported).clone();
         for (_, bindings) in scopes {
             local.interface_members.extend(bindings.members.clone());
             local.interface_types.extend(bindings.types.clone());
             local.interface_arrays.extend(bindings.arrays.clone());
             local.interface_instances.extend(bindings.instances.clone());
         }
-        Some(scope::install(&self.state, Arc::new(local)))
+        Some(Arc::new(local))
     }
 
     /// Parameters have already populated the enclosing constant environment.
@@ -522,6 +533,7 @@ impl Item {
 #[derive(Clone, Default)]
 struct Scope {
     state: std::rc::Rc<AnalysisState>,
+    imported: Arc<scope::ScopeSymbols>,
     path: String,
     in_loop: bool,
     env: SharedMap<i128>,
@@ -644,6 +656,7 @@ fn elaborate(
     literals.retain(|name, _| !env.contains_key(name));
     let scope = Scope {
         state: tree.state.clone(),
+        imported: scope::imported(tree),
         env: env.clone().into(),
         literals: literals.into(),
         parameter_dimensions: Arc::new(parameter_packed_dimensions(&parameters)),
@@ -869,6 +882,7 @@ impl<'a> Elaborator<'a, '_> {
     fn push(&mut self, id: celox_sv_syntax::BodyItemId, scope: &Scope) {
         self.items.push(Item {
             state: self.tree.state.clone(),
+            imported: scope::imported(self.tree),
             id,
             env: scope.env.clone(),
             literals: scope.literals.clone(),
@@ -1094,7 +1108,7 @@ impl<'a> Elaborator<'a, '_> {
                     // bind siblings. Either ends this run before rebuilding it.
                     let base = scope.env.clone();
                     let mut environment = parameters::ParameterEnvironment::new(
-                        &self.tree.state,
+                        self.tree,
                         &scope.parameters,
                         &base,
                         &pending
@@ -1372,7 +1386,7 @@ impl<'a> Elaborator<'a, '_> {
 /// Make `name` in `scope` denote the package item `target`, as an import of
 /// the generate block does.
 fn bind_import(scope: &mut Scope, name: &str, target: &str) {
-    let imported = scope::imported(&scope.state);
+    let imported = scope.imported.clone();
     Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
     scope.names.insert(name.to_string(), target.to_string());
     scope.imports.insert(name.to_string(), target.to_string());
@@ -1461,6 +1475,7 @@ fn module_constant_functions(
         }
         roots.push(Item {
             state: tree.state.clone(),
+            imported: scope::imported(tree),
             id,
             env: env.clone().into(),
             literals: literals.clone().into(),

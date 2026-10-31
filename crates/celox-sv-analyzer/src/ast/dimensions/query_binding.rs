@@ -303,7 +303,7 @@ fn interface_array_size(
     {
         return Ok(None);
     }
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     let Some(array) = imported.interface_arrays.get(&handle) else {
         return Ok(None);
     };
@@ -565,7 +565,7 @@ fn validate_index(
                 expression,
                 arguments,
             } => {
-                if expression_binding::native_name(&tree.state, *expression, native)
+                if expression_binding::native_name(tree, *expression, native)
                     .as_deref()
                     .and_then(SystemFunction::from_name)
                     .is_some_and(SystemFunction::has_unevaluated_operand)
@@ -746,7 +746,7 @@ pub(in crate::ast) fn shape(
                 if let Some((name, dimensions)) = type_binding::argument_alias(id, native)
                     && dimensions.is_empty()
                 {
-                    let imported = scope::imported(&tree.state);
+                    let imported = scope::imported(tree);
                     let receiver = name.split('.').next().unwrap_or(&name);
                     let local_receiver = context.get(receiver).is_some()
                         || context.const_env.contains_key(receiver)

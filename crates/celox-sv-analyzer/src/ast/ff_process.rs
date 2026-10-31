@@ -13,7 +13,7 @@ pub(super) fn ff_processes_from_scope(
     let active = generate::items(syntax_tree, const_env, &packed_dimensions.type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
-        let _interface_scope = item.interface_scope();
+        let syntax_tree = &item.scoped(syntax_tree);
         let Some(procedure) = item.procedure(syntax_tree.declarations())? else {
             continue;
         };

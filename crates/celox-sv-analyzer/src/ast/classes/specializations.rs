@@ -215,7 +215,7 @@ fn inherit(
         if let Some(scope) = tree.state.foreign.declarations(name) {
             scope.apply(env, aliases);
         }
-        if let Some(members) = scope::imported(&tree.state).class_member_types.get(name) {
+        if let Some(members) = scope::imported(tree).class_member_types.get(name) {
             aliases.extend(members.clone());
         }
     }
@@ -357,7 +357,7 @@ pub(in crate::ast) fn member_type(
                 .flatten()
         })
         .or_else(|| {
-            scope::imported(&tree.state)
+            scope::imported(tree)
                 .class_member_types
                 .get(name)?
                 .get(member)
@@ -372,7 +372,7 @@ pub(in crate::ast) fn member_type(
 pub(in crate::ast) fn export_member_types(
     tree: &AnalysisContext<'_>,
 ) -> HashMap<String, HashMap<String, Type>> {
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     let mut result = imported.class_member_types.clone();
     for declaration in super::scope_declarations(tree) {
         for name in super::specializations_of(tree, declaration) {
@@ -1187,7 +1187,7 @@ pub(in crate::ast) fn scoped_type(
                     None => Some(class),
                 }
             } else {
-                let qualified = scope::qualified_name(&tree.state, &scope, &member);
+                let qualified = scope::qualified_name(tree, &scope, &member);
                 return Ok(context.type_aliases.get(&qualified).cloned().or_else(
                     || match qualified.as_str() {
                         "std::process" => Some(super::handle(super::super::processes::CLASS)),
@@ -1465,7 +1465,7 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
     for name in tree.state.foreign.names() {
         names.entry(name.clone()).or_insert(name);
     }
-    for (alias, name) in &scope::imported(&tree.state).aliases {
+    for (alias, name) in &scope::imported(tree).aliases {
         if tree.state.foreign.contains(name) {
             names.entry(alias.clone()).or_insert(name.clone());
         }

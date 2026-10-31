@@ -385,7 +385,7 @@ impl<'a, 'b> Elaborator<'a, 'b> {
         } else {
             format!("{}.{name}", parent.path)
         };
-        let imported = scope::imported(&self.tree.state);
+        let imported = scope::imported(self.tree);
         if let Some(bindings) = imported.generate_imports.get(&id) {
             for (name, target) in bindings {
                 bind_import(&mut scope, name, target);

@@ -85,9 +85,9 @@ pub(in crate::ast) fn construct(
 pub(in crate::ast) fn member_access(
     mut path: Vec<String>,
     dims: &PackedDimensions,
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
 ) -> Converted<Option<(Vec<Expr>, Type)>> {
-    selects::bind_interface_path(state, &mut path, dims);
+    selects::bind_interface_path(tree, &mut path, dims);
     let Some(root) = path.first().and_then(|name| dims.get(name)) else {
         return Ok(None);
     };

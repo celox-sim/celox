@@ -447,7 +447,7 @@ pub(super) fn symbolic_module_constant_functions(
             symbolic_parameters,
         )
     });
-    roots.extend_missing(&scope::imported(&tree.state).constant_functions);
+    roots.extend_missing(&scope::imported(tree).constant_functions);
     let _installed = install(&tree.state, roots);
     collect_module_constant_functions(
         tree,

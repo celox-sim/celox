@@ -25,7 +25,6 @@ pub(super) struct AnalysisState {
     foreign_arguments: RefCell<Vec<(String, classes::specializations::BoundArguments)>>,
     foreign_names: RefCell<Vec<(String, classes::specializations::BoundArguments, String)>>,
     foreign_error: RefCell<Option<AnalyzerError>>,
-    scope: scope::State,
     interfaces: interface_ast::State,
     dimensions: dimensions::State,
     root_subroutines: std::cell::Cell<bool>,
@@ -71,10 +70,15 @@ pub(super) struct AnalysisState {
 
 /// Syntax and specialization bindings for one scope within an analysis session.
 /// Child modules share the session and receive their own parameter bindings.
+#[derive(Clone)]
 struct AnalysisContext<'a> {
     syntax_tree: &'a SyntaxTree,
     state: std::rc::Rc<AnalysisState>,
     parameter_overrides: Cow<'a, HashMap<String, ConstExpr>>,
+    /// The symbols the scope being analyzed imports (IEEE 1800-2023 26.3).
+    imported: Arc<scope::ScopeSymbols>,
+    /// The package being analyzed, inside which `p::x` names its own item.
+    package: Option<Arc<str>>,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -87,6 +91,8 @@ impl<'a> AnalysisContext<'a> {
             syntax_tree,
             state: std::rc::Rc::default(),
             parameter_overrides: Cow::Borrowed(parameter_overrides),
+            imported: Arc::default(),
+            package: None,
         }
     }
 
@@ -95,6 +101,8 @@ impl<'a> AnalysisContext<'a> {
             syntax_tree,
             state: std::rc::Rc::default(),
             parameter_overrides: Cow::Owned(HashMap::default()),
+            imported: Arc::default(),
+            package: None,
         }
     }
 
@@ -109,6 +117,8 @@ impl<'a> AnalysisContext<'a> {
                 ..AnalysisState::default()
             }),
             parameter_overrides: Cow::Owned(HashMap::default()),
+            imported: Arc::default(),
+            package: None,
         }
     }
 
@@ -121,6 +131,25 @@ impl<'a> AnalysisContext<'a> {
             syntax_tree,
             state: self.state.clone(),
             parameter_overrides: Cow::Borrowed(parameter_overrides),
+            imported: self.imported.clone(),
+            package: self.package.clone(),
+        }
+    }
+
+    /// This context analyzing a scope that imports `symbols`.
+    fn importing(&self, symbols: Arc<scope::ScopeSymbols>) -> Self {
+        Self {
+            imported: symbols,
+            ..self.clone()
+        }
+    }
+
+    /// This context analyzing package `name`, inside which `name::x` names
+    /// its own item `x`.
+    fn in_package(&self, name: &str) -> Self {
+        Self {
+            package: Some(name.into()),
+            ..self.clone()
         }
     }
 }
@@ -782,10 +811,10 @@ impl Module {
         };
         let specialization =
             syntax_tree.child(syntax_tree.syntax_tree, applicable_parameter_overrides);
+        let specialization = specialization.importing(imported.clone());
         let syntax_tree = &specialization;
         // The collectors below each elaborate the same generate scopes.
         let _elaborations = generate::memoize(syntax_tree);
-        let _imported = scope::install(&syntax_tree.state, imported.clone());
         let with_imported = |mut functions: const_functions::ConstantFunctions| {
             functions.extend_missing(&imported.constant_functions);
             functions

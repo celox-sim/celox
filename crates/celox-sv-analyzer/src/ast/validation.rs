@@ -283,7 +283,7 @@ pub(super) fn reject_silently_ignored_constructs(
             item.procedure(syntax_tree.declarations())?;
             item.continuous_assignment(syntax_tree.declarations())?;
             let _constant_functions = item.enter();
-            let _interface_scope = item.interface_scope();
+            let syntax_tree = &item.scoped(syntax_tree);
             validate_scope(Some(item), syntax_tree, views.dimensions(item))?;
         }
     }
@@ -922,7 +922,7 @@ fn validate_scope(
                 .into_iter()
                 .any(|index| {
                     parameters::skipped::needs_selected(
-                        &syntax_tree.state,
+                        syntax_tree,
                         facts.declared_defaults[index],
                         native,
                     )
@@ -949,7 +949,7 @@ fn validate_scope(
         if let celox_sv_syntax::ExprKind::Call {
             expression: callee, ..
         } = native.expression(root).kind
-            && expression_binding::native_name(&syntax_tree.state, callee, native).as_deref()
+            && expression_binding::native_name(syntax_tree, callee, native).as_deref()
                 == Some("$isunbounded")
         {
             expression_binding::bind(root, syntax_tree, indexed_dimensions)?;
@@ -1047,7 +1047,7 @@ fn reject_constant_calls(
             .containing(tokens)
             .into_iter()
             .any(|index| {
-                expression_binding::native_name(&tree.state, facts.first_arguments[index].0, native)
+                expression_binding::native_name(tree, facts.first_arguments[index].0, native)
                     .is_some_and(|name| {
                         SystemFunction::from_name(&name)
                             .is_some_and(SystemFunction::has_unevaluated_operand)
@@ -1067,8 +1067,7 @@ fn reject_constant_calls(
                 expression,
                 arguments,
             } => {
-                let Some(name) = expression_binding::native_name(&tree.state, *expression, native)
-                else {
+                let Some(name) = expression_binding::native_name(tree, *expression, native) else {
                     continue;
                 };
                 (name, arguments.as_slice())
@@ -1115,7 +1114,7 @@ fn reject_constant_calls(
             // package DPI function. Resolve that authored name in the active
             // item before consulting the qualified package declarations.
             let bound = item.map_or_else(|| name.clone(), |item| item.name(&name));
-            let imported = scope::imported(&tree.state);
+            let imported = scope::imported(tree);
             if imported
                 .dpi_imports
                 .iter()

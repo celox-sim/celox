@@ -50,7 +50,7 @@ pub(super) fn unindexed_parameter(
     {
         return None;
     }
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     let array = imported.interface_arrays.get(&handle.join("."))?;
     let element = array.elements.first()?;
     let bound = imported
@@ -346,7 +346,7 @@ pub(super) fn analyze_module(
     )?;
     let mut caller_ports = caller.ports.clone();
     let mut caller_symbols = caller.symbols.as_ref().unwrap().clone();
-    let _caller_scope = scope::install(&tree.state, Arc::new(caller_symbols.clone()));
+    let tree = &tree.importing(Arc::new(caller_symbols.clone()));
     let _functions = const_functions::install(&tree.state, caller.constant_functions.clone());
     let mut port_assignments = Vec::new();
     let mut pending = instantiations
@@ -377,7 +377,7 @@ pub(super) fn analyze_module(
             generated = true;
             let mut current = caller_symbols.clone();
             current.extend(&imported);
-            let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+            let tree = &tree.importing(Arc::new(current.clone()));
             let _functions =
                 const_functions::install(&tree.state, current.constant_functions.clone());
             for item in generate::items(tree, &current.const_env, &current.type_aliases)? {
@@ -426,7 +426,7 @@ pub(super) fn analyze_module(
                 .const_env
                 .extend(item.env.iter().map(|(name, value)| (name.clone(), *value)));
         }
-        let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+        let tree = &tree.importing(Arc::new(current.clone()));
         let _functions = const_functions::install(&tree.state, current.constant_functions.clone());
         // Exported scope symbols omit ordinary module ports. Keep the
         // selected caller header available for connection width discovery.
@@ -704,11 +704,11 @@ pub(super) fn analyze_module(
     if let Some(plan) = plan {
         let mut current = caller_symbols.clone();
         current.extend(&imported);
-        let _scope = scope::install(&tree.state, Arc::new(current.clone()));
+        let tree = &tree.importing(Arc::new(current.clone()));
         let _functions = const_functions::install(&tree.state, current.constant_functions.clone());
         for item in generate::items(tree, &current.const_env, &current.type_aliases)? {
-            let _interface_scope = item.interface_scope();
-            let active_scope = scope::imported(&tree.state);
+            let tree = &item.scoped(tree);
+            let active_scope = scope::imported(tree);
             let celox_sv_syntax::BodyItemKind::Instance(native) =
                 tree.declarations().body_item(item.id).kind
             else {

@@ -27,7 +27,7 @@ pub(super) fn imports(
     let mut imports = Vec::new();
     let mut exports = HashMap::<(String, String), String>::default();
     for item in items {
-        let _interface_scope = item.interface_scope();
+        let tree = &item.scoped(tree);
         if let celox_sv_syntax::BodyItemKind::Dpi(id) = syntax.body_item(item.id).kind {
             let declaration = syntax.dpi_declaration(id);
             if declaration.import {
