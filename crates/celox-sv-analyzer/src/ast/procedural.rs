@@ -1168,6 +1168,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         .copied()
                         .flatten()
                         .ok_or_else(|| unsupported("omitted %p argument"))?;
+                    if let Some(text) = expression_binding::format_aggregate_text(
+                        self.tree,
+                        self.session,
+                        id,
+                        value,
+                        native,
+                        &self.dims,
+                    )? {
+                        *value = text;
+                        return Ok(&b"%s"[..]);
+                    }
                     let pattern = expression_binding::format_pattern(
                         self.tree,
                         self.session,

@@ -27,8 +27,9 @@ pub(super) use direct::{
     remove_real_division_guards, string_literal_bytes, ungroup,
 };
 pub(super) use format_patterns::{
-    bytes_literal, format as format_call, has_pattern, pattern as format_pattern,
-    pattern_argument as format_pattern_argument, rewrite_format, rewrite_template,
+    aggregate_text as format_aggregate_text, bytes_literal, format as format_call, has_pattern,
+    pattern as format_pattern, pattern_argument as format_pattern_argument, rewrite_format,
+    rewrite_template,
 };
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{

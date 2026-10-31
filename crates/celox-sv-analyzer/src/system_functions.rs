@@ -1191,6 +1191,21 @@ pub enum ObjectOp {
     NewEvent,
     /// A streaming concatenation of dynamically sized data, see [`StreamOp`].
     Stream(StreamOp),
+    /// The `%p` text of a container of unpacked structures, see
+    /// [`AggregatePattern`].
+    Pattern(AggregatePattern),
+}
+
+/// The `%p` text of a container whose elements are unpacked structures
+/// (IEEE 1800-2023 21.2.1.6): `'{` and `}` around the text of each element,
+/// visited in order as an array locator method visits them. The arguments
+/// are the array, the element and index locals, the string local that
+/// collects the text, and the string expressions that start it, append the
+/// first element, append each later one, and finish it, which read those
+/// locals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AggregatePattern {
+    pub source: LocatorSource,
 }
 
 /// An operation on the heap stream of a streaming concatenation that holds
@@ -1331,6 +1346,7 @@ impl ObjectOp {
             | Self::Box(_)
             | Self::Locator(_)
             | Self::Concat(_)
+            | Self::Pattern(_)
             | Self::NewEvent => (32, false),
         }
     }
@@ -1341,6 +1357,7 @@ impl fmt::Display for ObjectOp {
         f.write_str(match self {
             Self::Container { .. } => "container operation",
             Self::Locator(_) => "array locator method",
+            Self::Pattern(_) => "assignment pattern text",
             Self::Concat(_) => "unpacked array concatenation",
             Self::Stream(_) => "streaming concatenation",
             Self::New { .. } => "new",
