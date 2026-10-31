@@ -149,6 +149,7 @@ fn select<'a>(
         let sub = Shape::Owned(Rc::new(VariableDimensions {
             declared: type_names::Declared::default(),
             container: None,
+            chandle: false,
             randomizable: true,
             enum_domain: None,
             packed_enum: false,
@@ -264,6 +265,7 @@ fn select<'a>(
     let bit = Shape::Owned(Rc::new(VariableDimensions {
         declared: type_names::Declared::default(),
         container: None,
+        chandle: false,
         randomizable: true,
         enum_domain: None,
         packed_enum: false,
@@ -504,6 +506,12 @@ pub(in crate::ast) fn bind_native(
                     continue;
                 }
                 if pattern {
+                    // A chandle has no elements a pattern could give (6.14).
+                    if shape.chandle && shape.unpacked.is_empty() {
+                        expression_binding::check_chandle_assignment(
+                            true, id, tree, native, dims, session,
+                        )?;
+                    }
                     let typed = typed_shape(id, tree, dims)?;
                     jobs.push(Job::Pattern(
                         id,
@@ -512,8 +520,17 @@ pub(in crate::ast) fn bind_native(
                             .unwrap_or(shape),
                     ));
                 } else {
-                    let value =
-                        expression_binding::bind_value(id, native, tree, session, dims, None)?;
+                    let chandle = shape.chandle && shape.unpacked.is_empty();
+                    expression_binding::check_chandle_assignment(
+                        chandle, id, tree, native, dims, session,
+                    )?;
+                    let value = if chandle {
+                        expression_binding::bind_chandle_value(
+                            id, native, tree, session, dims, None,
+                        )?
+                    } else {
+                        expression_binding::bind_value(id, native, tree, session, dims, None)?
+                    };
                     let type_dims = dimensions::query_context_for_operand(id, tree, session, dims)?;
                     let signed =
                         dimensions::expression_signedness(&value, &type_dims, &type_dims.const_env)

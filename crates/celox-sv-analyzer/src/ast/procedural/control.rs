@@ -15,6 +15,8 @@ struct CaseState {
     index: usize,
     kind: CaseKind,
     selector: Expr,
+    /// Whether the statement compares chandles (6.14).
+    chandles: bool,
     items: Vec<CaseItemBase<Expr, LValue>>,
     default: Option<Vec<Stmt>>,
 }
@@ -255,7 +257,11 @@ impl BodyBuilder<'_, '_, '_> {
                                     prologue = stmts;
                                     (LoopKind::For, None, false)
                                 }
-                                None => (LoopKind::While, Some(self.native_value(*value)?), false),
+                                None => (
+                                    LoopKind::While,
+                                    Some(self.native_chandle_value(*value)?),
+                                    false,
+                                ),
                             },
                             LoopSyntax::Repeat(value) => {
                                 // The count is evaluated once (12.7.2).
@@ -312,10 +318,42 @@ impl BodyBuilder<'_, '_, '_> {
                         keyword,
                         mode,
                         expression: Some(value),
+                        arms,
                         ..
                     } if keyword != "randcase" => {
                         if mode.as_deref() == Some("matches") {
                             return Err(unsupported("pattern-matching case statement"));
+                        }
+                        // A case statement compares with `===` (IEEE 1800-2023 12.5).
+                        let operator = match (mode.as_deref(), keyword.as_str()) {
+                            (Some("inside"), _) => "inside",
+                            (_, "case") => "===",
+                            (_, keyword) => keyword,
+                        };
+                        // Only `case` compares chandles, with chandle or
+                        // `null` items (6.14); the binder rejects them
+                        // elsewhere. A selector is a chandle also when only
+                        // a default arm compares nothing with it.
+                        let mut chandles = operator == "==="
+                            && expression_binding::native_chandle(
+                                self.tree,
+                                *value,
+                                native,
+                                &self.dims,
+                                self.session,
+                            );
+                        for case_match in arms.iter().flat_map(|arm| &arm.matches) {
+                            if let celox_sv_syntax::CaseMatch::Expression(label) = case_match {
+                                chandles |= expression_binding::check_chandle_equality(
+                                    operator,
+                                    *value,
+                                    *label,
+                                    self.tree,
+                                    native,
+                                    &self.dims,
+                                    self.session,
+                                )?;
+                            }
                         }
                         let kind = if mode.as_deref() == Some("inside") {
                             CaseKind::Inside
@@ -328,12 +366,17 @@ impl BodyBuilder<'_, '_, '_> {
                             }
                         };
                         output.extend(self.effects(&[*value])?);
-                        let selector = self.native_value(*value)?;
+                        let selector = if chandles {
+                            self.native_chandle_value(*value)?
+                        } else {
+                            self.native_value(*value)?
+                        };
                         jobs.push(Job::CaseNext(CaseState {
                             id,
                             index: 0,
                             kind,
                             selector,
+                            chandles,
                             items: Vec::new(),
                             default: None,
                         }));
@@ -506,7 +549,22 @@ impl BodyBuilder<'_, '_, '_> {
                         }
                         let value = value
                             .map(|id| {
-                                let mut value = expression_binding::bind_value(
+                                if let Some(chandle) = self.return_chandle {
+                                    expression_binding::check_chandle_assignment(
+                                        chandle,
+                                        id,
+                                        self.tree,
+                                        native,
+                                        &self.dims,
+                                        self.session,
+                                    )?;
+                                }
+                                let bind = if self.return_chandle == Some(true) {
+                                    expression_binding::bind_chandle_value
+                                } else {
+                                    expression_binding::bind_value
+                                };
+                                let mut value = bind(
                                     id,
                                     native,
                                     self.tree,
@@ -684,15 +742,15 @@ impl BodyBuilder<'_, '_, '_> {
                         });
                     } else {
                         let arm = &arms[state.index];
-                        let labels =
-                            if arm.default {
-                                None
-                            } else {
-                                Some(self.native_case_labels(
-                                    &arm.matches,
-                                    state.kind == CaseKind::Inside,
-                                )?)
-                            };
+                        let labels = if arm.default {
+                            None
+                        } else {
+                            Some(self.native_case_labels(
+                                &arm.matches,
+                                state.kind == CaseKind::Inside,
+                                state.chandles,
+                            )?)
+                        };
                         jobs.push(Job::CaseBranch {
                             state,
                             labels,
@@ -769,7 +827,7 @@ impl BodyBuilder<'_, '_, '_> {
                         });
                         continue;
                     }
-                    let condition = self.native_value(native)?;
+                    let condition = self.native_chandle_value(native)?;
                     output.push(Stmt::Loop {
                         kind: LoopKind::DoWhile,
                         init: Vec::new(),
@@ -791,6 +849,7 @@ impl BodyBuilder<'_, '_, '_> {
         &mut self,
         labels: &[celox_sv_syntax::CaseMatch],
         inside: bool,
+        chandles: bool,
     ) -> Result<Vec<CaseLabel<Expr>>, AnalyzerError> {
         if labels.is_empty() {
             return Err(AnalyzerError::Parse("native case arm has no labels".into()));
@@ -798,6 +857,9 @@ impl BodyBuilder<'_, '_, '_> {
         labels
             .iter()
             .map(|label| match label {
+                celox_sv_syntax::CaseMatch::Expression(id) if chandles => {
+                    self.native_chandle_value(*id).map(CaseLabel::Value)
+                }
                 celox_sv_syntax::CaseMatch::Expression(id) => {
                     self.native_value(*id).map(CaseLabel::Value)
                 }

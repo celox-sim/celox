@@ -202,7 +202,8 @@ fn equivalent(
     env: &HashMap<String, i128>,
 ) -> bool {
     let functions = &tree.functions;
-    if a.virtual_interface != b.virtual_interface {
+    // A chandle is equivalent only to a chandle (IEEE 1800-2023 6.14).
+    if a.virtual_interface != b.virtual_interface || a.chandle != b.chandle {
         return false;
     }
     let count = |width: &ConstExpr| eval_ast_const_expr(functions, width, env);

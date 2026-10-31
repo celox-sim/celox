@@ -127,8 +127,10 @@ pub(in crate::ast) fn native_type(
     let members = fields
         .into_iter()
         .map(|(name, ty)| {
+            // A chandle is no packed array element (IEEE 1800-2023 6.14).
             if !ty.unpacked_ranges.is_empty()
                 || ty.container.is_some()
+                || (ty.chandle && ty.packed_ranges.len() > 1)
                 // Each event member would need its own synchronization
                 // object (IEEE 1800-2023 15.5).
                 || matches!(

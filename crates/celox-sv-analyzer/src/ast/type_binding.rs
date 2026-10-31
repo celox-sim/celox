@@ -204,6 +204,10 @@ pub(super) fn argument_type(
         return Ok(None);
     };
     let ranges = binding::packed_ranges(&dimensions, tree, session, &context)?;
+    // A chandle is no packed array element (IEEE 1800-2023 6.14).
+    if base.chandle && !ranges.is_empty() {
+        return types::packed_chandles();
+    }
     Ok(Some(types::enclose_aliased_packed_type(
         base.clone(),
         ranges,
@@ -305,11 +309,13 @@ pub(super) fn builtin_type(name: &str, signing: Option<bool>) -> Option<Type> {
         "longint" => (TypeKind::Bit, Some(64), true),
         "integer" => (TypeKind::Logic, Some(32), true),
         "time" => (TypeKind::Logic, Some(64), false),
+        "chandle" => (TypeKind::Bit, Some(64), false),
         // A named event is a handle (IEEE 1800-2023 15.5).
         "event" => return Some(super::classes::handle(super::events::CLASS)),
         _ => return None,
     };
     let mut ty = Type::new(kind);
+    ty.chandle = name == "chandle";
     ty.is_signed = signing.unwrap_or(signed);
     let keyword = match name {
         "byte" => Some("byte"),

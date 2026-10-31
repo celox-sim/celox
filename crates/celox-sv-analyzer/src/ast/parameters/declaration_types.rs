@@ -30,6 +30,8 @@ pub(super) fn prefix<'a>(
             None,
             Some(
                 type_binding::builtin_type(name, data.signed)
+                    // A chandle is no constant (IEEE 1800-2023 6.14).
+                    .filter(|ty| !ty.chandle)
                     .ok_or_else(|| unsupported("unsupported parameter data type"))?,
             ),
         ),
@@ -39,7 +41,12 @@ pub(super) fn prefix<'a>(
                 .map(|part| instances::normalize_identifier(&part.name.spelling))
                 .collect::<Vec<_>>()
                 .join("::");
-            (aliases.get(&name).cloned(), None)
+            let alias = aliases.get(&name).cloned();
+            // Nor is a chandle named by a typedef.
+            if alias.as_ref().is_some_and(Type::holds_chandle) {
+                return Err(unsupported("unsupported parameter data type"));
+            }
+            (alias, None)
         }
         _ => return Err(unsupported("unsupported parameter data type")),
     };

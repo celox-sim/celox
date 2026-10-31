@@ -292,11 +292,44 @@ pub(super) fn enclose_aliased_packed_type(
     r#type
 }
 
-pub(super) fn type_with_unpacked_ranges(mut r#type: Type, ranges: Vec<UnpackedRange>) -> Type {
+/// The error of packed dimensions on a chandle, returned directly by the
+/// recursive type binder, which keeps its frames small.
+#[inline(never)]
+#[cold]
+pub(super) fn packed_chandles<T>() -> Result<T, AnalyzerError> {
+    Err(AnalyzerError::IllegalChandleUse {
+        detail: "a packed array of chandles".into(),
+    })
+}
+
+/// The error of an enumeration whose base type is a chandle, which is not
+/// integral (IEEE 1800-2023 6.19). Out of line like [`packed_chandles`].
+#[inline(never)]
+#[cold]
+pub(super) fn chandle_enum<T>() -> Result<T, AnalyzerError> {
+    Err(AnalyzerError::IllegalChandleUse {
+        detail: "an enumeration of chandle base type".into(),
+    })
+}
+
+/// `r#type` with the fixed-size unpacked dimensions `ranges` (IEEE 1800-2023
+/// 7.4) in front of its own. Every declaration of a fixed-size unpacked
+/// array, also of a typedef, a parameter or a container element, takes its
+/// type here.
+pub(super) fn type_with_unpacked_ranges(
+    mut r#type: Type,
+    ranges: Vec<UnpackedRange>,
+) -> Result<Type, AnalyzerError> {
+    // UVM keeps chandles in scalars and dynamic containers only.
+    if r#type.chandle && !ranges.is_empty() {
+        return Err(AnalyzerError::Unsupported(
+            "fixed-size unpacked array of chandle".into(),
+        ));
+    }
     let mut unpacked_ranges = ranges;
     unpacked_ranges.extend(r#type.unpacked_ranges);
     r#type.unpacked_ranges = unpacked_ranges;
-    r#type
+    Ok(r#type)
 }
 
 pub(super) fn validate_unpacked_dimension_sizes(

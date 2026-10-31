@@ -1598,3 +1598,13 @@ its exact mismatch remains an executed failure in
 not support unpacked array formals; its exact compile diagnostic remains an
 executed failure in [the Icarus types report](verification/sv/icarus/types.json).
 No assertions or exclusions are weakened.
+
+### Chandles
+
+`types::chandles_hold_null_and_copies` checks the uses IEEE 1800-2023 6.14 allows
+for a `chandle`: it starts as `null`, compares with another chandle or `null`,
+tests as a Boolean, and is copied through a class property, an associative array
+and subroutine arguments and results. Verilator 5.052 and the installed xezim
+0.11.3 build pass it. Icarus 13.0 rejects the `chandle` class property with
+"Invalid class item"; that compile failure remains executed evidence in
+[the Icarus report](verification/sv/icarus/types.json).

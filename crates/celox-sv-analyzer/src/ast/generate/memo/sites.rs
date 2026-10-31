@@ -163,6 +163,7 @@ impl CallSites for Type {
             container: _,
             unpacked_struct: _,
             spelling: _,
+            chandle: _,
         } = self;
         packed_ranges.call_sites(visit);
         unpacked_ranges.call_sites(visit);
@@ -206,6 +207,7 @@ impl CallSites for VariableDimensions {
             members,
             signed_element_depth: _,
             unpacked_struct: _,
+            chandle: _,
         } = self;
         packed.call_sites(visit);
         unpacked.call_sites(visit);

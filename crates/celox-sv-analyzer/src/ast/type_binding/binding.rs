@@ -467,6 +467,20 @@ fn bind_in_mode(
             }
         }
     }
+    // A chandle has its own packed range only; it is no packed array
+    // element or enumeration base (IEEE 1800-2023 6.14, 6.19), such as
+    // through a typedef. This checks in place, which keeps the recursive
+    // frame small.
+    if let Some(ty) = values.last()
+        && ty.chandle
+    {
+        if ty.is_enum {
+            return types::chandle_enum();
+        }
+        if ty.packed_ranges.len() > 1 {
+            return types::packed_chandles();
+        }
+    }
     Ok(values.pop())
 }
 

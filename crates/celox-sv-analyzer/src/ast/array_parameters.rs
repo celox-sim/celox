@@ -192,7 +192,7 @@ fn array_parameters_from_declaration(
         // default. Only defaults actually consumed here require their native ID.
         let native_pattern = if bound.is_none() { pattern } else { None };
         let parameter = ArrayParameter {
-            signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)),
+            signal: Signal::new(name, type_with_unpacked_ranges(element, ranges)?),
             native_pattern,
             bound,
         };

@@ -57,8 +57,11 @@ impl BodyBuilder<'_, '_, '_> {
                     .key
                     .as_ref()
                     .filter(|key| key.kind() == TypeKind::Process);
-                index_type = if object {
-                    container.key.clone().expect("a class index type")
+                index_type = if object || container.key.as_ref().is_some_and(|key| key.chandle) {
+                    container
+                        .key
+                        .clone()
+                        .expect("a class or chandle index type")
                 } else if let Some(process) = process {
                     process.clone()
                 } else if string {

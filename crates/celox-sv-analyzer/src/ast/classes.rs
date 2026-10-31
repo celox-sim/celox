@@ -187,6 +187,7 @@ impl Class {
             }
             if (property.rand || property.randc)
                 && (property.field.handle.is_some()
+                    || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none()))
             {
                 return Err(unsupported(
