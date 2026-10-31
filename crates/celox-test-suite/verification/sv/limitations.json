@@ -3739,5 +3739,83 @@
         "concurrent_assertions::sampled_history_explicit_nesting"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_assignment_expressions",
+    "category": "language_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects parenthesized simple and compound assignment expressions with syntax errors. The standalone default reproduction rejects b=(a+=1) and b=(a=5)+(a=7). IEEE 1800-2023 11.3.6 permits blocking assignments inside a procedural expression.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_assignment_expressions.sv",
+      "src/sv/cases/operators.vtest",
+      "LIMITATIONS.md#assignment-expressions"
+    ],
+    "cases": {
+      "icarus": [
+        "operators::assignment_expression_values",
+        "operators::assignment_expression_compound_operators",
+        "operators::assignment_expression_guards_and_loops",
+        "operators::assignment_expression_four_state",
+        "operators::assignment_expression_concat_value",
+        "operators::assignment_expression_selected_index_once",
+        "operators::assignment_expression_stacked_results"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_assignment_expression_concat",
+    "category": "language_limitation",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 rejects b=({hi,lo}=8'h12) with a syntax error at the assignment operator, reproduced with CONCAT. IEEE 1800-2023 11.3.6 explicitly defines the unsigned integral result type of a concatenated assignment-expression target.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_assignment_expressions.sv",
+      "src/sv/cases/operators.vtest",
+      "LIMITATIONS.md#assignment-expressions"
+    ],
+    "cases": {
+      "verilator": [
+        "operators::assignment_expression_concat_value"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_assignment_expression_selected_index",
+    "category": "simulator_internal_error",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 stops in V3Width.cpp:10272 with \"No dtype expected at statement ASSIGN\" for b=(mem[i++]=9), reproduced with SELECTED. IEEE 1800-2023 11.3.6 permits the blocking assignment and 11.4.2 defines the postfix index increment.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_assignment_expressions.sv",
+      "src/sv/cases/operators.vtest",
+      "LIMITATIONS.md#assignment-expressions"
+    ],
+    "cases": {
+      "verilator": [
+        "operators::assignment_expression_selected_index_once"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_assignment_expression_stacked_results",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "Verilator 5.052 returns 14 for (a=5)+(a=7), both standalone and through the adapter. IEEE 1800-2023 11.3.6 requires each assignment expression to cast and stack its RHS before updating the target, then return that stacked value, so the sum is 12 for either operand evaluation order.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_assignment_expressions.sv",
+      "src/sv/cases/operators.vtest",
+      "LIMITATIONS.md#assignment-expressions"
+    ],
+    "cases": {
+      "verilator": [
+        "operators::assignment_expression_stacked_results"
+      ]
+    }
   }
 ]

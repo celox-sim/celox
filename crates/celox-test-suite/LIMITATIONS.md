@@ -1651,3 +1651,23 @@ The exclusions cover only `queue_slice_runtime_bounds`,
 `queue_slice_updates_and_copies`, and (for Icarus) `queue_slice_wide_and_unknown_bounds`
 in the `containers` group. The four-state case remains unsupported by Verilator.
 The Celox cases retain their bounds, copy, side-effect and X/Z assertions.
+
+### Assignment expressions
+
+IEEE 1800-2023 11.3.6 permits blocking assignments inside procedural expressions.
+The right-hand value is converted to the destination type and saved before the
+destination is updated; the saved value is the expression's result. Concatenated
+targets return an unsigned integral value with their combined width.
+
+The standalone [assignment expression reproduction](verification/repros/sv_assignment_expressions.sv)
+prints 14 for `(a=5)+(a=7)` with Verilator 5.052, where 12 is required regardless
+of operand order. With `CONCAT` defined, Verilator rejects a concatenated target;
+with `SELECTED`, it stops in `V3Width.cpp:10272` on an incremented array index.
+The exclusions cover only the corresponding `assignment_expression_stacked_results`,
+`assignment_expression_concat_value`, and `assignment_expression_selected_index_once`
+cases. The ordinary typed-value, compound-operator and guard/loop cases pass
+Verilator; its four-state case is unsupported.
+
+Icarus 13.0 rejects both simple and compound assignment expressions in the default
+standalone source. Its exclusions cover all seven `operators::assignment_expression_*`
+cases. Celox retains the value, type, index-evaluation and short-circuit assertions.

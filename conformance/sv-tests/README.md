@@ -285,6 +285,17 @@ remain unsupported; this is not a full-corpus measurement. Shared regressions
 cover sampled/history nesting, gated histories, X/Z transitions, history while
 assertions are disabled, and sampling before NBA and Reactive actions.
 
+Assignment expressions (11.3.6) update 16 rows: both modes of the eight
+`chapter-11/11.3.6` previously unsupported assignment-expression cases change from fail
+to pass. A focused official run checks all 11 cases in both modes; all 22
+verdicts pass, including the existing negative case, which remains rejected.
+Shared cases cover destination sizing, signedness, two-state conversion,
+concatenated targets, saved results, nested assignments, short-circuit guards,
+loop conditions, and indices with extracted increments. Targets selected through
+other side-effecting expressions, selected targets with effectful right-hand
+sides, unpacked aggregate results, and selected nominal target types remain
+explicitly unsupported.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
