@@ -13,11 +13,11 @@ pub struct TestbenchScheduler<A> {
     pub control: [A; 15],
     /// State (ready/waiting/done/releasing), remaining cycles, clock, wake time, reset request.
     pub processes: Vec<[A; 5]>,
-    /// Next rising edge, next falling edge, falling armed, generator enabled.
+    /// Next rising edge, next falling edge, falling armed, processes waiting
+    /// on the clock (the generator runs while there are any).
     pub clocks: Vec<[A; 4]>,
     pub events: Vec<A>,
     pub periods: Vec<u64>,
-    pub declared: usize,
     /// Per-process homes for function temporaries; design variables stay shared.
     pub locals: Vec<Vec<(A, A)>>,
     pub baselines: Vec<(A, A)>,
@@ -36,7 +36,6 @@ impl<A: Clone> TestbenchScheduler<A> {
             clocks: self.clocks.into_iter().map(|v| v.map(&mut f)).collect(),
             events: self.events.into_iter().map(&mut f).collect(),
             periods: self.periods,
-            declared: self.declared,
             marker_site: self.marker_site,
             baselines: self
                 .baselines

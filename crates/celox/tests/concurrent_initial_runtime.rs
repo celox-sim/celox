@@ -513,6 +513,32 @@ fn concurrent_formatted_time_uses_scheduler_timestamp() {
     );
 }
 
+/// A generator nobody waits on takes no edge, but the testbench keeps its
+/// scheduler timestamps: one process on a clock of period 10 reports 30
+/// after three periods, not the cycle count 3.
+#[test]
+fn idle_generator_keeps_scheduler_timestamps() {
+    let code = r#"#[test(Top)] module Top {
+        inst clk: $tb::clock_gen #(period: 10);
+        inst idle: $tb::clock_gen #(period: 4);
+        initial { clk.next(3); $assert_continue(1'd0, "time=%t"); $finish(); }
+    }"#;
+    for mode in [
+        celox::SchedulerMode::Reference,
+        celox::SchedulerMode::Compiled,
+    ] {
+        let result = Simulator::builder(code, "Top")
+            .scheduler_mode(mode)
+            .run_test_detailed()
+            .unwrap();
+        assert_eq!(
+            result.assertions.last().unwrap().message.as_deref(),
+            Some(b"time=30".as_slice()),
+            "{mode:?}"
+        );
+    }
+}
+
 #[test]
 fn concurrent_runtime_assertions_use_event_time() {
     let code = r#"

@@ -112,24 +112,38 @@ delays are the testbench's time.
 
 ### `$tb::clock_gen`
 
-`inst clk: $tb::clock_gen #(period: P);` is a clock generator that runs from
-time 0, whether or not a process waits on it. `P` defaults to 2 and is at
+`inst clk: $tb::clock_gen #(period: P);` is an oscillator with an enable:
+it runs only while some process waits on it, in `clk.next` or in
+`rst.assert` on a reset generator of this clock. `P` defaults to 2 and is at
 least 2; with `H = ceil(P / 2)` and `L = floor(P / 2)`:
 
 ```systemverilog
 bit clk = 1'b0;
+int unsigned clk_waiters = 0; // processes in clk.next / rst.assert on clk
+
 initial forever begin
-  clk <= 1'b1; #H;
-  clk <= 1'b0; #L;
+  wait (clk_waiters != 0);
+  clk <= 1'b1;
+  #H clk <= 1'b0;
+  #L;
 end
 ```
+
+- The generator finishes a whole period before it looks at its enable again,
+  so a rising edge falls at the later of the time a process starts waiting
+  and the previous rising edge plus `P`. Back-to-back `next` calls are
+  continuous, and a clock left idle restarts at the instant a process next
+  waits on it.
+- A clock nobody waits on takes no edge, so its domains do not run.
 
 ### `clk.next(n)`
 
 ```systemverilog
 task automatic clk_next(int unsigned n);
   if (n != 0) begin
+    clk_waiters++;
     repeat (n) @(posedge clk);
+    clk_waiters--;
     #P;
   end
 endtask
@@ -143,10 +157,12 @@ endtask
 - The clock rises through a nonblocking assignment, after the processes that
   resume at the same time have run. What a process writes between two
   `next` calls is therefore sampled by the rising edge that follows, without
-  a race.
-- Several initial processes, and several clocks of different periods, need no
-  further rule: they are concurrent SystemVerilog processes. A clock nobody
-  waits on keeps running and clocking its domains.
+  a race. A process that calls `next` again when it resumes, at the end of a
+  period, keeps the clock running: the rise is in that same slot whichever
+  of the process and the generator runs first.
+- Processes waiting on the same clock count the same edges. Clocks of
+  different periods due at the same instant rise in one nonblocking
+  assignment region, so their domains read pre-edge values.
 
 ### `$tb::reset_gen`
 
@@ -165,7 +181,9 @@ With `P` the period of the generator's clock:
 task automatic rst_assert(int unsigned n);
   if (n == 0) n = 1;
   rst = A;
+  clk_waiters++;
   repeat (n) @(posedge clk);
+  clk_waiters--;
   #P;
   rst = I;
 endtask

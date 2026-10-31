@@ -279,9 +279,9 @@ pub type SemanticStatement<A> = TestbenchStatement<
 pub type SemanticComponentBinding<A> =
     ComponentBinding<A, SemanticSignal<A>, ExprBytecode<StateLocation<A>>>;
 
-/// A `$tb::clock_gen` instance: a clock that runs from time 0, rising at
-/// multiples of `period` and falling `ceil(period / 2)` after each rise,
-/// whether or not a process waits on it.
+/// A `$tb::clock_gen` instance: a clock that starts low and rises only
+/// while some process waits on it, a period apart, falling
+/// `ceil(period / 2)` after each rise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchClock<Event> {
     pub event: Event,
