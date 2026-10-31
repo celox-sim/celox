@@ -90,11 +90,17 @@ impl Prefix<'_> {
     pub fn ranges(
         &self,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         env: &HashMap<String, i128>,
         aliases: &HashMap<String, Type>,
     ) -> Converted<Vec<PackedRange>> {
-        let mut ranges =
-            constant_binding::packed_ranges(&self.data.packed_dimensions, tree, env, aliases)?;
+        let mut ranges = constant_binding::packed_ranges(
+            &self.data.packed_dimensions,
+            tree,
+            session,
+            env,
+            aliases,
+        )?;
         if let Some(base) = self.alias.as_ref().or(self.primitive.as_ref()) {
             ranges.extend(base.packed_ranges.iter().cloned());
         }

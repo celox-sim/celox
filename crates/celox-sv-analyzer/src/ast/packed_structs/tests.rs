@@ -204,7 +204,7 @@ fn rejects_empty_tagged_union_without_panicking() {
     assert!(
         analyze_source(
             "module Top; union tagged packed {} item; endmodule",
-            Path::new("empty_tagged.sv")
+            Path::new("empty_tagged.sv"),
         )
         .is_err()
     );

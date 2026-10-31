@@ -7,6 +7,7 @@ pub(super) fn bind(
     id: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<(Expr, VariableDimensions)>> {
     let callee = match &native.expression(id).kind {
@@ -39,7 +40,7 @@ pub(super) fn bind(
             _ => op,
         };
     }
-    if let Some(container) = containers::native_type(*base, native, tree, dims)? {
+    if let Some(container) = containers::native_type(*base, native, tree, session, dims)? {
         if let ExprKind::Call { arguments, .. } = &native.expression(id).kind
             && !arguments.is_empty()
         {
@@ -59,7 +60,9 @@ pub(super) fn bind(
             containers::call(
                 op,
                 container.layout,
-                vec![expression_binding::value(*base, native, tree, dims)?],
+                vec![expression_binding::value(
+                    *base, native, tree, session, dims,
+                )?],
             ),
             procedural::dimensions_from_type(&container.element),
         )));

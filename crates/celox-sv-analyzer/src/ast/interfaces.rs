@@ -979,9 +979,14 @@ struct Design<'a> {
     modules: HashMap<String, ModuleDecl>,
     /// The ports of every subroutine declared or imported, by name.
     subroutines: HashMap<String, Vec<(Scope, usize, SubroutinePorts)>>,
-    expansions: std::cell::RefCell<HashMap<ExpansionKey, Expansion>>,
+}
+
+/// The interface port expansions a plan computes, each once.
+#[derive(Default)]
+struct Expansions {
+    done: HashMap<ExpansionKey, Expansion>,
     /// The expansions being computed, to reject a recursive instantiation.
-    expanding: std::cell::RefCell<HashSet<ExpansionKey>>,
+    expanding: HashSet<ExpansionKey>,
 }
 
 impl<'a> Design<'a> {
@@ -1147,8 +1152,6 @@ impl<'a> Design<'a> {
             interfaces,
             modules,
             subroutines,
-            expansions: Default::default(),
-            expanding: Default::default(),
         })
     }
 
@@ -1167,6 +1170,7 @@ impl<'a> Design<'a> {
 
     fn expansion(
         &self,
+        expansions: &mut Expansions,
         module: &str,
         port: &str,
         interface: &str,
@@ -1178,23 +1182,24 @@ impl<'a> Design<'a> {
             interface.to_string(),
             bindings.to_vec(),
         );
-        if let Some(expansion) = self.expansions.borrow().get(&key) {
+        if let Some(expansion) = expansions.done.get(&key) {
             return Ok(expansion.clone());
         }
-        if !self.expanding.borrow_mut().insert(key.clone()) {
+        if !expansions.expanding.insert(key.clone()) {
             return Err(unsupported(format!(
                 "recursive instantiation through interface port `{port}` of module `{module}`"
             )));
         }
-        let expansion = self.compute_expansion(module, port, interface, bindings);
-        self.expanding.borrow_mut().remove(&key);
+        let expansion = self.compute_expansion(expansions, module, port, interface, bindings);
+        expansions.expanding.remove(&key);
         let expansion = expansion?;
-        self.expansions.borrow_mut().insert(key, expansion.clone());
+        expansions.done.insert(key, expansion.clone());
         Ok(expansion)
     }
 
     fn compute_expansion(
         &self,
+        expansions: &mut Expansions,
         module_name: &str,
         port_name: &str,
         interface_name: &str,
@@ -1281,6 +1286,7 @@ impl<'a> Design<'a> {
                 .filter(|child| child.handle == port_name)
             {
                 let child_expansion = self.expansion(
+                    expansions,
                     &child.module,
                     &child.formal,
                     interface_name,
@@ -1357,6 +1363,7 @@ impl<'a> Design<'a> {
             .filter(|child| child.handle == port_name)
         {
             let child_expansion = self.expansion(
+                expansions,
                 &child.module,
                 &child.formal,
                 interface_name,
@@ -3197,6 +3204,8 @@ pub fn plan_interfaces_with_member_paths(
     } else {
         Design::collect(&files)?
     };
+    let mut expansions = Expansions::default();
+    let expansions = &mut expansions;
     let mut result = NativeInterfacePlan::default();
     let mut reflected_paths = HashMap::default();
     if design.interfaces.is_empty() {
@@ -3280,7 +3289,8 @@ pub fn plan_interfaces_with_member_paths(
                         port.name
                     ))
                 })?;
-            let expansion = design.expansion(&name, &port.name, interface, &bindings)?;
+            let expansion =
+                design.expansion(expansions, &name, &port.name, interface, &bindings)?;
             let uses = design.module_uses(&name, (&port.name, interface), &bindings)?;
             let declaration = &design.interfaces[interface];
             for (handle, member, _) in &uses.references {
@@ -3489,6 +3499,7 @@ pub fn plan_interfaces_with_member_paths(
                         })
                         .collect::<Vec<_>>();
                     let child_expansion = design.expansion(
+                        expansions,
                         &child_name,
                         &formal,
                         &handle.interface,

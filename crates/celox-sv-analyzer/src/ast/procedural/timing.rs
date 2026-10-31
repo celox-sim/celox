@@ -5,7 +5,10 @@ use celox_sv_syntax::{
 };
 
 impl BodyBuilder<'_, '_, '_> {
-    pub(super) fn native_timing_control(&self, id: TimingControlId) -> Result<Stmt, AnalyzerError> {
+    pub(super) fn native_timing_control(
+        &mut self,
+        id: TimingControlId,
+    ) -> Result<Stmt, AnalyzerError> {
         let control = self.tree.declarations().timing_control(id);
         match &control.kind {
             TimingControlKind::Delay {
@@ -36,6 +39,7 @@ impl BodyBuilder<'_, '_, '_> {
                         if items.iter().any(|item| {
                             events::is_handle(
                                 self.tree,
+                                self.session,
                                 item.expression,
                                 self.tree.declarations(),
                                 &self.dims,
@@ -50,6 +54,7 @@ impl BodyBuilder<'_, '_, '_> {
                                 || item.iff.is_some()
                                 || !events::is_handle(
                                     self.tree,
+                                    self.session,
                                     item.expression,
                                     self.tree.declarations(),
                                     &self.dims,
@@ -86,6 +91,7 @@ impl BodyBuilder<'_, '_, '_> {
                     EventControl::Named(id)
                         if events::is_handle(
                             self.tree,
+                            self.session,
                             *id,
                             self.tree.declarations(),
                             &self.dims,
@@ -130,8 +136,14 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(None);
         };
         if !items.iter().any(|item| {
-            virtual_interfaces::native_member(self.tree, item.expression, native, &self.dims)
-                .is_some()
+            virtual_interfaces::native_member(
+                self.tree,
+                self.session,
+                item.expression,
+                native,
+                &self.dims,
+            )
+            .is_some()
         }) {
             return Ok(None);
         }
@@ -148,6 +160,7 @@ impl BodyBuilder<'_, '_, '_> {
             let iff = item.iff.map(|iff| self.native_value(iff)).transpose()?;
             let expr = match virtual_interfaces::native_member(
                 self.tree,
+                self.session,
                 item.expression,
                 native,
                 &self.dims,
@@ -163,7 +176,7 @@ impl BodyBuilder<'_, '_, '_> {
                     // A write of the selected member is an event at the
                     // write; a change of the selection, at the change.
                     for (signal, denotes) in
-                        virtual_interfaces::watched_writes(&self.tree.state, &handle, &ty, &member)?
+                        virtual_interfaces::watched_writes(self.session, &handle, &ty, &member)?
                     {
                         events.push(EventItemBase {
                             edge,
@@ -178,7 +191,7 @@ impl BodyBuilder<'_, '_, '_> {
                             }),
                         });
                     }
-                    virtual_interfaces::watched(self.tree, handle, &ty, &member)?
+                    virtual_interfaces::watched(self.tree, self.session, handle, &ty, &member)?
                 }
                 None => self.native_value(item.expression)?,
             };
@@ -241,7 +254,11 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(true)
     }
 
-    fn native_delay(&self, mut value: ExprId, parenthesized: bool) -> Result<Expr, AnalyzerError> {
+    fn native_delay(
+        &mut self,
+        mut value: ExprId,
+        parenthesized: bool,
+    ) -> Result<Expr, AnalyzerError> {
         let native = self.tree.declarations();
         if parenthesized {
             value = expression_binding::ungroup(value, native);

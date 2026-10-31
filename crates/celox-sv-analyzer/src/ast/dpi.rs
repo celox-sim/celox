@@ -21,6 +21,7 @@ const MAX_DPI_ARGUMENTS: usize = 16;
 pub(super) fn imports(
     items: &[generate::Item],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<DpiImport>, AnalyzerError> {
     let syntax = tree.declarations();
@@ -33,7 +34,15 @@ pub(super) fn imports(
             if declaration.import {
                 imports.push(import(id, syntax)?);
             } else {
-                export(declaration, item, items, tree, type_aliases, &mut exports)?;
+                export(
+                    declaration,
+                    item,
+                    items,
+                    tree,
+                    session,
+                    type_aliases,
+                    &mut exports,
+                )?;
             }
         }
     }
@@ -48,6 +57,7 @@ fn export(
     item: &generate::Item,
     items: &[generate::Item],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     type_aliases: &HashMap<String, Type>,
     exports: &mut HashMap<(String, String), String>,
 ) -> Result<(), AnalyzerError> {
@@ -89,8 +99,8 @@ fn export(
     // scope of the export, as its subroutine's are.
     let aliases = item.type_aliases(type_aliases);
     let context = PackedDimensions::new(HashMap::default(), &item.env, &aliases);
-    let class_handle = |id| -> Result<bool, AnalyzerError> {
-        Ok(type_binding::bind(id, tree, &context)?.is_some_and(|ty| ty.class().is_some()))
+    let mut class_handle = |id| -> Result<bool, AnalyzerError> {
+        Ok(type_binding::bind(id, tree, session, &context)?.is_some_and(|ty| ty.class().is_some()))
     };
     let ports = subroutine.ports.iter().flatten().chain(
         subroutine

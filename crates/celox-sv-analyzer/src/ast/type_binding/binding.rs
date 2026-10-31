@@ -5,18 +5,20 @@ use celox_sv_syntax::{Dimension, DimensionKind, ExprId, ExprKind};
 pub(in crate::ast) fn bind(
     root: TypeId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    bind_in(root, tree.declarations(), tree, context)
+    bind_in(root, tree.declarations(), tree, session, context)
 }
 
 pub(in crate::ast) fn bind_in(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    bind_in_mode(root, native, tree, context, BindingMode::Use)
+    bind_in_mode(root, native, tree, session, context, BindingMode::Use)
 }
 
 /// Typedef discovery precedes enum constant resolution, so dependent aliases
@@ -26,6 +28,7 @@ pub(in crate::ast) fn bind_alias_in(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
     defer_defaults: bool,
 ) -> Converted<Option<Type>> {
@@ -33,6 +36,7 @@ pub(in crate::ast) fn bind_alias_in(
         root,
         native,
         tree,
+        session,
         context,
         BindingMode::Alias { defer_defaults },
     )
@@ -48,6 +52,7 @@ impl BindingMode {
     fn specialize(
         self,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         generic: &str,
         arguments: &[celox_sv_syntax::Argument],
         context: &PackedDimensions,
@@ -59,11 +64,13 @@ impl BindingMode {
             }
         ) {
             super::super::classes::specializations::specialize_if_ready(
-                tree, generic, arguments, context,
+                tree, session, generic, arguments, context,
             )
         } else {
-            super::super::classes::specializations::specialize(tree, generic, arguments, context)
-                .map(Some)
+            super::super::classes::specializations::specialize(
+                tree, session, generic, arguments, context,
+            )
+            .map(Some)
         }
     }
 }
@@ -72,6 +79,7 @@ fn bind_in_mode(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
     mode: BindingMode,
 ) -> Converted<Option<Type>> {
@@ -99,9 +107,9 @@ fn bind_in_mode(
             Job::Enter(id) => {
                 let data = native.data_type(id);
                 let ranges = if matches!(data.kind, DataTypeKind::Struct { .. }) {
-                    bind_ranges(&data.packed_dimensions, tree, context)?
+                    bind_ranges(&data.packed_dimensions, tree, session, context)?
                 } else {
-                    packed_ranges(&data.packed_dimensions, tree, context)?
+                    packed_ranges(&data.packed_dimensions, tree, session, context)?
                 };
                 match &data.kind {
                     DataTypeKind::Implicit => {
@@ -121,7 +129,7 @@ fn bind_in_mode(
                     }
                     DataTypeKind::Named(path) => {
                         if let Some(ty) =
-                            super::super::processes::builtin_type(path, tree, context)?
+                            super::super::processes::builtin_type(path, tree, session, context)?
                         {
                             values.push(types::enclose_aliased_packed_type(*ty, ranges));
                             continue;
@@ -133,11 +141,13 @@ fn bind_in_mode(
                             let name = normalize_identifier(&part.name.spelling);
                             if (part.arguments.is_some()
                                 || !context.type_aliases.contains_key(&name))
-                                && let Some(name) = super::super::classes::resolve(tree, &name)
-                                && super::super::classes::is_parameterized(tree, &name)
+                                && let Some(name) =
+                                    super::super::classes::resolve(tree, session, &name)
+                                && super::super::classes::is_parameterized(tree, session, &name)
                             {
                                 let Some(name) = mode.specialize(
                                     tree,
+                                    session,
                                     &name,
                                     part.arguments.as_deref().unwrap_or_default(),
                                     context,
@@ -156,11 +166,11 @@ fn bind_in_mode(
                                 &normalize_identifier(&class.name.spelling),
                             );
                             if let Some(class) =
-                                class_scope_named(class, tree, context, mode, name)?
+                                class_scope_named(class, tree, session, context, mode, name)?
                             {
                                 let member = normalize_identifier(&member.name.spelling);
                                 let ty = super::super::classes::specializations::member_type(
-                                    tree, &class, &member,
+                                    tree, session, &class, &member,
                                 )
                                 .ok_or_else(|| {
                                     unsupported(format!("type `{member}` of class `{class}`"))
@@ -172,11 +182,11 @@ fn bind_in_mode(
                         // A type that a class declares, `C::T` (IEEE 1800-2023
                         // 8.23, 8.25.1).
                         if let [scope, member] = path.as_slice()
-                            && let Some(class) = class_scope(scope, tree, context, mode)?
+                            && let Some(class) = class_scope(scope, tree, session, context, mode)?
                         {
                             let member = normalize_identifier(&member.name.spelling);
                             let ty = super::super::classes::specializations::member_type(
-                                tree, &class, &member,
+                                tree, session, &class, &member,
                             )
                             .ok_or_else(|| {
                                 unsupported(format!("type `{member}` of class `{class}`"))
@@ -202,14 +212,14 @@ fn bind_in_mode(
                             };
                             if let Some(class) = class
                                 .as_ref()
-                                .filter(|class| tree.state.foreign.contains(class))
+                                .filter(|class| session.foreign.contains(class))
                             {
                                 let arguments = path
                                     .last()
                                     .and_then(|part| part.arguments.as_deref())
                                     .unwrap_or_default();
                                 let Some(name) =
-                                    mode.specialize(tree, class, arguments, context)?
+                                    mode.specialize(tree, session, class, arguments, context)?
                                 else {
                                     return Ok(None);
                                 };
@@ -246,14 +256,16 @@ fn bind_in_mode(
                             // package itself, whose classes are declared
                             // under their qualified names.
                             let class = match path.as_slice() {
-                                [_] => super::super::classes::resolve(tree, &name),
-                                _ => super::super::classes::handle_type(tree, &name)
+                                [_] => super::super::classes::resolve(tree, session, &name),
+                                _ => super::super::classes::handle_type(tree, session, &name)
                                     .map(|_| name.clone())
-                                    .or_else(|| super::super::classes::resolve(tree, &name)),
+                                    .or_else(|| {
+                                        super::super::classes::resolve(tree, session, &name)
+                                    }),
                             };
-                            if let Some(class) = class
-                                .and_then(|class| super::super::classes::handle_type(tree, &class))
-                            {
+                            if let Some(class) = class.and_then(|class| {
+                                super::super::classes::handle_type(tree, session, &class)
+                            }) {
                                 values.push(class);
                                 continue;
                             }
@@ -269,9 +281,11 @@ fn bind_in_mode(
                             let mut ty = builtin_type("int", None).unwrap();
                             ty.is_enum = true;
                             if matches!(mode, BindingMode::Use) {
-                                validate_enum_initializers(id, native, tree, context, &ty)?;
+                                validate_enum_initializers(
+                                    id, native, tree, session, context, &ty,
+                                )?;
                             }
-                            ty.enum_domain = enum_values(id, native, tree, context, &ty);
+                            ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
                             ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
                             ty.packed_ranges = ranges.into_iter().chain(ty.packed_ranges).collect();
                             values.push(ty);
@@ -365,7 +379,7 @@ fn bind_in_mode(
                         modport,
                     } => {
                         values.push(super::super::virtual_interfaces::bind_type(
-                            &tree.state,
+                            session,
                             name,
                             arguments.as_deref(),
                             modport.as_ref(),
@@ -379,13 +393,13 @@ fn bind_in_mode(
                     return Err(unsupported("enum base type"));
                 };
                 if matches!(mode, BindingMode::Use) {
-                    validate_enum_initializers(id, native, tree, context, &ty)?;
+                    validate_enum_initializers(id, native, tree, session, context, &ty)?;
                 }
                 let mut outer = ranges;
                 outer.extend(ty.packed_ranges);
                 ty.packed_ranges = outer;
                 ty.is_enum = true;
-                ty.enum_domain = enum_values(id, native, tree, context, &ty);
+                ty.enum_domain = enum_values(id, native, tree, session, context, &ty);
                 ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
                 values.push(ty);
             }
@@ -459,6 +473,7 @@ fn bind_in_mode(
 pub(in crate::ast) fn packed_ranges(
     dimensions: &[Dimension],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Vec<PackedRange>> {
     if dimensions.is_empty() {
@@ -482,12 +497,13 @@ pub(in crate::ast) fn packed_ranges(
     }
     all.sort_by_key(|dimension| dimension.tokens.start);
     all.dedup_by_key(|dimension| dimension.tokens);
-    bind_ranges(&all, tree, context)
+    bind_ranges(&all, tree, session, context)
 }
 
 fn bind_ranges(
     dimensions: &[Dimension],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Vec<PackedRange>> {
     let mut result = Vec::new();
@@ -495,8 +511,8 @@ fn bind_ranges(
         let DimensionKind::Range { left, right } = dimension.kind else {
             return Err(unsupported("unsized packed dimension"));
         };
-        let left = constant_binding::bind(left, tree, context)?;
-        let right = constant_binding::bind(right, tree, context)?;
+        let left = constant_binding::bind(left, tree, session, context)?;
+        let right = constant_binding::bind(right, tree, session, context)?;
         if let (Some(left), Some(right)) = (left, right) {
             result.push(PackedRange::new(left, right));
         }
@@ -510,12 +526,14 @@ fn bind_ranges(
 fn class_scope(
     scope: &celox_sv_syntax::TypeSegment,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
     mode: BindingMode,
 ) -> Converted<Option<String>> {
     class_scope_named(
         scope,
         tree,
+        session,
         context,
         mode,
         normalize_identifier(&scope.name.spelling),
@@ -525,6 +543,7 @@ fn class_scope(
 fn class_scope_named(
     scope: &celox_sv_syntax::TypeSegment,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
     mode: BindingMode,
     name: String,
@@ -535,7 +554,7 @@ fn class_scope_named(
             .get(&super::super::classes::specializations::scope_key(&name))
             .or_else(|| {
                 // A class of a package is declared under its qualified name.
-                let class = super::super::classes::resolve(tree, &name)?;
+                let class = super::super::classes::resolve(tree, session, &name)?;
                 context
                     .type_aliases
                     .get(&super::super::classes::specializations::scope_key(&class))
@@ -545,7 +564,7 @@ fn class_scope_named(
     {
         return Ok(Some(class));
     }
-    let Some(class) = super::super::classes::resolve(tree, &name) else {
+    let Some(class) = super::super::classes::resolve(tree, session, &name) else {
         return Ok(None);
     };
     // Resolve a user package before std's implicit class fallback for this
@@ -556,7 +575,7 @@ fn class_scope_named(
         return Ok(None);
     }
     let name = class;
-    if !super::super::classes::is_parameterized(tree, &name) {
+    if !super::super::classes::is_parameterized(tree, session, &name) {
         if scope
             .arguments
             .as_ref()
@@ -567,10 +586,12 @@ fn class_scope_named(
             )));
         }
         // Its members are those of its one specialization.
-        if super::super::classes::handle_type(tree, &name).is_some()
-            && super::super::classes::specializations::lookup(tree, &name).is_none()
-            && super::super::classes::is_declared(tree, &name)
-            && mode.specialize(tree, &name, &[], context)?.is_none()
+        if super::super::classes::handle_type(tree, session, &name).is_some()
+            && super::super::classes::specializations::lookup(session, &name).is_none()
+            && super::super::classes::is_declared(tree, session, &name)
+            && mode
+                .specialize(tree, session, &name, &[], context)?
+                .is_none()
         {
             return Ok(None);
         }
@@ -579,16 +600,17 @@ fn class_scope_named(
     let Some(arguments) = &scope.arguments else {
         return Err(AnalyzerError::UnspecializedClassScope { class: name });
     };
-    mode.specialize(tree, &name, arguments, context)
+    mode.specialize(tree, session, &name, arguments, context)
 }
 
 pub(in crate::ast) fn expression_type(
     root: ExprId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Option<ExprType>> {
     if let ExprKind::Type(id) = tree.declarations().expression(root).kind {
-        return Ok(bind(id, tree, context)?
+        return Ok(bind(id, tree, session, context)?
             .and_then(|ty| expr_type_from_type(&tree.functions, &ty, &context.const_env)));
     }
     if let Some((name, ranges)) = argument_alias(root, tree.declarations())
@@ -600,8 +622,10 @@ pub(in crate::ast) fn expression_type(
         && !context.parameter_values.contains_key(&name)
         && let Some(ty) = context.type_aliases.get(&name)
     {
-        let ty =
-            types::enclose_aliased_packed_type(ty.clone(), packed_ranges(&ranges, tree, context)?);
+        let ty = types::enclose_aliased_packed_type(
+            ty.clone(),
+            packed_ranges(&ranges, tree, session, context)?,
+        );
         return Ok(expr_type_from_type(
             &tree.functions,
             &ty,
@@ -616,7 +640,7 @@ pub(in crate::ast) fn expression_type(
     );
     query.type_query = true;
     query.functions = Arc::default();
-    let value = expression_binding::bind(root, tree, &query)?;
+    let value = expression_binding::bind(root, tree, session, &query)?;
     Ok(dimensions::bound_bits_type(tree, &value, &query))
 }
 
@@ -626,6 +650,7 @@ pub(in crate::ast) fn validate_enum_initializers(
     id: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
     ty: &Type,
 ) -> Converted<()> {
@@ -677,20 +702,20 @@ pub(in crate::ast) fn validate_enum_initializers(
         }
         // During signature discovery some constants are still unresolved.
         // Leave their resolution to the ordinary constant-binding pass.
-        let expr = constant_binding::expression(value, native, tree, &env, &context.type_aliases)
-            .ok()
-            .flatten()
-            .and_then(|expr| {
-                expr_to_const(
-                    &tree.state,
-                    constants::substitute_expr_constants_with_parameter_literals(
+        let expr =
+            constant_binding::expression(value, native, tree, session, &env, &context.type_aliases)
+                .ok()
+                .flatten()
+                .and_then(|expr| {
+                    let substituted = constants::substitute_expr_constants_with_parameter_literals(
                         tree,
+                        session,
                         const_expr_to_expr(expr),
                         &env,
                         &unknown_literals,
-                    ),
-                )
-            });
+                    );
+                    expr_to_const(session, substituted)
+                });
         let expr = expr.map(|expr| match expr {
             ConstExpr::Literal(text) => ConstExpr::Literal(
                 resize_unbased_fill_literal_for_cast(&text, shape.width, shape.signed)
@@ -755,6 +780,7 @@ fn enum_values(
     id: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
     ty: &Type,
 ) -> Option<Arc<enums::EnumDomain>> {
@@ -778,8 +804,15 @@ fn enum_values(
             return None;
         }
         let value = if let Some(id) = item.value {
-            let expr = constant_binding::expression(id, native, tree, &env, &context.type_aliases)
-                .ok()??;
+            let expr = constant_binding::expression(
+                id,
+                native,
+                tree,
+                session,
+                &env,
+                &context.type_aliases,
+            )
+            .ok()??;
             // Unbased fills take the enum base's width and signedness, just
             // as they do when resolving the declared enum constants (5.7.1).
             let expr = match expr {

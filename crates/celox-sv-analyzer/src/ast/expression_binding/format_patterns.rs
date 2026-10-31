@@ -85,6 +85,7 @@ pub(in crate::ast) fn rewrite_template(
 /// names are renamed).
 pub(in crate::ast) fn pattern(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     value: &Expr,
     native: &Declarations,
@@ -106,20 +107,22 @@ pub(in crate::ast) fn pattern(
         // A string literal is integral unless the other operand is a string
         // (5.9, 6.16), and an enum operand is integral unless the other
         // operand has the same enumerated type (11.4.11).
-        let enum_valued = enums::domain(tree, id, native, dimensions)?.is_some();
-        let operand = |id, value| {
-            if !enum_valued && enums::domain(tree, id, native, dimensions)?.is_some() {
+        let enum_valued = enums::domain(tree, session, id, native, dimensions)?.is_some();
+        let mut operand = |id, value| {
+            if !enum_valued && enums::domain(tree, session, id, native, dimensions)?.is_some() {
                 return Ok(Pattern::Integral);
             }
-            Ok(match pattern(tree, id, value, native, dimensions)? {
-                Pattern::String
-                    if matches!(&native.expression(ungroup(id, native)).kind,
+            Ok(
+                match pattern(tree, session, id, value, native, dimensions)? {
+                    Pattern::String
+                        if matches!(&native.expression(ungroup(id, native)).kind,
                         ExprKind::Literal(text) if text.starts_with('"')) =>
-                {
-                    Pattern::Integral
-                }
-                pattern => pattern,
-            })
+                    {
+                        Pattern::Integral
+                    }
+                    pattern => pattern,
+                },
+            )
         };
         let then_pattern = operand(*then_expression, then_expr)?;
         let else_pattern = operand(*else_expression, else_expr)?;
@@ -137,12 +140,12 @@ pub(in crate::ast) fn pattern(
     if matches!(expression, ExprKind::Call { expression, .. }
         if direct::call_name(tree, *expression, native)
             .is_some_and(|name| returns_enum(&name, dimensions)))
-        || enums::domain(tree, id, native, dimensions)?.is_some()
+        || enums::domain(tree, session, id, native, dimensions)?.is_some()
     {
         return Err(unsupported("%p of an enum value"));
     }
     if strings::string_value(value, dimensions)
-        || strings::native_string(tree, id, native, dimensions)
+        || strings::native_string(tree, session, id, native, dimensions)
         || matches!(expression, ExprKind::Literal(text) if text.starts_with('"'))
     {
         return Ok(Pattern::String);
@@ -150,7 +153,7 @@ pub(in crate::ast) fn pattern(
     if matches!(expression, ExprKind::Literal(text) if text == "null") {
         return Ok(Pattern::Handle(None));
     }
-    if let Some(container) = containers::native_type(id, native, tree, dimensions)? {
+    if let Some(container) = containers::native_type(id, native, tree, session, dimensions)? {
         let element = &container.element;
         if element.is_enum || element.enum_domain.is_some() || element.packed_enum {
             return Err(unsupported("%p of a container of enum values"));
@@ -188,7 +191,7 @@ pub(in crate::ast) fn pattern(
         }
         return Ok(Pattern::Handle(Some(container.layout)));
     }
-    if objects::native_class(tree, id, native, dimensions).is_some()
+    if objects::native_class(tree, session, id, native, dimensions).is_some()
         || handle_value(value, dimensions)
         || matches!(expression, ExprKind::Call { expression, .. }
             if direct::call_name(tree, *expression, native)
@@ -212,7 +215,7 @@ pub(in crate::ast) fn pattern(
         _ => None,
     };
     if let Some(base) = base {
-        if let Some(container) = containers::native_type(base, native, tree, dimensions)? {
+        if let Some(container) = containers::native_type(base, native, tree, session, dimensions)? {
             let element = &container.element;
             if element.is_enum || element.enum_domain.is_some() || element.packed_enum {
                 return Err(unsupported("%p of an enum value"));
@@ -254,7 +257,8 @@ pub(in crate::ast) fn pattern(
     };
     let aggregate_value = match expression {
         ExprKind::Cast { target, .. } => {
-            enums::cast_type(tree, *target, native, dimensions)?.is_some_and(|ty| aggregate(&ty))
+            enums::cast_type(tree, session, *target, native, dimensions)?
+                .is_some_and(|ty| aggregate(&ty))
         }
         ExprKind::Call { expression, .. } => direct::call_name(tree, *expression, native)
             .is_some_and(|name| returns_aggregate(&name, dimensions, aggregate)),
@@ -262,8 +266,8 @@ pub(in crate::ast) fn pattern(
     };
     // A value of unpacked structure type: a variable, member or property.
     if aggregate_value
-        || unpacked_structs::native_struct(id, native, tree, dimensions)?.is_some()
-        || objects::aggregate_property(tree, id, native, dimensions)?.is_some()
+        || unpacked_structs::native_struct(id, native, tree, session, dimensions)?.is_some()
+        || objects::aggregate_property(tree, session, id, native, dimensions)?.is_some()
     {
         return Err(unsupported("%p of a structure or unpacked array"));
     }
@@ -286,7 +290,7 @@ pub(in crate::ast) fn pattern(
                 || !shape.unpacked.is_empty(),
         );
     }
-    if let Some((property, _)) = objects::property(tree, id, native, dimensions)? {
+    if let Some((property, _)) = objects::property(tree, session, id, native, dimensions)? {
         let ty = &property.r#type;
         return checked(
             ty.is_enum || ty.enum_domain.is_some() || ty.packed_enum,
@@ -433,6 +437,7 @@ pub(in crate::ast) fn rewrite_format(
     ids: &[ExprId],
     values: &mut [Expr],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Vec<u8>> {
@@ -441,7 +446,7 @@ pub(in crate::ast) fn rewrite_format(
             // A conversion without an argument prints nothing.
             return Ok(&b"%0d"[..]);
         };
-        let pattern = pattern(tree, id, value, native, dimensions)?;
+        let pattern = pattern(tree, session, id, value, native, dimensions)?;
         let (conversion, argument) = pattern_argument(
             pattern,
             std::mem::replace(value, Expr::Literal("0".into())),
@@ -470,6 +475,7 @@ pub(in crate::ast) fn format(
     ids: &[ExprId],
     mut operands: Vec<Expr>,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
@@ -479,7 +485,7 @@ pub(in crate::ast) fn format(
         && has_pattern(&bytes)
         && let Some((first, rest)) = operands.split_first_mut()
     {
-        let template = rewrite_format(&bytes, values, rest, tree, native, dimensions)?;
+        let template = rewrite_format(&bytes, values, rest, tree, session, native, dimensions)?;
         *first = bytes_literal(&template);
     }
     Ok(strings::call(StringOp::Format { ticks_per_unit }, operands))

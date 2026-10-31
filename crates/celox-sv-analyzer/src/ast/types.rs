@@ -4,11 +4,13 @@ use celox_sv_syntax::{BodyItemKind, ParameterKind, TypeAliasTarget};
 
 pub(super) fn type_aliases_from_scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
 ) -> Converted<HashMap<String, Type>> {
     // Constants of this scope are not available until parameter collection.
     // The subsequent pass with an environment requires complete defaults.
     type_aliases_in_scope(
         tree,
+        session,
         &HashMap::default(),
         &HashMap::default(),
         true,
@@ -19,10 +21,12 @@ pub(super) fn type_aliases_from_scope(
 }
 pub(super) fn type_aliases_from_scope_with_env(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
 ) -> Converted<HashMap<String, Type>> {
     type_aliases_in_scope(
         syntax_tree,
+        session,
         const_env,
         &HashMap::default(),
         true,
@@ -35,12 +39,14 @@ pub(super) fn type_aliases_from_scope_with_env(
 /// Resolve a selected body while retaining its enclosing lexical type bindings.
 pub(super) fn type_aliases_from_body_with_env(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
 ) -> Converted<HashMap<String, Type>> {
     type_aliases_in_scope(
         syntax_tree,
+        session,
         const_env,
         inherited,
         false,
@@ -55,6 +61,7 @@ pub(super) fn type_aliases_from_body_with_env(
 /// in each iteration of a loop (IEEE 1800-2023 27.4).
 pub(super) fn type_aliases_of_generate_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
@@ -62,6 +69,7 @@ pub(super) fn type_aliases_of_generate_scope(
 ) -> Converted<HashMap<String, Type>> {
     type_aliases_in_scope(
         syntax_tree,
+        session,
         const_env,
         inherited,
         false,
@@ -73,6 +81,7 @@ pub(super) fn type_aliases_of_generate_scope(
 
 fn type_aliases_in_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
     include_header: bool,
@@ -93,6 +102,7 @@ fn type_aliases_in_scope(
                 parameter,
                 parameter.id,
                 syntax_tree,
+                session,
                 const_env,
                 &mut aliases,
             )?;
@@ -117,6 +127,7 @@ fn type_aliases_in_scope(
                         parameter,
                         parameter.id,
                         syntax_tree,
+                        session,
                         const_env,
                         &mut aliases,
                     )?;
@@ -131,6 +142,7 @@ fn type_aliases_in_scope(
                     id,
                     syntax_tree.declarations(),
                     syntax_tree,
+                    session,
                     const_env,
                     &aliases,
                     defer_class_defaults,
@@ -139,8 +151,13 @@ fn type_aliases_in_scope(
                     continue;
                 };
                 let context = PackedDimensions::new(HashMap::default(), const_env, &aliases);
-                let mut ty =
-                    containers::with_dimensions(base, &alias.dimensions, syntax_tree, &context)?;
+                let mut ty = containers::with_dimensions(
+                    base,
+                    &alias.dimensions,
+                    syntax_tree,
+                    session,
+                    &context,
+                )?;
                 ty.name_declaration(|| declaration_name(syntax_tree, alias, generate_scope));
                 aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
             }
@@ -231,6 +248,7 @@ fn add_type_parameter(
     parameter: &celox_sv_syntax::Parameter,
     key: celox_sv_syntax::ParameterId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &mut HashMap<String, Type>,
 ) -> Converted<()> {
@@ -242,7 +260,7 @@ fn add_type_parameter(
         aliases.insert(name, bound.clone());
     } else if let Some(id) = default {
         let context = PackedDimensions::new(HashMap::default(), env, aliases);
-        if let Some(ty) = type_binding::bind(id, tree, &context)? {
+        if let Some(ty) = type_binding::bind(id, tree, session, &context)? {
             aliases.insert(name, ty);
         }
     }

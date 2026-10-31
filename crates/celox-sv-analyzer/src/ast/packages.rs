@@ -23,9 +23,9 @@ use super::*;
 /// The analyzed packages of a design.
 #[derive(Debug, Clone, Default)]
 pub struct Packages {
-    pub(super) foreign: std::rc::Rc<classes::foreign::Registry>,
-    /// Source-call identities shared with modules importing these package bodies.
-    pub(super) call_sites: std::rc::Rc<std::cell::Cell<usize>>,
+    /// What analyzing the packages made that modules analyzed with them
+    /// continue from.
+    design: Design,
     pub(crate) interface_plan: Arc<interfaces::NativeInterfacePlan>,
     /// All interface declaration names, including unsupported non-ANSI bodies.
     /// Namespace validation must not depend on sources selected for binding.
@@ -42,9 +42,18 @@ pub struct Packages {
     /// The virtual interfaces of the design, which the modules that use the
     /// packages are analyzed with.
     pub(crate) virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
-    /// The semantic types of the design, which every scope analyzed with
-    /// the packages shares.
-    pub(super) types: std::rc::Rc<semantic_types::TyTable>,
+}
+
+/// What the analyses of the modules of a design add to the packages they
+/// use: the specializations of package class templates the modules request,
+/// the semantic types of the design and its call sites. Each analysis takes
+/// it as `&mut`, starting from [`Packages::design`].
+#[derive(Clone, Debug, Default)]
+pub struct Design {
+    pub(super) foreign: classes::foreign::Registry,
+    /// Source-call identities shared with modules importing these package bodies.
+    pub(super) call_sites: usize,
+    pub(super) types: semantic_types::TyTable,
 }
 
 /// The compilation-unit scope of a source file.
@@ -198,8 +207,14 @@ impl Packages {
     }
 
     /// Package state after specialization requests made by importing scopes.
-    pub fn specialized_state_modules(&self) -> Vec<crate::ir::Module> {
-        let specialized = self.foreign.states();
+    /// The state of the design that analyzing the packages left, which the
+    /// analyses of its modules continue.
+    pub fn design(&self) -> Design {
+        self.design.clone()
+    }
+
+    pub fn specialized_state_modules(&self, design: &Design) -> Vec<crate::ir::Module> {
+        let specialized = design.foreign.states();
         // Different compilation units may each have a state module named
         // `$unit`; preserve every one rather than indexing them by name.
         let mut states = self
@@ -207,7 +222,7 @@ impl Packages {
             .filter(|module| !specialized.contains_key(module.name()))
             .cloned()
             .collect::<Vec<_>>();
-        states.extend(specialized.into_values());
+        states.extend(specialized.values().cloned());
         states.sort_by(|left, right| {
             left.name().cmp(right.name()).then_with(|| {
                 left.signals()
@@ -282,21 +297,17 @@ impl Packages {
         }
         let mixed_timescales = timescales.has_mixed_timescales();
         let timescales = Arc::new(timescales);
-        let state = std::rc::Rc::new(AnalysisState {
+        let session = &mut Session {
             virtual_interfaces: options.virtual_interfaces.clone(),
-            ..AnalysisState::default()
-        });
-        state
-            .foreign
-            .set_virtual_interfaces(options.virtual_interfaces.clone());
-        let mut packages = Self::analyze_packages(trees, timescales, &state)?;
+            ..Session::default()
+        };
+        let mut packages = Self::analyze_packages(trees, timescales, session)?;
         packages.virtual_interfaces = options.virtual_interfaces;
         if mixed_timescales {
             packages
                 .warnings
                 .push(super::warnings::AnalyzerWarning::MixedTimescale);
         }
-        packages.call_sites = state.next_call_site.clone();
         let units: Vec<_> = trees
             .iter()
             .map(|(tree, path)| (tree.compilation_scope(), *path))
@@ -308,12 +319,12 @@ impl Packages {
             let visibility = unit_visibility(tree)?;
             // The classes of each compilation unit are its own, though those
             // of two sources may share a name.
-            state.classes.borrow_mut().clear();
-            state.class_specializations.borrow_mut().clear();
-            state.class_specialization_names.borrow_mut().clear();
-            state.class_declaration_scopes.borrow_mut().clear();
-            state.class_declarations_repeated.borrow_mut().clear();
-            let scope = analyze_package(UNIT, tree, &packages, &state);
+            session.classes.clear();
+            session.class_specializations.clear();
+            session.class_specialization_names.clear();
+            session.class_declaration_scopes.clear();
+            session.class_declarations_repeated.clear();
+            let scope = analyze_package(UNIT, tree, &packages, session);
             if scope
                 .as_ref()
                 .is_ok_and(|scope| scope.state_module.is_some())
@@ -339,13 +350,20 @@ impl Packages {
                 .units
                 .insert(path.to_path_buf(), Arc::new(Unit { visibility, scope }));
         }
+        // Modules analyzed with the packages start from what analyzing
+        // them made.
+        packages.design = Design {
+            call_sites: session.next_call_site,
+            foreign: std::mem::take(&mut session.foreign),
+            types: std::mem::take(&mut session.types),
+        };
         Ok(packages)
     }
 
     fn analyze_packages(
         trees: &[(&SyntaxTree, &Path)],
         timescales: Arc<timescales::Timescales>,
-        state: &std::rc::Rc<AnalysisState>,
+        session: &mut Session,
     ) -> Result<Self, AnalyzerError> {
         let mut declarations: Vec<(String, SyntaxTree)> = Vec::new();
         for (tree, _) in trees {
@@ -382,8 +400,6 @@ impl Packages {
         }
         if declarations.is_empty() {
             return Ok(Self {
-                foreign: state.foreign.clone(),
-                types: state.types.clone(),
                 timescales,
                 ..Self::default()
             });
@@ -410,14 +426,12 @@ impl Packages {
         // Package bodies can query selected hierarchy roots while they are
         // collected, before any module is analyzed.
         let mut packages = Self {
-            foreign: state.foreign.clone(),
-            types: state.types.clone(),
             timescales,
             ..Self::default()
         };
         for index in order {
             let (name, tree) = &declarations[index];
-            let package = analyze_package(name, tree, &packages, state)?;
+            let package = analyze_package(name, tree, &packages, session)?;
             packages.packages.insert(
                 name.clone(),
                 Arc::new(Package {
@@ -510,11 +524,10 @@ fn analyze_package(
     name: &str,
     tree: &SyntaxTree,
     packages: &Packages,
-    state: &std::rc::Rc<AnalysisState>,
+    session: &mut Session,
 ) -> Result<Package, AnalyzerError> {
     let context = AnalysisContext {
         syntax_tree: tree,
-        state: state.clone(),
         parameter_overrides: Cow::Owned(HashMap::default()),
         imported: Arc::default(),
         package: None,
@@ -532,7 +545,7 @@ fn analyze_package(
     let tree = &timed;
     let first = {
         // Inside the package, `p::x` names its own item `x`.
-        analyze_package_scope(name, &tree.in_package(name), packages, None)?
+        analyze_package_scope(name, &tree.in_package(name), session, packages, None)?
     };
     if !imports::ScopeImports::from_scope(tree)?
         .qualified
@@ -544,12 +557,13 @@ fn analyze_package(
     // A self-qualified reference `p::x` is not hidden by a local `x` of a
     // function (IEEE 1800-2023 26.3). Analyze the package again with its
     // items from the first analysis under their qualified names.
-    analyze_package_scope(name, tree, packages, Some(&first.symbols))
+    analyze_package_scope(name, tree, session, packages, Some(&first.symbols))
 }
 
 fn analyze_package_scope(
     name: &str,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     packages: &Packages,
     own_items: Option<&ScopeSymbols>,
 ) -> Result<Package, AnalyzerError> {
@@ -558,20 +572,20 @@ fn analyze_package_scope(
         exports,
     } = imports::resolve_imports(tree, packages, None)?;
     if own_items.is_none() && name != UNIT {
-        tree.state.foreign.register(
+        session.foreign.register(
             name,
             tree.syntax_tree,
             &imported,
-            tree.state.next_call_site.clone(),
             packages.timescales.clone(),
         );
     }
-    analyze_package_with_symbols(name, tree, imported, exports, own_items)
+    analyze_package_with_symbols(name, tree, session, imported, exports, own_items)
 }
 
 pub(super) fn analyze_package_with_symbols(
     name: &str,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     mut imported: ScopeSymbols,
     exports: HashMap<String, String>,
     own_items: Option<&ScopeSymbols>,
@@ -587,6 +601,7 @@ pub(super) fn analyze_package_with_symbols(
     let mut variables = package_variables(name, tree)?;
     let mut module = Module::from_scope_with_parameter_overrides(
         tree,
+        session,
         "",
         &HashMap::default(),
         &InterfaceLookup {

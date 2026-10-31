@@ -71,6 +71,7 @@ mod tests {
 
     #[test]
     fn builds_one_view_for_a_growing_block_of_siblings() {
+        let session = &mut Session::default();
         for count in [16, 64, 256] {
             let mut code = String::from("module Top(); if (1) begin : g\n");
             for index in 0..count {
@@ -81,7 +82,7 @@ mod tests {
                 crate::source_tree::parse_scope_fixture(&code, Path::new("scope_scaling.sv"))
                     .unwrap();
             let tree = AnalysisContext::unspecialized(&tree);
-            let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
+            let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
             let dimensions = PackedDimensions::default();
             let mut views = ScopeViews::new(&dimensions);
             for item in &active {
@@ -95,13 +96,14 @@ mod tests {
 
     #[test]
     fn preserves_nested_and_interrupted_scopes_and_detaches_changed_snapshots() {
+        let session = &mut Session::default();
         let tree = crate::source_tree::parse_scope_fixture(
             "module Top(); if (1) begin : g localparam int P=2; logic [P-1:0] x; if (1) begin : inner localparam int P=3; logic [P-1:0] x; end logic y; end if (1) begin : h localparam int P=4; logic [P-1:0] x; end endmodule",
             Path::new("scope_views.sv"),
         ).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let source = Source::from_syntax(&tree).unwrap();
-        let active = items(&tree, &HashMap::default(), &HashMap::default()).unwrap();
+        let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
         let dimensions = packed_dimensions_from_ports_and_signals(
             source.modules()[0].ports(),
             source.modules()[0].signals(),

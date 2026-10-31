@@ -38,8 +38,8 @@ impl TyTable {
                 let scalar_enum = |packed: &Packed| {
                     matches!(packed.element, PackedElement::Enum { array: false, .. })
                 };
-                !scalar_enum(&a)
-                    && !scalar_enum(&b)
+                !scalar_enum(a)
+                    && !scalar_enum(b)
                     && a.bits() == b.bits()
                     && a.four_state == b.four_state
                     && a.signed == b.signed
@@ -61,11 +61,11 @@ impl TyTable {
                     (ArrayKind::Dynamic, ArrayKind::Dynamic)
                     | (ArrayKind::Queue { .. }, ArrayKind::Queue { .. }) => true,
                     (ArrayKind::Associative { key: a }, ArrayKind::Associative { key: b }) => {
-                        self.equivalent(a, b)
+                        self.equivalent(*a, *b)
                     }
                     _ => false,
                 };
-                kinds && self.equivalent(a_element, b_element)
+                kinds && self.equivalent(*a_element, *b_element)
             }
             _ => false,
         }
@@ -89,7 +89,7 @@ impl TyTable {
         else {
             return Err(Mismatch::NotArrays);
         };
-        let assignable = match (&source_kind, &target_kind) {
+        let assignable = match (source_kind, target_kind) {
             (ArrayKind::Associative { key: source }, ArrayKind::Associative { key: target }) => {
                 if !self.matches(*source, *target) {
                     return Err(Mismatch::IndexType);
@@ -111,7 +111,7 @@ impl TyTable {
             (_, ArrayKind::Fixed(target)) => Assignable::WhenSized(target.size()),
             _ => Assignable::Always,
         };
-        if !self.equivalent(source_element, target_element) {
+        if !self.equivalent(*source_element, *target_element) {
             return Err(Mismatch::ElementType);
         }
         Ok(assignable)

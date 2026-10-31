@@ -76,6 +76,8 @@ fn analyzed_info(design: &Design) -> Option<DesignInfo> {
         interfaces.extend(source.module_interfaces().clone());
     }
     let mut modules: Vec<Module> = Vec::new();
+    // The package class specializations the modules share.
+    let mut analysis = packages.design();
     for source in &sources {
         for name in source.module_names() {
             let overrides = if name == &design.top {
@@ -98,9 +100,18 @@ fn analyzed_info(design: &Design) -> Option<DesignInfo> {
                     &overrides,
                     &interfaces,
                     &packages,
+                    &mut analysis,
                 )
             } else {
-                source.analyze_module(name, &overrides, &[], &[], &interfaces, &packages)
+                source.analyze_module(
+                    name,
+                    &overrides,
+                    &[],
+                    &[],
+                    &interfaces,
+                    &packages,
+                    &mut analysis,
+                )
             };
             if let Ok(ir) = result {
                 modules.extend(ir.modules().iter().cloned());

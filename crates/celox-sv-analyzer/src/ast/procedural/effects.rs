@@ -284,7 +284,13 @@ impl BodyBuilder<'_, '_, '_> {
     /// Evaluate the truth of `id` into a hidden 1-bit local, which `id`
     /// binds to from now on, and return its unique name.
     fn truth(&mut self, id: ExprId, stmts: &mut Vec<Stmt>) -> Converted<String> {
-        let value = expression_binding::value(id, self.tree.declarations(), self.tree, &self.dims)?;
+        let value = expression_binding::value(
+            id,
+            self.tree.declarations(),
+            self.tree,
+            self.session,
+            &self.dims,
+        )?;
         let (source, unique) = self.hidden(Type::new(TypeKind::Logic));
         let truth = |value: Expr| Expr::Unary {
             op: UnaryOp::LogicNot,
@@ -319,21 +325,31 @@ impl BodyBuilder<'_, '_, '_> {
         let native = self.tree.declarations();
         self.reject_tagged_integral_target(operand)?;
         // A virtual interface is no number to step (IEEE 1800-2023 25.9).
-        if let Some(ty) = virtual_interfaces::native_type(self.tree, operand, native, &self.dims) {
+        if let Some(ty) =
+            virtual_interfaces::native_type(self.tree, self.session, operand, native, &self.dims)
+        {
             return Err(virtual_interfaces::arithmetic(
                 if increment { "++" } else { "--" },
                 &ty,
             ));
         }
-        if expression_binding::native_string(self.tree, operand, native, &self.dims) {
+        if expression_binding::native_string(self.tree, self.session, operand, native, &self.dims) {
             return Err(unsupported("increment or decrement of a string"));
         }
-        let current = expression_binding::value(operand, native, self.tree, &self.dims)?;
+        let current =
+            expression_binding::value(operand, native, self.tree, self.session, &self.dims)?;
         // The operand is read and then written: a select of it must not
         // change in between. A member read through a virtual interface checks
         // for `null`, which changes nothing; its handle is pure.
         if inlining::effectful(&current)
-            && virtual_interfaces::native_member(self.tree, operand, native, &self.dims).is_none()
+            && virtual_interfaces::native_member(
+                self.tree,
+                self.session,
+                operand,
+                native,
+                &self.dims,
+            )
+            .is_none()
         {
             return Err(unsupported(
                 "increment or decrement of an operand selected with a side effect",

@@ -2,6 +2,7 @@ use super::*;
 use std::{fmt::Write, path::Path};
 
 fn environment(count: usize) -> HashMap<String, i128> {
+    let session = &mut Session::default();
     let syntax = crate::source_tree::SourceTree::empty();
     let tree = AnalysisContext::unspecialized(&syntax);
     let mut parameter = Parameter::new(
@@ -17,7 +18,7 @@ fn environment(count: usize) -> HashMap<String, i128> {
         ConstExpr::Literal("7".into()),
         ConstExpr::Literal("0".into()),
     ));
-    let mut env = const_env_from_parameters(&tree, &[parameter]);
+    let mut env = const_env_from_parameters(&tree, session, &[parameter]);
     env.insert("W".into(), 3);
     env.insert("Q".into(), 9);
     for i in 0..count {
@@ -126,6 +127,7 @@ fn concat_slice_indices_accept_dynamic_array_elements() {
 
 #[test]
 fn native_constant_calls_preserve_contextual_operand_shapes() {
+    let session = &mut Session::default();
     let tree = crate::source_tree::parse_source(
         "module M;parameter N=f(P[0+:W],byte_t'(P),$bits(P));endmodule",
         Path::new("native-call-context.sv"),
@@ -161,7 +163,7 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
             _ => None,
         })
         .unwrap();
-    let value = constant_binding::bind(root, &tree, &context)
+    let value = constant_binding::bind(root, &tree, session, &context)
         .unwrap()
         .unwrap();
     let ConstExpr::Function { callee, args, .. } = value else {

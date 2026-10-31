@@ -5,6 +5,7 @@ use crate::procedural::ParamDirection;
 pub(in crate::ast) fn subroutine_formals(
     native: &celox_sv_syntax::Subroutine,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<
     Vec<(
@@ -37,7 +38,7 @@ pub(in crate::ast) fn subroutine_formals(
         let mut ty = if port.direction.is_none() && omitted {
             previous_type.clone().unwrap_or(Type::new(TypeKind::Logic))
         } else {
-            bind(port.data_type, tree, context)?.ok_or_else(|| {
+            bind(port.data_type, tree, session, context)?.ok_or_else(|| {
                 unsupported(format!(
                     "unsupported {} formal data type",
                     if native.kind == celox_sv_syntax::SubroutineKind::Function {
@@ -54,7 +55,7 @@ pub(in crate::ast) fn subroutine_formals(
         previous_type = Some(ty.clone());
         // A container formal that is not a reference holds a copy of the
         // container (IEEE 1800-2023 13.5.1), as an assignment makes one.
-        ty = containers::with_dimensions(ty, &port.dimensions, tree, context)?;
+        ty = containers::with_dimensions(ty, &port.dimensions, tree, session, context)?;
         result.push((
             instances::normalize_identifier(&name.spelling),
             direction,
