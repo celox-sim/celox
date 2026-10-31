@@ -1,1 +1,0 @@
-Fix review r4431811272: Nix tag-only inputs do not expose a semantic currentValue to Renovate; extract the release tag with a custom manager and test actual extraction.
