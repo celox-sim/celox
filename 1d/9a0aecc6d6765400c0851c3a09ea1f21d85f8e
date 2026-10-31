@@ -1,1 +1,6 @@
-Address review r4433143848: retain declared scalar enum parameter types independently of enum-domain metadata, with wide parameter and integral rejection regressions.
+Revision history for #2791:
+
+rev 2 (content) 2026-10-31 20:29 UTC — Address review r4433143848: retain declared scalar enum parameter types independently of enum-domain metadata, with wide parameter and integral rejection regressions.
+rev 1 (initial) 2026-10-31 20:29 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2791,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"c9ef879cbc8be1b7e2acd2a97d5fd29420cf2c53","timestamp_iso":"2026-10-31T20:29:08Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"c9ef879cbc8be1b7e2acd2a97d5fd29420cf2c53","new_sha":"1d9a0aecc6d6765400c0851c3a09ea1f21d85f8e","timestamp_iso":"2026-10-31T20:29:08Z","reason":"Address review r4433143848: retain declared scalar enum parameter types independently of enum-domain metadata, with wide parameter and integral rejection regressions.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/c9ef879cbc8be1b7e2acd2a97d5fd29420cf2c53...1d9a0aecc6d6765400c0851c3a09ea1f21d85f8e"}]} -->
