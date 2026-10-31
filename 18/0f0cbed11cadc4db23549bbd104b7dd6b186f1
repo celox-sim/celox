@@ -1,6 +1,1 @@
-Revision history for #2724:
-
-rev 2 (content) 2026-10-31 11:19 UTC — Preserve serialized preprocessing token boundaries after review discussion_r4431486006; cover unary operators, numeric macro fragments and explicit token pasting.
-rev 1 (initial) 2026-10-31 11:19 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2724,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"8d70e3bcf7ab078fbc1d9c6eee758e0b9dec6501","timestamp_iso":"2026-10-31T11:19:25Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"8d70e3bcf7ab078fbc1d9c6eee758e0b9dec6501","new_sha":"180f0cbed11cadc4db23549bbd104b7dd6b186f1","timestamp_iso":"2026-10-31T11:19:25Z","reason":"Preserve serialized preprocessing token boundaries after review discussion_r4431486006; cover unary operators, numeric macro fragments and explicit token pasting.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/8d70e3bcf7ab078fbc1d9c6eee758e0b9dec6501...180f0cbed11cadc4db23549bbd104b7dd6b186f1"}]} -->
+Terminate expanded escaped identifiers before comments after discussion_r4431531132; also preserve slash/comment boundaries and included-file EOF line comments.
