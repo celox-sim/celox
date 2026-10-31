@@ -1,0 +1,1 @@
+Sync after dependency PR #2746 merged and classify benchmark automation as ci so it does not request a simulator feature release.
