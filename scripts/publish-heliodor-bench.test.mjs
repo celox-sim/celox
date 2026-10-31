@@ -180,6 +180,14 @@ test("concurrent publishers preserve results and compare by measurement time", (
     ));
     assert.deepEqual(combined.entries["Rust Benchmarks"], [...original.entries["Rust Benchmarks"], rust]);
     assert.deepEqual(combined.entries["Heliodor Benchmarks"], [first, second, { ...first, date: 25 }]);
+    const statusOnly = { date: 40, benches: [], rtlmeter: { case: "e902", results: [{ status: "failed" }] } };
+    publishResult(remote, statusOnly, { historyName: "RTLMeter Benchmarks", allowEmpty: true });
+    git("-C", seed, "fetch", "--quiet", remote, "gh-pages");
+    const withStatus = JSON.parse(git("-C", seed, "show", "FETCH_HEAD:dev/bench/data.js").slice(
+      "window.BENCHMARK_DATA = ".length,
+    ));
+    assert.deepEqual(withStatus.entries["RTLMeter Benchmarks"], [statusOnly]);
+    assert.deepEqual(withStatus.entries["Rust Benchmarks"], combined.entries["Rust Benchmarks"]);
     // Exercise the real CI entry point, including conversion and commit data.
     git("-C", seed, "remote", "add", "origin", remote);
     const input = join(directory, "results.tsv");
