@@ -219,6 +219,7 @@ jobs:
           bash scripts/tests/run-heliodor-bench-results.sh
           bash scripts/tests/run-heliodor-bench-gate.sh
           python3 -m unittest discover -s .updatecli/tests -v
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_rtlmeter_bench.py -v
 
       # A new dependency edge can invalidate the NAPI exclusions or the
       # backend and frontend variants that pull requests narrow celox to.
