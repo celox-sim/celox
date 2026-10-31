@@ -77,7 +77,7 @@ pub(super) struct ProcModule<'a> {
     warnings: &'a mut Vec<crate::warning::PendingWarning>,
     /// Whether a call of each subroutine asked about can make a host
     /// request, by name.
-    requesting_subroutines: std::cell::RefCell<HashMap<String, bool>>,
+    requesting_subroutines: HashMap<String, bool>,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
@@ -284,7 +284,7 @@ impl<'a> ProcModule<'a> {
     /// Whether evaluating `expr` can make a host request, which suspends
     /// the process: it calls a function that makes one directly, in the
     /// defaults of omitted arguments, or through the subroutines it calls.
-    pub fn makes_host_request(&self, expr: &sv::ir::Expr) -> bool {
+    pub fn makes_host_request(&mut self, expr: &sv::ir::Expr) -> bool {
         let mut calls = Vec::new();
         collect_calls(expr, &mut calls);
         while let Some((callee, args)) = calls.pop() {
@@ -309,8 +309,8 @@ impl<'a> ProcModule<'a> {
 
     /// Whether the body of subroutine `name` can make a host request,
     /// including through the calls it makes and their omitted defaults.
-    fn subroutine_makes_host_request(&self, name: &str) -> bool {
-        if let Some(&known) = self.requesting_subroutines.borrow().get(name) {
+    fn subroutine_makes_host_request(&mut self, name: &str) -> bool {
+        if let Some(&known) = self.requesting_subroutines.get(name) {
             return known;
         }
         let mut pending = vec![name.to_string()];
@@ -354,9 +354,7 @@ impl<'a> ProcModule<'a> {
                 }
             }
         }
-        self.requesting_subroutines
-            .borrow_mut()
-            .insert(name.to_string(), found);
+        self.requesting_subroutines.insert(name.to_string(), found);
         found
     }
 
@@ -1250,11 +1248,11 @@ impl<'a> ProcModule<'a> {
 
     /// Whether an expression contains a call whose evaluation has effects.
     pub fn lvalue_calls(&self, lvalue: &sv::ir::LValue) -> bool {
-        lvalue_calls(lvalue, &|callee| self.is_callee(callee))
+        lvalue_calls(lvalue, &mut |callee| self.is_callee(callee))
     }
 
     pub fn const_calls(&self, expr: &sv::ir::ConstExpr) -> bool {
-        const_calls(expr, &|callee| self.is_callee(callee))
+        const_calls(expr, &mut |callee| self.is_callee(callee))
     }
 
     /// The largest subexpressions of `expr` that call a subroutine and also
@@ -1265,12 +1263,17 @@ impl<'a> ProcModule<'a> {
         other: &sv::ir::ConstExpr,
     ) -> Vec<&'e sv::ir::ConstExpr> {
         let mut shared = Vec::new();
-        shared_calls(expr, other, &|callee| self.is_callee(callee), &mut shared);
+        shared_calls(
+            expr,
+            other,
+            &mut |callee| self.is_callee(callee),
+            &mut shared,
+        );
         shared
     }
 
     pub fn calls(&self, expr: &sv::ir::Expr) -> bool {
-        expr_calls(expr, &|callee| self.is_callee(callee))
+        expr_calls(expr, &mut |callee| self.is_callee(callee))
     }
 
     /// The local index of the extern function `import` links to. Imports
@@ -1793,18 +1796,16 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
         // Evaluate `top` from the operand values known so far. The first
         // operand it needs that is not yet evaluated is pushed, and `top` is
         // evaluated again once that operand is known.
-        let missing = std::cell::Cell::new(None);
-        let child = |id: NodeId| match values.get(&id) {
+        let mut missing = None;
+        let mut child = |id: NodeId| match values.get(&id) {
             Some(value) => value.clone(),
             None => {
-                if missing.get().is_none() {
-                    missing.set(Some(id));
-                }
+                missing.get_or_insert(id);
                 None
             }
         };
-        let value = slt_const4_node(arena, top, &child);
-        match missing.get() {
+        let value = slt_const4_node(arena, top, &mut child);
+        match missing {
             Some(operand) => stack.push(operand),
             None => {
                 values.insert(top, value);
@@ -1819,7 +1820,7 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
 fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
     arena: &SLTNodeArena<A>,
     node: NodeId,
-    child: &dyn Fn(NodeId) -> Option<Const4>,
+    child: &mut dyn FnMut(NodeId) -> Option<Const4>,
 ) -> Option<Const4> {
     let width = celox_slt::get_width(node, arena);
     let all = mask_of(width);
@@ -2169,7 +2170,7 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
             then_expr,
             else_expr,
         } => {
-            let merge_arms = || -> Option<Const4> {
+            let merge_arms = |child: &mut dyn FnMut(NodeId) -> Option<Const4>| -> Option<Const4> {
                 let (tv, tm, _) = child(*then_expr)?;
                 let (ev, em, _) = child(*else_expr)?;
                 // Bits equal in both arms (an unknown bit too) keep their
@@ -2186,7 +2187,7 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
                 Some(condition) => match truth(&condition) {
                     Some(true) => child(*then_expr)?,
                     Some(false) => child(*else_expr)?,
-                    None => merge_arms()?,
+                    None => merge_arms(child)?,
                 },
                 // A run-time condition selecting between equal constants.
                 None => {
@@ -2672,7 +2673,7 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
 /// calls a subroutine.
 pub(super) fn const_calls(
     expr: &sv::ir::ConstExpr,
-    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
+    is_callee: &mut dyn FnMut(&sv::ir::Callee) -> bool,
 ) -> bool {
     use sv::ir::ConstExpr;
     match expr {
@@ -2742,7 +2743,7 @@ fn const_contains(expr: &sv::ir::ConstExpr, part: &sv::ir::ConstExpr) -> bool {
 fn shared_calls<'e>(
     expr: &'e sv::ir::ConstExpr,
     other: &sv::ir::ConstExpr,
-    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
+    is_callee: &mut dyn FnMut(&sv::ir::Callee) -> bool,
     shared: &mut Vec<&'e sv::ir::ConstExpr>,
 ) {
     use sv::ir::ConstExpr;
@@ -2789,7 +2790,7 @@ fn shared_calls<'e>(
 /// Whether the select positions of an assignment target call a subroutine.
 pub(super) fn lvalue_calls(
     lvalue: &sv::ir::LValue,
-    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
+    is_callee: &mut dyn FnMut(&sv::ir::Callee) -> bool,
 ) -> bool {
     match lvalue {
         sv::ir::LValue::Ident(_) => false,
@@ -2800,7 +2801,10 @@ pub(super) fn lvalue_calls(
 }
 
 /// Whether an expression calls a user subroutine.
-pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&sv::ir::Callee) -> bool) -> bool {
+pub(super) fn expr_calls(
+    expr: &sv::ir::Expr,
+    is_callee: &mut dyn FnMut(&sv::ir::Callee) -> bool,
+) -> bool {
     match expr {
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
         sv::ir::Expr::Select { expr, msb, lsb, .. } => {
