@@ -59,6 +59,28 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 16; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:1: error: Error in task/function port item after port name T.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Syntax error defining function.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid module item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "string_format::pattern_format_structure_containers",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "string_format::pattern_format_structure_values",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 compiles $sformat with a string class property as its output, but vvp stops with \"$sformat's first argument must be a register or SV string.\" IEEE 1800-2023 21.3.3 permits a string variable as the output, and a class property is one (8.5). Verilator 5.052 and xezim pass the case.",
       "expectation": "Simulation",
       "known_issue": {

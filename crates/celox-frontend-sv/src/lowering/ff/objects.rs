@@ -104,6 +104,7 @@ impl Ff<'_, '_> {
             }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::Locator(_) => unreachable!("handled by locator"),
+            ObjectOp::Pattern(_) => unreachable!("handled by aggregate_pattern"),
             ObjectOp::Concat(_) => unreachable!("handled by container_concat"),
             // Each declaration of an event creates a synchronization object
             // (IEEE 1800-2023 15.5).
@@ -302,6 +303,7 @@ impl Ff<'_, '_> {
         let kind = match op {
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
             ObjectOp::Locator(_) => unreachable!("handled by locator"),
+            ObjectOp::Pattern(_) => unreachable!("handled by aggregate_pattern"),
             ObjectOp::Concat(_) => unreachable!("handled by container_concat"),
             ObjectOp::Stream(_) => unreachable!("handled by stream_call"),
             ObjectOp::New { .. } | ObjectOp::Copy | ObjectOp::Box(_) => {
