@@ -1,0 +1,6 @@
+Revision history for #2762:
+
+rev 2 (rebase) 2026-10-31 15:01 UTC — Rebase this dependent change after fixing the lower PR's cold-cache verifier identity failure.
+rev 1 (initial) 2026-10-31 15:01 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2762,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2190d12b1357f39198ae595b0a40edee367cf7d2","timestamp_iso":"2026-10-31T15:01:04Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"2190d12b1357f39198ae595b0a40edee367cf7d2","new_sha":"f1a44b1bc5273845b3f343f2846262a8ca805ec9","timestamp_iso":"2026-10-31T15:01:04Z","reason":"Rebase this dependent change after fixing the lower PR's cold-cache verifier identity failure.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2190d12b1357f39198ae595b0a40edee367cf7d2...f1a44b1bc5273845b3f343f2846262a8ca805ec9"}]} -->

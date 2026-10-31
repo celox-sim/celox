@@ -1,0 +1,6 @@
+Revision history for #2758:
+
+rev 2 (content) 2026-10-31 15:01 UTC — Fix CI cache tests: cold offline workspace metadata can lack unrelated dynasm archives; use a conservative complete-verifier fingerprint fallback and test cache invalidation.
+rev 1 (initial) 2026-10-31 15:01 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2758,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"02496a07d6d2407e5bcb87301f1ebea2e5a11406","timestamp_iso":"2026-10-31T15:01:04Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"02496a07d6d2407e5bcb87301f1ebea2e5a11406","new_sha":"92f3a58b3547e1a941652a5c5bcffc1cd0b41a67","timestamp_iso":"2026-10-31T15:01:04Z","reason":"Fix CI cache tests: cold offline workspace metadata can lack unrelated dynasm archives; use a conservative complete-verifier fingerprint fallback and test cache invalidation.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/02496a07d6d2407e5bcb87301f1ebea2e5a11406...92f3a58b3547e1a941652a5c5bcffc1cd0b41a67"}]} -->
