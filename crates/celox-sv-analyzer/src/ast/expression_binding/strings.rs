@@ -18,7 +18,9 @@ pub(in crate::ast) fn string_value(expr: &Expr, dimensions: &PackedDimensions) -
                 )),
             ..
         } => true,
-        Expr::Ident(name) => dimensions.get(name).is_some_and(|ty| ty.string),
+        Expr::Ident(name) => dimensions
+            .get(name)
+            .is_some_and(|ty| ty.string && ty.unpacked.is_empty()),
         Expr::Call {
             callee: Callee::String(op),
             ..
@@ -122,9 +124,11 @@ pub(in crate::ast) fn operands(
 ) -> Vec<Expr> {
     let strings = match op {
         // A format keeps its type: the frontend reads a literal one as text.
-        StringOp::FromBits | StringOp::Itoa(_) | StringOp::Format { .. } | StringOp::Pattern(_) => {
-            0
-        }
+        StringOp::FromBits
+        | StringOp::FromHandle
+        | StringOp::Itoa(_)
+        | StringOp::Format { .. }
+        | StringOp::Pattern(_) => 0,
         StringOp::Concat => usize::MAX,
         StringOp::Compare | StringOp::ICompare => 2,
         _ => 1,
@@ -152,6 +156,9 @@ pub(in crate::ast) fn native_string(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
+    if fixed_array_element(tree, id, native, dimensions) {
+        return true;
+    }
     match &native.expression(ungroup(id, native)).kind {
         ExprKind::Call { expression, .. } if matches!(&native.expression(*expression).kind, ExprKind::Member { expression: base, name, separator } if separator == "." && name.spelling == "get_randstate" && objects::native_class(tree, session, *base, native, dimensions).as_deref() == Some(super::super::processes::CLASS)) => {
             true
@@ -179,7 +186,7 @@ pub(in crate::ast) fn native_string(
         {
             dimensions
                 .get(&instances::normalize_identifier(&name.spelling))
-                .is_some_and(|ty| ty.string)
+                .is_some_and(|ty| ty.string && ty.unpacked.is_empty())
         }
         ExprKind::Call { expression, .. } => {
             matches!(&native.expression(ungroup(*expression, native)).kind,
@@ -226,6 +233,49 @@ pub(in crate::ast) fn native_string(
                 property.field.handle == Some(crate::system_functions::HandleProperty::String)
             }),
     }
+}
+
+/// Only an index that consumes every unpacked dimension selects one string.
+/// A slice or a remaining subarray is still an array, including extent one.
+pub(super) fn fixed_array_element(
+    tree: &AnalysisContext<'_>,
+    mut id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> bool {
+    let mut indices = 0;
+    loop {
+        id = ungroup(id, native);
+        match &native.expression(id).kind {
+            ExprKind::Select {
+                expression,
+                dimension,
+            } if matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_)) => {
+                indices += 1;
+                id = *expression;
+            }
+            _ => break,
+        }
+    }
+    if indices == 0 {
+        return false;
+    }
+    let name = super::direct::call_name(tree, id, native).or_else(|| {
+        type_binding::argument_alias(id, native)
+            .filter(|(_, selections)| selections.is_empty())
+            .map(|(name, _)| name)
+    });
+    let imported = scope::imported(tree);
+    name.and_then(|name| {
+        dimensions.get(&name).or_else(|| {
+            imported
+                .interface_members
+                .get(&name)
+                .or_else(|| imported.aliases.get(&name))
+                .and_then(|binding| dimensions.get(binding))
+        })
+    })
+    .is_some_and(|ty| ty.string && ty.unpacked.len() == indices)
 }
 
 /// Whether native callee expression `id` is a function or method that

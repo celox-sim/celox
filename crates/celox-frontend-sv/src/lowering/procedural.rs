@@ -104,7 +104,10 @@ impl<'a> ProcModule<'a> {
                 .name_to_id
                 .get(name)
                 .and_then(|id| self.variables.get(id))
-                .is_some_and(|variable| variable.value_kind == celox_design::ValueKind::StrRef),
+                .is_some_and(|variable| {
+                    variable.value_kind == celox_design::ValueKind::StrRef
+                        && variable.array_dims.is_empty()
+                }),
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::String(op),
                 ..

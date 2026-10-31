@@ -147,11 +147,13 @@ pub(super) fn expression(
     let value = bind_value(root, native, tree, session, dimensions, shape)?;
     // A string literal or integral value assigned to a string becomes its
     // bytes (IEEE 1800-2023 6.16).
-    Ok(if shape.is_some_and(|shape| shape.string) {
-        string_operand(value, dimensions)
-    } else {
-        value
-    })
+    Ok(
+        if shape.is_some_and(|shape| shape.string && shape.unpacked.is_empty()) {
+            string_operand(value, dimensions)
+        } else {
+            value
+        },
+    )
 }
 pub(super) fn value(
     root: ExprId,

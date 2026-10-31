@@ -1,0 +1,66 @@
+{
+  "schema_version": 3,
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "scope": "Focused fixed-string-array failures retained before the exclusions; passing cases and four-state unsupported cases omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_dynamic_indices",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:5: warning: ignoring out of bounds l-value array access words[0][0].\n<case>/source_0.sv:6: warning: ignoring out of bounds l-value array access words[2][1].\n<case>/source_0.sv:7: warning: returning 'bx for out of bounds array access words[0][0].\n<case>/source_0.sv:7: assert: eval_tree.cc:570: failed assertion lv.len() == rv.len()\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_invalid_indices",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:12: error: the type of the variable 'words' doesn't match the context type.\n<case>/source_0.sv:12:      : variable type=string\n<case>/source_0.sv:12:      : context type=11netuarray_t\n1 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_loops_and_copy",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:7: error: the type of the variable 'words['sd1]' doesn't match the context type.\n<case>/source_0.sv:7:      : variable type=string\n<case>/source_0.sv:7:      : context type=11netuarray_t\n<case>/source_0.sv:8: error: the type of the variable 'flat['sd1:'sd1]' doesn't match the context type.\n<case>/source_0.sv:8:      : variable type=string\n<case>/source_0.sv:8:      : context type=11netuarray_t\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_multidimensional_slices",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:9: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_ports_and_local_lifetime",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 5
+  }
+}

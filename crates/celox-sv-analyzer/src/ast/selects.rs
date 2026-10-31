@@ -207,8 +207,7 @@ pub(super) fn invalid_unpacked_read(
         return None;
     };
     let variable = dimensions.get(name)?;
-    if variable.unpacked.is_empty() || variable.real || variable.string || variable.class.is_some()
-    {
+    if variable.unpacked.is_empty() || variable.real || variable.class.is_some() {
         return None;
     }
     let full_width =
@@ -222,9 +221,10 @@ pub(super) fn invalid_unpacked_read(
         .ok()?
         .checked_add(1)?;
     let signing = if *signed { "s" } else { "" };
+    // A string element defaults to the empty-string handle (7.4.5).
     // A two-state member of a four-state structure element reads its
     // default converted to two states (IEEE 1800-2023 7.2.1).
-    let digit = if variable.is_2state || *is_2state {
+    let digit = if variable.string || variable.is_2state || *is_2state {
         "0"
     } else {
         "x"

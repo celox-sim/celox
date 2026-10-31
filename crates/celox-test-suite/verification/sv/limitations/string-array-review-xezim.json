@@ -1,0 +1,26 @@
+{
+  "schema_version": 3,
+  "tool": "xezim",
+  "version": "xezim version 0.11.4",
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "include_ignored": false,
+  "exclude_stronger_than_sv": false,
+  "scope": "Focused string-array review regressions retained before exclusions; passing cases omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "string::fixed_array_pattern_rows at 47:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_pattern_rows",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "mismatch": 1
+  }
+}
