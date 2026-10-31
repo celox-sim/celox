@@ -39,6 +39,9 @@ pub enum PortTypeKind {
     Logic,
     Bit,
     Other,
+    Real,
+    ShortReal,
+    String,
 }
 
 /// Source-independent metadata for one elaborated design variable.

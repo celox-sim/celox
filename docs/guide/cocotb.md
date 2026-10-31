@@ -398,10 +398,14 @@ supported for existing automation: `PYGPI_PYTHON_BIN`, `LIBPYTHON_LOC`,
 
 ## Current compatibility
 
-The compatibility layer covers cocotb 2.0 paths for module and signal
-discovery, immediate/deposit/force/release writes, scalar and vector values,
-simulation time, and the Start, ReadWrite, ReadOnly, NextTimeStep, Timer,
-ValueChange, and End callback regions.
+The compatibility layer covers cocotb 2.0 and 2.1 paths for module and signal
+discovery, including escaped signal names, scalar/vector values, packed bit
+handles, unpacked array elements, real values and string bytes.
+Immediate deposits and zero-delay inertial updates are supported. Packed
+variables support whole-vector force/release and deposits through their bit
+handles while forced; string force/release and delayed VPI writes are not
+supported. Callbacks cover Start, ReadWrite, ReadOnly, NextTimeStep, Timer,
+ValueChange, and End regions.
 
-Packed bit handles, delayed VPI writes, unpacked-array indexing, and
-derived/cascaded clock scheduling are not yet supported.
+The [upstream regression runner](https://github.com/celox-sim/celox/tree/master/conformance/cocotb) runs pinned,
+unmodified cocotb tests against the generated executable.
