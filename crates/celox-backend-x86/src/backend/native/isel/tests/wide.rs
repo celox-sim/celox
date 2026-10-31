@@ -1492,9 +1492,12 @@ fn wide_value_invariant_validation_scales_with_values() {
             .map(|i| (RegisterId(i), RegisterType::Logic { width: 65 }))
             .collect(),
     };
-    WIDE_VALUE_VERIFICATIONS.with(|count| count.set(0));
-    let _ = lower_execution_unit(&unit, &empty_layout(), false);
-    let checks = WIDE_VALUE_VERIFICATIONS.with(|count| count.get());
+    let (_, checks) = lower_execution_unit_counting_verifications(
+        &unit,
+        &empty_layout(),
+        false,
+        &crate::NativeDiagnostics::default(),
+    );
     assert!(
         checks >= COUNT,
         "the invariant must still be checked: {checks}"

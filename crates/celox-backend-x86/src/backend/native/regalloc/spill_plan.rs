@@ -825,14 +825,14 @@ fn plan_internal(
                     .checked_of(value, Some(func.blocks[block].id), Some(0))
             })
             .collect::<Result<LogicalSet, _>>()?;
-        let exit_reload_costs = LazyExitReloadCosts {
+        let mut exit_reload_costs = LazyExitReloadCosts {
             func,
             cfg,
             next_use,
             recipes: planning_recipes,
             translations: &edge_translations,
             block,
-            cache: std::cell::RefCell::new(HashMap::default()),
+            cache: HashMap::default(),
         };
         let (spilled, transition, order) = loop {
             // S means that a valid home exists on every path.  Every live
@@ -864,7 +864,7 @@ fn plan_internal(
                     &entry,
                     spilled.clone(),
                     instruction_constraints,
-                    &exit_reload_costs,
+                    &mut exit_reload_costs,
                 )?;
                 (transition, Some(order))
             } else {
@@ -1096,12 +1096,12 @@ fn plan_internal(
 /// Scheduling only prices values considered for eviction. Large live-through
 /// sets must not cause every block to price every successor's entire live set.
 trait ExitReloadCosts {
-    fn cost(&self, value: LogicalValue) -> u32;
+    fn cost(&mut self, value: LogicalValue) -> u32;
 }
 
 #[cfg(test)]
 impl ExitReloadCosts for HashMap<LogicalValue, u32> {
-    fn cost(&self, value: LogicalValue) -> u32 {
+    fn cost(&mut self, value: LogicalValue) -> u32 {
         self.get(&value).copied().unwrap_or(0)
     }
 }
@@ -1114,12 +1114,12 @@ struct LazyExitReloadCosts<'a> {
     translations: &'a EdgeTranslations,
     block: usize,
     // Released after this block, with one entry per queried eviction candidate.
-    cache: std::cell::RefCell<HashMap<LogicalValue, u32>>,
+    cache: HashMap<LogicalValue, u32>,
 }
 
 impl ExitReloadCosts for LazyExitReloadCosts<'_> {
-    fn cost(&self, value: LogicalValue) -> u32 {
-        if let Some(&cost) = self.cache.borrow().get(&value) {
+    fn cost(&mut self, value: LogicalValue) -> u32 {
+        if let Some(&cost) = self.cache.get(&value) {
             return cost;
         }
         let mut cost = 0u32;
@@ -1143,7 +1143,7 @@ impl ExitReloadCosts for LazyExitReloadCosts<'_> {
                 )));
             }
         }
-        self.cache.borrow_mut().insert(value, cost);
+        self.cache.insert(value, cost);
         cost
     }
 }
@@ -1496,7 +1496,7 @@ fn plan_scheduled_block_transition(
     w_entry: &LogicalSet,
     spilled: LogicalSet,
     constraints: &[super::constraints::InstructionConstraints],
-    exit_reload_costs: &dyn ExitReloadCosts,
+    exit_reload_costs: &mut dyn ExitReloadCosts,
 ) -> Result<(BlockTransition, Vec<usize>), SpillPlanError> {
     let instructions = &func.blocks[block].insts;
     if instructions.len() != constraints.len() {
@@ -1709,7 +1709,7 @@ fn plan_explicit_block_order(
     registers: usize,
     w_entry: &LogicalSet,
     spilled: LogicalSet,
-    exit_reload_costs: &dyn ExitReloadCosts,
+    exit_reload_costs: &mut dyn ExitReloadCosts,
     order: &[usize],
 ) -> Result<BlockTransition, SpillPlanError> {
     let instructions = &func.blocks[block].insts;
@@ -1816,20 +1816,20 @@ impl<'a> BlockTransitionPlanner<'a> {
     }
 
     fn step(&mut self, point: TransitionPoint, inst: &MInst) -> Result<(), SpillPlanError> {
-        let before = LinearFutureUses {
+        let mut before = LinearFutureUses {
             func: self.func,
             next_use: self.next_use,
             block: self.block,
             instruction: point.source,
         };
-        let uses = self.begin_step(point, inst, &before)?;
-        let after = LinearFutureUses {
+        let uses = self.begin_step(point, inst, &mut before)?;
+        let mut after = LinearFutureUses {
             func: self.func,
             next_use: self.next_use,
             block: self.block,
             instruction: point.source + 1,
         };
-        self.finish_step(point, inst, &uses, &after)
+        self.finish_step(point, inst, &uses, &mut after)
     }
 
     fn step_scheduled(
@@ -1846,13 +1846,13 @@ impl<'a> BlockTransitionPlanner<'a> {
             .collect::<Vec<_>>();
         let last_definition_before = self.last_definition;
         let uses = {
-            let before = DynamicFutureUses(remaining);
-            self.begin_step(point, inst, &before)?
+            let mut before = DynamicFutureUses(remaining);
+            self.begin_step(point, inst, &mut before)?
         };
         let remaining_uses = remaining.emit(point.source, inst, self.logical)?;
         {
-            let after = DynamicFutureUses(remaining);
-            self.finish_step(point, inst, &uses, &after)?;
+            let mut after = DynamicFutureUses(remaining);
+            self.finish_step(point, inst, &uses, &mut after)?;
         }
         let mut resident = resident_before
             .iter()
@@ -2006,7 +2006,7 @@ impl<'a> BlockTransitionPlanner<'a> {
         &mut self,
         point: TransitionPoint,
         inst: &MInst,
-        future_uses: &impl FutureUses,
+        future_uses: &mut impl FutureUses,
     ) -> Result<Vec<LogicalValue>, SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
         let mut uses = inst
@@ -2077,7 +2077,7 @@ impl<'a> BlockTransitionPlanner<'a> {
         point: TransitionPoint,
         inst: &MInst,
         uses: &[LogicalValue],
-        future_uses: &impl FutureUses,
+        future_uses: &mut impl FutureUses,
     ) -> Result<(), SpillPlanError> {
         let block_id = self.func.blocks[self.block].id;
         let clobbered = super::assignment::allocatable_clobber_count(inst, self.func);
@@ -2178,7 +2178,7 @@ fn limit_live_through_clobber(
     resident: &mut LogicalSet,
     spilled: &mut LogicalSet,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
-    future_uses: &impl FutureUses,
+    future_uses: &mut impl FutureUses,
 ) -> Result<(), SpillPlanError> {
     let mut live_through = resident
         .iter()
@@ -2423,7 +2423,7 @@ fn retain_closest(
 trait FutureUses {
     fn distance(&self, value: LogicalValue) -> NextUseDistance;
     fn next_point(&self, value: LogicalValue) -> Option<PointUse>;
-    fn exit_reload_cost(&self, _value: LogicalValue) -> u32 {
+    fn exit_reload_cost(&mut self, _value: LogicalValue) -> u32 {
         0
     }
 }
@@ -2465,7 +2465,7 @@ struct RemainingBlockUses<'a> {
     preferred_rank: Vec<usize>,
     remaining: HashMap<LogicalValue, RemainingUses>,
     exit: &'a DistanceMap,
-    exit_reload_costs: &'a dyn ExitReloadCosts,
+    exit_reload_costs: &'a mut dyn ExitReloadCosts,
     emitted: Vec<bool>,
     emitted_count: usize,
 }
@@ -2476,7 +2476,7 @@ impl<'a> RemainingBlockUses<'a> {
         next_use: &'a NextUseAnalysis,
         logical: &LogicalValues,
         block: usize,
-        exit_reload_costs: &'a dyn ExitReloadCosts,
+        exit_reload_costs: &'a mut dyn ExitReloadCosts,
         preferred_order: Option<&[usize]>,
     ) -> Result<Self, SpillPlanError> {
         let instructions = func.blocks[block].insts.len();
@@ -2652,12 +2652,12 @@ impl<'a> RemainingBlockUses<'a> {
         })
     }
 
-    fn exit_reload_cost(&self, value: LogicalValue) -> u32 {
+    fn exit_reload_cost(&mut self, value: LogicalValue) -> u32 {
         self.exit_reload_costs.cost(value)
     }
 }
 
-struct DynamicFutureUses<'view, 'data>(&'view RemainingBlockUses<'data>);
+struct DynamicFutureUses<'view, 'data>(&'view mut RemainingBlockUses<'data>);
 
 impl FutureUses for DynamicFutureUses<'_, '_> {
     fn distance(&self, value: LogicalValue) -> NextUseDistance {
@@ -2668,7 +2668,7 @@ impl FutureUses for DynamicFutureUses<'_, '_> {
         self.0.next_point(value)
     }
 
-    fn exit_reload_cost(&self, value: LogicalValue) -> u32 {
+    fn exit_reload_cost(&mut self, value: LogicalValue) -> u32 {
         self.0.exit_reload_cost(value)
     }
 }
@@ -2686,7 +2686,7 @@ fn limit(
     resident: &mut LogicalSet,
     spilled: &mut LogicalSet,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
-    future_uses: &impl FutureUses,
+    future_uses: &mut impl FutureUses,
 ) -> Result<(), SpillPlanError> {
     while resident.len() > maximum {
         let Some(victim) = resident
@@ -2743,7 +2743,7 @@ fn evict_value(
     value: LogicalValue,
     spilled: &mut LogicalSet,
     deferred_recipe_reloads: &mut BTreeMap<LogicalValue, PointUse>,
-    future_uses: &impl FutureUses,
+    future_uses: &mut impl FutureUses,
 ) -> Result<(), SpillPlanError> {
     if spilled.contains(&value) {
         return Ok(());
@@ -2790,7 +2790,7 @@ fn evict_value(
 fn next_use_point_recipe(
     planning_recipes: &PlanningRecipes,
     value: LogicalValue,
-    future_uses: &impl FutureUses,
+    future_uses: &mut impl FutureUses,
 ) -> Option<(PointUse, u16)> {
     let point = future_uses.next_point(value)?;
     planning_recipes
@@ -2808,7 +2808,7 @@ fn compare_eviction_candidates(
     func: &MFunction,
     planning_recipes: &PlanningRecipes,
     spilled: &LogicalSet,
-    future_uses: &impl FutureUses,
+    future_uses: &mut impl FutureUses,
     left: (LogicalValue, NextUseDistance),
     right: (LogicalValue, NextUseDistance),
 ) -> Ordering {
@@ -2848,7 +2848,7 @@ fn eviction_cost(
     planning_recipes: &PlanningRecipes,
     spilled: &LogicalSet,
     value: LogicalValue,
-    future_uses: &impl FutureUses,
+    future_uses: &mut impl FutureUses,
 ) -> u32 {
     let has_persistent_home = spilled.contains(&value);
     let local_reload =
@@ -2879,7 +2879,7 @@ fn reload_cost_at_next_local_use(
     func: &MFunction,
     planning_recipes: &PlanningRecipes,
     value: LogicalValue,
-    future_uses: &impl FutureUses,
+    future_uses: &mut impl FutureUses,
 ) -> Option<u16> {
     let costs = super::cost::MachineSpillCosts::with_recipes(func, planning_recipes);
     future_uses
@@ -3875,9 +3875,10 @@ mod tests {
                 let cfg = super::super::cfg::normalize(&mut func).unwrap();
                 let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
                 let logical = LogicalValues::build(&func);
-                let costs = HashMap::default();
+                let mut costs = HashMap::default();
                 let mut remaining =
-                    RemainingBlockUses::build(&func, &next_use, &logical, 0, &costs, None).unwrap();
+                    RemainingBlockUses::build(&func, &next_use, &logical, 0, &mut costs, None)
+                        .unwrap();
                 let value = logical.checked_of(root, Some(BlockId(0)), None).unwrap();
                 assert_eq!(remaining.is_live_out(value), live_out);
                 assert!(
@@ -3959,7 +3960,7 @@ mod tests {
             &LogicalSet::new(),
             LogicalSet::new(),
             &constraints.instructions[0],
-            &HashMap::default(),
+            &mut HashMap::default(),
         )
         .unwrap();
 
@@ -4047,7 +4048,7 @@ mod tests {
             &LogicalSet::new(),
             LogicalSet::new(),
             &constraints.instructions[0],
-            &HashMap::default(),
+            &mut HashMap::default(),
         )
         .unwrap();
 
@@ -4123,7 +4124,7 @@ mod tests {
             &LogicalSet::new(),
             LogicalSet::new(),
             &constraints.instructions[0],
-            &HashMap::default(),
+            &mut HashMap::default(),
         )
         .unwrap();
 
@@ -4227,24 +4228,24 @@ mod tests {
         translations: &EdgeTranslations,
     ) {
         for block in 0..func.blocks.len() {
-            let expected =
+            let mut expected =
                 exit_reload_costs(func, cfg, next_use, recipes, logical, translations, block)
                     .unwrap();
-            let lazy = LazyExitReloadCosts {
+            let mut lazy = LazyExitReloadCosts {
                 func,
                 cfg,
                 next_use,
                 recipes,
                 translations,
                 block,
-                cache: std::cell::RefCell::new(HashMap::default()),
+                cache: HashMap::default(),
             };
-            assert!(lazy.cache.borrow().is_empty());
+            assert!(lazy.cache.is_empty());
             // Query one identity repeatedly before touching the rest. Neither
             // live-set size nor repeated requests may grow the block cache.
             for _ in 0..3 {
                 assert_eq!(lazy.cost(LogicalValue(0)), expected.cost(LogicalValue(0)));
-                assert_eq!(lazy.cache.borrow().len(), 1);
+                assert_eq!(lazy.cache.len(), 1);
             }
             for value in (0..func.vregs.count()).rev().map(LogicalValue) {
                 assert_eq!(
@@ -4824,7 +4825,7 @@ mod tests {
         let next_use = super::super::next_use::analyze(&func, &cfg).unwrap();
         let planning_recipes = PlanningRecipes::stack_only(func.vregs.count());
         let spilled = LogicalSet::new();
-        let future = LinearFutureUses {
+        let mut future = LinearFutureUses {
             func: &func,
             next_use: &next_use,
             block: 0,
@@ -4840,7 +4841,7 @@ mod tests {
                 &func,
                 &planning_recipes,
                 &spilled,
-                &future,
+                &mut future,
                 (LogicalValue(cheap.0), local(1)),
                 (LogicalValue(costly.0), local(1)),
             ),
@@ -4852,7 +4853,7 @@ mod tests {
                 &func,
                 &planning_recipes,
                 &spilled,
-                &future,
+                &mut future,
                 (LogicalValue(cheap.0), local(1)),
                 (LogicalValue(costly.0), local(15)),
             ),
@@ -4870,7 +4871,7 @@ mod tests {
         let equal_cfg = super::super::cfg::normalize(&mut equal_cost).unwrap();
         let equal_next_use = super::super::next_use::analyze(&equal_cost, &equal_cfg).unwrap();
         let equal_recipes = PlanningRecipes::stack_only(equal_cost.vregs.count());
-        let equal_future = LinearFutureUses {
+        let mut equal_future = LinearFutureUses {
             func: &equal_cost,
             next_use: &equal_next_use,
             block: 0,
@@ -4881,7 +4882,7 @@ mod tests {
                 &equal_cost,
                 &equal_recipes,
                 &spilled,
-                &equal_future,
+                &mut equal_future,
                 (LogicalValue(cheap.0), local(2)),
                 (LogicalValue(costly.0), local(8)),
             ),
@@ -4894,7 +4895,7 @@ mod tests {
                 &equal_cost,
                 &exact_recipes,
                 &spilled,
-                &equal_future,
+                &mut equal_future,
                 (LogicalValue(cheap.0), local(2)),
                 (LogicalValue(costly.0), local(2)),
             ),
