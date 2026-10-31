@@ -66,6 +66,12 @@ impl BodyBuilder<'_, '_, '_> {
                     process.clone()
                 } else if string {
                     type_binding::builtin_type("string", None).expect("string is a builtin type")
+                } else if let Some(key) =
+                    container.key.as_ref().filter(|key| !key.members.is_empty())
+                {
+                    // A packed structure index keeps its type, so the body
+                    // may select its members (IEEE 1800-2023 12.7.3).
+                    key.clone()
                 } else {
                     let mut ty = int_type();
                     ty.is_signed = signed;

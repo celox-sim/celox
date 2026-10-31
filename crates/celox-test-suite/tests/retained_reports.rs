@@ -638,6 +638,19 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq sum: expected 0x1179b59, got 0x117b2e7",
                         ),
+                        ("icarus", "containers::wide_associative_keys") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("icarus", "containers::wide_associative_keys_with_unknown_bits") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
+                        ("icarus", "containers::wide_signed_associative_keys") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

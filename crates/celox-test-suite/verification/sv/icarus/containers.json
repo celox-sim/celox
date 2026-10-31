@@ -124,6 +124,39 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:22: syntax error\n<case>/source_0.sv:22: error: Malformed statement\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "containers::wide_associative_keys",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:3: error: Type names are not valid expressions here.\n<case>/source_0.sv:3: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:3:               : Expression is: <type>\n<case>/source_0.sv:3:               : Expression type: 10PETypename\n<case>/source_0.sv:3: error: Dimensions must be constant.\n<case>/source_0.sv:3       : This size expression violates the rule: <type>\nwarning: verinum::as_long() truncated 100 bits to 63, returns 1\n<case>/source_0.sv:6: warning: ignoring out of bounds l-value array access m[1].\n<case>/source_0.sv:8: error: Object celox_suite_tb.dut.m has no method \"exists(...)\".\n<case>/source_0.sv:10: error: Object celox_suite_tb.dut.m has no method \"exists(...)\".\n<case>/source_0.sv:10: error: Object celox_suite_tb.dut.m has no method \"num(...)\".\n6 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::wide_associative_keys_with_unknown_bits",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:4: error: Type names are not valid expressions here.\n<case>/source_0.sv:4: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:4:               : Expression is: <type>\n<case>/source_0.sv:4:               : Expression type: 10PETypename\n<case>/source_0.sv:4: error: Dimensions must be constant.\n<case>/source_0.sv:4       : This size expression violates the rule: <type>\n<case>/source_0.sv:7: warning: ignoring out of bounds l-value array access s[-1].\nwarning: verinum::as_long() truncated 128 bits to 63, returns 0\nwarning: verinum::as_long() truncated 128 bits to 63, returns -9223372036854775808\n<case>/source_0.sv:9: warning: ignoring out of bounds l-value array access s[-9223372036854775808].\n<case>/source_0.sv:12: error: Enable of unknown task ``s.first''.\n<case>/source_0.sv:14: error: Enable of unknown task ``s.last''.\n<case>/source_0.sv:17: error: Enable of unknown task ``s.prev''.\n<case>/source_0.sv:20: error: Enable of unknown task ``s.next''.\n<case>/source_0.sv:22: error: Enable of unknown task ``s.delete''.\n<case>/source_0.sv:23: error: Object celox_suite_tb.dut.s has no method \"num(...)\".\n<case>/source_0.sv:23: error: Object celox_suite_tb.dut.s has no method \"first(...)\".\n10 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::wide_signed_associative_keys",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
