@@ -18,7 +18,7 @@ fn unresolved_local_parameter_masks_imported_bindings() {
             .collect(),
         ..Default::default()
     };
-    let _scope = scope::install(&tree.state, Arc::new(imported.clone()));
+    let tree = tree.importing(Arc::new(imported.clone()));
     let parameters = parameters_from_scope(
         &tree,
         &HashMap::default(),
@@ -61,7 +61,7 @@ fn short_circuit_proof_does_not_inherit_a_required_parameter_literal() {
             .collect(),
         ..Default::default()
     };
-    let _scope = scope::install(&tree.state, Arc::new(imported));
+    let tree = tree.importing(Arc::new(imported));
     let error = parameters_from_scope(
         &tree,
         &HashMap::default(),
@@ -392,7 +392,6 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
         Path::new("borrowed_ranges.sv"),
     ).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
-    let state = tree.state.as_ref();
     let base = HashMap::from_iter([("N".into(), 99), ("LATER".into(), 17)]);
     let copied_base = base.clone();
     let aliases = type_aliases_from_scope_with_env(&tree, &base).unwrap();
@@ -400,10 +399,10 @@ fn borrowed_range_context_matches_copied_context_with_aliases_and_stale_values()
         let overrides = HashMap::from_iter([("N".into(), ConstExpr::Literal(n.to_string()))]);
         let mut borrowed = Vec::new();
         let mut copied = Vec::new();
-        let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base, &[]);
+        let mut borrowed_env = ParameterEnvironment::new(&tree, &borrowed, &base, &[]);
         // The same contents at a different address deliberately select the
         // former copy-and-mask path, providing an independent width context.
-        let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base, &[]);
+        let mut copied_env = ParameterEnvironment::new(&tree, &copied, &copied_base, &[]);
         DECLARATION_ENV_COPIES.with(|copies| copies.set(0));
         for id in tree.body_membership().unwrap() {
             if !matches!(
@@ -526,7 +525,6 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
         Path::new("literal_prefix_projection.sv"),
     ).unwrap();
     let tree = AnalysisContext::unspecialized(&tree);
-    let state = tree.state.as_ref();
     for inherited_p in [None, Some(2)] {
         let base = inherited_p
             .map(|value| HashMap::from_iter([("P".into(), value)]))
@@ -534,8 +532,8 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
         let copied_base = base.clone();
         let mut borrowed = Vec::new();
         let mut copied = Vec::new();
-        let mut borrowed_env = ParameterEnvironment::new(state, &borrowed, &base, &[]);
-        let mut copied_env = ParameterEnvironment::new(state, &copied, &copied_base, &[]);
+        let mut borrowed_env = ParameterEnvironment::new(&tree, &borrowed, &base, &[]);
+        let mut copied_env = ParameterEnvironment::new(&tree, &copied, &copied_base, &[]);
         for id in tree.body_membership().unwrap() {
             if !matches!(
                 tree.declarations().body_item(id).kind,
@@ -565,7 +563,7 @@ fn literal_prefix_range_contexts_match_copied_projection_and_track_inherited_sha
                 &mut copied_env,
             )
             .unwrap();
-            let rebuilt = ParameterEnvironment::new(state, &borrowed, &base, &[]);
+            let rebuilt = ParameterEnvironment::new(&tree, &borrowed, &base, &[]);
             assert_eq!(
                 borrowed_env.has_inherited_literal_shadow,
                 rebuilt.has_inherited_literal_shadow
@@ -1467,9 +1465,10 @@ fn inherited_evaluation_masks_pending_local_names_and_their_type_markers() {
             signed: false,
         },
     );
-    let state = AnalysisState::default();
+    let tree = crate::source_tree::parse_source("", Path::new("environment.sv")).unwrap();
+    let tree = AnalysisContext::unspecialized(&tree);
     let mut environment =
-        ParameterEnvironment::new(&state, &[], &base, &["LOCAL".into(), "ALIAS".into()]);
+        ParameterEnvironment::new(&tree, &[], &base, &["LOCAL".into(), "ALIAS".into()]);
     let alias = Parameter::new(
         "ALIAS".into(),
         Some(ConstExpr::Ident("LOCAL".into())),
@@ -1479,7 +1478,7 @@ fn inherited_evaluation_masks_pending_local_names_and_their_type_markers() {
         false,
         true,
     );
-    environment.append(&state, &alias);
+    environment.append(&tree.state, &alias);
     assert!(!environment.values.contains_key("ALIAS"));
     assert!(!environment.types.contains_key("LOCAL"));
     assert_eq!(environment.bindings.get("EXTERNAL"), Some(&8));

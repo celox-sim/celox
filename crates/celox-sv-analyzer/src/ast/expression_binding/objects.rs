@@ -47,7 +47,7 @@ pub(in crate::ast) fn native_class(
     if let ExprKind::Call { expression, .. } = &native.expression(id).kind {
         let name = match method(tree, *expression, native, dimensions) {
             Ok(Some((name, ..))) => name,
-            Ok(None) => super::direct::callable_name(&tree.state, *expression, native)?,
+            Ok(None) => super::direct::callable_name(tree, *expression, native)?,
             Err(_) => return None,
         };
         return dimensions.function_return_types.get(&name)?.class.clone();
@@ -210,7 +210,7 @@ pub(in crate::ast) fn named_class(
             {
                 return Ok(Some(class.to_owned()));
             }
-            let class = scope::qualified_name(&tree.state, &scope_name, &member_name);
+            let class = scope::qualified_name(tree, &scope_name, &member_name);
             // A typedef of the package may name a class or a specialization.
             if let Some(aliased) = dimensions
                 .type_aliases

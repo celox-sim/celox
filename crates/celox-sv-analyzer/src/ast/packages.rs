@@ -515,14 +515,15 @@ fn analyze_package(
         syntax_tree: tree,
         state: state.clone(),
         parameter_overrides: Cow::Owned(HashMap::default()),
+        imported: Arc::default(),
+        package: None,
     };
     let tree = &context;
     let _timescales =
         timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
     let first = {
         // Inside the package, `p::x` names its own item `x`.
-        let _package = scope::enter_package(&tree.state, name);
-        analyze_package_scope(name, tree, packages, None)?
+        analyze_package_scope(name, &tree.in_package(name), packages, None)?
     };
     if !imports::ScopeImports::from_scope(tree)?
         .qualified

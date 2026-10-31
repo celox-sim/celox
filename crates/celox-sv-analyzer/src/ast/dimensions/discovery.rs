@@ -1019,13 +1019,13 @@ fn settle_scope(
     #[cfg(test)]
     super::SCOPE_SETTLES.with(|count| count.set(count.get() + 1));
     let mut context = input.clone();
-    for (name, metadata) in &scope::imported(&tree.state).function_return_types {
+    for (name, metadata) in &scope::imported(tree).function_return_types {
         context
             .function_return_types
             .entry(name.clone())
             .or_insert_with(|| metadata.clone());
     }
-    extend_interface_dimensions(&tree.state, &mut context);
+    extend_interface_dimensions(tree, &mut context);
     extend_variable_dimensions_from_const_env(&mut context, &input.const_env);
     publish(&tree.state.dimensions, key, &context);
     let _guard = Guard(&tree.state.dimensions, key.clone());
@@ -1147,7 +1147,7 @@ pub(in crate::ast) fn query_operand_dimensions_id(
                 continue;
             };
             let _functions = item.enter();
-            let _interface_scope = item.interface_scope();
+            let tree = &item.scoped(tree);
             let mut signals = Vec::new();
             declarations::signals_from_body_item(
                 item.id,

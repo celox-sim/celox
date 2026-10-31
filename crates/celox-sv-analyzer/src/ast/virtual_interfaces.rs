@@ -832,7 +832,7 @@ pub(super) fn identity(
     }
     // A port of an interface without members has no connection the
     // instance it denotes could be found by (see [`port_identity_signal`]).
-    match scope::imported(&tree.state).interface_types.get(name) {
+    match scope::imported(tree).interface_types.get(name) {
         Some(interface) => Err(unsupported(format!(
             "virtual interface value of port `{name}` of interface `{interface}`, which declares no members"
         ))),
@@ -936,7 +936,7 @@ fn native_value_type(
             let name =
                 match expression_binding::object_method(tree, *expression, native, dimensions) {
                     Ok(Some((name, _, _))) => name,
-                    _ => expression_binding::callable_name(&tree.state, *expression, native)
+                    _ => expression_binding::callable_name(tree, *expression, native)
                         .ok_or_else(|| "the call".to_owned())?,
                 };
             return match dimensions.function_return_types.get(&name) {
@@ -960,7 +960,7 @@ fn native_value_type(
     )
     .ok();
     if let Some(handle) = &handle {
-        let imported = scope::imported(&tree.state);
+        let imported = scope::imported(tree);
         if let Some(interface) = imported.interface_types.get(handle) {
             // A port declared with a modport is a view of the instance
             // restricted to it (IEEE 1800-2023 25.5).

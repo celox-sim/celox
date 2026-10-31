@@ -14,13 +14,13 @@ pub(super) fn instances_from_scope(
     let mut instances = Vec::new();
     let mut views = generate::ScopeViews::new(packed_dimensions);
     for item in &active {
-        let _interface_scope = item.interface_scope();
+        let syntax_tree = &item.scoped(syntax_tree);
         let celox_sv_syntax::BodyItemKind::Instance(native) =
             syntax_tree.declarations().body_item(item.id).kind
         else {
             continue;
         };
-        if scope::imported(&syntax_tree.state)
+        if scope::imported(syntax_tree)
             .interface_declarations
             .contains(&item.id)
         {
@@ -164,7 +164,7 @@ fn instances_from_native_declaration(
                 })?;
             Some(bounds)
         };
-        let imported = scope::imported(&syntax_tree.state);
+        let imported = scope::imported(syntax_tree);
         let binding = imported.interface_instances.get(&(id, index));
         let mut parameter_names = parameter_names.clone();
         let mut parameter_overrides = parameter_overrides.clone();

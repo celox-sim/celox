@@ -974,7 +974,7 @@ pub(super) fn print_message(
                     tree,
                     &prepared.unit,
                     site,
-                    &scope::imported(&tree.state).interface_types,
+                    &scope::imported(tree).interface_types,
                 )
                 .map(|scope| scope.message(prefix.as_deref()))
         } else {
@@ -983,7 +983,7 @@ pub(super) fn print_message(
                 tree,
                 site,
                 prefix.as_deref(),
-                &scope::imported(&tree.state).interface_types,
+                &scope::imported(tree).interface_types,
             )
         }
     }
@@ -999,12 +999,12 @@ pub(super) fn query(call: celox_sv_syntax::ExprId, tree: &AnalysisContext<'_>) -
                 call,
                 tree,
                 &prepared.unit,
-                &scope::imported(&tree.state).interface_types,
+                &scope::imported(tree).interface_types,
             )
         } else {
             context
                 .design
-                .query(call, tree, &scope::imported(&tree.state).interface_types)
+                .query(call, tree, &scope::imported(tree).interface_types)
         }
     }
 }

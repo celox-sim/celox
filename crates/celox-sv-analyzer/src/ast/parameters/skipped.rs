@@ -153,7 +153,7 @@ pub(in crate::ast) fn validate(
                 ..
             } => {
                 if separator == "::"
-                    && let Some(name) = expression_binding::native_name(&tree.state, id, native)
+                    && let Some(name) = expression_binding::native_name(tree, id, native)
                 {
                     if names {
                         value_name(&tree.state, &name, query, dims, unavailable)?;
@@ -166,7 +166,7 @@ pub(in crate::ast) fn validate(
                 expression,
                 arguments,
             } => {
-                let name = expression_binding::callable_name(&tree.state, *expression, native)
+                let name = expression_binding::callable_name(tree, *expression, native)
                     .ok_or_else(|| unsupported("function name in parameter operand"))?;
                 if let Some(function) = SystemFunction::from_name(&name) {
                     let args = arguments
@@ -270,31 +270,30 @@ pub(in crate::ast) fn validate(
                     tree,
                     dims,
                 )?;
-                let shape = if let Some(name) =
-                    expression_binding::native_name(&tree.state, *target, native)
-                    && let Some(ty) = dims.type_aliases.get(&name)
-                {
-                    Some(procedural::dimensions_from_type(ty))
-                } else {
-                    let width = match cast {
-                        casts::RuntimeCastTarget::Integral { target, .. }
-                        | casts::RuntimeCastTarget::Zero(target) => Some(target.width),
-                        casts::RuntimeCastTarget::Signing(_) | casts::RuntimeCastTarget::String => {
-                            None
-                        }
-                        casts::RuntimeCastTarget::Real { short } => {
-                            Some(if short { 32 } else { 64 })
-                        }
+                let shape =
+                    if let Some(name) = expression_binding::native_name(tree, *target, native)
+                        && let Some(ty) = dims.type_aliases.get(&name)
+                    {
+                        Some(procedural::dimensions_from_type(ty))
+                    } else {
+                        let width = match cast {
+                            casts::RuntimeCastTarget::Integral { target, .. }
+                            | casts::RuntimeCastTarget::Zero(target) => Some(target.width),
+                            casts::RuntimeCastTarget::Signing(_)
+                            | casts::RuntimeCastTarget::String => None,
+                            casts::RuntimeCastTarget::Real { short } => {
+                                Some(if short { 32 } else { 64 })
+                            }
+                        };
+                        width.map(|width| {
+                            let mut ty = Type::new(TypeKind::Logic);
+                            ty.packed_ranges.push(PackedRange::new(
+                                ConstExpr::Literal((width - 1).to_string()),
+                                ConstExpr::Literal("0".into()),
+                            ));
+                            procedural::dimensions_from_type(&ty)
+                        })
                     };
-                    width.map(|width| {
-                        let mut ty = Type::new(TypeKind::Logic);
-                        ty.packed_ranges.push(PackedRange::new(
-                            ConstExpr::Literal((width - 1).to_string()),
-                            ConstExpr::Literal("0".into()),
-                        ));
-                        procedural::dimensions_from_type(&ty)
-                    })
-                };
                 jobs.push((*expression, query, shape));
             }
             ExprKind::Concatenation(parts) => {
@@ -641,7 +640,7 @@ pub(in crate::ast) fn literal_widths(
                 expression,
                 arguments,
             } => {
-                let query = expression_binding::native_name(&tree.state, *expression, native)
+                let query = expression_binding::native_name(tree, *expression, native)
                     .and_then(|name| SystemFunction::from_name(&name))
                     .is_some_and(SystemFunction::has_unevaluated_operand);
                 for (index, arg) in arguments.iter().enumerate() {
@@ -756,8 +755,7 @@ pub(in crate::ast) fn literal_widths(
                     expression,
                     arguments,
                 } => {
-                    if let Some(name) =
-                        expression_binding::native_name(&tree.state, *expression, native)
+                    if let Some(name) = expression_binding::native_name(tree, *expression, native)
                         && name.starts_with('$')
                     {
                         let args = arguments
@@ -824,9 +822,9 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                 ),
                 ExprKind::Group(inner) => jobs.push(Job::Enter(*inner)),
                 ExprKind::Name(_) | ExprKind::Member { .. }
-                    if expression_binding::native_name(&tree.state, id, native).is_some() =>
+                    if expression_binding::native_name(tree, id, native).is_some() =>
                 {
-                    let name = expression_binding::native_name(&tree.state, id, native).unwrap();
+                    let name = expression_binding::native_name(tree, id, native).unwrap();
                     values.push(
                         dims.parameter_values
                             .get(&name)
@@ -861,8 +859,8 @@ fn proof(root: ExprId, tree: &AnalysisContext<'_>, dims: &PackedDimensions) -> C
                     while let ExprKind::Select { expression, .. } = native.expression(base).kind {
                         base = expression;
                     }
-                    let safe = expression_binding::native_name(&tree.state, base, native)
-                        .is_some_and(|name| {
+                    let safe =
+                        expression_binding::native_name(tree, base, native).is_some_and(|name| {
                             dims.parameter_values
                                 .get(&name)
                                 .and_then(|value| expr_static_width(&tree.state, value, dims))
@@ -1052,10 +1050,10 @@ pub(in crate::ast) fn validate_scope(
                     .map(|other| instances::normalize_identifier(&other.name.spelling)),
             );
         }
-        validate_operators(&tree.state, root, native)?;
+        validate_operators(tree, root, native)?;
         if literal_widths(root, scope, dimensions)?.is_some() {
             validate(root, scope, dimensions, &unavailable, true)?;
-        } else if needs_selected(&tree.state, root, native) {
+        } else if needs_selected(tree, root, native) {
             let context = dimensions::query_context_for_operand(root, scope, dimensions)?;
             selects::selected_parameter_initializer(root, scope, &context, None)?;
         }
@@ -1064,7 +1062,7 @@ pub(in crate::ast) fn validate_scope(
 }
 
 pub(in crate::ast) fn needs_selected(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     root: ExprId,
     native: &celox_sv_syntax::Declarations,
 ) -> bool {
@@ -1073,7 +1071,7 @@ pub(in crate::ast) fn needs_selected(
         // Data query operands contribute shape, not constant values. Their
         // operators are validated by the query binder in its type context.
         if let ExprKind::Call { expression, .. } = native.expression(id).kind
-            && expression_binding::native_name(state, expression, native)
+            && expression_binding::native_name(tree, expression, native)
                 .and_then(|name| SystemFunction::from_name(&name))
                 .is_some_and(SystemFunction::has_unevaluated_operand)
         {
@@ -1101,7 +1099,7 @@ pub(in crate::ast) fn needs_selected(
 }
 
 fn validate_operators(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     root: ExprId,
     native: &celox_sv_syntax::Declarations,
 ) -> Converted<()> {
@@ -1110,7 +1108,7 @@ fn validate_operators(
         // Data query operands contribute shape, not constant values. Their
         // operators are validated by the query binder in its type context.
         if let ExprKind::Call { expression, .. } = native.expression(id).kind
-            && expression_binding::native_name(state, expression, native)
+            && expression_binding::native_name(tree, expression, native)
                 .and_then(|name| SystemFunction::from_name(&name))
                 .is_some_and(SystemFunction::has_unevaluated_operand)
         {
@@ -1134,7 +1132,7 @@ fn validate_operators(
                 return Err(unsupported("reduction operator in parameter expression"));
             }
             if operator == "~"
-                && expression_binding::native_name(state, *expression, native).is_some()
+                && expression_binding::native_name(tree, *expression, native).is_some()
             {
                 return Err(unsupported(
                     "width-dependent complement in parameter expression",

@@ -135,7 +135,7 @@ pub(in crate::ast) fn pattern(
     // An enum value: a variable, constant, cast, method or call of an
     // enumerated type.
     if matches!(expression, ExprKind::Call { expression, .. }
-        if direct::call_name(&tree.state, *expression, native)
+        if direct::call_name(tree, *expression, native)
             .is_some_and(|name| returns_enum(&name, dimensions)))
         || enums::domain(tree, id, native, dimensions)?.is_some()
     {
@@ -191,7 +191,7 @@ pub(in crate::ast) fn pattern(
     if objects::native_class(tree, id, native, dimensions).is_some()
         || handle_value(value, dimensions)
         || matches!(expression, ExprKind::Call { expression, .. }
-            if direct::call_name(&tree.state, *expression, native)
+            if direct::call_name(tree, *expression, native)
                 .is_some_and(|name| returns_handle(&name, dimensions)))
     {
         return Ok(Pattern::Handle(None));
@@ -256,7 +256,7 @@ pub(in crate::ast) fn pattern(
         ExprKind::Cast { target, .. } => {
             enums::cast_type(tree, *target, native, dimensions)?.is_some_and(|ty| aggregate(&ty))
         }
-        ExprKind::Call { expression, .. } => direct::call_name(&tree.state, *expression, native)
+        ExprKind::Call { expression, .. } => direct::call_name(tree, *expression, native)
             .is_some_and(|name| returns_aggregate(&name, dimensions, aggregate)),
         _ => false,
     };

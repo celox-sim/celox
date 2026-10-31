@@ -46,7 +46,7 @@ pub(super) fn scope(
             if dimensions.get(&name).is_some() {
                 return false;
             }
-            !scope::imported(&tree.state).package_scopes.contains(&name)
+            !scope::imported(tree).package_scopes.contains(&name)
                 && classes::resolve(tree, &name).as_deref() == Some(CLASS)
         }
         ExprKind::Member {

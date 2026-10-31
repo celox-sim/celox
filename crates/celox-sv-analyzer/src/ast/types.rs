@@ -80,7 +80,7 @@ fn type_aliases_in_scope(
     defer_class_defaults: bool,
     generate_scope: Option<&str>,
 ) -> Converted<HashMap<String, Type>> {
-    let mut aliases = scope::imported(&syntax_tree.state).type_aliases.clone();
+    let mut aliases = scope::imported(syntax_tree).type_aliases.clone();
     aliases.extend(
         inherited
             .iter()
@@ -232,10 +232,7 @@ fn add_type_parameter(
         return Ok(());
     };
     let name = instances::normalize_identifier(&parameter.name.spelling);
-    if let Some(bound) = scope::imported(&tree.state)
-        .type_parameter_bindings
-        .get(&key)
-    {
+    if let Some(bound) = scope::imported(tree).type_parameter_bindings.get(&key) {
         aliases.insert(name, bound.clone());
     } else if let Some(id) = default {
         let context = PackedDimensions::new(HashMap::default(), env, aliases);

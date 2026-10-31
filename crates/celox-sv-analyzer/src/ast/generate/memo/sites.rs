@@ -240,6 +240,7 @@ impl CallSites for Item {
     fn call_sites(&self, visit: &mut dyn FnMut(usize)) {
         let Item {
             state: _,
+            imported: _,
             id: _,
             env: _,
             literals,

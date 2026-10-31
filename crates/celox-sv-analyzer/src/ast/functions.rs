@@ -59,7 +59,7 @@ pub(super) fn native_functions(
     let mut functions = HashMap::default();
     for (item, id) in owners {
         let aliases = item.type_aliases(&dimensions.type_aliases);
-        let _scope = item.interface_scope();
+        let tree = &item.scoped(tree);
         let _constants = item.enter();
         let mut signature_context = item.dimensions(dimensions);
         signature_context.const_env = item.env.clone();

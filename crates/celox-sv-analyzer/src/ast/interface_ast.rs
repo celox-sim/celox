@@ -131,7 +131,7 @@ pub(super) fn signature(
     // Internal signal lowering freezes localparam-dependent dimensions for
     // execution. A public declaration must retain those dependencies so its
     // consumers can specialize the interface with different header values.
-    let _scope = scope::install(&tree.state, Arc::new(imported.clone()));
+    let tree = &tree.importing(Arc::new(imported.clone()));
     let _functions = const_functions::install(&tree.state, module.constant_functions.clone());
     let mut env = imported.const_env.clone();
     extend_const_env_with_parameters(&tree.state, &mut env, &module.parameters);
