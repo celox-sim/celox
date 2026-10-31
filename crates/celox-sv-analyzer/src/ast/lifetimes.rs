@@ -30,18 +30,22 @@ enum Entry {
 /// time-zero initializations.
 /// `directions` gives the argument directions of the subroutines a body
 /// may call.
-/// For the bodies of processes, `explicit` gives the statics declared with
-/// the `static` keyword, and each body tells whether its process runs once;
-/// see [`initialized_at_time_zero`].
+/// `explicit` gives the statics declared with the `static` keyword, or
+/// every static of a subroutine, and each body tells whether its process
+/// runs once; see [`initialized_at_time_zero`]. A static of `explicit`
+/// that is not in `statics` is kept too when such an initializer reads it. `formals` are the formals of a subroutine,
+/// which an initializer that runs at time zero cannot read either.
 /// With `concurrent`, the bodies may run in overlapping activations, and
 /// every static local keeps its value.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn keep_static_locals<'b, T>(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     statics: &HashMap<String, T>,
     directions: &Directions,
     bodies: impl IntoIterator<Item = (&'b mut Vec<Stmt>, bool)>,
-    explicit: Option<&HashSet<String>>,
+    explicit: &HashSet<String>,
+    formals: &[String],
     concurrent: bool,
 ) -> Result<(Vec<String>, Vec<Stmt>), AnalyzerError> {
     let mut kept = Vec::new();
@@ -50,10 +54,7 @@ pub(super) fn keep_static_locals<'b, T>(
         return Ok((kept, initializers));
     }
     let mut bodies = bodies.into_iter().collect::<Vec<_>>();
-    let initialized = match explicit {
-        Some(explicit) => initialized_at_time_zero(tree, session, statics, explicit, &bodies),
-        None => HashSet::default(),
-    };
+    let initialized = initialized_at_time_zero(tree, session, statics, explicit, formals, &bodies);
     for (body, _) in &mut bodies {
         let mut concurrent = concurrent;
         for stmt in body.iter() {
@@ -74,8 +75,8 @@ pub(super) fn keep_static_locals<'b, T>(
     Ok((kept, initializers))
 }
 
-/// The static locals of process `bodies` whose initializer is not constant
-/// but reads no automatic variable, with the static locals they read. The
+/// The static locals of `bodies` whose initializer is not constant but
+/// reads no automatic variable or formal, with the static locals they read. The
 /// initializer of a static variable may be any run-time expression, and
 /// runs once before any procedure starts (IEEE 1800-2023 6.8, 6.21); these
 /// locals keep their value so that the time-zero initialization does that.
@@ -91,15 +92,16 @@ fn initialized_at_time_zero<T>(
     session: &mut Session,
     statics: &HashMap<String, T>,
     explicit: &HashSet<String>,
+    formals: &[String],
     bodies: &[(&mut Vec<Stmt>, bool)],
 ) -> HashSet<String> {
     let mut initializers = HashMap::default();
-    let mut automatic = Vec::new();
+    let mut automatic = formals.iter().map(String::as_str).collect::<Vec<_>>();
     for (body, once) in bodies {
         for stmt in body.iter() {
             stmt.walk(&mut |stmt| {
                 if let Stmt::Local { name, init } = stmt {
-                    if statics.contains_key(name) {
+                    if statics.contains_key(name) || explicit.contains(name) {
                         let allowed = *once || explicit.contains(name);
                         initializers.insert(name.as_str(), (init.as_ref(), allowed));
                     } else {
@@ -153,10 +155,22 @@ fn keep_in<T>(
 ) -> Result<(), AnalyzerError> {
     let mut index = 0;
     while index < stmts.len() {
+        // In overlapping activations every static keeps its value, and an
+        // initializer that is not constant must run at time zero.
+        if let Stmt::Local {
+            name,
+            init: Some(init),
+        } = &stmts[index]
+            && concurrent
+            && statics.contains_key(name)
+            && !initialized.contains(name)
+        {
+            constant_initializer(tree, session, name, init)?;
+        }
         // A sampled value of a static local is its value from an earlier
         // time slot (IEEE 1800-2023 16.5.1), which the local keeps.
         if let Stmt::Local { name, init } = &stmts[index]
-            && statics.contains_key(name)
+            && (statics.contains_key(name) || initialized.contains(name))
             && (initialized.contains(name)
                 || concurrent
                 || sampled_reads(&stmts[index + 1..], name)
@@ -448,31 +462,6 @@ fn argument_widths(subroutine: &Subroutine) -> HashMap<String, usize> {
 /// The name a unique local name `x@N` was declared with.
 fn source_name(name: &str) -> &str {
     name.rsplit_once('@').map_or(name, |(source, _)| source)
-}
-
-/// Reject a static local of `body` whose initializer is not constant, as
-/// [`entry`] does for a local whose entry value it examines.
-pub(super) fn check_constant_initializers(
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    body: &[Stmt],
-    statics: &HashSet<String>,
-) -> Result<(), AnalyzerError> {
-    let mut result = Ok(());
-    for stmt in body {
-        stmt.walk(&mut |stmt| {
-            if let Stmt::Local {
-                name,
-                init: Some(init),
-            } = stmt
-                && statics.contains(name)
-                && result.is_ok()
-            {
-                result = constant_initializer(tree, session, name, init);
-            }
-        });
-    }
-    result
 }
 
 fn constant_initializer(

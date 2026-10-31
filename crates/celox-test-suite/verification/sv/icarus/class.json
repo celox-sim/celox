@@ -1722,6 +1722,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:10: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:27: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:38: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:39: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:42: syntax error\n<case>/source_0.sv:42: error: Malformed statement\n<case>/source_0.sv:43: syntax error\n<case>/source_0.sv:43: error: Malformed statement\n<case>/source_0.sv:44: syntax error\n<case>/source_0.sv:44: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::static_initializers_run_once_before_time_zero",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects class scope resolution with a syntax error: reading a static property (Counter::created), calling a static method (Counter::next()) and assigning a static property (Counter::last = \"set\"). IEEE 1800-2023 8.9, 8.10 and 8.23 define these accesses. Verilator passes both cases.",
       "expectation": "Simulation",
       "known_issue": {
