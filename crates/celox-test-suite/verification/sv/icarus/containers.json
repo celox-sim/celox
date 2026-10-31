@@ -116,6 +116,78 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 returns the entire queue for q[lo:hi], both for lo=hi=-2 and for lo=hi=1. The standalone six-element queue prints size 6 for both; IEEE 1800-2023 7.10.1 requires sizes 0 and 1, respectively. The wide and unknown bound case also retains the whole queue when selecting one element.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_queue_slices.sv",
+          "src/sv/cases/containers.vtest",
+          "LIMITATIONS.md#queue-slices"
+        ],
+        "id": "sv_icarus_queue_slice_ranges",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 returns the entire queue for q[lo:hi], both for lo=hi=-2 and for lo=hi=1. The standalone six-element queue prints size 6 for both; IEEE 1800-2023 7.10.1 requires sizes 0 and 1, respectively. The wide and unknown bound case also retains the whole queue when selecting one element.",
+        "upstream": []
+      },
+      "name": "containers::queue_slice_runtime_bounds",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects q[0:$] with a syntax error, as reproduced with EMPTY_QUEUE. The shared update case also uses q[2:$], q[1:$] and q[0:$-1]. IEEE 1800-2023 7.10.1 and 7.10.4 permit these queue slices.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "language_limitation",
+        "evidence": [
+          "verification/repros/sv_queue_slices.sv",
+          "src/sv/cases/containers.vtest",
+          "LIMITATIONS.md#queue-slices"
+        ],
+        "id": "sv_icarus_queue_slice_dollar_bounds",
+        "observed_version": "Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects q[0:$] with a syntax error, as reproduced with EMPTY_QUEUE. The shared update case also uses q[2:$], q[1:$] and q[0:$-1]. IEEE 1800-2023 7.10.1 and 7.10.4 permit these queue slices.",
+        "upstream": []
+      },
+      "name": "containers::queue_slice_updates_and_copies",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 returns the entire queue for q[lo:hi], both for lo=hi=-2 and for lo=hi=1. The standalone six-element queue prints size 6 for both; IEEE 1800-2023 7.10.1 requires sizes 0 and 1, respectively. The wide and unknown bound case also retains the whole queue when selecting one element.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_queue_slices.sv",
+          "src/sv/cases/containers.vtest",
+          "LIMITATIONS.md#queue-slices"
+        ],
+        "id": "sv_icarus_queue_slice_ranges",
+        "observed_version": "Icarus 13.0",
+        "phase": "execute",
+        "reason": "Icarus 13.0 returns the entire queue for q[lo:hi], both for lo=hi=-2 and for lo=hi=1. The standalone six-element queue prints size 6 for both; IEEE 1800-2023 7.10.1 requires sizes 0 and 1, respectively. The wide and unknown bound case also retains the whole queue when selecting one element.",
+        "upstream": []
+      },
+      "name": "containers::queue_slice_wide_and_unknown_bounds",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:8: syntax error\n<case>/source_1.sv:8: Syntax in assignment statement l-value.\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "containers::string_indices_from_calls",

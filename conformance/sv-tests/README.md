@@ -267,6 +267,15 @@ their expected comparisons depend on retaining X/Z values in the nets. This
 change does not implement general resolution of differing or dynamic drivers,
 and does not coalesce `uwire` or variable drivers.
 
+Queue slices (7.10.1, 7.10.4) update 10 rows: both modes of
+`chapter-7/queues/delete_assign.sv`, `insert_assign.sv`, `pop_back_assing.sv`,
+`pop_front_assign.sv`, and `slice.sv` change from fail to pass. A focused official
+run of all 18 queue cases in both modes reports 17 passes and the existing
+`persistence.sv` failure per mode; only these 10 verdicts change. Shared cases
+check runtime clipping, empty queues, `$` bounds, copies, string elements,
+argument side effects, wide signed/unsigned bounds, and unknown bounds and elements.
+Element-reference persistence remains unsupported.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.

@@ -3640,5 +3640,61 @@
         "streaming::streaming_dynamic_unpack"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_queue_slice_boundaries",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052",
+    "reason": "IEEE 1800-2023 7.10.1 requires q[-2:-2] and a slice of an empty queue to be empty. Verilator 5.052 returns all six elements for the negative singleton slice and crashes for an empty queue sliced as q[0:$]. The shared update case aborts in std::deque::operator[]; the standalone EMPTY_QUEUE reproduction segfaults. Its VlQueue::slice compares signed bounds with size_t and accesses index -1 of an empty deque.",
+    "cases": {
+      "verilator": [
+        "containers::queue_slice_runtime_bounds",
+        "containers::queue_slice_updates_and_copies"
+      ]
+    },
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_queue_slices.sv",
+      "src/sv/cases/containers.vtest",
+      "LIMITATIONS.md#queue-slices"
+    ]
+  },
+  {
+    "id": "sv_icarus_queue_slice_ranges",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 returns the entire queue for q[lo:hi], both for lo=hi=-2 and for lo=hi=1. The standalone six-element queue prints size 6 for both; IEEE 1800-2023 7.10.1 requires sizes 0 and 1, respectively. The wide and unknown bound case also retains the whole queue when selecting one element.",
+    "cases": {
+      "icarus": [
+        "containers::queue_slice_runtime_bounds",
+        "containers::queue_slice_wide_and_unknown_bounds"
+      ]
+    },
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_queue_slices.sv",
+      "src/sv/cases/containers.vtest",
+      "LIMITATIONS.md#queue-slices"
+    ]
+  },
+  {
+    "id": "sv_icarus_queue_slice_dollar_bounds",
+    "category": "language_limitation",
+    "phase": "compile",
+    "observed_version": "Icarus 13.0",
+    "reason": "Icarus 13.0 rejects q[0:$] with a syntax error, as reproduced with EMPTY_QUEUE. The shared update case also uses q[2:$], q[1:$] and q[0:$-1]. IEEE 1800-2023 7.10.1 and 7.10.4 permit these queue slices.",
+    "cases": {
+      "icarus": [
+        "containers::queue_slice_updates_and_copies"
+      ]
+    },
+    "upstream": [],
+    "evidence": [
+      "verification/repros/sv_queue_slices.sv",
+      "src/sv/cases/containers.vtest",
+      "LIMITATIONS.md#queue-slices"
+    ]
   }
 ]

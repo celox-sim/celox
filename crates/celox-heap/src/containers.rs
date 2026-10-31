@@ -52,6 +52,9 @@ pub const HANDLE_PATTERN: u64 = 101;
 /// those of sequence `b`, kept to the capacity of the layout (IEEE 1800-2023
 /// 10.10). Either may be empty (0).
 pub const CONCAT: u64 = 102;
+/// `slice(a, b, c)`: a new queue with the inclusive, signed bounds b..c,
+/// clipped to the source queue (IEEE 1800-2023 7.10.1).
+pub const SLICE: u64 = 103;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -535,6 +538,22 @@ impl Heap {
                 }
                 return self.finish_container(a as Handle) as u64;
             }
+            SLICE => {
+                let mut result = Container::empty(layout);
+                if let Contents::Sequence(dst) = &mut result.contents
+                    && let Some(Container {
+                        contents: Contents::Sequence(src),
+                        ..
+                    }) = existing.map(AsRef::as_ref)
+                {
+                    let lo = (b as i64).max(0) as usize;
+                    let hi = (c as i64).min(src.len() as i64 - 1);
+                    if hi >= 0 && lo <= hi as usize {
+                        dst.extend(src.range(lo..=hi as usize).copied().take(layout.capacity()));
+                    }
+                }
+                return self.publish_container(result, true) as u64;
+            }
             CONCAT => {
                 let mut result = Container::empty(layout);
                 let Contents::Sequence(v) = &mut result.contents else {
@@ -731,6 +750,28 @@ mod tests {
         call(&mut heap, NEW, p, u64::MAX, 0, 0);
         assert_eq!(heap.take_fault(), Some(Fault::NegativeArraySize));
     }
+    #[test]
+    fn queue_slice_clips_and_copies_elements_and_masks() {
+        let mut heap = Heap::new();
+        let p = parameter(8, false, 0, 1, 0, false, false, false);
+        let a = call(&mut heap, INSERT, p, 0, 0, 17);
+        let a = call(&mut heap, INSERT, p, a, 1, 255);
+        let a = call(&mut heap, SET_MASK, p, a, 1, 255);
+        let b = call(&mut heap, SLICE, p, a, 1, u64::MAX >> 1);
+        assert_eq!(call(&mut heap, LEN, p, b, 0, 0), 1);
+        assert_eq!(call(&mut heap, GET, p, b, 0, 0), 255);
+        assert_eq!(call(&mut heap, GET_MASK, p, b, 0, 0), 255);
+        let c = call(&mut heap, SET, p, b, 0, 42);
+        assert_eq!(call(&mut heap, GET, p, c, 0, 0), 42);
+        assert_eq!(call(&mut heap, GET, p, a, 1, 0), 255);
+        let all = call(&mut heap, SLICE, p, a, u64::MAX, 9);
+        assert_eq!(call(&mut heap, LEN, p, all, 0, 0), 2);
+        for (lo, hi) in [(2, 1), (9, 10), (0, u64::MAX)] {
+            assert_eq!(call(&mut heap, SLICE, p, a, lo, hi), 0);
+        }
+        assert_eq!(call(&mut heap, SLICE, p, 0, 0, 0), 0);
+    }
+
     #[test]
     fn concatenation_copies_both_sequences_once_within_capacity() {
         let mut heap = Heap::new();
