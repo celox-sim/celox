@@ -24,6 +24,10 @@ pub const GETC: u64 = 3;
 /// `atoi(a)`: the leading digits of string `a` in the radix of the
 /// parameter, as a 32-bit integer.
 pub const ATOI: u64 = 4;
+/// `key_bytes(a, i, count)`: the `count` bytes from byte `i` of the bytes
+/// that [`KEY`] string `a` holds, most significant first, where bytes past the
+/// end read as 0. `count` is at most 8.
+pub const KEY_BYTES: u64 = 5;
 /// `new()`: an empty buffer.
 pub const NEW: u64 = 16;
 /// `copy(a)`: a buffer holding string `a`.
@@ -33,6 +37,12 @@ pub const APPEND: u64 = 18;
 /// `append_bytes(buffer, value, count)`: `buffer` extended by the low `count`
 /// bytes of `value`, most significant first. `count` is at most 8.
 pub const APPEND_BYTES: u64 = 19;
+/// `key(buffer)`: the string that holds the bytes of `buffer` as a key of a
+/// [`crate::containers::WIDE_KEY`] array; the buffer is consumed. Strings
+/// hold no zero bytes, so the key is the bytes in 7-bit groups, most
+/// significant first, each with its top bit set: keys of one length order as
+/// the bytes they hold.
+pub const KEY: u64 = 26;
 /// `putc(buffer, i, c)`: `buffer` with byte `i` replaced by `c`, unless `i`
 /// is out of range or `c` is 0. `i` is signed.
 pub const PUTC: u64 = 20;
@@ -181,6 +191,18 @@ impl Heap {
                 .ok()
                 .and_then(|index| self.string(a as Handle).get(index))
                 .map_or(0, |&byte| byte.into()),
+            KEY_BYTES => {
+                let string = crate::containers::key_bytes(self.string(a as Handle));
+                (0..(c as usize).min(8)).fold(0, |word, k| {
+                    let byte = usize::try_from(b)
+                        .ok()
+                        .and_then(|i| i.checked_add(k))
+                        .and_then(|i| string.get(i))
+                        .copied()
+                        .unwrap_or(0);
+                    word << 8 | u64::from(byte)
+                })
+            }
             ATOI => atoi(self.string(a as Handle), parameter as u32 & 0xff),
             NEW => self.new_buffer(Vec::new()),
             COPY => self.new_buffer(self.string(a as Handle).to_vec()),
@@ -233,6 +255,10 @@ impl Heap {
                 (parameter >> 8) as u32 & 0xff,
                 parameter >> 16 & 1 != 0,
             )),
+            KEY => {
+                let bytes = self.take_buffer(a);
+                self.intern(&crate::containers::key_string(&bytes)).into()
+            }
             FREEZE => {
                 let bytes = self.take_buffer(a);
                 self.intern(&bytes).into()

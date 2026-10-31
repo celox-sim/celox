@@ -8144,6 +8144,25 @@ fn property_select_reads_require_a_zero_based_range() {
 }
 
 #[test]
+fn wide_associative_indices_reject_index_locators() {
+    // Integral indices of any width key an associative array (IEEE
+    // 1800-2023 7.8.4); a queue of the indices wider than 64 bits is not
+    // built.
+    let source = "module Top; int a[bit [99:0]]; int f[$]; bit [99:0] k; \
+         initial begin a[k] = 1; f = a.find() with (item.index > 3); end endmodule";
+    analyze_source(source, Path::new("wide_keys.sv")).expect("wide indices are accepted");
+    let source = "module Top; int a[bit [99:0]]; bit [99:0] ix[$]; \
+         initial ix = a.find_index() with (item > 0); endmodule";
+    let error = analyze_source(source, Path::new("wide_keys.sv"))
+        .expect_err("the index locator must be rejected");
+    assert!(
+        matches!(error, AnalyzerError::Unsupported(_))
+            && error.to_string().contains("indices wider than 64 bits"),
+        "{error}"
+    );
+}
+
+#[test]
 fn wide_container_elements_reject_whole_container_operations() {
     // Elements wider than 64 bits are held in records, which these
     // operations would compare or combine as handles.

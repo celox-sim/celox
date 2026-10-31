@@ -1198,3 +1198,100 @@ module Top(output int sum, output int text);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 14394313) (assert_eq text 1))
+
+; IEEE 1800-2023 7.8.4: an integral index of any width is cast to the index
+; type and orders numerically, signed or unsigned per the index type; 7.9
+; methods traverse the indices in that order.
+(case wide_associative_keys
+  (source "wide_associative_keys.sv" #"
+module Top(output bit done);
+    typedef struct packed { bit [31:0] hi; bit [63:0] mid; bit [63:0] lo; } range_t;
+    int u[bit [64:0]];
+    int c[bit [64:0]];
+    string m[range_t];
+    bit [64:0] uk;
+    range_t r;
+    initial begin
+        u[65'h1_0000_0000_0000_0000] = 3;
+        u[65'd5] = 1;
+        u[65'h1_ffff_ffff_ffff_ffff] = 4;
+        u[65'h0_ffff_ffff_ffff_ffff] = 2;
+        $display("u %0d %0d %0d %0d", u.num(), u.size(), u.exists(65'd5), u.exists(65'd6));
+        foreach (u[k]) $display("each %h %0d", k, u[k]);
+        if (u.first(uk)) do $display("next %h", uk); while (u.next(uk));
+        if (u.last(uk)) do $display("prev %h", uk); while (u.prev(uk));
+        c = u;
+        c.delete(65'd5);
+        u[65'd5] = 10;
+        $display("copy %0d %0d %0d %0d", c.num(), c.exists(65'd5), u[65'd5], c[65'h1_ffff_ffff_ffff_ffff]);
+        r = '{hi: 32'h1, mid: 64'h0, lo: 64'h2};
+        m[r] = "b";
+        r.hi = 0;
+        m[r] = "a";
+        r = '{hi: 32'hffff_ffff, mid: 64'h0, lo: 64'hffff_ffff_ffff_ffff};
+        m[r] = "c";
+        foreach (m[k]) $display("struct %h %h %s", k, k.hi, m[k]);
+        void'(m.first(r));
+        $display("first %h %h %s", r.hi, r.lo, m[r]);
+        void'(m.next(r));
+        $display("next %h %h %s", r.hi, r.lo, m[r]);
+        m.delete(r);
+        $display("deleted %0d %0d", m.num(), m.exists(r));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "u 4 4 1 0\neach 00000000000000005 1\neach 0ffffffffffffffff 2\neach 10000000000000000 3\neach 1ffffffffffffffff 4\nnext 00000000000000005\nnext 0ffffffffffffffff\nnext 10000000000000000\nnext 1ffffffffffffffff\nprev 1ffffffffffffffff\nprev 10000000000000000\nprev 0ffffffffffffffff\nprev 00000000000000005\ncopy 3 0 10 4\nstruct 0000000000000000000000000000000000000002 00000000 a\nstruct 0000000100000000000000000000000000000002 00000001 b\nstruct ffffffff0000000000000000ffffffffffffffff ffffffff c\nfirst 00000000 0000000000000002 a\nnext 00000001 0000000000000002 b\ndeleted 2 0\n"))
+
+(case wide_signed_associative_keys
+  (source "wide_signed_associative_keys.sv" #"
+module Top(output bit done);
+    typedef bit signed [127:0] s128_t;
+    int s[s128_t];
+    s128_t sk;
+    initial begin
+        s[-128'sd1] = 1;
+        s[128'sd1 <<< 100] = 3;
+        s[-(128'sd1 <<< 120)] = 0;
+        s[0] = 2;
+        foreach (s[k]) $display("signed %0d %0d", k, s[k]);
+        void'(s.first(sk));
+        $display("first %0d", sk);
+        void'(s.last(sk));
+        $display("last %0d", sk);
+        sk = 0;
+        void'(s.prev(sk));
+        $display("before zero %0d", sk);
+        sk = -128'sd1;
+        void'(s.next(sk));
+        $display("after minus one %0d", sk);
+        s.delete();
+        $display("cleared %0d %0d", s.num(), s.first(sk));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "signed -1329227995784915872903807060280344576 0\nsigned -1 1\nsigned 0 2\nsigned 1267650600228229401496703205376 3\nfirst -1329227995784915872903807060280344576\nlast 1267650600228229401496703205376\nbefore zero -1\nafter minus one 0\ncleared 0 0\n"))
+
+; IEEE 1800-2023 7.8.4: a wide index with unknown bits is invalid, so no
+; element exists for it.
+(case wide_associative_keys_with_unknown_bits
+  (four_state)
+  (source "wide_associative_unknown_keys.sv" #"
+module Top(output bit done);
+    int m[logic [99:0]];
+    logic [99:0] k;
+    initial begin
+        m[100'h1_0000_0000_0000_0000_0000_0001] = 7;
+        k = 100'h1_0000_0000_0000_0000_0000_0001;
+        $display("%0d %0d", m.exists(k), m[k]);
+        k[50] = 1'bx;
+        $display("%0d %0d", m.exists(k), m.num());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 7\n0 1\n"))

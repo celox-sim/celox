@@ -70,11 +70,10 @@ pub(super) fn with_dimensions(
                         && (!matches!(
                             ty.kind(),
                             TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Process
-                        ) || shape.width > 64
-                            || !ty.unpacked_ranges.is_empty())
+                        ) || !ty.unpacked_ranges.is_empty())
                     {
                         return Err(unsupported(
-                            "associative indices require strings, class or process handles or integral types up to 64 bits",
+                            "associative indices require strings, class or process handles or integral types",
                         ));
                     }
                     Some(ContainerKind::Associative {

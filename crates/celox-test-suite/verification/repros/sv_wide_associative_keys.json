@@ -1,0 +1,29 @@
+{
+  "case": "containers::wide_signed_associative_keys",
+  "source": "src/sv/cases/containers.vtest",
+  "standard": "IEEE 1800-2023 7.8.4: an integral index of any width is cast to the index type, and the ordering is signed or unsigned numerical, depending on the signedness of the index type.",
+  "method": "The shared cases containers::wide_associative_keys and containers::wide_signed_associative_keys run unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters.",
+  "reduced_source": "module Top;\n    typedef bit signed [127:0] s_t;\n    int s[s_t];\n    int u[bit [64:0]];\n    initial begin\n        s[-128'sd1] = 1; s[0] = 2; s[128'sd5] = 3;\n        foreach (s[k]) $display(\"signed %0d\", k);\n        u[65'h1_0000_0000_0000_0000] = 1; u[65'd5] = 2;\n        u[65'h1_ffff_ffff_ffff_ffff] = 3; u[65'h0_ffff_ffff_ffff_ffff] = 4;\n        foreach (u[k]) $display(\"unsigned %h\", k);\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "signed 0\nsigned 5\nsigned -1\nunsigned 00000000000000005\nunsigned 0ffffffffffffffff\nunsigned 10000000000000000\nunsigned 1ffffffffffffffff\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:3: error: Type names are not valid expressions here.\nrepro.sv:3: internal error: I do not know how to elaborate this expression. \n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "signed 0\nsigned 340282366920938463463374607431768211455\nsigned 5\nunsigned 0ffffffffffffffff\nunsigned 1ffffffffffffffff\nunsigned 00000000000000005\nunsigned 10000000000000000\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "signed -1\nsigned 0\nsigned 5\nunsigned 00000000000000005\nunsigned 0ffffffffffffffff\nunsigned 10000000000000000\nunsigned 1ffffffffffffffff\n"
+    }
+  ]
+}

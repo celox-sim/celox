@@ -39,6 +39,12 @@ pub const RSORT: u64 = 99;
 pub const PATTERN: u64 = 100;
 /// A [`PATTERN`] parameter bit: integral elements print as signed values.
 pub const SIGNED_ELEMENTS: u64 = 1 << 47;
+/// A parameter bit of a string-keyed associative array whose keys are
+/// integral indices wider than 64 bits: each key is the [`crate::ops::KEY`]
+/// of the index in big-endian bytes, extended to whole bytes, with the top
+/// bit flipped when the index type is signed, so the keys order numerically
+/// (IEEE 1800-2023 7.8.4). [`PATTERN`] prints them in decimal.
+pub const WIDE_KEY: u64 = 1 << 51;
 /// `handle_pattern(a)`: a buffer with class handle `a` as [`PATTERN`] prints
 /// an element: `null`, or `@` and the handle.
 pub const HANDLE_PATTERN: u64 = 101;
@@ -51,7 +57,8 @@ pub const CONCAT: u64 = 102;
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
 /// kind (10..11: dynamic/queue/associative), queue capacity (12..43, 0 means
 /// unbounded), associative key ordering (44 signed, 45 string), and whether
-/// associative keys are object handles that the collector traces (46).
+/// associative keys are object handles that the collector traces (46). An
+/// array with [`WIDE_KEY`] also has string keys.
 #[allow(clippy::too_many_arguments)]
 pub const fn parameter(
     width: u32,
@@ -125,6 +132,69 @@ fn quoted(out: &mut Vec<u8>, text: &[u8]) {
     out.push(b'"');
     out.extend_from_slice(text);
     out.push(b'"');
+}
+
+/// The [`crate::ops::KEY`] string of `bytes`.
+pub(crate) fn key_string(bytes: &[u8]) -> Vec<u8> {
+    let bits = bytes.len() * 8;
+    let groups = bits.div_ceil(7);
+    let bit = |i: usize| bytes[i / 8] >> (7 - i % 8) & 1;
+    (0..groups)
+        .map(|group| {
+            (0..7).fold(0x80, |byte, k| {
+                // The groups pad the bytes with zeros on the left.
+                let position = (group * 7 + k).checked_sub(groups * 7 - bits);
+                byte | position.map_or(0, bit) << (6 - k)
+            })
+        })
+        .collect()
+}
+
+/// The bytes that the [`crate::ops::KEY`] string `key` holds.
+pub(crate) fn key_bytes(key: &[u8]) -> Vec<u8> {
+    let bits = key.len() * 7;
+    let bytes = bits / 8;
+    let bit = |i: usize| key[i / 7] >> (6 - i % 7) & 1;
+    (0..bytes)
+        .map(|byte| {
+            (0..8).fold(0, |value, k| {
+                value << 1 | bit(bits - bytes * 8 + byte * 8 + k)
+            })
+        })
+        .collect()
+}
+
+/// The [`WIDE_KEY`] key `bytes` in decimal.
+fn wide_decimal(bytes: &[u8], signed: bool) -> String {
+    let mut magnitude = bytes.to_vec();
+    let negative = signed && magnitude.first().is_some_and(|top| top & 0x80 == 0);
+    if let Some(top) = magnitude.first_mut().filter(|_| signed) {
+        *top ^= 0x80;
+    }
+    if negative {
+        // The two's complement: invert and add one.
+        let mut carry = true;
+        for byte in magnitude.iter_mut().rev() {
+            let (sum, overflow) = (!*byte).overflowing_add(u8::from(carry));
+            *byte = sum;
+            carry = overflow;
+        }
+    }
+    let mut digits = Vec::new();
+    while magnitude.iter().any(|&byte| byte != 0) || digits.is_empty() {
+        let mut remainder = 0u32;
+        for byte in magnitude.iter_mut() {
+            let value = remainder << 8 | u32::from(*byte);
+            *byte = (value / 10) as u8;
+            remainder = value % 10;
+        }
+        digits.push(b'0' + remainder as u8);
+    }
+    if negative {
+        digits.push(b'-');
+    }
+    digits.reverse();
+    String::from_utf8(digits).unwrap()
 }
 
 /// The `width`-bit `value` in decimal, as `%0d` prints it: an element with
@@ -305,6 +375,9 @@ impl Heap {
                         out.extend_from_slice(b", ");
                     }
                     match key {
+                        Key::String(key) if parameter & WIDE_KEY != 0 => out.extend_from_slice(
+                            wide_decimal(&key_bytes(key), parameter & (1 << 44) != 0).as_bytes(),
+                        ),
                         Key::String(text) => quoted(&mut out, text),
                         Key::Integer(key) if parameter & (1 << 44) != 0 => {
                             out.extend_from_slice(((key ^ 1 << 63) as i64).to_string().as_bytes())
@@ -724,6 +797,49 @@ mod tests {
         assert!(!heap.contains(z as Handle));
         assert!(!heap.contains(a as Handle));
     }
+    #[test]
+    fn wide_keys_order_numerically_and_print_in_decimal() {
+        let mut heap = Heap::new();
+        // 72-bit signed keys: nine bytes, the top bit flipped.
+        let p = parameter(8, true, 0, 2, 0, true, true, false) | WIDE_KEY;
+        let key = |heap: &mut Heap, bytes: [u8; 9]| {
+            let buffer = heap.new_buffer(bytes.to_vec());
+            heap.call(crate::ops::KEY, buffer, 0, 0)
+        };
+        let minus_one = key(
+            &mut heap,
+            [0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        );
+        let two_pow_64 = key(&mut heap, [0x81, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let zero = key(&mut heap, [0x80, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let mut a = 0;
+        for (k, v) in [(two_pow_64, 3), (minus_one, 1), (zero, 2)] {
+            a = call(&mut heap, SET, p, a, k, v);
+            a = call(&mut heap, SET_MASK, p, a, k, 0);
+        }
+        assert_eq!(call(&mut heap, FIRST, p, a, 0, 0), minus_one);
+        assert_eq!(call(&mut heap, NEXT, p, a, minus_one, 0), zero);
+        assert_eq!(call(&mut heap, LAST, p, a, 0, 0), two_pow_64);
+        let buffer = call(&mut heap, PATTERN, p, a, 0, 0);
+        assert_eq!(
+            heap.take_buffer(buffer),
+            b"'{-1:1, 0:2, 18446744073709551616:3}"
+        );
+        let buffer = call(&mut heap, PATTERN, p & !(1 << 44), a, 0, 0);
+        assert_eq!(
+            heap.take_buffer(buffer),
+            b"'{2361183241434822606847:1, 2361183241434822606848:2, 2379629985508532158464:3}"
+        );
+        let bytes_of = crate::ops::KEY_BYTES;
+        assert_eq!(heap.call(bytes_of, two_pow_64, 0, 2), 0x8100);
+        assert_eq!(heap.call(bytes_of, two_pow_64, 1, 8), 0);
+        assert_eq!(heap.call(bytes_of, minus_one, 8, 8), 0xff00_0000_0000_0000);
+        for bytes in [&[][..], &[0], &[0x80, 1], &[0xff; 20]] {
+            assert_eq!(key_bytes(&key_string(bytes)), bytes);
+            assert!(!key_string(bytes).contains(&0));
+        }
+    }
+
     #[test]
     fn associative_order_and_gc_follow_element_handles() {
         let mut heap = Heap::new();
