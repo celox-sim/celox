@@ -10,7 +10,7 @@ pub(in crate::ast) fn ungroup(mut id: ExprId, native: &Declarations) -> ExprId {
 }
 
 pub(in crate::ast) fn call_name(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
 ) -> Option<String> {
@@ -21,8 +21,8 @@ pub(in crate::ast) fn call_name(
             separator,
             name,
         } if separator == "::" => Some(scope::qualified_name(
-            state,
-            &call_name(state, *expression, native)?,
+            tree,
+            &call_name(tree, *expression, native)?,
             &instances::normalize_identifier(&name.spelling),
         )),
         _ => None,
@@ -30,11 +30,11 @@ pub(in crate::ast) fn call_name(
 }
 
 pub(in crate::ast) fn callable_name(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
 ) -> Option<String> {
-    if let Some(name) = call_name(state, id, native) {
+    if let Some(name) = call_name(tree, id, native) {
         return (name != "randomize").then_some(name);
     }
     let ExprKind::Member {
@@ -48,8 +48,8 @@ pub(in crate::ast) fn callable_name(
     if separator != "." {
         return None;
     }
-    let handle = call_name(state, *expression, native)?;
-    scope::imported(state)
+    let handle = call_name(tree, *expression, native)?;
+    scope::imported(tree)
         .interface_members
         .get(&format!(
             "{handle}.{}",
@@ -65,7 +65,7 @@ pub(super) fn bound_callable_name(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
-    if let Some(name) = callable_name(&tree.state, id, native) {
+    if let Some(name) = callable_name(tree, id, native) {
         return Ok(Some(name));
     }
     if let Some((name, _, objects::Receiver::Static)) =
@@ -90,7 +90,7 @@ pub(super) fn bound_callable_name(
         &dimensions.const_env,
         &dimensions.type_aliases,
     )?;
-    Ok(scope::imported(&tree.state)
+    Ok(scope::imported(tree)
         .interface_members
         .get(&format!(
             "{handle}.{}",
@@ -193,7 +193,7 @@ pub(in crate::ast) fn cast_target_native(
     {
         return Ok(casts::RuntimeCastTarget::Signing(name.spelling == "signed"));
     }
-    let named = call_name(&tree.state, target, native);
+    let named = call_name(tree, target, native);
     let (ty, numeric, two_state) = if let Some(ty) = named
         .as_ref()
         .and_then(|name| dimensions.type_aliases.get(name))
@@ -556,7 +556,7 @@ pub(in crate::ast) fn bind_value(
                     ExprKind::Call {
                         expression,
                         arguments,
-                    } => call_name(&tree.state, *expression, native)
+                    } => call_name(tree, *expression, native)
                         .filter(|name| matches!(name.as_str(), "$time" | "$stime" | "$realtime"))
                         .map(|name| (name, arguments.as_slice())),
                     _ => None,
@@ -647,11 +647,7 @@ pub(in crate::ast) fn bind_value(
                             values.push(value);
                             continue;
                         }
-                        values.push(expressions::identifier_expression(
-                            &tree.state,
-                            name,
-                            dimensions,
-                        )?);
+                        values.push(expressions::identifier_expression(tree, name, dimensions)?);
                         continue;
                     }
                     ExprKind::Unary {
@@ -701,7 +697,7 @@ pub(in crate::ast) fn bind_value(
                     {
                         // A cast to a type that is not integral receives the
                         // stream as an assignment does.
-                        let ty = match call_name(&tree.state, *target, native) {
+                        let ty = match call_name(tree, *target, native) {
                             Some(name) => dimensions.type_aliases.get(&name).cloned(),
                             None => match native.expression(ungroup(*target, native)).kind {
                                 ExprKind::Type(ty) => {
@@ -883,7 +879,7 @@ pub(in crate::ast) fn bind_value(
                         arguments: args,
                     } => {
                         if matches!(
-                            call_name(&tree.state, *expression, native).as_deref(),
+                            call_name(tree, *expression, native).as_deref(),
                             Some("randomize" | "std::randomize")
                         ) {
                             if args
@@ -1052,7 +1048,7 @@ pub(in crate::ast) fn bind_value(
                                 let arg = args
                                     .first()
                                     .and_then(|arg| arg.value)
-                                    .and_then(|id| call_name(&tree.state, id, native));
+                                    .and_then(|id| call_name(tree, id, native));
                                 let Some(arg) = arg.filter(|name| {
                                     dimensions
                                         .const_env
@@ -2307,7 +2303,7 @@ pub(in crate::ast) fn selected_lvalue(
     suffix.reverse();
     let (parts, qualified) = path(base, native, tree, dimensions)?;
     if suffix.is_empty() && parts.len() > 1 {
-        return packed_structs::whole_member(&tree.state, parts, qualified, dimensions);
+        return packed_structs::whole_member(tree, parts, qualified, dimensions);
     }
     let finish = |name: String, context: &PackedDimensions, strict: bool| -> Converted<LValue> {
         if context.get(&name).is_some_and(|ty| {
@@ -2398,7 +2394,7 @@ pub(in crate::ast) fn selected_lvalue(
         }
     };
     let lvalue = if parts.len() > 1 {
-        packed_structs::select_member(&tree.state, parts, qualified, dimensions, finish)?
+        packed_structs::select_member(tree, parts, qualified, dimensions, finish)?
     } else {
         finish(
             qualified.unwrap_or_else(|| parts[0].clone()),
@@ -2657,7 +2653,7 @@ pub(in crate::ast) fn member_context(
     if let Some(name) = qualified {
         parts[0] = name;
     }
-    packed_structs::member_access(parts, dims, &tree.state)
+    packed_structs::member_access(parts, dims, tree)
 }
 
 fn cast_shape(
@@ -2666,7 +2662,7 @@ fn cast_shape(
     tree: &AnalysisContext<'_>,
     dims: &PackedDimensions,
 ) -> Converted<Option<VariableDimensions>> {
-    let ty = if let Some(name) = call_name(&tree.state, target, native) {
+    let ty = if let Some(name) = call_name(tree, target, native) {
         dims.type_aliases.get(&name).cloned()
     } else if let ExprKind::Type(id) = native.expression(target).kind {
         type_binding::binding::bind_in(id, native, tree, dims)?

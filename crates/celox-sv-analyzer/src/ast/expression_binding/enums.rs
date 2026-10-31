@@ -98,7 +98,7 @@ pub(super) fn domain(
                 Some(shape) => variable(shape),
                 None => match objects::property(tree, id, native, dimensions)? {
                     Some((property, _)) => scalar(&property.r#type),
-                    None => constant(&tree.state, &name, dimensions),
+                    None => constant(tree, &name, dimensions),
                 },
             }
         }
@@ -106,14 +106,14 @@ pub(super) fn domain(
             // A method called without parentheses (6.19.5.7).
             Some((method, _, domain)) => method.returns_member().then_some(domain),
             None => match objects::static_property(tree, id, native, dimensions)?
-                .or_else(|| call_name(&tree.state, id, native))
+                .or_else(|| call_name(tree, id, native))
                 .and_then(|name| dimensions.get(&name))
             {
                 // A static property or a package variable.
                 Some(shape) => variable(shape),
                 // A package-qualified enum constant.
-                None if let Some(domain) = call_name(&tree.state, id, native)
-                    .and_then(|name| constant(&tree.state, &name, dimensions)) =>
+                None if let Some(domain) = call_name(tree, id, native)
+                    .and_then(|name| constant(tree, &name, dimensions)) =>
                 {
                     Some(domain)
                 }
@@ -155,7 +155,7 @@ pub(super) fn domain(
             } else {
                 let name = match objects::method(tree, *expression, native, dimensions)? {
                     Some((name, _, _)) => Some(name),
-                    None => call_name(&tree.state, *expression, native),
+                    None => call_name(tree, *expression, native),
                 };
                 name.and_then(|name| {
                     dimensions
@@ -196,7 +196,7 @@ pub(super) fn cast_type(
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Type>> {
     let target = ungroup(target, native);
-    Ok(if let Some(name) = call_name(&tree.state, target, native) {
+    Ok(if let Some(name) = call_name(tree, target, native) {
         dimensions.type_aliases.get(&name).cloned()
     } else if let ExprKind::Type(id) = native.expression(target).kind {
         type_binding::binding::bind_in(id, native, tree, dimensions)?
@@ -225,7 +225,7 @@ fn variable(shape: &VariableDimensions) -> Option<Arc<EnumDomain>> {
 /// local type declares is the package item an import makes visible; other
 /// scopes may declare members of the same name and value.
 fn constant(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: &str,
     dimensions: &PackedDimensions,
 ) -> Option<Arc<EnumDomain>> {
@@ -255,7 +255,7 @@ fn constant(
     match name.rsplit_once("::") {
         Some((scope, member)) => find(Some(scope), member),
         None => find(None, name).or_else(|| {
-            let qualified = scope::imported(state).aliases.get(name)?.clone();
+            let qualified = scope::imported(tree).aliases.get(name)?.clone();
             let (scope, member) = qualified.rsplit_once("::")?;
             find(Some(scope), member)
         }),
@@ -305,7 +305,7 @@ fn element(
         // A static property or a package variable.
         ExprKind::Member { .. }
             if let Some(shape) = objects::static_property(tree, root, native, dimensions)?
-                .or_else(|| call_name(&tree.state, root, native))
+                .or_else(|| call_name(tree, root, native))
                 .and_then(|name| dimensions.get(&name)) =>
         {
             if shape.container.is_some() {

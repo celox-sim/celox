@@ -9,7 +9,7 @@ pub(super) fn connections(
     dimensions: &PackedDimensions,
     interface: Option<&ModuleInterface>,
 ) -> Result<Vec<PortConnection>, AnalyzerError> {
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     let binding = imported.interface_instances.get(&key);
     if native.connections.is_empty() {
         return Ok(Vec::new());

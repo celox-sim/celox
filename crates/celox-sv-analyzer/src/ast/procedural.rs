@@ -2064,7 +2064,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 self.tree.declarations().expression(query_root).kind
                 && matches!(
                     expression_binding::native_name(
-                        &self.tree.state,
+                        self.tree,
                         expression,
                         self.tree.declarations()
                     )
@@ -2785,7 +2785,7 @@ pub(super) fn subroutine_argument_names(
     let mut shapes = HashMap::default();
     let mut directions = HashMap::default();
     for item in generate::subroutine_items(tree, const_env, type_aliases)? {
-        let _interface_scope = item.interface_scope();
+        let tree = &item.scoped(tree);
         for native_id in subroutine_owners::item(item.id, tree)? {
             let native = tree.declarations().subroutine(native_id);
             let _constant_functions = item.enter();
@@ -2976,7 +2976,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
     let active = generate::subroutine_items(tree, const_env, module_type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for item in &active {
-        let _interface_scope = item.interface_scope();
+        let tree = &item.scoped(tree);
         if item.is_parameter_declaration(tree.declarations()) {
             continue;
         }
@@ -3072,7 +3072,7 @@ pub(super) fn subroutines_with_symbolic_parameters(
     // method's dispatcher, which the declaring scope lowered for the classes
     // it saw: the scope lowers the dispatcher again, over every class it
     // sees, when the dispatcher misses one (IEEE 1800-2023 8.20).
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     for class in &imported.classes {
         for method in class.dispatched_methods() {
             let name = classes::Class::dispatcher_name(&class.name, &method.name);
@@ -4677,7 +4677,7 @@ pub(super) fn initial_processes_from_scope(
     let active = generate::items(tree, const_env, &type_aliases)?;
     let mut views = generate::ScopeViews::with_literals(packed_dimensions, parameter_literals);
     for (creation_order, item) in active.iter().enumerate() {
-        let _interface_scope = item.interface_scope();
+        let tree = &item.scoped(tree);
         if item.is_parameter_declaration(tree.declarations()) {
             continue;
         }
@@ -5171,7 +5171,7 @@ fn dump_selection_name(
     // Imports bind declarations, not a module-local spelling. Nested procedural
     // declarations shadow these aliases just as they do for value expressions.
     if kind == "relative" && fields.len() == 2 && !is_local(&fields[1]) {
-        let symbols = scope::imported(&tree.state);
+        let symbols = scope::imported(tree);
         if let Some(target) = symbols.aliases.get(&fields[1])
             && let Some((package, name)) = symbols
                 .state_signals

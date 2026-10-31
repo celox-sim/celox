@@ -300,7 +300,7 @@ pub(in crate::ast) fn native_struct(
         ExprKind::Call { expression, .. } => {
             match expression_binding::object_method_result(tree, *expression, native, dims)? {
                 Some(ty) => ty.unpacked_struct().cloned(),
-                None => expression_binding::callable_name(&tree.state, *expression, native)
+                None => expression_binding::callable_name(tree, *expression, native)
                     .and_then(|name| dims.functions.get(&name))
                     .and_then(|function| function.return_type.as_ref())
                     .and_then(|ty| ty.unpacked_struct().cloned()),

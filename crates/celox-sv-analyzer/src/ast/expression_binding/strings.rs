@@ -230,7 +230,7 @@ fn returns_string(
 ) -> bool {
     let name = match objects::method(tree, id, native, dimensions) {
         Ok(Some((name, ..))) => name,
-        Ok(None) => match super::direct::callable_name(&tree.state, id, native) {
+        Ok(None) => match super::direct::callable_name(tree, id, native) {
             Some(name) => name,
             None => return false,
         },

@@ -12,8 +12,8 @@ pub(super) use query_binding::{
 };
 
 /// Imported interface member shapes remain visible during native discovery.
-fn extend_interface_dimensions(state: &AnalysisState, dimensions: &mut PackedDimensions) {
-    let imported = scope::imported(state);
+fn extend_interface_dimensions(tree: &AnalysisContext<'_>, dimensions: &mut PackedDimensions) {
+    let imported = scope::imported(tree);
     if imported.interface_members.is_empty() {
         return;
     }

@@ -470,7 +470,7 @@ pub(in crate::ast) fn inline_subroutines(
     dimensions: &PackedDimensions,
 ) -> Converted<(Vec<Subroutine>, Vec<classes::constraints::InlineRequest>)> {
     let mut requests = std::mem::take(&mut *tree.state.inline_randomizations.borrow_mut());
-    for request in &scope::imported(&tree.state).inline_randomizations {
+    for request in &scope::imported(tree).inline_randomizations {
         if !requests.iter().any(|known| known.key == request.key) {
             requests.push(classes::constraints::Inline {
                 key: request.key,

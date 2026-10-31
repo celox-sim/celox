@@ -317,10 +317,12 @@ impl Registry {
             syntax_tree: &owner.tree,
             state: state.clone(),
             parameter_overrides: Cow::Owned(HashMap::default()),
+            imported: Arc::default(),
+            // Inside the package, `p::x` names its own item `x`.
+            package: Some(name.into()),
         };
         let _timescales =
             timescales::install_for_tree(&state.timescales, owner.timescales.clone(), &owner.tree)?;
-        let _package = scope::enter_package(&state, name);
         let mut imports = owner.imports.clone();
         if let Some(caller) = caller {
             // Preserve the owner's existing bindings when caller metadata also
@@ -382,7 +384,10 @@ impl Registry {
             None,
         )?;
         if self_qualified {
-            drop(_package);
+            let context = AnalysisContext {
+                package: None,
+                ..context.clone()
+            };
             // Class statics already have qualified names. Unlike ordinary
             // package variables, their new declarations would collide with
             // the first pass's imported storage.

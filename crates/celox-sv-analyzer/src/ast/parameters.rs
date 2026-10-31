@@ -150,7 +150,7 @@ pub(super) fn parameters_from_native(
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
     let mut environment = ParameterEnvironment::new(
-        &syntax_tree.state,
+        syntax_tree,
         parameters,
         base_const_env,
         &authored
@@ -192,11 +192,12 @@ pub(super) struct ParameterEnvironment<'a> {
 
 impl<'a> ParameterEnvironment<'a> {
     pub(super) fn new(
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
         parameters: &[Parameter],
         base: &'a HashMap<String, i128>,
         shadowed: &[String],
     ) -> Self {
+        let state = &*tree.state;
         let shadowed: HashSet<&str> = shadowed
             .iter()
             .map(String::as_str)
@@ -210,7 +211,7 @@ impl<'a> ParameterEnvironment<'a> {
         }
         let mut values = HashMap::default();
         let mut types = parameter_types_from_const_env(&bindings);
-        let mut literals = scope::imported(state)
+        let mut literals = scope::imported(tree)
             .parameter_values
             .iter()
             .filter(|(name, value)| {
@@ -393,7 +394,7 @@ pub(super) fn parameters_from_native_with_environment(
             syntax_tree,
             &environment.constants,
             type_aliases,
-        )? || scope::imported(&syntax_tree.state)
+        )? || scope::imported(syntax_tree)
             .pattern_parameter_bindings
             .contains_key(&native.id)
         {
@@ -418,7 +419,7 @@ pub(super) fn parameters_from_native_with_environment(
         let mut value = if replaced_pattern {
             parameter_overrides.get(&name).cloned()
         } else if ownership::default(native).is_some() {
-            let imported = scope::imported(&syntax_tree.state);
+            let imported = scope::imported(syntax_tree);
             let mut proof_context = PackedDimensions::new(
                 parameter_packed_dimensions_with_imported(parameters, &imported),
                 const_env,
@@ -462,7 +463,7 @@ pub(super) fn parameters_from_native_with_environment(
                 Some(value)
             } else if native_prefix.floating().is_none()
                 && skipped::needs_selected(
-                    &syntax_tree.state,
+                    syntax_tree,
                     ownership::default(native)
                         .ok_or_else(|| unsupported("native parameter default is missing"))?,
                     syntax_tree.declarations(),
