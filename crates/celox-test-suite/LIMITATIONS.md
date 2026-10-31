@@ -1748,3 +1748,35 @@ is specified. Its exact case ID is excluded only on Icarus. The
 [retained observation](verification/repros/sv_gate_two_state_member.json) also
 records Verilator 5.052 accepting the source in lint mode; this does not claim
 four-state execution agreement. `--include-ignored` reruns the Icarus failure.
+
+### Implicit integral enum writes
+
+IEEE 1800-2023 6.19.3 and 6.19.4 require an explicit cast when an integral
+expression is assigned to an enum variable. Even an integer equal to a named
+member is not an implicit enum value; arithmetic and increment/decrement
+operators also lose enum typing. Celox rejects these writes to standalone
+scalar variables and scalar elements of unpacked enum arrays using their
+declared type, independently of the best-effort randomization domain.
+
+The shared `types::enum_explicit_integral_assignments` regression preserves
+explicit enum casts (including out-of-range values), aliases, conditional
+enum values and function returns. Analyzer checks also preserve saved
+assignment-expression values and the union-member exception in 6.19.3.
+Packed bit/part-selects are integral targets.
+Enum-to-enum nominal compatibility, general call/member RHS typing and checks
+of member targets, declaration initializers, arguments and return statements
+remain separate gaps; this change does not claim complete strong enum typing.
+
+Explicitly typed scalar enum value parameters retain their declared type
+(6.20.2), including enums wider than 64 bits that have no randomization-domain
+metadata. The shared
+`types::enum_wide_parameters_preserve_declared_types` case checks module and
+block constants, package imports, generated scopes and parameter overrides at
+128 bits. Analyzer regressions also check 32- and 65-bit enums and preserve
+rejection of explicitly integral parameters initialized from enum members.
+
+With no type or range specification, an integral initializer gives a
+logic-vector parameter (6.20.2); enum values are integral (6.11.1). Therefore
+`localparam P=A;` requires an explicit enum cast when assigned back to an enum
+variable. Analyzer regressions check this rule at 32, 65 and 128 bits and
+preserve the legal cast, alongside explicitly enum-typed parameters.

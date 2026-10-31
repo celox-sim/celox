@@ -6,6 +6,7 @@ mod chandles;
 mod direct;
 mod element_members;
 mod enums;
+pub(super) use enums::cast_type as enum_cast_type;
 mod format_patterns;
 mod lvalues;
 pub(super) mod objects;

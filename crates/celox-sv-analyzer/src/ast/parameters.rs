@@ -594,6 +594,15 @@ pub(super) fn parameters_from_native_with_environment(
         parameter.packed_ranges = parameter_ranges.clone();
         parameter.members = parameter_members.clone();
         parameter.signed_element_depth = parameter_signed_element_depth;
+        parameter.enum_type = declared_alias
+            .as_ref()
+            .filter(|alias| {
+                !alias_has_use_site_dimensions
+                    && alias.is_enum
+                    && !alias.packed_enum
+                    && alias.unpacked_ranges.is_empty()
+            })
+            .map(|alias| Arc::new(alias.clone()));
         parameter.enum_domain = declared_alias
             .as_ref()
             .filter(|_| !alias_has_use_site_dimensions)

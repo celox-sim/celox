@@ -599,12 +599,20 @@ mod tests;
 pub(super) fn parameter_packed_dimensions(parameters: &[Parameter]) -> VariablePackedDimensions {
     parameters
         .iter()
-        .filter(|parameter| !parameter.packed_ranges.is_empty() || parameter.enum_domain.is_some())
+        .filter(|parameter| {
+            !parameter.packed_ranges.is_empty()
+                || parameter.enum_type.is_some()
+                || parameter.enum_domain.is_some()
+        })
         .map(|parameter| {
             (
                 parameter.name.clone(),
                 VariableDimensions {
-                    declared: type_names::Declared::default(),
+                    declared: parameter
+                        .enum_type
+                        .as_deref()
+                        .map(type_names::Declared::new)
+                        .unwrap_or_default(),
                     container: None,
                     chandle: false,
                     randomizable: true,
