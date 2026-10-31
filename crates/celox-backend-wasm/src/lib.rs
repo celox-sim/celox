@@ -788,7 +788,7 @@ fn compile_sparse_commit(
     debug_assert_eq!(dst_addr.region, STABLE_REGION);
     let abs = src_addr.absolute_addr();
     let sparse = &layout.sparse_layouts[&abs];
-    let byte_size = get_byte_size(layout.widths[&abs]);
+    let byte_size = layout.plane_size(&abs);
     let src_base = layout.sparse_base_offset + layout.sparse_offsets[&abs];
     let dst_base = layout.offsets[&abs];
     let plane_count = if four_state && layout.is_4states[&abs] {
@@ -4110,6 +4110,61 @@ fn compile_zero_count_chunk(
 // Memory operations
 // ============================================================
 
+/// Convert a logical array access to physical bits. Layout selection keeps
+/// ordinary accesses within one element; aggregate zeroing/commits are split
+/// before calling this helper.
+fn physical_offset(layout: &MemoryLayout, address: &AbsoluteAddr, offset: &SIROffset) -> SIROffset {
+    let Some(array) = layout.unpacked_arrays.get(address) else {
+        return offset.clone();
+    };
+    match offset {
+        SIROffset::Static(start)
+        | SIROffset::PackedElements {
+            bit_offset: start, ..
+        } => {
+            let (byte, bit) = layout.map_static_bit_offset(address, *start);
+            SIROffset::Static(byte * 8 + bit)
+        }
+        SIROffset::Element {
+            index,
+            bit_offset,
+            dynamic_bit_offset,
+            ..
+        } => SIROffset::Element {
+            index: *index,
+            element_width: array.element_stride * 8,
+            bit_offset: *bit_offset,
+            dynamic_bit_offset: *dynamic_bit_offset,
+        },
+        SIROffset::Dynamic(_) => unreachable!("dynamic packed access to strided array"),
+    }
+}
+
+fn strided_pieces(
+    layout: &MemoryLayout,
+    address: &AbsoluteAddr,
+    offset: &SIROffset,
+    width: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let array = layout.unpacked_arrays.get(address)?;
+    let start = offset.constant_bit_offset()?;
+    if width == 0
+        || array.element_stride * 8 == array.element_width
+        || width <= array.element_width - start % array.element_width
+    {
+        return None;
+    }
+    let mut pieces = Vec::new();
+    let mut copied = 0;
+    while copied < width {
+        let position = start + copied;
+        let count = (array.element_width - position % array.element_width).min(width - copied);
+        pieces.push((position, count));
+        copied += count;
+    }
+    Some(pieces)
+}
+
 fn compile_logical_bit_offset(
     offset: &SIROffset,
     locals: &mut LocalAllocator,
@@ -4159,11 +4214,12 @@ fn compile_load(
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    let physical = physical_offset(layout, &addr.absolute_addr(), offset);
+    let offset = &physical;
     let d = locals.reg_map[dst].clone();
     let abs = addr.absolute_addr();
     let base_offset = compute_byte_offset(layout, &abs, addr.region);
-    let var_width = layout.widths[&abs];
-    let var_byte_size = get_byte_size(var_width);
+    let var_byte_size = layout.plane_size(&abs);
 
     match offset {
         SIROffset::Static(bit_off)
@@ -4452,7 +4508,7 @@ fn compile_prepare_sparse_store(
     let sparse = &layout.sparse_layouts[&abs];
     let stable_base = layout.offsets[&abs];
     let sparse_base = layout.sparse_base_offset + layout.sparse_offsets[&abs];
-    let byte_size = get_byte_size(layout.widths[&abs]);
+    let byte_size = layout.plane_size(&abs);
     let bit_offset = locals.alloc(1);
     let logical_offset = compile_logical_bit_offset(offset, locals, instrs);
     instrs.push(Instruction::LocalGet(logical_offset));
@@ -4522,45 +4578,58 @@ fn compile_prepare_sparse_store(
         instrs.push(Instruction::I64ExtendI32U);
         instrs.push(Instruction::LocalSet(was_dirty));
 
-        for plane_delta in
-            [0, byte_size]
-                .into_iter()
-                .take(if four_state && layout.is_4states[&abs] {
-                    2
-                } else {
-                    1
-                })
-        {
-            let stable = locals.alloc(1);
-            instrs.push(Instruction::I64Const((stable_base + plane_delta) as i64));
+        // Copy each dirty chunk only once, bounded to its own plane.
+        let byte_index = locals.alloc(1);
+        instrs.push(Instruction::LocalGet(chunk));
+        instrs.push(Instruction::I64Const(8));
+        instrs.push(Instruction::I64Mul);
+        instrs.push(Instruction::LocalSet(byte_index));
+        instrs.push(Instruction::LocalGet(was_dirty));
+        instrs.push(Instruction::I64Eqz);
+        instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+        let last_len = byte_size - (sparse.chunk_count - 1) * 8;
+        let planes = if four_state && layout.is_4states[&abs] {
+            2
+        } else {
+            1
+        };
+        if last_len == 8 {
+            for plane in 0..planes {
+                compile_sparse_chunk_copy(
+                    stable_base + plane * byte_size,
+                    sparse_base + plane * byte_size,
+                    byte_index,
+                    8,
+                    instrs,
+                );
+            }
+        } else {
             instrs.push(Instruction::LocalGet(chunk));
-            instrs.push(Instruction::I64Const(8));
-            instrs.push(Instruction::I64Mul);
-            instrs.push(Instruction::I64Add);
-            instrs.push(Instruction::I32WrapI64);
-            instrs.push(Instruction::I64Load(memarg));
-            instrs.push(Instruction::LocalSet(stable));
-            let working = locals.alloc(1);
-            instrs.push(Instruction::I64Const((sparse_base + plane_delta) as i64));
-            instrs.push(Instruction::LocalGet(chunk));
-            instrs.push(Instruction::I64Const(8));
-            instrs.push(Instruction::I64Mul);
-            instrs.push(Instruction::I64Add);
-            instrs.push(Instruction::LocalTee(working));
-            instrs.push(Instruction::I32WrapI64);
-            instrs.push(Instruction::I64Load(memarg));
-            let old_working = locals.alloc(1);
-            instrs.push(Instruction::LocalSet(old_working));
-            instrs.push(Instruction::LocalGet(working));
-            instrs.push(Instruction::I32WrapI64);
-            instrs.push(Instruction::LocalGet(old_working));
-            instrs.push(Instruction::LocalGet(stable));
-            instrs.push(Instruction::LocalGet(was_dirty));
-            instrs.push(Instruction::I64Const(0));
-            instrs.push(Instruction::I64Ne);
-            instrs.push(Instruction::Select);
-            instrs.push(Instruction::I64Store(memarg));
+            instrs.push(Instruction::I64Const((sparse.chunk_count - 1) as i64));
+            instrs.push(Instruction::I64Eq);
+            instrs.push(Instruction::If(wasm_encoder::BlockType::Empty));
+            for plane in 0..planes {
+                compile_sparse_chunk_copy(
+                    stable_base + plane * byte_size,
+                    sparse_base + plane * byte_size,
+                    byte_index,
+                    last_len,
+                    instrs,
+                );
+            }
+            instrs.push(Instruction::Else);
+            for plane in 0..planes {
+                compile_sparse_chunk_copy(
+                    stable_base + plane * byte_size,
+                    sparse_base + plane * byte_size,
+                    byte_index,
+                    8,
+                    instrs,
+                );
+            }
+            instrs.push(Instruction::End);
         }
+        instrs.push(Instruction::End);
 
         instrs.push(Instruction::LocalGet(dirty_addr));
         instrs.push(Instruction::I32WrapI64);
@@ -4608,6 +4677,26 @@ fn compile_store(
     locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    if let Some(pieces) = strided_pieces(layout, &addr.absolute_addr(), offset, op_width) {
+        for (start, width) in pieces {
+            compile_store(
+                addr,
+                &SIROffset::Static(start),
+                width,
+                src,
+                triggers,
+                comb_capture_sites,
+                layout,
+                four_state,
+                emit_triggers,
+                locals,
+                instrs,
+            );
+        }
+        return;
+    }
+    let physical = physical_offset(layout, &addr.absolute_addr(), offset);
+    let offset = &physical;
     // width=0: identity Store optimized away by alias; emit triggers only.
     if op_width == 0 {
         if emit_triggers && !triggers.is_empty() {
@@ -4622,7 +4711,7 @@ fn compile_store(
     let abs = addr.absolute_addr();
     let base_offset = compute_byte_offset(layout, &abs, addr.region);
     let var_width = layout.widths[&abs];
-    let var_byte_size = get_byte_size(var_width);
+    let var_byte_size = layout.plane_size(&abs);
     let old_value_probe = if comb_capture_sites.is_empty() {
         None
     } else {
@@ -4652,7 +4741,8 @@ fn compile_store(
             let byte_off = bit_off / 8;
             let bit_shift = bit_off % 8;
             let store_offset = base_offset + byte_off;
-            let effective_width = if *bit_off == 0
+            let effective_width = if !layout.unpacked_arrays.contains_key(&abs)
+                && *bit_off == 0
                 && bit_shift == 0
                 && op_width < var_width
                 && s.num_chunks > num_i64_chunks(op_width)
@@ -4736,8 +4826,24 @@ fn compile_store(
                             instrs,
                         );
                     } else {
-                        // Clear mask: store zeros at dynamic offset
-                        // TODO: implement dynamic zero store
+                        let zero_idx = locals.alloc(s.num_chunks);
+                        for chunk in 0..s.num_chunks {
+                            instrs.push(Instruction::I64Const(0));
+                            instrs.push(Instruction::LocalSet(zero_idx + chunk as u32));
+                        }
+                        let zero = RegLocal {
+                            value_idx: zero_idx,
+                            num_chunks: s.num_chunks,
+                            mask_idx: None,
+                        };
+                        compile_store_dynamic(
+                            &zero,
+                            base_offset + var_byte_size,
+                            offset_reg_value_idx,
+                            op_width,
+                            locals,
+                            instrs,
+                        );
                     }
                 }
             }
@@ -5405,169 +5511,59 @@ fn compile_commit(
     layout: &MemoryLayout,
     four_state: bool,
     emit_triggers: bool,
-    locals: &LocalAllocator,
+    locals: &mut LocalAllocator,
     instrs: &mut Vec<Instruction<'static>>,
 ) {
+    if let Some(pieces) = strided_pieces(layout, &src_addr.absolute_addr(), offset, op_width) {
+        for (start, width) in pieces {
+            compile_commit(
+                src_addr,
+                dst_addr,
+                &SIROffset::Static(start),
+                width,
+                triggers,
+                layout,
+                four_state,
+                emit_triggers,
+                locals,
+                instrs,
+            );
+        }
+        return;
+    }
     let src_abs = src_addr.absolute_addr();
     let dst_abs = dst_addr.absolute_addr();
     let src_base = compute_byte_offset(layout, &src_abs, src_addr.region);
     let dst_base = compute_byte_offset(layout, &dst_abs, dst_addr.region);
-
-    match offset {
-        SIROffset::Static(bit_off)
-        | SIROffset::PackedElements {
-            bit_offset: bit_off,
-            ..
-        } => {
-            let byte_off = bit_off / 8;
-            let bit_shift = bit_off % 8;
-            let copy_bytes = get_byte_size(op_width);
-
-            if bit_shift == 0 {
-                // Byte-aligned copy
-                let mut copied = 0usize;
-                while copied < copy_bytes {
-                    let remaining = copy_bytes - copied;
-                    let src_off = src_base + byte_off + copied;
-                    let dst_off = dst_base + byte_off + copied;
-                    instrs.push(Instruction::I32Const(dst_off as i32));
-                    instrs.push(Instruction::I32Const(src_off as i32));
-                    match remaining {
-                        1 => {
-                            instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
-                                offset: 0,
-                                align: 0,
-                                memory_index: 0,
-                            }));
-                            instrs.push(Instruction::I32Store8(wasm_encoder::MemArg {
-                                offset: 0,
-                                align: 0,
-                                memory_index: 0,
-                            }));
-                            copied += 1;
-                        }
-                        2 | 3 => {
-                            instrs.push(Instruction::I32Load16U(wasm_encoder::MemArg {
-                                offset: 0,
-                                align: 0,
-                                memory_index: 0,
-                            }));
-                            instrs.push(Instruction::I32Store16(wasm_encoder::MemArg {
-                                offset: 0,
-                                align: 0,
-                                memory_index: 0,
-                            }));
-                            copied += 2;
-                        }
-                        4..=7 => {
-                            instrs.push(Instruction::I32Load(wasm_encoder::MemArg {
-                                offset: 0,
-                                align: 0,
-                                memory_index: 0,
-                            }));
-                            instrs.push(Instruction::I32Store(wasm_encoder::MemArg {
-                                offset: 0,
-                                align: 0,
-                                memory_index: 0,
-                            }));
-                            copied += 4;
-                        }
-                        _ => {
-                            instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
-                                offset: 0,
-                                align: 0,
-                                memory_index: 0,
-                            }));
-                            instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
-                                offset: 0,
-                                align: 0,
-                                memory_index: 0,
-                            }));
-                            copied += 8;
-                        }
-                    }
-                }
-
-                // 4-state mask commit
-                if four_state {
-                    let is_4state = layout.is_4states.get(&dst_abs).copied().unwrap_or(false);
-                    if is_4state {
-                        let src_var_byte_size = get_byte_size(layout.widths[&src_abs]);
-                        let dst_var_byte_size = get_byte_size(layout.widths[&dst_abs]);
-                        let mut copied = 0usize;
-                        while copied < copy_bytes {
-                            let remaining = copy_bytes - copied;
-                            let src_mask_off = src_base + src_var_byte_size + byte_off + copied;
-                            let dst_mask_off = dst_base + dst_var_byte_size + byte_off + copied;
-                            instrs.push(Instruction::I32Const(dst_mask_off as i32));
-                            instrs.push(Instruction::I32Const(src_mask_off as i32));
-                            match remaining {
-                                1 => {
-                                    instrs.push(Instruction::I32Load8U(wasm_encoder::MemArg {
-                                        offset: 0,
-                                        align: 0,
-                                        memory_index: 0,
-                                    }));
-                                    instrs.push(Instruction::I32Store8(wasm_encoder::MemArg {
-                                        offset: 0,
-                                        align: 0,
-                                        memory_index: 0,
-                                    }));
-                                    copied += 1;
-                                }
-                                2 | 3 => {
-                                    instrs.push(Instruction::I32Load16U(wasm_encoder::MemArg {
-                                        offset: 0,
-                                        align: 0,
-                                        memory_index: 0,
-                                    }));
-                                    instrs.push(Instruction::I32Store16(wasm_encoder::MemArg {
-                                        offset: 0,
-                                        align: 0,
-                                        memory_index: 0,
-                                    }));
-                                    copied += 2;
-                                }
-                                4..=7 => {
-                                    instrs.push(Instruction::I32Load(wasm_encoder::MemArg {
-                                        offset: 0,
-                                        align: 0,
-                                        memory_index: 0,
-                                    }));
-                                    instrs.push(Instruction::I32Store(wasm_encoder::MemArg {
-                                        offset: 0,
-                                        align: 0,
-                                        memory_index: 0,
-                                    }));
-                                    copied += 4;
-                                }
-                                _ => {
-                                    instrs.push(Instruction::I64Load(wasm_encoder::MemArg {
-                                        offset: 0,
-                                        align: 0,
-                                        memory_index: 0,
-                                    }));
-                                    instrs.push(Instruction::I64Store(wasm_encoder::MemArg {
-                                        offset: 0,
-                                        align: 0,
-                                        memory_index: 0,
-                                    }));
-                                    copied += 8;
-                                }
-                            }
-                        }
-                    }
-                }
-            } else {
-                // Bit-offset commit: load from src, store to dst with RMW.
-                // TODO: implement bit-offset commit
-            }
-        }
-        SIROffset::Dynamic(_) | SIROffset::Element { .. } => {
-            // TODO: dynamic offset commit
+    let physical = physical_offset(layout, &src_abs, offset);
+    let chunks = num_i64_chunks(op_width);
+    let temp = RegLocal {
+        value_idx: locals.alloc(chunks),
+        num_chunks: chunks,
+        mask_idx: None,
+    };
+    let dynamic = if physical.constant_bit_offset().is_none() {
+        Some(compile_logical_bit_offset(&physical, locals, instrs))
+    } else {
+        None
+    };
+    let planes = if four_state && layout.is_4states[&dst_abs] {
+        2
+    } else {
+        1
+    };
+    for plane in 0..planes {
+        let src = src_base + plane * layout.plane_size(&src_abs);
+        let dst = dst_base + plane * layout.plane_size(&dst_abs);
+        if let Some(bits) = physical.constant_bit_offset() {
+            compile_load_at_offset(&temp, src + bits / 8, bits % 8, op_width, instrs);
+            compile_store_at_offset(&temp, dst + bits / 8, bits % 8, op_width, locals, instrs);
+        } else {
+            let bits = dynamic.unwrap();
+            compile_load_dynamic(&temp, src, bits, op_width, instrs);
+            compile_store_dynamic(&temp, dst, bits, op_width, locals, instrs);
         }
     }
-
     if emit_triggers && !triggers.is_empty() {
         emit_trigger_detection(dst_addr, triggers, layout, locals, instrs);
     }

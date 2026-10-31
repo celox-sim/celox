@@ -217,3 +217,118 @@ fn preserves_width_of_zero_literal_casts() {
     .expect("zero literal casts should build");
     assert_eq!(simulator.get(simulator.signal("y")), 0x100u16.into());
 }
+
+// Exercise physical layout and host API contracts as well as HDL behavior.
+#[cfg(feature = "systemverilog")]
+macro_rules! strided_backend_tests {
+    ($name:ident, $build:ident) => {
+        mod $name {
+            #[test]
+            fn ff_writes_clear_only_written_array_masks() {
+                for four_state in [false, true] {
+                    for (parallel, packed) in [(false, false), (true, false), (false, true)] {
+                        let source = r#"
+                            module Top(input logic clk, input logic [2:0] index,
+                                output logic [19:0] a, b, c, d, e, untouched);
+                                logic [19:0] p [6];
+                                logic [19:0] q [6];
+                                logic [19:0] u [6];
+                                logic [19:0] matrix [2][3];
+                                always_ff @(posedge clk) begin
+                                    p[0] <= 20'h11;
+                                    for (int k = 0; k < 6; k++) u[k] <= 20'(k + 1);
+                                    q[0] <= 20'h1; q[1] <= 20'h2; q[5] <= 20'h6;
+                                    for (int i = 0; i < 2; i++)
+                                        for (int j = 0; j < 3; j++)
+                                            matrix[i][j] <= 20'(i * 3 + j + 1);
+                                end
+                                assign a = p[0];
+                                assign b = q[0];
+                                assign c = u[index];
+                                assign d = q[5];
+                                assign e = matrix[1][2];
+                                assign untouched = q[3];
+                            endmodule
+                        "#;
+                        let builder = celox::Simulator::from_sv_sources(
+                            vec![(source, std::path::Path::new("array_masks.sv"))],
+                            "Top",
+                        )
+                        .four_state(four_state)
+                        .parallel_partition(if parallel {
+                            celox::ParallelPartition::Always
+                        } else {
+                            celox::ParallelPartition::Estimated
+                        });
+                        let trace = tempfile::tempdir().unwrap();
+                        let builder = if packed {
+                            builder.vcd(trace.path().join("array.vcd"))
+                        } else {
+                            builder
+                        };
+                        let mut sim = builder.$build().unwrap();
+                        // These arrays must actually select the new layout.
+                        assert_eq!(sim.signal("u").array_layout.is_some(), !packed);
+                        let clk = sim.event("clk");
+                        let index = sim.signal("index");
+                        sim.modify(|io| io.set(index, 0u8)).unwrap();
+                        for _ in 0..2 {
+                            sim.tick(clk).unwrap();
+                            for (name, value) in
+                                [("a", 0x11u32), ("b", 1), ("c", 1), ("d", 6), ("e", 6)]
+                            {
+                                assert_eq!(
+                                    sim.get_four_state(sim.signal(name)),
+                                    (value.into(), 0u8.into()),
+                                    "{name}, four_state={four_state}, parallel={parallel}"
+                                );
+                            }
+                            for i in 0..6u8 {
+                                sim.modify(|io| io.set(index, i)).unwrap();
+                                assert_eq!(
+                                    sim.get_four_state(sim.signal("c")),
+                                    ((i + 1).into(), 0u8.into())
+                                );
+                            }
+                            let expected = (0..6u32).fold(celox::BigUint::from(0u8), |value, i| {
+                                value | (celox::BigUint::from(i + 1) << (i as usize * 20))
+                            });
+                            assert_eq!(sim.get_four_state(sim.signal("u")), (expected, 0u8.into()));
+                            if four_state {
+                                assert_eq!(
+                                    sim.get_four_state(sim.signal("untouched")).1,
+                                    0xfffffu32.into()
+                                );
+                            }
+                            sim.modify(|io| io.set(index, 0u8)).unwrap();
+                        }
+                        // Raw host access must scatter into padded elements and
+                        // gather the same packed value and mask again.
+                        let u = sim.signal("u");
+                        let value = (celox::BigUint::from(0xabcdeu32) << 100usize)
+                            | celox::BigUint::from(0x12345u32);
+                        let mask = celox::BigUint::from(0x101u32) << 40usize;
+                        sim.modify(|io| io.set_four_state(u, value.clone(), mask.clone()))
+                            .unwrap();
+                        assert_eq!(
+                            sim.get_four_state(u),
+                            (value.clone(), if four_state { mask } else { 0u8.into() })
+                        );
+                        sim.modify(|io| io.set(u, 0x123456789abcdefu64)).unwrap();
+                        assert_eq!(
+                            sim.get_four_state(u),
+                            (0x123456789abcdefu64.into(), 0u8.into())
+                        );
+                    }
+                }
+            }
+        }
+    };
+}
+
+#[cfg(feature = "systemverilog")]
+strided_backend_tests!(native_strided, build_native);
+#[cfg(all(feature = "systemverilog", feature = "cranelift"))]
+strided_backend_tests!(cranelift_strided, build_cranelift);
+#[cfg(all(feature = "systemverilog", feature = "wasm-runtime"))]
+strided_backend_tests!(wasm_strided, build_wasm);

@@ -9,8 +9,11 @@ fn main() {
 #[cfg(feature = "external")]
 fn main() {
     if let Err(error) = fingerprint::emit() {
-        // An incomplete dependency graph must never enable result reuse.
-        println!("cargo:warning=incremental verification disabled: {error}");
+        // Runtime falls back to hashing the complete verifier executable.
+        // Never use an incomplete dependency graph as a cache identity.
+        println!(
+            "cargo:warning=dependency-graph fingerprint unavailable; using verifier executable identity: {error}"
+        );
         println!("cargo:rustc-env=CELOX_VERIFICATION_BUILD_HASH=unavailable");
     }
 }
