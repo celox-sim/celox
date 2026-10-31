@@ -2823,6 +2823,8 @@ fn declare_scheduler_slots(
         dirty: declare("dirty".into(), FLAG),
         defer_limit_settle: declare("defer_limit_settle".into(), FLAG),
         count: declare("count".into(), TIME),
+        budget: declare("budget".into(), TIME),
+        events: declare("events".into(), TIME),
         current: declare("current".into(), TIME),
         levels: declare("levels".into(), events),
         unknown_levels: declare("unknown_levels".into(), events),

@@ -144,18 +144,20 @@ impl<B: SimBackend> SimulationState<B> {
             .is_some_and(|events| events.intersects(&self.observed_events))
     }
 
-    /// Run the compiled scheduler for the slots up to `limit`. Returns, like
-    /// [`Self::step_until`], the time of the last slot run.
+    /// Run the compiled scheduler for the slots up to `limit`, at most
+    /// `budget` of them. Returns, like [`Self::step_until`], the time of the
+    /// last slot run.
     pub(super) fn run_compiled<E>(
         &mut self,
         executor: &mut E,
         limit: u64,
+        budget: u64,
     ) -> Result<Option<u64>, SimulatorErrorCode>
     where
         E: SimulationExecutor<Backend = B>,
     {
         self.stopped = false;
-        match self.run_compiled_slots(executor, limit) {
+        match self.run_compiled_slots(executor, limit, budget) {
             Ok(time) => Ok(Some(time)),
             Err(Halt::Finish) => {
                 self.finalize_terminal(executor)?;
@@ -174,7 +176,12 @@ impl<B: SimBackend> SimulationState<B> {
         }
     }
 
-    fn run_compiled_slots<E>(&mut self, executor: &mut E, limit: u64) -> Result<u64, Halt>
+    fn run_compiled_slots<E>(
+        &mut self,
+        executor: &mut E,
+        limit: u64,
+        budget: u64,
+    ) -> Result<u64, Halt>
     where
         E: SimulationExecutor<Backend = B>,
     {
@@ -196,6 +203,8 @@ impl<B: SimBackend> SimulationState<B> {
         // Only hosts that prove their input state settled may enter clean.
         backend.set(scheduler.dirty, 1u8);
         backend.set(scheduler.count, 0u64);
+        backend.set(scheduler.budget, budget);
+        backend.set(scheduler.runtime_events, 0u64);
         for &(_, waiting) in scheduler.wake.iter().flatten() {
             backend.set(waiting, 0u8);
         }
