@@ -661,11 +661,12 @@ mod tests {
                     if finished {
                         return displays;
                     }
-                    std::thread::yield_now();
+                    drain.wait(std::time::Duration::from_secs(1));
                 }
             });
             sim.run_until(50_000).unwrap();
             done.store(true, std::sync::atomic::Ordering::Release);
+            reader.thread().unpark();
             reader.join().unwrap()
         });
         let expected: Vec<Vec<u8>> = (1..=5000).map(|n| format!("n={n}").into_bytes()).collect();
@@ -701,6 +702,23 @@ mod tests {
             reader.join().unwrap()
         });
         assert_eq!(count, 2500);
+    }
+
+    /// A simulation waiting for a paced drain that does not drain goes on
+    /// once the drain stops pacing it.
+    #[test]
+    fn a_simulation_goes_on_when_its_drain_stops_pacing() {
+        let mut sim = build_in(DISPLAYS, SchedulerMode::Compiled);
+        let drain = sim.runtime_event_drain().expect("a ring buffer");
+        drain.set_backpressure(true);
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                drain.set_backpressure(false);
+            });
+            sim.run_until(25_000).unwrap();
+        });
+        assert_eq!(sim.time(), 25_000);
     }
 
     /// A paced drain also takes the events the host moves into its queue,
@@ -791,11 +809,12 @@ mod tests {
                     if finished {
                         return displays;
                     }
-                    std::thread::yield_now();
+                    drain.wait(std::time::Duration::from_secs(1));
                 }
             });
             sim.run_until(20_000).unwrap();
             done.store(true, std::sync::atomic::Ordering::Release);
+            reader.thread().unpark();
             reader.join().unwrap()
         });
         // The records of the last step stay in the ring for the simulation.
