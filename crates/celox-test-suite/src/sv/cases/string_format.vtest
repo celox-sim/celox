@@ -562,6 +562,58 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "'{'{a:-3, b:255}, '{a:7, b:0}} '{3:'{n:'{a:0, b:9}, h:null}, 5:'{n:'{a:1, b:2}, h:null}} '{a:12, b:16}\n'{n:'{a:6, b:0}, h:null} '{a:1, b:2}\n"))
 
+; IEEE 1800-2023 21.2.1.6: an enum value prints as the name of its member,
+; and a value that is no member as its base type does; so do enum members of
+; structures, elements of containers and indices of associative arrays.
+(case pattern_format_enums
+  (source "pattern_enums.sv" #"
+module Top(output bit done);
+    typedef enum {ON, OFF} switch_e;
+    typedef enum bit [1:0] {A = 1, B = 2} small_e;
+    typedef struct {switch_e sw; string s;} pair_t;
+    class Resource #(type T = int);
+        T val;
+        function string convert2string(); return $sformatf("%p", val); endfunction
+    endclass
+    Resource #(switch_e) resource;
+    pair_t va[int];
+    small_e q[$];
+    int m[small_e];
+    switch_e sw;
+    switch_e bad;
+    switch_e fa[2];
+    pair_t pair;
+    int i;
+    string s;
+    initial begin
+        resource = new();
+        resource.val = OFF;
+        sw = OFF;
+        bad = switch_e'(5);
+        i = 1;
+        fa[1] = OFF;
+        $display("%p %p %p %p %p %p", sw, bad, ON, sw.next(), switch_e'(0), resource.convert2string());
+        $display("%p %p %p", i > 0 ? ON : OFF, i > 0 ? ON : 2, fa[1]);
+        va[20] = '{ON, "switch20"};
+        va[10] = '{OFF, "switch10"};
+        pair = va[10];
+        q.push_back(A);
+        q.push_back(B);
+        q.push_back(small_e'(3));
+        m[B] = 7;
+        m[A] = 4;
+        m[small_e'(0)] = 1;
+        $display("%p", va);
+        $display("%p %p %p", pair, q, q[1]);
+        s = $sformatf("%p|%p", m, va[20].sw);
+        $display("%s", s);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "OFF 5 ON ON ON \"OFF\"\nON 0 OFF\n'{10:'{sw:OFF, s:\"switch10\"}, 20:'{sw:ON, s:\"switch20\"}}\n'{sw:OFF, s:\"switch10\"} '{A, B, 3} B\n'{0:1, A:4, B:7}|ON\n"))
+
 (case formatted_strings_into_integral_outputs
   (source "top.sv" #"
 module Top(output bit [15:0] a, output bit [39:0] b, output logic signed [15:0] c,

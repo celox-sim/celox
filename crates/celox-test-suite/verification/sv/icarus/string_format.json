@@ -36,6 +36,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:5: sorry: Unpacked structs not supported.\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Invalid module item.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid module instantiation\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:10: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "string_format::pattern_format_enums",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects associative arrays declared with int and string indices (\"Type names are not valid expressions here\") and queues of class handles (\"Queue of type class ... is not yet supported\", \"Class/null r-value not allowed in this context\"), which IEEE 1800-2023 7.8 and 7.10 define.",
       "expectation": "Simulation",
       "known_issue": {
