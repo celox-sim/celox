@@ -95,7 +95,7 @@ test("a failed lookup stops the workflow instead of permitting a rewrite", () =>
   assert.equal(result.output, "");
 });
 
-test("master updates release PRs but never creates tags or GitHub releases", () => {
+test("weekly preparation freezes queued PRs and never creates tags or GitHub releases", () => {
   const action = workflow
     .split("      - name: Create release or update release pull request\n")[1]
     .split("      - name: Queue package publication for this release\n")[0];
