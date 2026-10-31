@@ -1786,3 +1786,52 @@
   (top Top)
   (run_to_finish)
   (expect_output "ffffffffffffffffffff\n"))
+
+(case coalesces_repeated_literal_net_drivers
+  (source "repeated_literal_net_drivers.sv" #"
+    module Top(output wire [7:0] y, fill, truncated, output wire eq);
+      wire [7:0] a = 8'hd9;
+      assign a = 8'hd9;
+      assign a = 8'hd9;
+      wire [7:0] b = 8'hd9;
+      assign b = 8'hd9;
+      assign y = a;
+      assign eq = a == b;
+      assign fill = '1;
+      assign fill = '1;
+      assign truncated = 16'h12ab;
+      assign truncated = 16'h12ab;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq y 0xd9)
+  (assert_eq eq 1)
+  (assert_eq fill 0xff)
+  (assert_eq truncated 0xab))
+
+(case repeated_literal_net_drivers_preserve_four_state_equality
+  (four_state)
+  (source "repeated_four_state_literal_net_drivers.sv" #"
+    module Top(output wire same_x, same_z, different_xz, known_mismatch,
+               output wire [7:0] x_value, z_value);
+      wire [7:0] a = 8'b1101x001;
+      assign a = 8'b1101x001;
+      wire [7:0] b = 8'b1101z001;
+      assign b = 8'b1101z001;
+      wire [7:0] c = 8'b1101x000;
+      assign c = 8'b1101x000;
+      assign same_x = a === 8'b1101x001;
+      assign same_z = b === 8'b1101z001;
+      assign different_xz = a !== b;
+      assign known_mismatch = a == c;
+      assign x_value = a;
+      assign z_value = b;
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq same_x 1)
+  (assert_eq same_z 1)
+  (assert_eq different_xz 1)
+  (assert_eq known_mismatch 0)
+  (assert_eq x_value (fourstate 0xd9 0x08))
+  (assert_eq z_value (fourstate 0xd1 0x08)))

@@ -9047,6 +9047,26 @@ fn masked_reads_preserve_observer_sensitivity_and_real_self_dependencies() {
 fn net_alias_coalescing_retains_distinct_and_variable_drivers() {
     for (source, diagnostic) in [
         (
+            "module Top(output uwire y); assign y=1'b1; assign y=1'b1; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(output wire y); uwire n=1'b1; assign n=1'b1; assign y=n; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(output logic y); assign y=1'b1; assign y=1'b1; endmodule",
+            "multiple variable drivers",
+        ),
+        (
+            "module Top(output wire y); assign y=1'b0; assign y=1'b0; assign y=1'b1; endmodule",
+            "multiple net drivers",
+        ),
+        (
+            "module Top(input logic a, output wire y); assign y=a; assign y=1'b1; endmodule",
+            "multiple net drivers",
+        ),
+        (
             "module Top(input logic a, output uwire y); assign y=a; assign y=a; endmodule",
             "multiple net drivers",
         ),

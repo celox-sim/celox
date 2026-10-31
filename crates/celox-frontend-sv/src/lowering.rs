@@ -1774,12 +1774,13 @@ struct DriverWrite {
     element: Option<(i128, i128)>,
 }
 
-/// Repeated zero-delay aliases of a declared net have one effective value
-/// (IEEE 1800-2023 6.5, 6.6.1). Keep the authored process indices so removing
-/// an alias does not renumber the random streams of later processes.
-/// Only whole-net identifier reads qualify: calls, slices, variables and
-/// conditional assignments retain their independent driver identities.
-fn redundant_net_aliases(module: &sv::ir::Module) -> HashSet<usize> {
+/// Repeated zero-delay aliases or identical literal drivers of a declared net
+/// have one effective value (IEEE 1800-2023 6.6.1, 10.3.1). Keep the authored
+/// process indices so removing a driver does not renumber the random streams
+/// of later processes. Only whole-net identifier reads and identical literals
+/// qualify: calls, slices, variables and conditional assignments retain their
+/// independent driver identities. In particular, `uwire` drivers must not merge.
+fn redundant_net_drivers(module: &sv::ir::Module) -> HashSet<usize> {
     let nets: HashSet<_> = module
         .signals()
         .iter()
@@ -1795,7 +1796,7 @@ fn redundant_net_aliases(module: &sv::ir::Module) -> HashSet<usize> {
                 .map(|port| port.name()),
         )
         .collect();
-    let mut aliases = HashSet::default();
+    let mut drivers = HashSet::default();
     let mut redundant = HashSet::default();
     for (index, process) in module.comb_processes().iter().enumerate() {
         if process.kind() != sv::ir::CombProcessKind::ContinuousAssign
@@ -1806,14 +1807,21 @@ fn redundant_net_aliases(module: &sv::ir::Module) -> HashSet<usize> {
         let [
             sv::ir::Stmt::Assign {
                 lhs: sv::ir::LValue::Ident(target),
-                rhs: sv::ir::Expr::Ident(source),
+                rhs,
                 nonblocking: false,
             },
         ] = process.body()
         else {
             continue;
         };
-        if nets.contains(target.as_str()) && !aliases.insert((target.as_str(), source.as_str())) {
+        let (literal, source) = match rhs {
+            sv::ir::Expr::Ident(source) => (false, source),
+            sv::ir::Expr::Literal(source) => (true, source),
+            _ => continue,
+        };
+        if nets.contains(target.as_str())
+            && !drivers.insert((target.as_str(), literal, source.as_str()))
+        {
             redundant.insert(index);
         }
     }
@@ -1905,7 +1913,7 @@ impl ModuleDrivers {
         };
         let comb = module.comb_processes();
         let ff = module.ff_processes();
-        let redundant = redundant_net_aliases(module);
+        let redundant = redundant_net_drivers(module);
         for (index, process) in comb.iter().enumerate() {
             if redundant.contains(&index) {
                 continue;
@@ -5932,7 +5940,7 @@ fn lower_comb_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let random_seeds = process_random_seeds(module);
-    let redundant = redundant_net_aliases(module);
+    let redundant = redundant_net_drivers(module);
     let watchable =
         watch_seeds.map(|seeds| watchable_variables(&pm, module, port_assignments, seeds));
     for (index, process) in module.comb_processes().iter().enumerate() {
