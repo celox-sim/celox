@@ -172,7 +172,7 @@ endmodule
         let progress = restore(&mut resumed, &path).unwrap();
         let mut saves = crate::StateSaves::default();
         saves.restore_progress(&resumed, "Top", progress).unwrap();
-        let error = crate::simulate_sv(resumed, 10, saves, &mut Vec::new()).unwrap_err();
+        let error = crate::simulate_sv(resumed, 10, saves, &mut Vec::new(), false).unwrap_err();
         assert!(error.contains("assertion failure or $error"), "{error}");
     }
 }
@@ -289,7 +289,7 @@ fn restore_keeps_consumed_saves_cycle_count_and_edge_baseline() {
         let progress = restore(&mut restored, &checkpoint).unwrap();
         let mut saves = crate::StateSaves::new(&restored, "Top", &arguments, None).unwrap();
         saves.restore_progress(&restored, "Top", progress).unwrap();
-        crate::simulate_sv(restored, 20, saves, &mut Vec::new()).unwrap();
+        crate::simulate_sv(restored, 20, saves, &mut Vec::new(), false).unwrap();
         assert_eq!(
             std::fs::read(dir.path().join("time-5.state")).unwrap(),
             first_time
