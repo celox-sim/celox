@@ -1,1 +1,6 @@
-Fix missing retained exclusion rows reported by CI and sync with master to resolve the PR conflict.
+Revision history for #2755:
+
+rev 2 (content) 2026-10-31 15:14 UTC — Fix missing retained exclusion rows reported by CI and sync with master to resolve the PR conflict.
+rev 1 (initial) 2026-10-31 15:14 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2755,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f26d257d080f4f810e858d42ac420aa5b6bbe27d","timestamp_iso":"2026-10-31T15:14:55Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"f26d257d080f4f810e858d42ac420aa5b6bbe27d","new_sha":"f87223dd806eae642cd4268d96fd25a84e98a042","timestamp_iso":"2026-10-31T15:14:55Z","reason":"Fix missing retained exclusion rows reported by CI and sync with master to resolve the PR conflict.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f26d257d080f4f810e858d42ac420aa5b6bbe27d...f87223dd806eae642cd4268d96fd25a84e98a042"}]} -->
