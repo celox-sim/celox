@@ -942,6 +942,10 @@
     "sv_pattern_structure_members": {
       "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
       "standard": "IEEE 1800-2023 21.2.1.6"
+    },
+    "sv_nested_container_foreach": {
+      "title": "A foreach over a container of containers with a loop variable per dimension leaves the inner variable x and iterates the outer dimension only: foreach (all[k, j]) over int all[int][$] prints j as x once per key, and foreach (d[i, j]) over int d[$][] runs no iteration",
+      "standard": "IEEE 1800-2023 12.7.3"
     }
   },
   "cases": [
@@ -4831,6 +4835,22 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X90",
       "note": "m[next_index()].push_back(7) calls next_index() three times per statement (i = 6 after two statements, elements lost), and $unpacked_dimensions(grid)/$dimensions(grid) of int grid[][] print 1 2 instead of 2 3."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::multidimensional_foreach_break",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_nested_container_foreach",
+      "note": "foreach (q[i, j]) over int q[$][$] runs no iteration, so n and c print 0; the fixed-size array a[2][3] breaks out of both dimensions as expected (m is 2)."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::nested_container_foreach",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_nested_container_foreach",
+      "note": "foreach (all[k, j]) prints j as x once for each key (including the empty all[7]), and foreach (d[i, j]) runs no iteration, so sum is 0; the single-variable loops and the string-keyed case print as expected."
     },
     {
       "suite": "sv",
