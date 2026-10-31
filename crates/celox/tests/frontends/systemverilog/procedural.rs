@@ -96,6 +96,14 @@ sv_backends! {
         @case "procedural::static_function_result_filled_by_constant_loops";
     }
 
+    fn static_function_unread_partial_result_is_constant(sim) {
+        @case "procedural::static_function_unread_partial_result_is_constant";
+    }
+
+    fn static_function_unread_partial_result_keeps_unknown_bits(sim) {
+        @case "procedural::static_function_unread_partial_result_keeps_unknown_bits";
+    }
+
     fn typedef_declaration_initializers(sim) {
         @case "procedural::typedef_declaration_initializers";
     }
