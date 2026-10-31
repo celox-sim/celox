@@ -1,0 +1,1 @@
+Fix both CI Rust test failures: update the remaining unsupported-gate diagnostic fixture and retain the exact reviewed Icarus exclusion row.
