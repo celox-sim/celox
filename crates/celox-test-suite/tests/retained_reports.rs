@@ -681,6 +681,17 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "sorry: Overriding the default variable lifetime is not yet supported.",
                         ),
+                        ("icarus", "class::specialized_scope_typedef_calls") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::specialized_scope_typedef_properties") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("xezim", "class::specialized_scope_typedef_properties") => (
+                            "mismatch",
+                            "execute",
+                            "reads count with unknown bits in a two-state run",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
