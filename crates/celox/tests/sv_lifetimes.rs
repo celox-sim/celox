@@ -212,17 +212,57 @@ fn static_task_outputs_keep_their_value() {
     );
 }
 
+/// The initializer of a static local runs once, before time zero (IEEE
+/// 1800-2023 6.8, 6.21), also in a task that suspends; it cannot read a
+/// formal, which only a call gives a value.
 #[test]
-fn static_initializers_of_timed_tasks_must_be_constant() {
+fn static_initializers_of_timed_tasks_run_at_time_zero() {
+    let mut simulation = Simulation::from_sv_sources(
+        vec![(
+            "`timescale 1ns/1ns
+             module Top(output int y);
+               int m = 4;
+               task t(output int r); static int x = m + 1; #1 x++; r = x; endtask
+               initial begin int a; t(a); t(y); y += a; end
+             endmodule",
+            std::path::Path::new("lifetimes.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+    simulation.run_until(3).unwrap();
+    let y = simulation.signal("y");
+    assert_eq!(u64::try_from(simulation.get(y)).unwrap(), 13);
     let detail = error(
-        "module Top(input int a, output int y);
-           task t; static int x = a; #1 y = x; endtask
-           initial t();
+        "module Top(output int y);
+           task t(input int a); static int x = a; #1 y = x; endtask
+           initial t(1);
          endmodule",
     );
     assert!(
         detail.contains("initializer that is not constant"),
         "{detail}"
+    );
+}
+
+/// A run-time static initializer of a function may read another static
+/// local, also one that the calls only read.
+#[test]
+fn static_initializers_of_functions_read_other_static_locals() {
+    assert_eq!(
+        settled(
+            "module Top(output logic [7:0] y);
+               function int f();
+                 static int a = 2;
+                 static int b = a;
+                 b++;
+                 return b;
+               endfunction
+               initial begin static int k = f(); y = k + 10 * f(); end
+             endmodule"
+        ),
+        43
     );
 }
 

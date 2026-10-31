@@ -1650,7 +1650,8 @@ impl Module {
                             .iter_mut()
                             .map(|process| (&mut process.body, !process.repeats)),
                     ),
-                Some(&body_state.explicit_statics),
+                &body_state.explicit_statics,
+                &[],
                 false,
             )?;
             for subroutine in &subroutines {
