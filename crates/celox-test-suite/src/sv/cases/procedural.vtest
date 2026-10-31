@@ -979,6 +979,34 @@
   (assert_eq binary 0x12)
   (assert_eq reversed 0x1b))
 
+(case static_function_unread_partial_result_is_constant
+  (source "static_partial_result.sv" #"
+    module Top(input logic [7:0] d, output logic [7:0] q);
+      function bit [7:0] low_bits();
+        for (int i = 0; i < 4; i++) low_bits[i] = i[0];
+      endfunction
+      assign q = d ^ low_bits();
+    endmodule
+  "#)
+  (top Top)
+  (modify (set d 0x00))
+  (assert_eq q 0x0a)
+  (modify (set d 0xff))
+  (assert_eq q 0xf5))
+
+(case static_function_unread_partial_result_keeps_unknown_bits
+  (four_state)
+  (source "static_partial_result_unknown.sv" #"
+    module Top(output logic [7:0] q);
+      function [7:0] low_bits();
+        for (int i = 0; i < 4; i++) low_bits[i] = i[0];
+      endfunction
+      assign q = low_bits();
+    endmodule
+  "#)
+  (top Top)
+  (assert_eq q (fourstate 0xfa 0xf0)))
+
 (case static_function_scratch_arrays_are_filled_before_reads
   (source "scratch_array.sv" #"
     module Top(input logic [7:0] a, output logic [7:0] y);
