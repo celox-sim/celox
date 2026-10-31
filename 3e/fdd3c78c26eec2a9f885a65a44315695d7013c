@@ -1,0 +1,1 @@
+Replace Renovate release extraction with Updatecli per user request. Generate the release tag, flake.lock and xezim Cargo.lock together in one automated dependency PR; remove the manual lock-update flow.
