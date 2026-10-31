@@ -16,7 +16,8 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
     let mut module_table = ModuleTable::default();
     let mut modules = Vec::new();
     for module in source.modules() {
-        let state = module.constant_function_state();
+        let syntax = crate::source_tree::SourceTree::empty();
+        let tree = &module.constant_context(&syntax);
         let id = module_table.insert(module)?;
         let mut constants = HashMap::default();
         let mut parameter_types = HashMap::default();
@@ -42,7 +43,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             }
             let value: Option<ir::ConstExpr> = parameter.value().cloned().map(Into::into);
             let (resolved_value, literal) = parameter.resolved_value_and_literal(
-                &state,
+                tree,
                 &constants,
                 &parameter_types,
                 &parameter_literals,
@@ -79,7 +80,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
             .with_declaration(
                 parameter.value().map(|value| {
                     module
-                        .declaration_expr(&state, value, &parameter_signedness)
+                        .declaration_expr(tree, value, &parameter_signedness)
                         .into()
                 }),
                 parameter
@@ -88,10 +89,10 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                     .map(|range| {
                         ir::PackedRange::new(
                             module
-                                .declaration_expr(&state, range.left(), &parameter_signedness)
+                                .declaration_expr(tree, range.left(), &parameter_signedness)
                                 .into(),
                             module
-                                .declaration_expr(&state, range.right(), &parameter_signedness)
+                                .declaration_expr(tree, range.right(), &parameter_signedness)
                                 .into(),
                         )
                     })
@@ -116,7 +117,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                         port.r#type().clone(),
                         &ast::const_functions::Environment {
                             constants: &constants,
-                            functions: &state.const_functions,
+                            functions: &tree.functions,
                         },
                     ),
                     port.is_net(),
@@ -126,7 +127,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                 .with_pattern_target(port.r#type().pattern_target(
                     &ast::const_functions::Environment {
                         constants: &constants,
-                        functions: &state.const_functions,
+                        functions: &tree.functions,
                     },
                 )),
             );
@@ -162,7 +163,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                             ty,
                             &ast::const_functions::Environment {
                                 constants: &constants,
-                                functions: &state.const_functions,
+                                functions: &tree.functions,
                             },
                         ),
                         port.is_net(),
@@ -182,7 +183,7 @@ fn analyze_source_impl(source: ast::Source) -> Result<ir::Ir, AnalyzerError> {
                         signal.r#type().clone(),
                         &ast::const_functions::Environment {
                             constants: &constants,
-                            functions: &state.const_functions,
+                            functions: &tree.functions,
                         },
                     ),
                     signal.is_net(),

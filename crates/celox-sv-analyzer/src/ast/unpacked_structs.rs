@@ -119,7 +119,7 @@ impl UnpackedStruct {
 /// The type of an unpacked structure with `fields`, or `None` when a member
 /// type has no supported unpacked-structure representation.
 pub(in crate::ast) fn native_type(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     owner: Arc<str>,
     fields: Vec<(String, Type)>,
     env: &HashMap<String, i128>,
@@ -140,11 +140,11 @@ pub(in crate::ast) fn native_type(
             }
             let ty = match ty.unpacked_struct() {
                 Some(_) => ty,
-                None => packed_structs::capture_member_type(state, ty, env)?,
+                None => packed_structs::capture_member_type(functions, ty, env)?,
             };
             let width = match ty.unpacked_struct() {
                 Some(inner) => inner.width(),
-                None => casts::expr_type_from_type(state, &ty, env)?.width,
+                None => casts::expr_type_from_type(functions, &ty, env)?.width,
             };
             Some(Member {
                 name,
@@ -478,7 +478,7 @@ pub(in crate::ast) fn leaf_parts(aggregate: &UnpackedStruct, value: &Expr) -> Op
 /// handle member and members that are all 2-state or all 4-state, so the
 /// container's default element is the structure's default.
 pub(in crate::ast) fn record(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     aggregate: &UnpackedStruct,
     env: &HashMap<String, i128>,
 ) -> Converted<Option<crate::system_functions::Record>> {
@@ -499,7 +499,7 @@ pub(in crate::ast) fn record(
     let mut size = 0;
     let mut fields = Vec::new();
     for leaf in &leaves {
-        let mut field = classes::field(state, &leaf.r#type, env, size)?;
+        let mut field = classes::field(functions, &leaf.r#type, env, size)?;
         field.nullable = true;
         size = field.offset + field.storage();
         fields.push(field);

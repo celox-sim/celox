@@ -339,13 +339,15 @@ fn element(
 
 /// The value of `method` of `domain` called on `receiver` with `count`.
 pub(super) fn call(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     method: Method,
     domain: &EnumDomain,
     receiver: Option<Expr>,
     count: Option<Expr>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    let state = &*tree.state;
+    let functions = &tree.functions;
     let members = &domain.members;
     let member = |index: usize| {
         Expr::Literal(format_typed_parameter_literal(
@@ -399,7 +401,7 @@ pub(super) fn call(
             // extended by its own signedness; the type is 2-state, so unknown
             // bits become 0.
             let count = casts::runtime_cast_target_expr(
-                state,
+                tree,
                 casts::RuntimeCastTarget::Integral {
                     target: ExprType {
                         width: 32,
@@ -412,7 +414,7 @@ pub(super) fn call(
                 dimensions,
             )?;
             let constant = expr_to_const(state, count.clone())
-                .and_then(|count| eval_ast_const_expr(state, &count, &dimensions.const_env))
+                .and_then(|count| eval_ast_const_expr(functions, &count, &dimensions.const_env))
                 .map(|count| (count as u32 as usize) % count_members);
             if let Some(shift) = constant {
                 let shift = if method == Method::Next {

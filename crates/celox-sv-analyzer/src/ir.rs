@@ -852,7 +852,7 @@ impl Type {
 
     pub(crate) fn has_symbolic_ranges(
         &self,
-        functions: &crate::ast::const_functions::State,
+        functions: &crate::ast::const_functions::ConstantFunctions,
     ) -> bool {
         let values = fxhash::FxHashMap::default();
         let constants = crate::ast::const_functions::Environment {

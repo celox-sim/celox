@@ -60,7 +60,7 @@ pub(super) fn native_functions(
     for (item, id) in owners {
         let aliases = item.type_aliases(&dimensions.type_aliases);
         let tree = &item.scoped(tree);
-        let _constants = item.enter();
+        let tree = &item.enter(tree);
         let mut signature_context = item.dimensions(dimensions);
         signature_context.const_env = item.env.clone();
         signature_context.type_aliases = aliases.as_ref().clone().into();
@@ -203,7 +203,7 @@ fn native_signature(
         previous = ty.clone();
         let expr_type = ty
             .as_ref()
-            .and_then(|ty| expr_type_from_type(&tree.state, ty, &context.const_env));
+            .and_then(|ty| expr_type_from_type(&tree.functions, ty, &context.const_env));
         params.push(FunctionParam {
             name: instances::normalize_identifier(&name.spelling),
             has_default: port.default.is_some(),
@@ -224,11 +224,11 @@ fn native_signature(
     };
     let result = ty
         .as_ref()
-        .and_then(|ty| expr_type_from_type(&tree.state, ty, &context.const_env));
+        .and_then(|ty| expr_type_from_type(&tree.functions, ty, &context.const_env));
     let first = match ty.as_ref().and_then(|ty| ty.packed_ranges().first()) {
         Some(range) => (|| {
-            let left = eval_ast_const_expr(&tree.state, &range.left, &context.const_env)?;
-            let right = eval_ast_const_expr(&tree.state, &range.right, &context.const_env)?;
+            let left = eval_ast_const_expr(&tree.functions, &range.left, &context.const_env)?;
+            let right = eval_ast_const_expr(&tree.functions, &range.right, &context.const_env)?;
             usize::try_from(left.abs_diff(right).checked_add(1)?).ok()
         })(),
         None => result.map(|ty| ty.width),
@@ -274,7 +274,7 @@ fn native_signature(
             .and_then(|ty| {
                 ty.pattern_target(&const_functions::Environment {
                     constants: &*context.const_env,
-                    functions: &tree.state.const_functions,
+                    functions: &tree.functions,
                 })
             }),
     })

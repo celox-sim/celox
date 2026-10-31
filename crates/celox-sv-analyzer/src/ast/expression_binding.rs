@@ -67,15 +67,15 @@ pub(super) fn expression(
     // shape, or a selection aligned to the left.
     if streams::is_stream(root, native) {
         let receiver = match shape {
-            Some(shape) => streams::receiver(shape, &tree.state, dimensions)?,
+            Some(shape) => streams::receiver(shape, &tree.functions, dimensions)?,
             None => streams::selection_receiver(
                 lhs,
-                lvalue_expr_type(&tree.state, lhs, dimensions)
+                lvalue_expr_type(&tree.functions, lhs, dimensions)
                     .map(|ty| ty.width)
                     .ok_or_else(|| {
                         unsupported("streaming concatenation into a selection of unknown width")
                     })?,
-                &tree.state,
+                &tree.functions,
                 dimensions,
             ),
         };
@@ -156,7 +156,7 @@ mod tests {
                 expression(root, &native, &lhs, &tree, &PackedDimensions::default()).unwrap();
             assert_eq!(
                 expr_to_const(&tree.state, value).and_then(|value| eval_ast_const_expr(
-                    &tree.state,
+                    &tree.functions,
                     &value,
                     &HashMap::default()
                 )),

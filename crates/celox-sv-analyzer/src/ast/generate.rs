@@ -60,7 +60,6 @@ fn scope_component(name: &str) -> String {
 
 #[derive(Clone)]
 pub(super) struct Item {
-    state: std::rc::Rc<AnalysisState>,
     /// The symbols the scope that elaborated the item imports.
     imported: Arc<scope::ScopeSymbols>,
     pub id: celox_sv_syntax::BodyItemId,
@@ -80,7 +79,6 @@ pub(super) struct Item {
 /// hold those declarations under their qualified names.
 #[derive(Clone, Copy)]
 struct BlockImports<'s> {
-    state: &'s std::rc::Rc<AnalysisState>,
     names: &'s HashMap<String, String>,
     imports: &'s HashMap<String, String>,
     /// The names the blocks declare or import.
@@ -124,12 +122,14 @@ impl<'s> BlockImports<'s> {
         visible
     }
 
-    /// Make each imported name call the constant function of its
-    /// declaration, until the guard is dropped; a name that imports no
-    /// constant function calls none. Calls in the bodies of the functions it
-    /// hides keep their definition-site meaning.
-    fn install_constant_functions(self) -> Option<const_functions::Installed> {
-        let installed = const_functions::installed(&self.state.const_functions);
+    /// `installed` with each imported name calling the constant function of
+    /// its declaration, or `None` if no name rebinds one; a name that imports
+    /// no constant function calls none. Calls in the bodies of the functions
+    /// it hides keep their definition-site meaning.
+    fn visible_constant_functions(
+        self,
+        installed: &const_functions::ConstantFunctions,
+    ) -> Option<const_functions::ConstantFunctions> {
         let rebound: Vec<_> = self
             .bindings()
             .filter(|(name, target)| installed.contains(name) || installed.contains(target))
@@ -148,7 +148,7 @@ impl<'s> BlockImports<'s> {
         for (name, target) in rebound {
             visible.alias(name, target);
         }
-        Some(const_functions::install(self.state, visible))
+        Some(visible)
     }
 }
 
@@ -185,7 +185,6 @@ impl Item {
 
     fn block_imports(&self) -> BlockImports<'_> {
         BlockImports {
-            state: &self.state,
             names: &self.names,
             imports: &self.imports,
             shadowed: &self.shadowed,
@@ -209,10 +208,15 @@ impl Item {
         Cow::Owned(self.block_imports().type_aliases(&all).into_owned())
     }
 
-    /// Make the constant functions this item sees the installed ones, until
-    /// the guard is dropped.
-    pub fn enter(&self) -> Option<const_functions::Installed> {
-        self.block_imports().install_constant_functions()
+    /// `tree` calling the constant functions this item sees.
+    pub fn enter<'a>(&self, tree: &AnalysisContext<'a>) -> AnalysisContext<'a> {
+        match self
+            .block_imports()
+            .visible_constant_functions(&tree.functions)
+        {
+            Some(functions) => tree.with_functions(functions),
+            None => tree.clone(),
+        }
     }
 
     pub fn scope_name(&self) -> &str {
@@ -565,7 +569,6 @@ impl Scope {
 
     fn block_imports(&self) -> BlockImports<'_> {
         BlockImports {
-            state: &self.state,
             names: &self.names,
             imports: &self.imports,
             shadowed: &self.shadowed,
@@ -574,7 +577,9 @@ impl Scope {
 }
 
 struct Elaborator<'a, 'b> {
-    tree: &'a AnalysisContext<'a>,
+    /// The context of the scope being elaborated, whose constant functions
+    /// change with the imports of each generate block.
+    tree: AnalysisContext<'a>,
     module_aliases: &'b HashMap<String, Type>,
     /// The type aliases of the scope being elaborated.
     aliases: Cow<'b, HashMap<String, Type>>,
@@ -638,7 +643,7 @@ fn elaborate(
     literal_use: LiteralUse,
 ) -> Result<Vec<Item>, AnalyzerError> {
     let mut elaborator = Elaborator {
-        tree,
+        tree: tree.clone(),
         module_aliases: aliases,
         aliases: Cow::Borrowed(aliases),
         remaining: MAX_GENERATE_LOOP_EXPANSION,
@@ -648,7 +653,7 @@ fn elaborate(
     let parameters = parameters_from_scope(tree, aliases, env, &tree.parameter_overrides)?;
     let references = parameter_literal_references(tree, literal_use)?;
     let mut literals =
-        parameters::parameter_value_env_for_references(&tree.state, &parameters, env, &references);
+        parameters::parameter_value_env_for_references(tree, &parameters, env, &references);
     if elaboration::needs_functions(tree)? {
         elaborator.functions = module_constant_functions(tree, env, aliases, &literals)?;
     }
@@ -745,7 +750,7 @@ impl<'a> Elaborator<'a, '_> {
         let Some(expr) = constant_binding::expression(
             root,
             self.tree.declarations(),
-            self.tree,
+            &self.tree,
             &scope.env,
             &self.aliases,
         )?
@@ -757,27 +762,28 @@ impl<'a> Elaborator<'a, '_> {
             ..PackedDimensions::default()
         };
         let Some(mut expr) = expr_to_index_const(
-            &self.tree.state,
+            &self.tree,
             substitute_expr_idents(const_expr_to_expr(expr), &scope.literals),
             &dimensions,
         ) else {
             return Ok(None);
         };
         Ok(self
-            .expand_constant_calls(&self.tree.state, &mut expr, scope)
+            .expand_constant_calls(&self.tree, &mut expr, scope)
             .map(|()| expr))
     }
 
     fn expand_constant_calls(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
         expr: &mut ConstExpr,
         scope: &Scope,
     ) -> Option<()> {
+        let state = &*tree.state;
         match expr {
             ConstExpr::Function { callee, args, .. } => {
                 for arg in args {
-                    self.expand_constant_calls(state, arg, scope)?;
+                    self.expand_constant_calls(tree, arg, scope)?;
                 }
                 // A block import binds the call to the qualified declaration,
                 // which the installed constant functions evaluate.
@@ -806,39 +812,39 @@ impl<'a> Elaborator<'a, '_> {
                         0,
                         true,
                     );
-                    let expanded = simplify_constant_mux_conditions(state, expanded, &scope.env);
+                    let expanded = simplify_constant_mux_conditions(tree, expanded, &scope.env);
                     // Fold only the call: surrounding case arithmetic still needs
                     // the common comparison width, while function results are self-determined.
                     *expr = expr_to_const(
                         state,
-                        fold_const_integral_expr_preserving_mask(state, expanded, &scope.env),
+                        fold_const_integral_expr_preserving_mask(tree, expanded, &scope.env),
                     )?;
                 }
             }
             ConstExpr::Resize { expr, .. } | ConstExpr::Unary { expr, .. } => {
-                self.expand_constant_calls(state, expr, scope)?
+                self.expand_constant_calls(tree, expr, scope)?
             }
             ConstExpr::SelectRange { expr, msb, lsb, .. } => {
-                self.expand_constant_calls(state, expr, scope)?;
-                self.expand_constant_calls(state, msb, scope)?;
-                self.expand_constant_calls(state, lsb, scope)?;
+                self.expand_constant_calls(tree, expr, scope)?;
+                self.expand_constant_calls(tree, msb, scope)?;
+                self.expand_constant_calls(tree, lsb, scope)?;
             }
             ConstExpr::Select { expr, bit } => {
-                self.expand_constant_calls(state, expr, scope)?;
-                self.expand_constant_calls(state, bit, scope)?;
+                self.expand_constant_calls(tree, expr, scope)?;
+                self.expand_constant_calls(tree, bit, scope)?;
             }
             ConstExpr::Binary { left, right, .. } => {
-                self.expand_constant_calls(state, left, scope)?;
-                self.expand_constant_calls(state, right, scope)?;
+                self.expand_constant_calls(tree, left, scope)?;
+                self.expand_constant_calls(tree, right, scope)?;
             }
             ConstExpr::Mux {
                 condition,
                 then_expr,
                 else_expr,
             } => {
-                self.expand_constant_calls(state, condition, scope)?;
-                self.expand_constant_calls(state, then_expr, scope)?;
-                self.expand_constant_calls(state, else_expr, scope)?;
+                self.expand_constant_calls(tree, condition, scope)?;
+                self.expand_constant_calls(tree, then_expr, scope)?;
+                self.expand_constant_calls(tree, else_expr, scope)?;
             }
             ConstExpr::Ident(_) | ConstExpr::Literal(_) => {}
         }
@@ -847,7 +853,7 @@ impl<'a> Elaborator<'a, '_> {
 
     fn value(&self, root: ExprId, scope: &Scope, detail: &str) -> Result<i128, AnalyzerError> {
         self.expression(root, scope)?
-            .and_then(|expr| eval_ast_const_expr(&self.tree.state, &expr, &scope.env))
+            .and_then(|expr| eval_ast_const_expr(&self.tree.functions, &expr, &scope.env))
             .ok_or_else(|| AnalyzerError::Unsupported(detail.to_string()))
     }
 
@@ -869,7 +875,7 @@ impl<'a> Elaborator<'a, '_> {
                             &expr,
                             &const_functions::Environment {
                                 constants: &*scope.env,
-                                functions: &self.tree.state.const_functions,
+                                functions: &self.tree.functions,
                             },
                             &|name| types.get(name).copied(),
                         )
@@ -881,8 +887,7 @@ impl<'a> Elaborator<'a, '_> {
 
     fn push(&mut self, id: celox_sv_syntax::BodyItemId, scope: &Scope) {
         self.items.push(Item {
-            state: self.tree.state.clone(),
-            imported: scope::imported(self.tree),
+            imported: scope::imported(&self.tree),
             id,
             env: scope.env.clone(),
             literals: scope.literals.clone(),
@@ -1060,7 +1065,7 @@ impl<'a> Elaborator<'a, '_> {
                 let mut signals = Vec::new();
                 signals_from_body_item(
                     id,
-                    self.tree,
+                    &self.tree,
                     &self.aliases,
                     &scope.env,
                     Some(&name),
@@ -1081,7 +1086,8 @@ impl<'a> Elaborator<'a, '_> {
                         )
                     {
                         if parameters::contains_unbounded_operand(bound, &scope.env)
-                            && eval_ast_const_expr(&self.tree.state, bound, &scope.env).is_none()
+                            && eval_ast_const_expr(&self.tree.functions, bound, &scope.env)
+                                .is_none()
                         {
                             return Err(AnalyzerError::Unsupported(
                                 "numeric use of unbounded parameter in generate signal range"
@@ -1091,7 +1097,7 @@ impl<'a> Elaborator<'a, '_> {
                     }
                 }
                 extend_const_env_with_variable_types(
-                    &self.tree.state,
+                    &self.tree.functions,
                     &mut scope.env,
                     signals
                         .iter()
@@ -1108,7 +1114,7 @@ impl<'a> Elaborator<'a, '_> {
                     // bind siblings. Either ends this run before rebuilding it.
                     let base = scope.env.clone();
                     let mut environment = parameters::ParameterEnvironment::new(
-                        self.tree,
+                        &self.tree,
                         &scope.parameters,
                         &base,
                         &pending
@@ -1125,8 +1131,8 @@ impl<'a> Elaborator<'a, '_> {
                             .expect("ready parameter is unbound");
                         let inherited_count = scope.parameters.len();
                         parameters::parameters_from_native_with_environment(
-                            &parameters::ownership::body(id, self.tree)?,
-                            self.tree,
+                            &parameters::ownership::body(id, &self.tree)?,
+                            &self.tree,
                             &mut scope.parameters,
                             true,
                             &base,
@@ -1145,7 +1151,7 @@ impl<'a> Elaborator<'a, '_> {
                                 ))
                             })?;
                         constants::bind_generate_parameter_with_types(
-                            &self.tree.state,
+                            &self.tree,
                             parameter,
                             &mut scope.env,
                             &mut scope.literals,
@@ -1175,8 +1181,8 @@ impl<'a> Elaborator<'a, '_> {
                 // this scheduled parameter, without cloning the inherited prefix.
                 let inherited_count = scope.parameters.len();
                 parameters::parameters_from_native(
-                    &parameters::ownership::body(id, self.tree)?,
-                    self.tree,
+                    &parameters::ownership::body(id, &self.tree)?,
+                    &self.tree,
                     &mut scope.parameters,
                     true,
                     &scope.env,
@@ -1191,12 +1197,7 @@ impl<'a> Elaborator<'a, '_> {
                         AnalyzerError::Unsupported(format!("generate-local parameter `{name}`"))
                     })?;
                 scope.parameters.push(parameter.clone());
-                bind_generate_parameter(
-                    &self.tree.state,
-                    parameter,
-                    &mut scope.env,
-                    &mut scope.literals,
-                );
+                bind_generate_parameter(&self.tree, parameter, &mut scope.env, &mut scope.literals);
             }
             order.complete(index);
         }
@@ -1262,14 +1263,14 @@ impl<'a> Elaborator<'a, '_> {
                 }
             }
             let mut aliases = types::type_aliases_of_generate_scope(
-                self.tree,
+                &self.tree,
                 children,
                 &scope.env,
                 &self.aliases,
                 &scope.path,
             )?;
             let enums = parameters::enum_member_constants_from_items(
-                self.tree,
+                &self.tree,
                 children,
                 &scope.env,
                 &aliases,
@@ -1291,8 +1292,8 @@ impl<'a> Elaborator<'a, '_> {
                 // another loop iteration shadows the names in their bounds.
                 let ty = procedural::scoped_type(ty, &scope.env);
                 if ty.packed_ranges().iter().any(|range| {
-                    eval_ast_const_expr(&self.tree.state, range.left(), &scope.env).is_none()
-                        || eval_ast_const_expr(&self.tree.state, range.right(), &scope.env)
+                    eval_ast_const_expr(&self.tree.functions, range.left(), &scope.env).is_none()
+                        || eval_ast_const_expr(&self.tree.functions, range.right(), &scope.env)
                             .is_none()
                 }) {
                     return Err(unsupported(format!(
@@ -1350,7 +1351,7 @@ impl<'a> Elaborator<'a, '_> {
             let mut signals = Vec::new();
             signals_from_body_item(
                 *id,
-                self.tree,
+                &self.tree,
                 &self.aliases,
                 &scope.env,
                 None,
@@ -1474,7 +1475,6 @@ fn module_constant_functions(
             _ => {}
         }
         roots.push(Item {
-            state: tree.state.clone(),
             imported: scope::imported(tree),
             id,
             env: env.clone().into(),
@@ -1754,7 +1754,8 @@ mod tests {
 
     #[test]
     fn cached_generate_types_match_rebuilt_types_for_imports_and_four_state_values() {
-        let state = AnalysisState::default();
+        let syntax = crate::source_tree::SourceTree::empty();
+        let tree = AnalysisContext::unspecialized(&syntax);
         let mut base = HashMap::from_iter([("pkg::IMPORTED".into(), -1)]);
         insert_parameter_type_markers(
             &mut base,
@@ -1794,13 +1795,13 @@ mod tests {
                 true,
             );
             bind_generate_parameter(
-                &state,
+                &tree,
                 parameter.clone(),
                 &mut rebuilt_env,
                 &mut rebuilt_literals,
             );
             constants::bind_generate_parameter_with_types(
-                &state,
+                &tree,
                 parameter,
                 &mut cached_env,
                 &mut cached_literals,
@@ -2182,7 +2183,7 @@ mod tests {
         )
         .unwrap();
         let mut env = HashMap::default();
-        extend_const_env_with_parameters(&tree.state, &mut env, &parameters);
+        extend_const_env_with_parameters(&tree, &mut env, &parameters);
         assert_eq!(env[&parameter_dimensions_marker("i")], 2);
         let active = items(&tree, &env, &HashMap::default()).unwrap();
         let iterations: Vec<_> = active
@@ -2223,7 +2224,11 @@ mod tests {
                 panic!("{assignment:?}")
             };
             assert_eq!(
-                eval_ast_const_expr(&AnalysisState::default(), lsb, &HashMap::default()),
+                eval_ast_const_expr(
+                    &const_functions::ConstantFunctions::default(),
+                    lsb,
+                    &HashMap::default()
+                ),
                 Some(index as i128),
                 "{assignment:?}"
             );
@@ -2546,7 +2551,7 @@ mod tests {
         let env = HashMap::default();
         let aliases = HashMap::default();
         let parameters = parameters_from_scope(&tree, &aliases, &env, &HashMap::default()).unwrap();
-        let full = parameter_value_env(&tree.state, &parameters, &env);
+        let full = parameter_value_env(&tree, &parameters, &env);
         let active = items(&tree, &env, &aliases).unwrap();
         for item in active {
             assert_eq!(item.literals.get("B"), full.get("B"));

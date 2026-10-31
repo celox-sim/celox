@@ -17,7 +17,7 @@ pub(super) fn ff_processes_from_scope(
         let Some(procedure) = item.procedure(syntax_tree.declarations())? else {
             continue;
         };
-        let _constant_functions = item.enter();
+        let syntax_tree = &item.enter(syntax_tree);
         let start = processes.len();
         let (dimensions, literals) = views.get(item);
         if let Some(process) = ff_process_from_procedure(
@@ -87,12 +87,7 @@ fn ff_process_from_procedure(
     );
     let mut body = builder.native_body(&[body], &procedure.authored_statements)?;
     for stmt in &mut body {
-        procedural::substitute_stmt_constants(
-            &syntax_tree.state,
-            stmt,
-            const_env,
-            parameter_literals,
-        );
+        procedural::substitute_stmt_constants(syntax_tree, stmt, const_env, parameter_literals);
     }
     Ok((!events.is_empty()).then(|| {
         let mut process = FfProcess::new(events, body);

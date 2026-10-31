@@ -3,14 +3,14 @@
 use super::*;
 
 pub(super) fn bind_generate_parameter(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
 ) {
     let mut parameter_types = parameter_types_from_const_env(const_env);
     bind_generate_parameter_with_types(
-        state,
+        tree,
         parameter,
         const_env,
         parameter_literals,
@@ -19,7 +19,7 @@ pub(super) fn bind_generate_parameter(
 }
 
 pub(super) fn bind_generate_parameter_with_types(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     parameter: Parameter,
     const_env: &mut HashMap<String, i128>,
     parameter_literals: &mut HashMap<String, Expr>,
@@ -39,7 +39,7 @@ pub(super) fn bind_generate_parameter_with_types(
     );
     let resolved_type = parameter.resolved_type(parameter_types);
     let (resolved, resolved_literal) =
-        parameter.resolved_value_and_literal(state, const_env, parameter_types, parameter_literals);
+        parameter.resolved_value_and_literal(tree, const_env, parameter_types, parameter_literals);
     let literal = if let Some(value) = resolved {
         const_env.insert(parameter.name().to_string(), value);
         Some(Expr::Literal(if let Some(ty) = resolved_type {
@@ -49,7 +49,7 @@ pub(super) fn bind_generate_parameter_with_types(
         }))
     } else {
         resolved_literal.or_else(|| {
-            parameter_value_env(state, std::slice::from_ref(&parameter), const_env)
+            parameter_value_env(tree, std::slice::from_ref(&parameter), const_env)
                 .remove(parameter.name())
                 .map(|value| substitute_expr_idents(value, parameter_literals))
         })
@@ -64,7 +64,7 @@ pub(super) fn bind_generate_parameter_with_types(
 }
 
 pub(super) fn eval_ast_const_expr(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     expr: &ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> Option<i128> {
@@ -79,18 +79,18 @@ pub(super) fn eval_ast_const_expr(
         &expr.into(),
         &const_functions::Environment {
             constants: const_env,
-            functions: &state.const_functions,
+            functions,
         },
     )
 }
 
 pub(super) fn substitute_process_constants(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     process: CombProcess,
     const_env: &HashMap<String, i128>,
 ) -> CombProcess {
     substitute_process_constants_with_parameter_literals(
-        state,
+        tree,
         process,
         const_env,
         &HashMap::default(),
@@ -98,14 +98,14 @@ pub(super) fn substitute_process_constants(
 }
 
 pub(super) fn substitute_process_constants_with_parameter_literals(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     process: CombProcess,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> CombProcess {
     let mut sensitivity_body = process.sensitivity_body;
     for stmt in &mut sensitivity_body {
-        procedural::substitute_stmt_constants(state, stmt, const_env, parameter_literals);
+        procedural::substitute_stmt_constants(tree, stmt, const_env, parameter_literals);
     }
     let condition = process
         .condition
@@ -113,7 +113,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
     if process.assignments.is_empty() {
         let mut body = process.body;
         for stmt in &mut body {
-            procedural::substitute_stmt_constants(state, stmt, const_env, parameter_literals);
+            procedural::substitute_stmt_constants(tree, stmt, const_env, parameter_literals);
         }
         return CombProcess {
             creation_order: process.creation_order,
@@ -131,7 +131,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
             .into_iter()
             .map(|assignment| {
                 substitute_assignment_constants_with_parameter_literals(
-                    state,
+                    tree,
                     assignment,
                     const_env,
                     parameter_literals,
@@ -147,7 +147,7 @@ pub(super) fn substitute_process_constants_with_parameter_literals(
 }
 
 pub(super) fn substitute_assignment_constants_with_parameter_literals(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     assignment: Assignment,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
@@ -155,7 +155,7 @@ pub(super) fn substitute_assignment_constants_with_parameter_literals(
     Assignment::new(
         substitute_lvalue_constants(assignment.lhs, const_env),
         substitute_expr_constants_with_parameter_literals(
-            state,
+            tree,
             assignment.rhs,
             const_env,
             parameter_literals,
@@ -191,11 +191,12 @@ pub(super) fn substitute_lvalue_constants(
 }
 
 pub(super) fn substitute_expr_constants_with_parameter_literals(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expr: Expr,
     const_env: &HashMap<String, i128>,
     parameter_literals: &HashMap<String, Expr>,
 ) -> Expr {
+    let state = &*tree.state;
     match expr {
         Expr::Ident(name) => parameter_literals
             .get(&name)
@@ -233,7 +234,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             signed,
         } => Expr::Select {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -247,7 +248,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .into_iter()
                 .map(|part| {
                     substitute_expr_constants_with_parameter_literals(
-                        state,
+                        tree,
                         part,
                         const_env,
                         parameter_literals,
@@ -261,7 +262,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .into_iter()
                 .map(|part| {
                     substitute_expr_constants_with_parameter_literals(
-                        state,
+                        tree,
                         part,
                         const_env,
                         parameter_literals,
@@ -275,7 +276,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             signed,
         } => Expr::Resize {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -286,7 +287,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         Expr::Unary { op, expr } => Expr::Unary {
             op,
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -294,14 +295,14 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         },
         Expr::Binary { left, op, right } => Expr::Binary {
             left: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *left,
                 const_env,
                 parameter_literals,
             )),
             op,
             right: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *right,
                 const_env,
                 parameter_literals,
@@ -313,19 +314,19 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             else_expr,
         } => Expr::Mux {
             condition: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *condition,
                 const_env,
                 parameter_literals,
             )),
             then_expr: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *then_expr,
                 const_env,
                 parameter_literals,
             )),
             else_expr: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *else_expr,
                 const_env,
                 parameter_literals,
@@ -333,7 +334,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
         },
         Expr::Inside { expr, items } => Expr::Inside {
             expr: Box::new(substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 *expr,
                 const_env,
                 parameter_literals,
@@ -343,7 +344,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .map(|item| {
                     item.map(&mut |operand| {
                         substitute_expr_constants_with_parameter_literals(
-                            state,
+                            tree,
                             operand,
                             const_env,
                             parameter_literals,
@@ -362,7 +363,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .map(|arg| {
                     arg.map(|arg| {
                         substitute_expr_constants_with_parameter_literals(
-                            state,
+                            tree,
                             arg,
                             const_env,
                             parameter_literals,
@@ -385,7 +386,7 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
             } else if function == Some(SystemFunction::Countbits) {
                 // Resolve constant calls before SLT lowering while retaining X/Z masks.
                 fold_const_integral_expr_preserving_mask(
-                    state,
+                    tree,
                     Expr::Call {
                         callee,
                         args,
@@ -628,10 +629,12 @@ pub(super) fn expr_to_const(state: &AnalysisState, expr: Expr) -> Option<ConstEx
 }
 
 pub(super) fn expr_to_index_const(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expr: Expr,
     dimensions: &PackedDimensions,
 ) -> Option<ConstExpr> {
+    let state = &*tree.state;
+    let functions = &tree.functions;
     match expr {
         Expr::Resize {
             expr,
@@ -642,7 +645,7 @@ pub(super) fn expr_to_index_const(
                 return Some(ConstExpr::Literal("0".into()));
             }
             Some(ConstExpr::Resize {
-                expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
+                expr: Box::new(expr_to_index_const(tree, *expr, dimensions)?),
                 width,
                 signed,
             })
@@ -651,12 +654,12 @@ pub(super) fn expr_to_index_const(
         Expr::Literal(value) => Some(ConstExpr::Literal(value)),
         Expr::Unary { op, expr } => Some(ConstExpr::Unary {
             op,
-            expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
+            expr: Box::new(expr_to_index_const(tree, *expr, dimensions)?),
         }),
         Expr::Binary { left, op, right } => Some(ConstExpr::Binary {
-            left: Box::new(expr_to_index_const(state, *left, dimensions)?),
+            left: Box::new(expr_to_index_const(tree, *left, dimensions)?),
             op,
-            right: Box::new(expr_to_index_const(state, *right, dimensions)?),
+            right: Box::new(expr_to_index_const(tree, *right, dimensions)?),
         }),
         Expr::Select {
             expr,
@@ -665,7 +668,7 @@ pub(super) fn expr_to_index_const(
             signed,
         } if !matches!(&*expr, Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
             Some(ConstExpr::SelectRange {
-                expr: Box::new(expr_to_index_const(state, *expr, dimensions)?),
+                expr: Box::new(expr_to_index_const(tree, *expr, dimensions)?),
                 msb: Box::new(msb),
                 lsb: Box::new(lsb),
                 signed,
@@ -676,9 +679,9 @@ pub(super) fn expr_to_index_const(
             then_expr,
             else_expr,
         } => Some(ConstExpr::Mux {
-            condition: Box::new(expr_to_index_const(state, *condition, dimensions)?),
-            then_expr: Box::new(expr_to_index_const(state, *then_expr, dimensions)?),
-            else_expr: Box::new(expr_to_index_const(state, *else_expr, dimensions)?),
+            condition: Box::new(expr_to_index_const(tree, *condition, dimensions)?),
+            then_expr: Box::new(expr_to_index_const(tree, *then_expr, dimensions)?),
+            else_expr: Box::new(expr_to_index_const(tree, *else_expr, dimensions)?),
         }),
         Expr::Call {
             callee,
@@ -694,7 +697,7 @@ pub(super) fn expr_to_index_const(
                 state,
                 callee,
                 args.into_iter()
-                    .map(|arg| expr_to_index_const(state, arg?, dimensions))
+                    .map(|arg| expr_to_index_const(tree, arg?, dimensions))
                     .collect::<Option<_>>()?,
             ))
         }
@@ -704,8 +707,8 @@ pub(super) fn expr_to_index_const(
             lsb,
             signed: false,
         } => {
-            let msb = eval_ast_const_expr(state, &msb, &dimensions.const_env)?;
-            let lsb = eval_ast_const_expr(state, &lsb, &dimensions.const_env)?;
+            let msb = eval_ast_const_expr(functions, &msb, &dimensions.const_env)?;
+            let lsb = eval_ast_const_expr(functions, &lsb, &dimensions.const_env)?;
             let width = usize::try_from(msb.abs_diff(lsb).checked_add(1)?).ok()?;
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
@@ -726,13 +729,13 @@ pub(super) fn expr_to_index_const(
                     if inlining::calls_subroutine(&expr) {
                         return None;
                     }
-                    let source = IndexBitSource::from_expr(state, expr, dimensions)?;
+                    let source = IndexBitSource::from_expr(tree, expr, dimensions)?;
                     positions
                         .map(|bit| source.bit(bit))
                         .collect::<Option<_>>()?
                 }
                 expr => {
-                    let expr = expr_to_index_const(state, expr, dimensions)?;
+                    let expr = expr_to_index_const(tree, expr, dimensions)?;
                     positions
                         .map(|bit| ConstExpr::Select {
                             expr: Box::new(expr.clone()),
@@ -749,7 +752,7 @@ pub(super) fn expr_to_index_const(
             if inlining::calls_subroutine(&expr) {
                 return None;
             }
-            let source = IndexBitSource::from_expr(state, expr, dimensions)?;
+            let source = IndexBitSource::from_expr(tree, expr, dimensions)?;
             let width = source.width();
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
@@ -830,18 +833,23 @@ enum IndexBitSource {
 }
 
 impl IndexBitSource {
-    fn from_expr(state: &AnalysisState, expr: Expr, dimensions: &PackedDimensions) -> Option<Self> {
-        let width = expr_static_width(state, &expr, dimensions)?;
+    fn from_expr(
+        tree: &AnalysisContext<'_>,
+        expr: Expr,
+        dimensions: &PackedDimensions,
+    ) -> Option<Self> {
+        let functions = &tree.functions;
+        let width = expr_static_width(tree, &expr, dimensions)?;
         Some(match expr {
             Expr::Concat(parts) => Self::Concat {
                 parts: parts
                     .into_iter()
-                    .map(|part| Self::from_expr(state, part, dimensions))
+                    .map(|part| Self::from_expr(tree, part, dimensions))
                     .collect::<Option<_>>()?,
                 width,
             },
             Expr::RepeatConcat { parts, .. } => Self::Repeat {
-                part: Box::new(Self::from_expr(state, Expr::Concat(parts), dimensions)?),
+                part: Box::new(Self::from_expr(tree, Expr::Concat(parts), dimensions)?),
                 width,
             },
             Expr::Resize { expr, .. } => {
@@ -852,7 +860,7 @@ impl IndexBitSource {
                     &dimensions.function_return_types,
                 )?;
                 Self::Resize {
-                    part: Box::new(Self::from_expr(state, *expr, dimensions)?),
+                    part: Box::new(Self::from_expr(tree, *expr, dimensions)?),
                     width,
                     extend_signed,
                 }
@@ -865,10 +873,10 @@ impl IndexBitSource {
             } => {
                 match *expr {
                     expr @ (Expr::Concat(_) | Expr::RepeatConcat { .. }) => {
-                        let left = eval_ast_const_expr(state, &msb, &dimensions.const_env)?;
-                        let right = eval_ast_const_expr(state, &lsb, &dimensions.const_env)?;
+                        let left = eval_ast_const_expr(functions, &msb, &dimensions.const_env)?;
+                        let right = eval_ast_const_expr(functions, &lsb, &dimensions.const_env)?;
                         Self::Slice {
-                            part: Box::new(Self::from_expr(state, expr, dimensions)?),
+                            part: Box::new(Self::from_expr(tree, expr, dimensions)?),
                             width,
                             right,
                             step: if left >= right { 1 } else { -1 },
@@ -878,7 +886,7 @@ impl IndexBitSource {
                         // The selected value has [width-1:0] coordinates even
                         // when its position in an unpacked array is dynamic.
                         expr: expr_to_index_const(
-                            state,
+                            tree,
                             Expr::Select {
                                 expr: Box::new(expr),
                                 msb,
@@ -900,14 +908,15 @@ impl IndexBitSource {
                     && !variable.packed[0].normalize_single
                 {
                     let range = &variable.packed[0];
-                    let left = eval_ast_const_expr(state, &range.left, &dimensions.const_env)?;
-                    let right = eval_ast_const_expr(state, &range.right, &dimensions.const_env)?;
+                    let left = eval_ast_const_expr(functions, &range.left, &dimensions.const_env)?;
+                    let right =
+                        eval_ast_const_expr(functions, &range.right, &dimensions.const_env)?;
                     (right, if left >= right { 1 } else { -1 })
                 } else {
                     (0, 1)
                 };
                 Self::Scalar {
-                    expr: expr_to_index_const(state, expr, dimensions)?,
+                    expr: expr_to_index_const(tree, expr, dimensions)?,
                     width,
                     right,
                     step,
@@ -975,10 +984,12 @@ mod tests;
 /// Preserve constant-call resolution/default/result-type semantics independently
 /// of the syntax adapter that supplied the call and its actual values.
 pub(super) fn user_call_value(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expression: Expr,
     constants: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
+    let state = &*tree.state;
+    let functions = &tree.functions;
     if let Expr::Call {
         args, arg_order, ..
     } = &expression
@@ -986,11 +997,7 @@ pub(super) fn user_call_value(
     {
         // Effectful runtime named calls keep their source order. Constant calls
         // are folded only when their bodies and actuals evaluate successfully.
-        let literal = const_functions::eval_expression_literal(
-            &state.const_functions,
-            &expression,
-            constants,
-        )?;
+        let literal = const_functions::eval_expression_literal(functions, &expression, constants)?;
         let Expr::Call { callee, args, .. } = &expression else {
             unreachable!()
         };
@@ -998,13 +1005,11 @@ pub(super) fn user_call_value(
             .into_iter()
             .map(|(name, ty)| (name, (ty.width, ty.signed)))
             .collect();
-        let args = const_functions::resolved_arguments(&state.const_functions, callee, args)?
+        let args = const_functions::resolved_arguments(functions, callee, args)?
             .into_iter()
             .map(|arg| {
                 expr_to_const(state, arg.clone()).or_else(|| {
-                    constant_folding::constant_with_folded_selections(
-                        state, &arg, constants, &types,
-                    )
+                    constant_folding::constant_with_folded_selections(tree, &arg, constants, &types)
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -1037,9 +1042,7 @@ pub(super) fn user_call_value(
             .map(|arg| {
                 let arg = arg?;
                 expr_to_const(state, arg.clone()).or_else(|| {
-                    constant_folding::constant_with_folded_selections(
-                        state, &arg, constants, &types,
-                    )
+                    constant_folding::constant_with_folded_selections(tree, &arg, constants, &types)
                 })
             })
             .collect::<Option<Vec<_>>>()?;
@@ -1051,10 +1054,11 @@ pub(super) fn user_call_value(
 // Counting each stream segment separately keeps parameter dependencies symbolic
 // and preserves the selected width, including when zero bits are counted.
 pub(super) fn countbits_constant_call(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expression: Expr,
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
+    let state = &*tree.state;
     let Expr::Call { args, .. } = expression else {
         return None;
     };
@@ -1070,15 +1074,17 @@ pub(super) fn countbits_constant_call(
             control => expr_to_const(state, control),
         })
         .collect::<Option<Vec<_>>>()?;
-    countbits_constant_operand(state, operand, &controls, const_env)
+    countbits_constant_operand(tree, operand, &controls, const_env)
 }
 
 fn countbits_constant_operand(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     operand: Expr,
     controls: &[ConstExpr],
     const_env: &HashMap<String, i128>,
 ) -> Option<ConstExpr> {
+    let state = &*tree.state;
+    let functions = &tree.functions;
     let call = |operand| {
         let mut args = Vec::with_capacity(controls.len() + 1);
         args.push(operand);
@@ -1106,8 +1112,8 @@ fn countbits_constant_operand(
     };
     match operand {
         Expr::Select { expr, msb, lsb, .. } if msb != lsb => {
-            let msb = usize::try_from(eval_ast_const_expr(state, &msb, const_env)?).ok()?;
-            let lsb = usize::try_from(eval_ast_const_expr(state, &lsb, const_env)?).ok()?;
+            let msb = usize::try_from(eval_ast_const_expr(functions, &msb, const_env)?).ok()?;
+            let lsb = usize::try_from(eval_ast_const_expr(functions, &lsb, const_env)?).ok()?;
             let width = msb.checked_sub(lsb)?.checked_add(1)?;
             if width > constant_folding::MAX_CONSTANT_CONCAT_BITS {
                 return None;
@@ -1124,15 +1130,15 @@ fn countbits_constant_operand(
         }
         Expr::Concat(parts) => sum(parts
             .into_iter()
-            .map(|part| countbits_constant_operand(state, part, controls, const_env))
+            .map(|part| countbits_constant_operand(tree, part, controls, const_env))
             .collect::<Option<Vec<_>>>()?),
         Expr::RepeatConcat { count, parts } => {
-            let count = eval_ast_const_expr(state, &count, const_env)?;
+            let count = eval_ast_const_expr(functions, &count, const_env)?;
             if count < 0 {
                 return None;
             }
             let counted =
-                countbits_constant_operand(state, Expr::Concat(parts), controls, const_env)?;
+                countbits_constant_operand(tree, Expr::Concat(parts), controls, const_env)?;
             Some(ConstExpr::Binary {
                 left: Box::new(counted),
                 op: BinaryOp::Mul,

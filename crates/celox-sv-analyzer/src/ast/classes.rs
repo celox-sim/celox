@@ -420,7 +420,8 @@ pub(super) fn scope_classes(tree: &AnalysisContext<'_>, env: &HashMap<String, i1
             // whose names another scope does not see.
             let (env, _) = specializations::scope(tree, &name, env, &HashMap::default());
             let resolve = |ty: &mut Type| {
-                if let Some(resolved) = type_parameters::resolve(&tree.state, ty.clone(), &env) {
+                if let Some(resolved) = type_parameters::resolve(&tree.functions, ty.clone(), &env)
+                {
                     *ty = resolved;
                 }
             };
@@ -863,7 +864,7 @@ pub(super) fn shared_class(
                     });
                 }
                 for leaf in aggregate.leaves() {
-                    let field = field(&tree.state, &leaf.r#type, env, size)?;
+                    let field = field(&tree.functions, &leaf.r#type, env, size)?;
                     size = field.offset + field.storage();
                     properties.push(Property {
                         name: leaf.name(&property_name),
@@ -895,7 +896,7 @@ pub(super) fn shared_class(
             }
             let owner = name.to_owned();
             let name = property_name;
-            let field = field(&tree.state, &ty, env, size)?;
+            let field = field(&tree.functions, &ty, env, size)?;
             size = field.offset + field.storage();
             properties.push(Property {
                 name,
@@ -1217,9 +1218,9 @@ fn signature(
                 .map(|name| instances::normalize_identifier(&name.spelling))
         })
         .collect();
-    let result = return_type(tree, id, context)
-        .ok()
-        .map(|ty| ty.and_then(|ty| type_parameters::resolve(&tree.state, ty, &context.const_env)));
+    let result = return_type(tree, id, context).ok().map(|ty| {
+        ty.and_then(|ty| type_parameters::resolve(&tree.functions, ty, &context.const_env))
+    });
     (formals, result)
 }
 
@@ -1259,7 +1260,7 @@ fn out_of_block_definition(
 /// The layout of a property of type `ty` at the first aligned offset at or
 /// after `offset`.
 pub(super) fn field(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     ty: &Type,
     env: &HashMap<String, i128>,
     offset: u32,
@@ -1273,7 +1274,7 @@ pub(super) fn field(
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::Process | TypeKind::Event => (HANDLE_WIDTH, false, None),
         TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
-            let shape = casts::expr_type_from_type(state, ty, env)
+            let shape = casts::expr_type_from_type(functions, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;
             (shape.width, shape.signed, None)
         }

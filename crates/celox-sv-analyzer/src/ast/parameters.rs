@@ -197,7 +197,6 @@ impl<'a> ParameterEnvironment<'a> {
         base: &'a HashMap<String, i128>,
         shadowed: &[String],
     ) -> Self {
-        let state = &*tree.state;
         let shadowed: HashSet<&str> = shadowed
             .iter()
             .map(String::as_str)
@@ -226,7 +225,7 @@ impl<'a> ParameterEnvironment<'a> {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect();
         for parameter in parameters {
-            bind_parameter(state, &mut bindings, &mut types, &mut literals, parameter);
+            bind_parameter(tree, &mut bindings, &mut types, &mut literals, parameter);
             for key in binding_keys(parameter.name(), &bindings, parameter.packed_ranges.len()) {
                 if let Some(value) = bindings.get(&key) {
                     values.insert(key, *value);
@@ -254,9 +253,9 @@ impl<'a> ParameterEnvironment<'a> {
         }
     }
 
-    fn append(&mut self, state: &AnalysisState, parameter: &Parameter) {
+    fn append(&mut self, tree: &AnalysisContext<'_>, parameter: &Parameter) {
         let bound = bind_parameter(
-            state,
+            tree,
             &mut self.bindings,
             &mut self.types,
             &mut self.literals,
@@ -442,7 +441,7 @@ pub(super) fn parameters_from_native_with_environment(
             proof_context
                 .parameter_values
                 .extend(parameter_value_env_filtered(
-                    &syntax_tree.state,
+                    syntax_tree,
                     parameters,
                     const_env,
                     Some(&resolved_numeric),
@@ -475,7 +474,7 @@ pub(super) fn parameters_from_native_with_environment(
                     type_aliases,
                 );
                 dimensions.parameter_values = parameter_value_env_with_imported(
-                    &syntax_tree.state,
+                    syntax_tree,
                     parameters,
                     const_env,
                     &imported,
@@ -537,7 +536,7 @@ pub(super) fn parameters_from_native_with_environment(
                 &environment.literals,
             );
             if !matches!(
-                fold_const_integral_expr_preserving_mask(&syntax_tree.state, lowered, const_env),
+                fold_const_integral_expr_preserving_mask(syntax_tree, lowered, const_env),
                 Expr::Literal(_)
             ) {
                 return Err(AnalyzerError::Unsupported(format!(
@@ -583,7 +582,7 @@ pub(super) fn parameters_from_native_with_environment(
                 .resolved_type(&environment.types)
                 .map(|ty| ty.width),
         )?;
-        environment.append(&syntax_tree.state, &parameter);
+        environment.append(syntax_tree, &parameter);
         parameters.push(parameter);
     }
     Ok(())
@@ -612,7 +611,7 @@ fn parameter_declared_width(
 ) -> Converted<Option<usize>> {
     let declared_alias = native.alias.clone();
     if declared_alias.is_none() && native.data.packed_dimensions.is_empty() {
-        return Ok(native.scalar_width(&syntax_tree.state));
+        return Ok(native.scalar_width(&syntax_tree.functions));
     }
     // With the same immutable base and no inherited numeric value shadowed
     // by a nonnumeric literal, both former copies have exactly the contents
@@ -652,7 +651,7 @@ fn parameter_declared_width(
                     .flatten()
                 })
             })
-            .and_then(|value| eval_ast_const_expr(&syntax_tree.state, &value, &range_env));
+            .and_then(|value| eval_ast_const_expr(&syntax_tree.functions, &value, &range_env));
         if let Some(value) = value {
             range_env.insert(name, value);
         }
@@ -687,14 +686,14 @@ fn parameter_width_from_environments(
         return Ok(if prefix.alias.is_some() {
             Some(1)
         } else {
-            prefix.scalar_width(&syntax_tree.state)
+            prefix.scalar_width(&syntax_tree.functions)
         });
     }
     let mut width = 1usize;
     for range in ranges {
         let (Some(left), Some(right)) = (
-            eval_ast_const_expr(&syntax_tree.state, range.left(), env),
-            eval_ast_const_expr(&syntax_tree.state, range.right(), env),
+            eval_ast_const_expr(&syntax_tree.functions, range.left(), env),
+            eval_ast_const_expr(&syntax_tree.functions, range.right(), env),
         ) else {
             return Ok(None);
         };
@@ -741,33 +740,34 @@ fn normalize_unbased_unsized_parameter_value(
 }
 
 pub(super) fn const_env_from_parameters(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     parameters: &[Parameter],
 ) -> HashMap<String, i128> {
     let mut env = HashMap::default();
-    extend_const_env_with_parameters(state, &mut env, parameters);
+    extend_const_env_with_parameters(tree, &mut env, parameters);
     env
 }
 
 pub(super) fn extend_const_env_with_parameters(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     env: &mut HashMap<String, i128>,
     parameters: &[Parameter],
 ) {
     let mut parameter_types = parameter_types_from_const_env(env);
     let mut literals = HashMap::default();
     for parameter in parameters {
-        bind_parameter(state, env, &mut parameter_types, &mut literals, parameter);
+        bind_parameter(tree, env, &mut parameter_types, &mut literals, parameter);
     }
 }
 
 pub(super) fn bind_parameter(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     env: &mut HashMap<String, i128>,
     types: &mut HashMap<String, ExprType>,
     literals: &mut HashMap<String, Expr>,
     parameter: &Parameter,
 ) -> bool {
+    let functions = &tree.functions;
     #[cfg(test)]
     PARAMETER_BINDINGS.with(|count| count.set(count.get() + 1));
     for key in binding_keys(parameter.name(), env, parameter.packed_ranges.len()) {
@@ -799,10 +799,10 @@ pub(super) fn bind_parameter(
             };
             env.insert(parameter_rank_marker(parameter.name()), rank as i128);
         }
-        insert_parameter_dimension_markers(state, env, parameter);
+        insert_parameter_dimension_markers(functions, env, parameter);
         return true;
     }
-    let (value, literal) = parameter.resolved_value_and_literal(state, env, types, literals);
+    let (value, literal) = parameter.resolved_value_and_literal(tree, env, types, literals);
     if value.is_none() && literal.is_none() {
         return false;
     }
@@ -823,7 +823,7 @@ pub(super) fn bind_parameter(
         // Shadow a numeric inherited binding with the four-state declaration.
         env.remove(parameter.name());
         literals.insert(parameter.name().to_string(), literal);
-        insert_parameter_dimension_markers(state, env, parameter);
+        insert_parameter_dimension_markers(functions, env, parameter);
         return true;
     }
     let value = value.expect("a known value or a resolved literal was checked above");
@@ -832,13 +832,13 @@ pub(super) fn bind_parameter(
     if parameter.is_local {
         env.insert(local_parameter_marker(parameter.name()), value);
     }
-    insert_parameter_dimension_markers(state, env, parameter);
+    insert_parameter_dimension_markers(functions, env, parameter);
     true
 }
 
 /// Record packed bounds for parameter selects and array queries.
 fn insert_parameter_dimension_markers(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     env: &mut HashMap<String, i128>,
     parameter: &Parameter,
 ) {
@@ -851,8 +851,8 @@ fn insert_parameter_dimension_markers(
         .iter()
         .map(|range| {
             Some((
-                eval_ast_const_expr(state, range.left(), env)?,
-                eval_ast_const_expr(state, range.right(), env)?,
+                eval_ast_const_expr(functions, range.left(), env)?,
+                eval_ast_const_expr(functions, range.right(), env)?,
             ))
         })
         .collect::<Option<Vec<_>>>()
@@ -1042,7 +1042,7 @@ pub(super) fn enum_member_constants_from_items(
                     parameter_overrides
                 },
             )?;
-            extend_const_env_with_parameters(&syntax_tree.state, &mut eval_env, &parameters);
+            extend_const_env_with_parameters(syntax_tree, &mut eval_env, &parameters);
             resolved_type_aliases = types::type_aliases_from_body_with_env(
                 syntax_tree,
                 declarations,
@@ -1074,7 +1074,7 @@ pub(super) fn enum_member_constants_from_items(
             &PackedDimensions::new(HashMap::default(), &eval_env, &resolved_type_aliases),
             &member_base,
         )?;
-        let member_type = expr_type_from_type(&syntax_tree.state, &member_base, &eval_env)
+        let member_type = expr_type_from_type(&syntax_tree.functions, &member_base, &eval_env)
             .ok_or_else(|| unsupported("enum base type"))?;
         let mut next_enum_value = 0i128;
         for new in items {
@@ -1114,8 +1114,8 @@ pub(super) fn enum_member_constants_from_items(
                     .ok_or_else(|| {
                         AnalyzerError::Unsupported(format!("enum member `{name}` value type"))
                     })?;
-            let number =
-                eval_ast_const_expr(&syntax_tree.state, &value, &eval_env).ok_or_else(|| {
+            let number = eval_ast_const_expr(&syntax_tree.functions, &value, &eval_env)
+                .ok_or_else(|| {
                     AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
                 })?;
             if !enum_initializer_fits_base_type(number, value_type, member_type) {
@@ -1153,17 +1153,17 @@ pub(super) fn enum_member_constants_from_items(
 }
 
 pub(super) fn parameter_value_env(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
 ) -> HashMap<String, Expr> {
-    parameter_value_env_filtered(state, parameters, const_env, None)
+    parameter_value_env_filtered(tree, parameters, const_env, None)
 }
 
 /// Materialize only referenced values and their initializer dependencies.
 /// Preserve the full declaration-order type prefix, including unused parameters.
 pub(super) fn parameter_value_env_for_references(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
     references: &HashSet<String>,
@@ -1177,7 +1177,7 @@ pub(super) fn parameter_value_env_for_references(
         return HashMap::default();
     }
     if needed.iter().all(|name| const_env.contains_key(name)) {
-        return parameter_value_env_filtered(state, parameters, const_env, Some(&needed));
+        return parameter_value_env_filtered(tree, parameters, const_env, Some(&needed));
     }
     // Include all declarations of a name so the projection preserves even
     // repeated-name prefixes used during preliminary collection.
@@ -1233,11 +1233,11 @@ pub(super) fn parameter_value_env_for_references(
             }
         }
     }
-    parameter_value_env_filtered(state, parameters, const_env, Some(&needed))
+    parameter_value_env_filtered(tree, parameters, const_env, Some(&needed))
 }
 
 fn parameter_value_env_filtered(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
     needed: Option<&HashSet<String>>,
@@ -1306,9 +1306,9 @@ fn parameter_value_env_filtered(
             }
         } else if let Some(value) = parameter.value().cloned() {
             let value = substitute_typed_parameter_literals(value, const_env, &parameter_types);
-            let value = replace_oob_const_selects_with_unknown(state, value, const_env);
+            let value = replace_oob_const_selects_with_unknown(tree, value, const_env);
             let value = substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
                 const_expr_to_expr(value),
                 const_env,
                 &values,
@@ -1349,17 +1349,18 @@ fn parameter_value_env_filtered(
                 expr: Box::new(value),
             };
         }
-        value = fold_const_integral_expr_preserving_mask(state, value, const_env);
+        value = fold_const_integral_expr_preserving_mask(tree, value, const_env);
         values.insert(parameter.name().to_string(), value);
     }
     values
 }
 
 fn replace_oob_const_selects_with_unknown(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expr: ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> ConstExpr {
+    let functions = &tree.functions;
     match expr {
         ConstExpr::SelectRange {
             expr,
@@ -1368,23 +1369,23 @@ fn replace_oob_const_selects_with_unknown(
             signed,
         } => ConstExpr::SelectRange {
             expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *expr, const_env,
+                tree, *expr, const_env,
             )),
             msb: Box::new(replace_oob_const_selects_with_unknown(
-                state, *msb, const_env,
+                tree, *msb, const_env,
             )),
             lsb: Box::new(replace_oob_const_selects_with_unknown(
-                state, *lsb, const_env,
+                tree, *lsb, const_env,
             )),
             signed,
         },
         ConstExpr::Select { expr, bit } => {
-            let expr = replace_oob_const_selects_with_unknown(state, *expr, const_env);
-            let bit = replace_oob_const_selects_with_unknown(state, *bit, const_env);
+            let expr = replace_oob_const_selects_with_unknown(tree, *expr, const_env);
+            let bit = replace_oob_const_selects_with_unknown(tree, *bit, const_env);
             if let ConstExpr::Literal(literal) = &expr
                 && let Some(width) =
                     typecheck::parse_integral_literal(literal).map(|literal| literal.width)
-                && match eval_ast_const_expr(state, &bit, const_env) {
+                && match eval_ast_const_expr(functions, &bit, const_env) {
                     Some(bit_index) => {
                         usize::try_from(bit_index).map_or(true, |bit_index| bit_index >= width)
                     }
@@ -1404,7 +1405,7 @@ fn replace_oob_const_selects_with_unknown(
             site,
             args: args
                 .into_iter()
-                .map(|arg| replace_oob_const_selects_with_unknown(state, arg, const_env))
+                .map(|arg| replace_oob_const_selects_with_unknown(tree, arg, const_env))
                 .collect(),
         },
         ConstExpr::Resize {
@@ -1413,7 +1414,7 @@ fn replace_oob_const_selects_with_unknown(
             signed,
         } => ConstExpr::Resize {
             expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *expr, const_env,
+                tree, *expr, const_env,
             )),
             width,
             signed,
@@ -1421,16 +1422,16 @@ fn replace_oob_const_selects_with_unknown(
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
             expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *expr, const_env,
+                tree, *expr, const_env,
             )),
         },
         ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
             left: Box::new(replace_oob_const_selects_with_unknown(
-                state, *left, const_env,
+                tree, *left, const_env,
             )),
             op,
             right: Box::new(replace_oob_const_selects_with_unknown(
-                state, *right, const_env,
+                tree, *right, const_env,
             )),
         },
         ConstExpr::Mux {
@@ -1439,13 +1440,13 @@ fn replace_oob_const_selects_with_unknown(
             else_expr,
         } => ConstExpr::Mux {
             condition: Box::new(replace_oob_const_selects_with_unknown(
-                state, *condition, const_env,
+                tree, *condition, const_env,
             )),
             then_expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *then_expr, const_env,
+                tree, *then_expr, const_env,
             )),
             else_expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *else_expr, const_env,
+                tree, *else_expr, const_env,
             )),
         },
         ConstExpr::Ident(name) => ConstExpr::Ident(name),

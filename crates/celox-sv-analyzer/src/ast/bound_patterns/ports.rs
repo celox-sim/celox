@@ -132,18 +132,20 @@ impl BoundPattern {
         let aggregate = target
             .unpacked_struct()
             .ok_or_else(|| unsupported("unpacked structure port type"))?;
-        let state = AnalysisState::default();
+        let syntax = SyntaxTree::empty();
+        let tree = AnalysisContext::unspecialized(&syntax);
         let shape = procedural::dimensions_from_type(target);
-        let value = self.lower(&state, &shape, &PackedDimensions::default())?;
+        let value = self.lower(&tree, &shape, &PackedDimensions::default())?;
         unpacked_structs::leaf_parts(aggregate, &value)
             .ok_or_else(|| unsupported("unpacked structure port pattern layout"))
             .map(|parts| parts.into_iter().map(Into::into).collect())
     }
 
     pub(crate) fn bind_port(&self, target: &Type) -> Converted<crate::ir::Expr> {
-        let state = AnalysisState::default();
+        let syntax = SyntaxTree::empty();
+        let tree = AnalysisContext::unspecialized(&syntax);
         let shape = procedural::dimensions_from_type(target);
-        self.lower(&state, &shape, &PackedDimensions::default())
+        self.lower(&tree, &shape, &PackedDimensions::default())
             .map(Into::into)
     }
 }
@@ -238,7 +240,7 @@ pub(super) fn native_value_type_plan(
                                         || !shape.unpacked.is_empty()
                                         || shape.packed.len() > 1
                                 })
-                                .and_then(|shape| shape.pattern_type(&tree.state, dims)),
+                                .and_then(|shape| shape.pattern_type(&tree.functions, dims)),
                         ));
                     }
                 }
@@ -262,7 +264,7 @@ pub(super) fn native_value_type_plan(
 impl VariableDimensions {
     pub(in crate::ast) fn pattern_type(
         &self,
-        state: &AnalysisState,
+        functions: &const_functions::ConstantFunctions,
         dims: &PackedDimensions,
     ) -> Option<Type> {
         let mut ty = Type::new(if self.is_2state {
@@ -286,7 +288,7 @@ impl VariableDimensions {
         ty.signed_element_depth = self.signed_element_depth;
         ty.pattern_target(&const_functions::Environment {
             constants: &*dims.const_env,
-            functions: &state.const_functions,
+            functions,
         })
     }
 }

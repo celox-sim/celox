@@ -199,7 +199,7 @@ pub(in crate::ast) fn cast_target_native(
         .and_then(|name| dimensions.type_aliases.get(name))
     {
         (
-            casts::expr_type_from_type(&tree.state, ty, &dimensions.const_env)
+            casts::expr_type_from_type(&tree.functions, ty, &dimensions.const_env)
                 .ok_or_else(|| unsupported("cast target type"))?,
             false,
             ty.kind() == TypeKind::Bit,
@@ -217,7 +217,7 @@ pub(in crate::ast) fn cast_target_native(
         let ty = type_binding::binding::bind_in(id, native, tree, dimensions)?
             .ok_or_else(|| unsupported("cast target type"))?;
         (
-            casts::expr_type_from_type(&tree.state, &ty, &dimensions.const_env)
+            casts::expr_type_from_type(&tree.functions, &ty, &dimensions.const_env)
                 .ok_or_else(|| unsupported("cast target type"))?,
             false,
             ty.kind() == TypeKind::Bit,
@@ -225,7 +225,7 @@ pub(in crate::ast) fn cast_target_native(
     } else {
         let value = super::bind_value(target, native, tree, dimensions, None)?;
         let value = expr_to_const(&tree.state, value)
-            .and_then(|value| eval_ast_const_expr(&tree.state, &value, &dimensions.const_env))
+            .and_then(|value| eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env))
             .and_then(|value| usize::try_from(value).ok())
             .filter(|width| *width > 0)
             .ok_or_else(|| unsupported("cast target type"))?;
@@ -429,7 +429,7 @@ pub(in crate::ast) fn bind_value(
                 {
                     let actual = if let ExprKind::Cast { target, .. } = native.expression(id).kind {
                         cast_shape(target, native, tree, dimensions)?
-                            .and_then(|shape| shape.pattern_type(&tree.state, dimensions))
+                            .and_then(|shape| shape.pattern_type(&tree.functions, dimensions))
                     } else {
                         bound_patterns::native_value_type(id, tree, dimensions)?
                     };
@@ -715,7 +715,7 @@ pub(in crate::ast) fn bind_value(
                                     || !shape.unpacked.is_empty()
                             })
                         {
-                            let receiver = streams::receiver(&shape, &tree.state, dimensions)?;
+                            let receiver = streams::receiver(&shape, &tree.functions, dimensions)?;
                             values.push(streams::pack(
                                 *expression,
                                 Some(receiver),
@@ -1290,12 +1290,7 @@ pub(in crate::ast) fn bind_value(
                         let selected = selected_value(id, native, tree, dimensions)?;
                         let handle = bind_value(handle, native, tree, dimensions, None)?;
                         values.push(virtual_interfaces::selected_read(
-                            &tree.state,
-                            handle,
-                            &ty,
-                            &member,
-                            selected,
-                            dimensions,
+                            tree, handle, &ty, &member, selected, dimensions,
                         )?);
                         continue;
                     }
@@ -1371,7 +1366,7 @@ pub(in crate::ast) fn bind_value(
                                 "a streaming concatenation operand shall first be cast to a bit-stream type".into(),
                             ));
                         };
-                        let receiver = streams::receiver(shape, &tree.state, dimensions)?;
+                        let receiver = streams::receiver(shape, &tree.functions, dimensions)?;
                         values.push(streams::pack(id, Some(receiver), native, tree, dimensions)?);
                         continue;
                     }
@@ -1415,7 +1410,7 @@ pub(in crate::ast) fn bind_value(
                 let mut operands = values.split_off(start);
                 let value = match finish {
                     Finish::Tagged(plan) => {
-                        packed_structs::construct(&tree.state, plan, operands.pop(), dimensions)?
+                        packed_structs::construct(tree, plan, operands.pop(), dimensions)?
                     }
                     Finish::Unary(op) => {
                         let operand = operands.pop().ok_or_else(disagreement)?;
@@ -1507,7 +1502,7 @@ pub(in crate::ast) fn bind_value(
                     }
                     Finish::Bits => {
                         let operand = operands.pop().ok_or_else(disagreement)?;
-                        let ty = dimensions::bound_bits_type(&tree.state, &operand, dimensions)
+                        let ty = dimensions::bound_bits_type(tree, &operand, dimensions)
                             .ok_or_else(|| unsupported("operand of `$bits`"))?;
                         Expr::Literal(ty.width.to_string())
                     }
@@ -1541,14 +1536,7 @@ pub(in crate::ast) fn bind_value(
                         count,
                     } => {
                         let count = count.then(|| operands.pop()).flatten();
-                        enums::call(
-                            &tree.state,
-                            method,
-                            &domain,
-                            operands.pop(),
-                            count,
-                            dimensions,
-                        )?
+                        enums::call(tree, method, &domain, operands.pop(), count, dimensions)?
                     }
                     Finish::StringCall(op) => {
                         strings::call(op, strings::operands(op, operands, dimensions))
@@ -1611,7 +1599,7 @@ pub(in crate::ast) fn bind_value(
                     Finish::VirtualMember(access) => {
                         let (ty, member) = *access;
                         let handle = operands.pop().ok_or_else(disagreement)?;
-                        virtual_interfaces::read(&tree.state, handle, &ty, &member, dimensions, Ok)?
+                        virtual_interfaces::read(tree, handle, &ty, &member, dimensions, Ok)?
                     }
                     Finish::MethodCall(call) => {
                         let MethodCall {
@@ -1658,19 +1646,16 @@ pub(in crate::ast) fn bind_value(
                     }
                     Finish::Cast(target) => {
                         let operand = remove_real_division_guards(
-                            guard_zero_divisions(
-                                &tree.state,
-                                operands.pop().ok_or_else(disagreement)?,
-                            ),
+                            guard_zero_divisions(tree, operands.pop().ok_or_else(disagreement)?),
                             dimensions,
                         );
                         if dimensions.constant_indexed_base {
                             let operand =
-                                selects::indexed_expression_value(&tree.state, operand, dimensions)
+                                selects::indexed_expression_value(tree, operand, dimensions)
                                     .ok_or_else(|| unsupported("constant cast operand"))?;
                             const_expr_to_expr(
                                 casts::cast_constant_target(
-                                    &tree.state,
+                                    tree,
                                     operand,
                                     target,
                                     &dimensions.const_env,
@@ -1678,12 +1663,7 @@ pub(in crate::ast) fn bind_value(
                                 .ok_or_else(|| unsupported("constant cast operand"))?,
                             )
                         } else {
-                            casts::runtime_cast_target_expr(
-                                &tree.state,
-                                target,
-                                operand,
-                                dimensions,
-                            )?
+                            casts::runtime_cast_target_expr(tree, target, operand, dimensions)?
                         }
                     }
                     Finish::Repeat
@@ -1704,7 +1684,7 @@ pub(in crate::ast) fn bind_value(
                     Finish::Repeat => {
                         let count = operands.remove(0);
                         let count = expr_to_const(&tree.state, count.clone())
-                            .or_else(|| expr_to_index_const(&tree.state, count, dimensions))
+                            .or_else(|| expr_to_index_const(tree, count, dimensions))
                             .ok_or_else(|| unsupported("replication count"))?;
                         Expr::RepeatConcat {
                             count,
@@ -1761,7 +1741,7 @@ pub(in crate::ast) fn bind_value(
                                                     "writable $fread destination",
                                                 ));
                                             }
-                                        } else if expr_static_width(&tree.state, value, dimensions)
+                                        } else if expr_static_width(tree, value, dimensions)
                                             .is_none()
                                         {
                                             return Err(unsupported("integral $fread argument"));
@@ -1806,8 +1786,7 @@ pub(in crate::ast) fn bind_value(
                                     ) && position >= 2
                                         && real_value(arg, dimensions);
                                     if (!real_output
-                                        && expr_static_width(&tree.state, arg, dimensions)
-                                            .is_none())
+                                        && expr_static_width(tree, arg, dimensions).is_none())
                                         || args
                                             .get(position)
                                             .copied()
@@ -1856,10 +1835,7 @@ pub(in crate::ast) fn bind_value(
                                     operands.insert(1, Expr::Literal("1".into()));
                                 }
                                 expressions::numeric_system_function(
-                                    &tree.state,
-                                    function,
-                                    operands,
-                                    dimensions,
+                                    tree, function, operands, dimensions,
                                 )?
                             }
                         } else {
@@ -1894,7 +1870,7 @@ pub(in crate::ast) fn bind_value(
         return Err(disagreement());
     }
     Ok(remove_real_division_guards(
-        guard_zero_divisions(&tree.state, values.pop().unwrap()),
+        guard_zero_divisions(tree, values.pop().unwrap()),
         dimensions,
     ))
 }
@@ -1916,9 +1892,9 @@ fn index_value(
         0,
         true,
     );
-    if let Some(folded) = selects::indexed_expression_value(&tree.state, value.clone(), dimensions)
+    if let Some(folded) = selects::indexed_expression_value(tree, value.clone(), dimensions)
         && (matches!(folded, ConstExpr::Literal(_))
-            || eval_ast_const_expr(&tree.state, &folded, &dimensions.const_env).is_some())
+            || eval_ast_const_expr(&tree.functions, &folded, &dimensions.const_env).is_some())
     {
         if matches!(&folded, ConstExpr::Literal(text) if real_value(&Expr::Literal(text.clone()), dimensions))
         {
@@ -1927,9 +1903,9 @@ fn index_value(
         return Ok(folded);
     }
     (if dimensions.constant_indexed_base {
-        selects::indexed_expression_value(&tree.state, value, dimensions)
+        selects::indexed_expression_value(tree, value, dimensions)
     } else {
-        expr_to_index_const(&tree.state, value, dimensions)
+        expr_to_index_const(tree, value, dimensions)
     })
     .ok_or_else(|| unsupported("index expression"))
 }
@@ -1946,7 +1922,7 @@ fn read_index_value(
             native.expression(ungroup(id, native)).kind,
             ExprKind::Conditional { .. }
         )
-        && eval_ast_const_expr(&tree.state, &value, &dimensions.const_env).is_none()
+        && eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env).is_none()
         && !inlining::calls_subroutine(&bind_value(id, native, tree, dimensions, None)?)
     {
         return Err(unsupported(format!(
@@ -2011,7 +1987,7 @@ pub(super) fn path(
                     unreachable!()
                 };
                 let value = index_value(index, native, tree, dimensions)?;
-                let value = eval_ast_const_expr(&tree.state, &value, &dimensions.const_env)
+                let value = eval_ast_const_expr(&tree.functions, &value, &dimensions.const_env)
                     .ok_or_else(|| unsupported("hierarchical index"))?;
                 let (mut prefix, base) = path(*expression, native, tree, dimensions)?;
                 let last = prefix.last_mut().ok_or_else(disagreement)?;
@@ -2174,10 +2150,14 @@ fn selected_value(
                 // `[N-1:0]` range declares.
                 let zero_based = match ty.packed_ranges() {
                     [range] => {
-                        eval_ast_const_expr(&tree.state, range.right(), &dimensions.const_env)
+                        eval_ast_const_expr(&tree.functions, range.right(), &dimensions.const_env)
                             == Some(0)
-                            && eval_ast_const_expr(&tree.state, range.left(), &dimensions.const_env)
-                                .is_some_and(|left| left >= 0)
+                            && eval_ast_const_expr(
+                                &tree.functions,
+                                range.left(),
+                                &dimensions.const_env,
+                            )
+                            .is_some_and(|left| left >= 0)
                     }
                     _ => false,
                 };
@@ -2214,7 +2194,7 @@ fn selected_value(
             }),
             _ => return Err(unsupported("concatenation select")),
         };
-        return selects::aggregate_selection_value(&tree.state, expr, selection, dimensions);
+        return selects::aggregate_selection_value(tree, expr, selection, dimensions);
     }
     let (parts, qualified) = path(base, native, tree, dimensions)?;
     if dimensions.constant_indexed_base && parts.len() == 1 {
@@ -2252,9 +2232,9 @@ fn selected_value(
             }
         }
         return if let Some(range) = range {
-            selects::indexed_parameter_range(&tree.state, name, indices, range, dimensions)
+            selects::indexed_parameter_range(tree, name, indices, range, dimensions)
         } else {
-            selects::indexed_parameter_indices(&tree.state, name, indices, dimensions)
+            selects::indexed_parameter_indices(tree, name, indices, dimensions)
         };
     }
     for dimension in &suffix {
@@ -2268,7 +2248,7 @@ fn selected_value(
         }
     }
     let value = expr_from_lvalue(
-        &tree.state,
+        tree,
         &selected_lvalue(root, native, tree, dimensions, false)?,
         dimensions,
     );
@@ -2280,7 +2260,7 @@ fn selected_value(
     let guards = member_context(root, native, tree, dimensions)?
         .map(|(guards, _)| guards)
         .unwrap_or_default();
-    packed_structs::checked_value(guards, value, &tree.state, dimensions)
+    packed_structs::checked_value(guards, value, tree, dimensions)
 }
 
 pub(in crate::ast) fn selected_lvalue(
@@ -2330,7 +2310,7 @@ pub(in crate::ast) fn selected_lvalue(
             ranged = !matches!(dimension, DimensionKind::Index(_));
             match dimension {
                 DimensionKind::Index(id) => indices.push(selects::self_determined_index(
-                    &tree.state,
+                    tree,
                     index_value(*id, native, tree, context)?,
                     context,
                 )),
@@ -2349,13 +2329,14 @@ pub(in crate::ast) fn selected_lvalue(
                     let start = index_value(*base, native, tree, context)?;
                     let width = index_value(*width, native, tree, context)?;
                     let ((msb, lsb), dynamic) = if net {
-                        let width = eval_ast_const_expr(&tree.state, &width, &context.const_env)
-                            .ok_or_else(|| {
-                                unsupported("indexed part-select width that is not constant")
-                            })?;
+                        let width =
+                            eval_ast_const_expr(&tree.functions, &width, &context.const_env)
+                                .ok_or_else(|| {
+                                    unsupported("indexed part-select width that is not constant")
+                                })?;
                         (
                             selects::indexed_select_bounds_values(
-                                &tree.state,
+                                tree,
                                 start,
                                 operator == "+:",
                                 width,
@@ -2366,7 +2347,7 @@ pub(in crate::ast) fn selected_lvalue(
                         )
                     } else {
                         selects::indexed_range_values(
-                            &tree.state,
+                            tree,
                             &name,
                             start,
                             width,
@@ -2381,16 +2362,16 @@ pub(in crate::ast) fn selected_lvalue(
             }
         }
         if strict
-            && !selects::constant_packed_indices_in_range(&tree.state, &name, &indices, context)
+            && !selects::constant_packed_indices_in_range(&tree.functions, &name, &indices, context)
         {
             return Err(unsupported(format!(
                 "constant select of `{name}` outside its declared range"
             )));
         }
         if let Some((msb, lsb, dynamic)) = range {
-            selects::lvalue_from_range(&tree.state, name, indices, msb, lsb, dynamic, context)
+            selects::lvalue_from_range(tree, name, indices, msb, lsb, dynamic, context)
         } else {
-            selects::lvalue_from_indices(&tree.state, name, indices, context)
+            selects::lvalue_from_indices(tree, name, indices, context)
         }
     };
     let lvalue = if parts.len() > 1 {
@@ -2695,7 +2676,7 @@ fn check_tagged_copyout(
         };
         if actual.tagged_identity().is_some()
             && formal
-                .and_then(|shape| shape.pattern_type(&tree.state, dims))
+                .and_then(|shape| shape.pattern_type(&tree.functions, dims))
                 .as_ref()
                 != Some(&actual)
         {
@@ -2746,8 +2727,8 @@ fn zero_based_vector(
 ) -> bool {
     let zero_based = match r#type.packed_ranges() {
         [range] => {
-            eval_ast_const_expr(&tree.state, range.right(), &dimensions.const_env) == Some(0)
-                && eval_ast_const_expr(&tree.state, range.left(), &dimensions.const_env)
+            eval_ast_const_expr(&tree.functions, range.right(), &dimensions.const_env) == Some(0)
+                && eval_ast_const_expr(&tree.functions, range.left(), &dimensions.const_env)
                     .is_some_and(|left| left >= 0)
         }
         _ => false,

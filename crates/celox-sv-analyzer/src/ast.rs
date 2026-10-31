@@ -20,7 +20,6 @@ use crate::source_tree::SourceTree as SyntaxTree;
 /// State owned by one analysis session, shared explicitly with nested scopes.
 #[derive(Default)]
 pub(super) struct AnalysisState {
-    pub(crate) const_functions: const_functions::State,
     foreign: std::rc::Rc<classes::foreign::Registry>,
     foreign_arguments: RefCell<Vec<(String, classes::specializations::BoundArguments)>>,
     foreign_names: RefCell<Vec<(String, classes::specializations::BoundArguments, String)>>,
@@ -75,7 +74,7 @@ pub(super) struct AnalysisState {
 /// Syntax and specialization bindings for one scope within an analysis session.
 /// Child modules share the session and receive their own parameter bindings.
 #[derive(Clone)]
-struct AnalysisContext<'a> {
+pub(crate) struct AnalysisContext<'a> {
     syntax_tree: &'a SyntaxTree,
     state: std::rc::Rc<AnalysisState>,
     parameter_overrides: Cow<'a, HashMap<String, ConstExpr>>,
@@ -83,6 +82,9 @@ struct AnalysisContext<'a> {
     imported: Arc<scope::ScopeSymbols>,
     /// The package being analyzed, inside which `p::x` names its own item.
     package: Option<Arc<str>>,
+    /// The constant functions that calls in constant expressions of the
+    /// scope call (IEEE 1800-2023 13.4.3).
+    pub(crate) functions: const_functions::ConstantFunctions,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -97,16 +99,18 @@ impl<'a> AnalysisContext<'a> {
             parameter_overrides: Cow::Borrowed(parameter_overrides),
             imported: Arc::default(),
             package: None,
+            functions: const_functions::ConstantFunctions::default(),
         }
     }
 
-    fn unspecialized(syntax_tree: &'a SyntaxTree) -> Self {
+    pub(crate) fn unspecialized(syntax_tree: &'a SyntaxTree) -> Self {
         Self {
             syntax_tree,
             state: std::rc::Rc::default(),
             parameter_overrides: Cow::Owned(HashMap::default()),
             imported: Arc::default(),
             package: None,
+            functions: const_functions::ConstantFunctions::default(),
         }
     }
 
@@ -123,6 +127,7 @@ impl<'a> AnalysisContext<'a> {
             parameter_overrides: Cow::Owned(HashMap::default()),
             imported: Arc::default(),
             package: None,
+            functions: const_functions::ConstantFunctions::default(),
         }
     }
 
@@ -137,6 +142,7 @@ impl<'a> AnalysisContext<'a> {
             parameter_overrides: Cow::Borrowed(parameter_overrides),
             imported: self.imported.clone(),
             package: self.package.clone(),
+            functions: self.functions.clone(),
         }
     }
 
@@ -144,6 +150,14 @@ impl<'a> AnalysisContext<'a> {
     fn importing(&self, symbols: Arc<scope::ScopeSymbols>) -> Self {
         Self {
             imported: symbols,
+            ..self.clone()
+        }
+    }
+
+    /// This context with `functions` as its constant functions.
+    fn with_functions(&self, functions: const_functions::ConstantFunctions) -> Self {
+        Self {
+            functions,
             ..self.clone()
         }
     }
@@ -679,7 +693,7 @@ pub struct Module {
 impl Module {
     pub(crate) fn declaration_expr(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
         expr: &ConstExpr,
         signedness: &HashMap<String, bool>,
     ) -> ConstExpr {
@@ -690,7 +704,7 @@ impl Module {
             0,
             true,
         );
-        expr_to_index_const(state, expanded, &PackedDimensions::default())
+        expr_to_index_const(tree, expanded, &PackedDimensions::default())
             .unwrap_or_else(|| expr.clone())
     }
 
@@ -698,12 +712,11 @@ impl Module {
         &self.declaration_subroutines
     }
 
-    /// Make the module's constant functions available to the constant
-    /// evaluator until the guard is dropped.
-    pub(crate) fn constant_function_state(&self) -> AnalysisState {
-        let state = AnalysisState::default();
-        const_functions::replace(&state.const_functions, self.constant_functions.clone());
-        state
+    /// A context that calls the module's constant functions, for constant
+    /// expressions of the analyzed module, which no longer read its syntax:
+    /// `syntax` is an empty tree.
+    pub(crate) fn constant_context<'a>(&self, syntax: &'a SyntaxTree) -> AnalysisContext<'a> {
+        AnalysisContext::unspecialized(syntax).with_functions(self.constant_functions.clone())
     }
 
     /// Analyze a module or a package. The scope starts from the `imported`
@@ -831,15 +844,14 @@ impl Module {
         let mut type_aliases = type_aliases_from_scope(syntax_tree)?;
         // Constant functions see the module constants known so far; they are
         // collected again once the parameters are known.
-        let _constant_functions = const_functions::install(
-            &syntax_tree.state,
-            with_imported(const_functions::module_constant_functions(
+        let preliminary =
+            syntax_tree.with_functions(with_imported(const_functions::module_constant_functions(
                 syntax_tree,
                 &imported.const_env,
                 &type_aliases,
                 &imported.parameter_values,
-            )),
-        );
+            )));
+        let syntax_tree = &preliminary;
         let mut parameters = parameters_from_scope(
             syntax_tree,
             &type_aliases,
@@ -860,7 +872,7 @@ impl Module {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
         let mut const_env = imported.const_env.clone();
-        const_env.extend(const_env_from_parameters(&syntax_tree.state, &parameters));
+        const_env.extend(const_env_from_parameters(syntax_tree, &parameters));
         type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
         let mut enum_constants = enum_member_constants_from_scope(
             syntax_tree,
@@ -903,7 +915,7 @@ impl Module {
         if name == override_module_name {
             apply_parameter_overrides(&mut parameters, parameter_overrides)?;
         }
-        extend_const_env_with_parameters(&syntax_tree.state, &mut const_env, &parameters);
+        extend_const_env_with_parameters(syntax_tree, &mut const_env, &parameters);
         type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
         // Contract dependency analysis must see module parameter references
         // before the normal procedural lowering substitutes default literals.
@@ -922,21 +934,15 @@ impl Module {
                 &symbolic_parameters,
             ))
             .declarations();
-        const_functions::replace(
-            &syntax_tree.state.const_functions,
-            with_imported(const_functions::module_constant_functions(
+        let parameterized =
+            syntax_tree.with_functions(with_imported(const_functions::module_constant_functions(
                 syntax_tree,
                 &const_env,
                 &type_aliases,
-                &parameter_value_env_with_imported(
-                    &syntax_tree.state,
-                    &parameters,
-                    &const_env,
-                    &imported,
-                ),
-            )),
-        );
-        extend_const_env_with_parameters(&syntax_tree.state, &mut const_env, &parameters);
+                &parameter_value_env_with_imported(syntax_tree, &parameters, &const_env, &imported),
+            )));
+        let syntax_tree = &parameterized;
+        extend_const_env_with_parameters(syntax_tree, &mut const_env, &parameters);
 
         let mut array_parameters =
             array_parameters::array_parameters_from_scope(syntax_tree, &const_env, &type_aliases)?;
@@ -953,12 +959,7 @@ impl Module {
                 &const_env,
                 &type_aliases,
                 &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-                &parameter_value_env_with_imported(
-                    &syntax_tree.state,
-                    &parameters,
-                    &const_env,
-                    &imported,
-                ),
+                &parameter_value_env_with_imported(syntax_tree, &parameters, &const_env, &imported),
             ) {
                 Ok(()) => {}
                 // A parameter initializer may inspect a port or signal type
@@ -973,7 +974,7 @@ impl Module {
                     let preliminary_signals =
                         signals_from_scope(syntax_tree, &const_env, &type_aliases)?;
                     extend_const_env_with_variable_types(
-                        &syntax_tree.state,
+                        &syntax_tree.functions,
                         &mut const_env,
                         preliminary_ports
                             .iter()
@@ -1002,11 +1003,7 @@ impl Module {
                     if name == override_module_name {
                         apply_parameter_overrides(&mut parameters, parameter_overrides)?;
                     }
-                    extend_const_env_with_parameters(
-                        &syntax_tree.state,
-                        &mut const_env,
-                        &parameters,
-                    );
+                    extend_const_env_with_parameters(syntax_tree, &mut const_env, &parameters);
                     type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
                     array_parameters = array_parameters::array_parameters_from_scope(
                         syntax_tree,
@@ -1019,7 +1016,7 @@ impl Module {
                         &type_aliases,
                         &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
                         &parameter_value_env_with_imported(
-                            &syntax_tree.state,
+                            syntax_tree,
                             &parameters,
                             &const_env,
                             &imported,
@@ -1066,7 +1063,7 @@ impl Module {
             .chain(signals.iter().map(Signal::r#type))
         {
             validate_unpacked_dimension_sizes(
-                &syntax_tree.state,
+                &syntax_tree.functions,
                 r#type.unpacked_ranges(),
                 &const_env,
             )?;
@@ -1084,13 +1081,9 @@ impl Module {
             packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env, &type_aliases);
         // Four-state parameter values cannot be represented by the numeric
         // environment. Keep their expressions for constant case analysis.
-        packed_dimensions.parameter_values = parameter_value_env_with_imported(
-            &syntax_tree.state,
-            &parameters,
-            &const_env,
-            &imported,
-        )
-        .into();
+        packed_dimensions.parameter_values =
+            parameter_value_env_with_imported(syntax_tree, &parameters, &const_env, &imported)
+                .into();
         packed_dimensions
             .parameter_values
             .retain(|name, _| !const_env.contains_key(name));
@@ -1188,7 +1181,7 @@ impl Module {
                     let signed = shape.signed;
                     let is_2state = shape.is_2state;
                     let width = expr_static_width(
-                        &syntax_tree.state,
+                        syntax_tree,
                         &Expr::Ident(name.to_string()),
                         &packed_dimensions,
                     )
@@ -1205,7 +1198,7 @@ impl Module {
                         };
                     }
                     let value = fold_const_integral_expr_preserving_mask(
-                        &syntax_tree.state,
+                        syntax_tree,
                         value,
                         &packed_dimensions.const_env,
                     );
@@ -1226,7 +1219,7 @@ impl Module {
                 instance
                     .condition()
                     .and_then(|condition| {
-                        eval_ast_const_expr(&syntax_tree.state, condition, &const_env)
+                        eval_ast_const_expr(&syntax_tree.functions, condition, &const_env)
                     })
                     .is_none_or(|value| value != 0)
             })
@@ -1266,12 +1259,8 @@ impl Module {
                 name: conflict.to_string(),
             });
         }
-        let mut parameter_values = parameter_value_env_with_imported(
-            &syntax_tree.state,
-            &parameters,
-            &const_env,
-            &imported,
-        );
+        let mut parameter_values =
+            parameter_value_env_with_imported(syntax_tree, &parameters, &const_env, &imported);
         parameter_values.extend(packed_pattern_values);
         for (name, value) in &enum_constants.exprs {
             parameter_values
@@ -1358,7 +1347,7 @@ impl Module {
                 connection.map_expressions(|expr| {
                     let expr = expand_expr_calls(expr, &functions, &expression_signedness, 0, true);
                     substitute_expr_constants_with_parameter_literals(
-                        &syntax_tree.state,
+                        syntax_tree,
                         expr,
                         &const_env,
                         &enum_constants.exprs,
@@ -1404,7 +1393,7 @@ impl Module {
                 .into_iter()
                 .map(|process| {
                     substitute_process_constants_with_parameter_literals(
-                        &syntax_tree.state,
+                        syntax_tree,
                         process,
                         &const_env,
                         &parameter_values,
@@ -1442,7 +1431,7 @@ impl Module {
         // of the module, initialized once with the declaration initializers.
         let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
         let (mut kept, mut static_initializers) = lifetimes::keep_static_locals(
-            &syntax_tree.state,
+            syntax_tree,
             &statics,
             &subroutine_directions,
             comb_processes
@@ -1589,7 +1578,7 @@ impl Module {
             enum_constants: enum_constants.clone(),
             functions: functions.clone(),
             function_return_types: (*packed_dimensions.function_return_types).clone(),
-            constant_functions: const_functions::installed(&syntax_tree.state.const_functions),
+            constant_functions: syntax_tree.functions.clone(),
             subroutine_params: subroutine_params.clone(),
             subroutine_shapes: subroutine_shapes.clone(),
             subroutines: subroutines.clone(),
@@ -1662,12 +1651,11 @@ impl Module {
             let symbolic_type = subroutine
                 .return_type
                 .as_ref()
-                .is_some_and(|ty| ty.has_symbolic_ranges(&syntax_tree.state.const_functions))
-                || subroutine.params.iter().any(|param| {
-                    param
-                        .r#type
-                        .has_symbolic_ranges(&syntax_tree.state.const_functions)
-                });
+                .is_some_and(|ty| ty.has_symbolic_ranges(&syntax_tree.functions))
+                || subroutine
+                    .params
+                    .iter()
+                    .any(|param| param.r#type.has_symbolic_ranges(&syntax_tree.functions));
             if (selected_write || symbolic_type)
                 && let Some(function) = functions.get_mut(&subroutine.name)
             {
@@ -1712,7 +1700,7 @@ impl Module {
             locals,
             subroutines,
             dpi_imports,
-            constant_functions: const_functions::installed(&syntax_tree.state.const_functions),
+            constant_functions: syntax_tree.functions.clone(),
             symbolic_functions: functions,
             declaration_subroutines,
             imported_parameters,
@@ -1850,7 +1838,7 @@ impl Parameter {
 
     pub(crate) fn resolved_value(
         &self,
-        state: &AnalysisState,
+        functions: &const_functions::ConstantFunctions,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
     ) -> Option<i128> {
@@ -1868,7 +1856,7 @@ impl Parameter {
         let value: crate::ir::ConstExpr = value.into();
         let environment = const_functions::Environment {
             constants,
-            functions: &state.const_functions,
+            functions,
         };
         let mut value = if self.has_declared_type && typecheck::const_expr_has_real_type(&value) {
             // An explicitly integral parameter supplies an integer assignment
@@ -1889,23 +1877,29 @@ impl Parameter {
     /// literal after two-state conversion or dependency substitution.
     pub(crate) fn resolved_value_and_literal(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> (Option<i128>, Option<Expr>) {
+        let state = &*tree.state;
+        let functions = &tree.functions;
         if self.floating.is_some() {
             return (
                 None,
-                self.resolved_literal(state, constants, parameter_types, literals),
+                self.resolved_literal(tree, constants, parameter_types, literals),
             );
         }
-        if let Some(value) = self.resolved_value(state, constants, parameter_types) {
+        if let Some(value) = self.resolved_value(&tree.functions, constants, parameter_types) {
             return (Some(value), None);
         }
-        let literal = self.resolved_literal(state, constants, parameter_types, literals);
+        let literal = self.resolved_literal(tree, constants, parameter_types, literals);
         let value = literal.as_ref().and_then(|literal| {
-            eval_ast_const_expr(state, &expr_to_const(state, literal.clone())?, constants)
+            eval_ast_const_expr(
+                functions,
+                &expr_to_const(state, literal.clone())?,
+                constants,
+            )
         });
         if value.is_some() {
             (value, None)
@@ -1916,7 +1910,7 @@ impl Parameter {
 
     pub(crate) fn resolved_literal(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
@@ -1952,13 +1946,13 @@ impl Parameter {
             parameter.declared_signed = Some(ty.signed);
         }
         let value = parameter_value_env(
-            state,
+            tree,
             std::slice::from_ref(&parameter),
             &evaluation_constants,
         )
         .remove(self.name())?;
         let value = substitute_expr_idents(value, literals);
-        let value = fold_const_integral_expr_preserving_mask(state, value, &evaluation_constants);
+        let value = fold_const_integral_expr_preserving_mask(tree, value, &evaluation_constants);
         matches!(value, Expr::Literal(_)).then_some(value)
     }
 
@@ -3152,12 +3146,12 @@ fn parameter_packed_dimensions_with_imported(
 /// The literal values of `parameters`, and of the package parameters and
 /// enum members a scope imports.
 fn parameter_value_env_with_imported(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
     imported: &scope::ScopeSymbols,
 ) -> HashMap<String, Expr> {
-    let mut values = parameter_value_env(state, parameters, const_env);
+    let mut values = parameter_value_env(tree, parameters, const_env);
     let local_names: HashSet<_> = parameters.iter().map(Parameter::name).collect();
     for (name, value) in &imported.parameter_values {
         if !local_names.contains(name.as_str()) {

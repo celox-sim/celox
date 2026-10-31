@@ -353,7 +353,7 @@ impl BodyBuilder<'_, '_, '_> {
             self.write_update(operand, id, stmts)?;
             return Ok(());
         };
-        let ty = dimensions::bound_bits_type(&self.tree.state, &current, &self.dims)
+        let ty = dimensions::bound_bits_type(self.tree, &current, &self.dims)
             .ok_or_else(|| unsupported("increment or decrement of this operand"))?;
         // The local is of the operand's type, so a prefix result is the value
         // the update stores.

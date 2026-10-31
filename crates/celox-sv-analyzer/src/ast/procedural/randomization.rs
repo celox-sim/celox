@@ -48,7 +48,7 @@ fn lower_methods(
             ty,
             &const_functions::Environment {
                 constants: env,
-                functions: &tree.state.const_functions,
+                functions: &tree.functions,
             },
         )
     };
