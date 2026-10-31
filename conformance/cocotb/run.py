@@ -31,7 +31,6 @@ CASES = {
         "cocotb_array", "test_cocotb_array",
     ),
 }
-DEFAULT_CASES = tuple(CASES)
 CASES["test_cocotb"] = (
     ["designs/sample_module/sample_module.sv"], "sample_module",
     ",".join((
@@ -42,6 +41,7 @@ CASES["test_cocotb"] = (
         "test_sim_time_utils", "test_start_soon", "test_ci", "test_waiters", "test_task_manager",
     )),
 )
+DEFAULT_CASES = tuple(CASES)
 
 
 def result_counts(path):
