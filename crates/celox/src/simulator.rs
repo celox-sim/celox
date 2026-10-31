@@ -156,6 +156,12 @@ mod host {
         pub(crate) tb_counters: (usize, usize, usize),
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
+        /// Set while the active drain paces the simulation
+        /// ([`RuntimeEventDrain::set_backpressure`]).
+        runtime_event_backpressure: Arc<AtomicBool>,
+        /// Whether a runtime-event site records heap handles
+        /// (`sites_record_handles`).
+        runtime_event_handles: bool,
         pub(super) comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
         /// Storage reused for the next snapshot.
         comb_observer_scratch: Vec<crate::comb_activation::ObserverSnapshot>,
@@ -325,24 +331,51 @@ mod host {
         read_seq: u64,
         shared_read_seq: Arc<AtomicU64>,
         active: Arc<AtomicBool>,
+        backpressure: Arc<AtomicBool>,
+        /// Whether a site records heap handles (`sites_record_handles`).
+        handles: bool,
+    }
+
+    /// Whether a site of `sites` records heap handles, which only the
+    /// simulation's thread can resolve.
+    fn sites_record_handles(sites: &[RuntimeEventSite]) -> bool {
+        sites
+            .iter()
+            .any(|site| site.arg_is_handle.iter().any(|&handle| handle))
     }
 
     impl RuntimeEventDrain {
+        /// While `enabled`, the simulation waits before each step until
+        /// this drain has taken every event, so that none of a step's, up to
+        /// the ring buffer's capacity, is lost while another thread keeps
+        /// draining. A drain
+        /// that stops draining then stalls the simulation until it drains
+        /// again or is dropped. When the design records heap handles (such
+        /// as `string` arguments), the simulation's thread moves the records
+        /// out of the ring buffer before each step, resolving the handles,
+        /// and the drain takes only those.
+        pub fn set_backpressure(&self, enabled: bool) {
+            self.backpressure.store(enabled, Ordering::Release);
+        }
+
         pub fn drain(&mut self) -> Vec<RuntimeEvent> {
             self.drain_with_context(RuntimeFormatContext::default())
         }
 
         pub fn drain_with_context(&mut self, ctx: RuntimeFormatContext<'_>) -> Vec<RuntimeEvent> {
             let mut pending = self.pending_host_events.lock().unwrap();
-            self.read_seq = self.shared_read_seq.load(Ordering::Acquire);
-            let events = drain_raw_runtime_events_from_buffer(
-                &self.buffer,
-                &self.layout,
-                &self.sites,
-                &mut self.read_seq,
-            );
-            self.shared_read_seq.store(self.read_seq, Ordering::Release);
-            pending.extend(events, self.layout.runtime_event_capacity);
+            // Handles left in the ring are the simulation's to resolve.
+            if !(self.handles && self.backpressure.load(Ordering::Acquire)) {
+                self.read_seq = self.shared_read_seq.load(Ordering::Acquire);
+                let events = drain_raw_runtime_events_from_buffer(
+                    &self.buffer,
+                    &self.layout,
+                    &self.sites,
+                    &mut self.read_seq,
+                );
+                self.shared_read_seq.store(self.read_seq, Ordering::Release);
+                pending.extend(events, self.layout.runtime_event_capacity);
+            }
             let events = pending.drain();
             drop(pending);
             events
@@ -355,6 +388,7 @@ mod host {
 
     impl Drop for RuntimeEventDrain {
         fn drop(&mut self) {
+            self.backpressure.store(false, Ordering::Release);
             self.active.store(false, Ordering::Release);
         }
     }
@@ -1261,6 +1295,8 @@ mod host {
                         .push((observer.activation_group, observer.site_id as usize));
                 }
             }
+            let runtime_event_handles =
+                sites_record_handles(&program.runtime_schema.runtime_event_sites);
             let mut sim = Self {
                 backend,
                 program,
@@ -1294,6 +1330,8 @@ mod host {
                 tb_counters: (0, 0, 0),
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
+                runtime_event_backpressure: Arc::new(AtomicBool::new(false)),
+                runtime_event_handles,
                 comb_observer_snapshots: Vec::new(),
                 comb_observer_scratch: Vec::new(),
                 comb_observer_reads,
@@ -2096,6 +2134,11 @@ mod host {
             }
         }
 
+        /// Whether a [`RuntimeEventDrain`] is active.
+        pub(crate) fn runtime_event_drain_active(&self) -> bool {
+            self.runtime_event_drain_active.load(Ordering::Acquire)
+        }
+
         pub fn runtime_event_drain(&mut self) -> Option<RuntimeEventDrain> {
             let buffer = self.backend.runtime_event_buffer()?;
             self.runtime_event_drain_active
@@ -2110,7 +2153,31 @@ mod host {
                 read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
                 shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
                 active: Arc::clone(&self.runtime_event_drain_active),
+                backpressure: Arc::clone(&self.runtime_event_backpressure),
+                handles: self.runtime_event_handles,
             })
+        }
+
+        /// Wait until a drain that paces the simulation has taken every
+        /// record (see [`RuntimeEventDrain::set_backpressure`]), those in the
+        /// ring buffer and those the host moved into its bounded queue, so
+        /// that the step keeps every record up to the buffer's capacity.
+        pub(crate) fn await_runtime_event_room(&mut self) {
+            while self.runtime_event_backpressure.load(Ordering::Acquire)
+                && self.runtime_event_drain_active.load(Ordering::Acquire)
+            {
+                // The drain takes records with handles from the host queue
+                // once this thread resolved them there.
+                if self.runtime_event_handles {
+                    self.stash_runtime_events();
+                }
+                let queued = self.pending_host_events.lock().unwrap().events.len();
+                let read = self.runtime_event_read_seq.load(Ordering::Acquire);
+                if queued == 0 && self.runtime_event_write_seq() <= read {
+                    break;
+                }
+                std::thread::yield_now();
+            }
         }
 
         /// Returns a reference to the compiled SIR program.
@@ -2268,7 +2335,10 @@ mod host {
             };
             f(&mut ctx);
             self.dirty = true;
-            if self.runtime_event_drain_active.load(Ordering::Acquire) {
+            // Without a scheduler, nothing else settles the write for a
+            // drain on another thread; a timed simulation's next step does,
+            // and handles a fatal assertion there.
+            if !self.timed && self.runtime_event_drain_active.load(Ordering::Acquire) {
                 self.eval_comb_for_runtime_event_drain()?;
                 self.end_untimed_slot()?;
             }

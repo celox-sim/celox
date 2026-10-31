@@ -577,6 +577,8 @@ fn generate(
             .get(&slots.levels)
             .copied()
             .unwrap_or(SCHEDULER_TIME_WIDTH),
+        // The unit drains its own events (`resume_after_events`).
+        event_batch: None,
     };
     let initialize = g.b.new_block();
     let start = g.b.new_block();
@@ -1182,6 +1184,8 @@ fn generate(
         g.store(slots.clock_value, 64, values);
         g.store(slots.limit, 64, now);
         put(&mut g, slots.count, 0);
+        put(&mut g, slots.budget, u64::MAX);
+        put(&mut g, slots.events, 0);
         put(&mut g, slots.ready, 0);
         let zero = g.constant(0, 8);
         g.store(slots.exit, 8, zero);

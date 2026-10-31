@@ -621,6 +621,345 @@ mod tests {
         agrees_with_the_reference(source, 1000);
     }
 
+    /// A compiled kernel that displays at every edge. Its runs of the
+    /// compiled scheduler return when their events fill a batch.
+    const DISPLAYS: &str = r#"
+        `timescale 1ns/1ns
+        module Top(output logic [31:0] n);
+            logic clk = 1'b0;
+            always #5 clk = ~clk;
+            initial begin
+                n = 0;
+                forever @(posedge clk) begin
+                    n = n + 1;
+                    $display("n=%0d", n);
+                end
+            end
+        endmodule
+    "#;
+
+    /// A drain on another thread that paces the simulation takes every
+    /// event of runs of the compiled scheduler longer than the ring buffer.
+    #[test]
+    fn a_paced_drain_takes_every_event_of_compiled_runs() {
+        let mut sim = build_in(DISPLAYS, SchedulerMode::Compiled);
+        let drain = sim.runtime_event_drain().expect("a ring buffer");
+        drain.set_backpressure(true);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let displays = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut drain = drain;
+                let mut displays = Vec::new();
+                loop {
+                    let finished = done.load(std::sync::atomic::Ordering::Acquire);
+                    for event in drain.drain() {
+                        match event {
+                            crate::RuntimeEvent::Display { message } => displays.push(message),
+                            other => panic!("unexpected event {other:?}"),
+                        }
+                    }
+                    if finished {
+                        return displays;
+                    }
+                    std::thread::yield_now();
+                }
+            });
+            sim.run_until(50_000).unwrap();
+            done.store(true, std::sync::atomic::Ordering::Release);
+            reader.join().unwrap()
+        });
+        let expected: Vec<Vec<u8>> = (1..=5000).map(|n| format!("n={n}").into_bytes()).collect();
+        assert_eq!(displays, expected);
+        assert!(sim.scheduler_stats().compiled_slots > 1000);
+    }
+
+    /// A paced drain also takes every event of single steps, however slowly
+    /// it reads.
+    #[test]
+    fn a_paced_drain_takes_every_event_of_single_steps() {
+        let mut sim = build_in(DISPLAYS, SchedulerMode::Compiled);
+        let drain = sim.runtime_event_drain().expect("a ring buffer");
+        drain.set_backpressure(true);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let count = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut drain = drain;
+                let mut count = 0;
+                loop {
+                    let finished = done.load(std::sync::atomic::Ordering::Acquire);
+                    count += drain.drain().len();
+                    if finished {
+                        return count;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+            while sim.time() < 25_000 {
+                sim.step().unwrap();
+            }
+            done.store(true, std::sync::atomic::Ordering::Release);
+            reader.join().unwrap()
+        });
+        assert_eq!(count, 2500);
+    }
+
+    /// A paced drain also takes the events the host moves into its queue,
+    /// as it does around the processes of a design with deferred
+    /// assertions.
+    #[test]
+    fn a_paced_drain_takes_the_events_the_host_queues() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [31:0] n);
+                logic clk = 1'b0;
+                always #5 clk = ~clk;
+                initial begin
+                    n = 0;
+                    forever @(posedge clk) begin
+                        n = n + 1;
+                        $display("n=%0d", n);
+                        assert #0 (n != 0);
+                    end
+                end
+            endmodule
+        "#;
+        let mut sim = build_in(source, SchedulerMode::Compiled);
+        let drain = sim.runtime_event_drain().expect("a ring buffer");
+        drain.set_backpressure(true);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let displays = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut drain = drain;
+                let mut displays = 0;
+                loop {
+                    let finished = done.load(std::sync::atomic::Ordering::Acquire);
+                    for event in drain.drain() {
+                        match event {
+                            crate::RuntimeEvent::Display { .. } => displays += 1,
+                            other => panic!("unexpected event {other:?}"),
+                        }
+                    }
+                    if finished {
+                        return displays;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+            sim.run_until(25_000).unwrap();
+            done.store(true, std::sync::atomic::Ordering::Release);
+            reader.join().unwrap()
+        });
+        assert_eq!(displays, 2500);
+    }
+
+    /// A paced drain gets the contents of the strings a design displays,
+    /// which the simulation's thread resolves from its heap.
+    #[test]
+    fn a_paced_drain_gets_displayed_strings() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [31:0] n);
+                logic clk = 1'b0;
+                string s;
+                always #5 clk = ~clk;
+                initial begin
+                    n = 0;
+                    forever @(posedge clk) begin
+                        n = n + 1;
+                        s = $sformatf("n=%0d", n);
+                        $display("%s", s);
+                    end
+                end
+            endmodule
+        "#;
+        let mut sim = build_in(source, SchedulerMode::Compiled);
+        let drain = sim.runtime_event_drain().expect("a ring buffer");
+        drain.set_backpressure(true);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let displays = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut drain = drain;
+                let mut displays = Vec::new();
+                loop {
+                    let finished = done.load(std::sync::atomic::Ordering::Acquire);
+                    for event in drain.drain() {
+                        match event {
+                            crate::RuntimeEvent::Display { message } => displays.push(message),
+                            other => panic!("unexpected event {other:?}"),
+                        }
+                    }
+                    if finished {
+                        return displays;
+                    }
+                    std::thread::yield_now();
+                }
+            });
+            sim.run_until(20_000).unwrap();
+            done.store(true, std::sync::atomic::Ordering::Release);
+            reader.join().unwrap()
+        });
+        // The records of the last step stay in the ring for the simulation.
+        let mut displays = displays;
+        for event in sim.drain_runtime_events() {
+            if let crate::RuntimeEvent::Display { message } = event {
+                displays.push(message);
+            }
+        }
+        let expected: Vec<Vec<u8>> = (1..=2000).map(|n| format!("n={n}").into_bytes()).collect();
+        assert_eq!(displays, expected);
+    }
+
+    /// A watched `run_slots` settles host writes that wake no process and
+    /// reports what they fail, as a watched run does.
+    #[test]
+    fn watched_run_slots_settle_idle_host_writes() {
+        let source = r#"
+            module Top(input logic [7:0] a);
+                always_comb assert #0 (a != 8'd3) else $error("a is 3");
+            endmodule
+        "#;
+        let mut sim = build_in(source, SchedulerMode::Compiled);
+        sim.set_fail_on(Some(crate::Severity::Error));
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 3u8)).unwrap();
+        sim.run_slots(10, || false).unwrap();
+        assert!(sim.failure().is_some());
+    }
+
+    /// A slot whose runtime events fill more than half the ring buffer
+    /// loses none of them to a paced drain that reads slowly.
+    #[test]
+    fn a_paced_drain_takes_a_burst_of_most_of_the_buffer() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top;
+                logic clk = 1'b0;
+                always #5 clk = ~clk;
+                initial forever @(posedge clk) for (int i = 0; i < 900; i++) $display("%0d", i);
+            endmodule
+        "#;
+        let mut sim = build_in(source, SchedulerMode::Compiled);
+        let drain = sim.runtime_event_drain().expect("a ring buffer");
+        drain.set_backpressure(true);
+        let done = std::sync::atomic::AtomicBool::new(false);
+        let count = std::thread::scope(|scope| {
+            let reader = scope.spawn(|| {
+                let mut drain = drain;
+                let mut count = 0;
+                loop {
+                    let finished = done.load(std::sync::atomic::Ordering::Acquire);
+                    for event in drain.drain() {
+                        match event {
+                            crate::RuntimeEvent::Display { .. } => count += 1,
+                            other => panic!("unexpected event {other:?}"),
+                        }
+                    }
+                    if finished {
+                        return count;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            });
+            sim.run_until(100).unwrap();
+            done.store(true, std::sync::atomic::Ordering::Release);
+            reader.join().unwrap()
+        });
+        assert_eq!(count, 10 * 900);
+    }
+
+    /// A simulation that reads its events itself, to watch reports or to
+    /// compare them with a shadow, hands out no drain.
+    #[test]
+    fn simulations_that_read_their_events_hand_out_no_drain() {
+        let mut watched = build_in(DISPLAYS, SchedulerMode::Compiled);
+        watched.set_fail_on(Some(crate::Severity::Error));
+        assert!(watched.runtime_event_drain().is_none());
+        for mode in [SchedulerMode::Differential, SchedulerMode::DifferentialRuns] {
+            assert!(
+                build_in(DISPLAYS, mode).runtime_event_drain().is_none(),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "cannot watch reports while a RuntimeEventDrain is active")]
+    fn reports_are_not_watched_while_a_drain_is_active() {
+        let mut sim = build_in(DISPLAYS, SchedulerMode::Compiled);
+        let _drain = sim.runtime_event_drain().expect("a ring buffer");
+        sim.set_fail_on(Some(crate::Severity::Error));
+    }
+
+    /// A host write that fails an immediate assertion with `$fatal` ends
+    /// the simulation at the next step while a drain is active.
+    #[test]
+    fn host_writes_keep_fatal_assertions_with_a_drain() {
+        let source = r#"
+            module Top(input logic [7:0] a);
+                always_comb assert (a != 8'd3) else $fatal(1, "a is 3");
+            endmodule
+        "#;
+        let mut sim = build_in(source, SchedulerMode::Compiled);
+        let _drain = sim.runtime_event_drain().expect("a ring buffer");
+        let a = sim.signal("a");
+        sim.modify(|io| io.set(a, 3u8)).unwrap();
+        let result = sim.step();
+        assert!(
+            matches!(result, Err(crate::RuntimeErrorCode::Fatal { .. })),
+            "{result:?}"
+        );
+        assert!(sim.is_finished());
+    }
+
+    /// A run of the compiled scheduler in `run_slots` returns now and then
+    /// to ask whether to go on, also without runtime events to drain.
+    #[test]
+    fn run_slots_asks_to_go_on_between_batches_of_slots() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [31:0] n);
+                logic clk = 1'b0;
+                always #5 clk = ~clk;
+                initial begin
+                    n = 0;
+                    forever @(posedge clk) n = n + 1;
+                end
+            endmodule
+        "#;
+        let mut sim = build_in(source, SchedulerMode::Compiled);
+        let mut asked = 0;
+        let steps = sim
+            .run_slots(u64::MAX, || {
+                asked += 1;
+                asked > 3
+            })
+            .unwrap();
+        assert!(steps > 0 && steps <= 3 << 16, "{steps}");
+        assert!(sim.scheduler_stats().compiled_slots > 0);
+    }
+
+    /// `run_slots` takes as many steps as it may, compiled slots included,
+    /// and stays at the time of the last one.
+    #[test]
+    fn run_slots_counts_compiled_slots_as_steps() {
+        let mut sim = build_in(DISPLAYS, SchedulerMode::Compiled);
+        let mut steps = 0;
+        while steps < 300 {
+            let run = sim.run_slots(300 - steps, || false).unwrap();
+            assert!(run > 0);
+            steps += run;
+            sim.drain_runtime_events();
+        }
+        assert_eq!(steps, 300);
+        // A slot every 5ns: the run did not move on to the time of the next.
+        let time = sim.time();
+        assert_eq!(time % 5, 0);
+        assert!((290 * 5..300 * 5).contains(&time), "{time}");
+        assert!(sim.scheduler_stats().compiled_slots > 200);
+        assert_eq!(sim.run_slots(10, || true).unwrap(), 0);
+        assert_eq!(sim.time(), time);
+    }
+
     /// Compiled kernels declared after more than 64 others keep their own
     /// bits in the ready mask.
     #[test]

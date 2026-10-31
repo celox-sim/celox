@@ -294,6 +294,10 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         std::mem::take(&mut self.slot_writes)
     }
 
+    fn await_runtime_event_room(&mut self) {
+        Simulator::await_runtime_event_room(self);
+    }
+
     fn compiled_slots(&self) -> celox_runtime::CompiledSlots {
         use celox_runtime::CompiledSlots;
         if self.frozen || !self.components.is_empty() || !self.backend.runs_compiled_scheduler() {
@@ -928,16 +932,22 @@ impl<B: SimBackend> Simulation<B> {
 
     /// The steps of a run while [`Self::set_fail_on`] is set, apart from
     /// the run loop that has no reports to watch. Returns `false` when a
-    /// step stopped at `$stop` or at a failure, or `max_steps` ran out.
+    /// step stopped at `$stop` or at a failure, or `max_steps` ran out or
+    /// `interrupt` returned `true` before a step; `steps` counts the steps.
     #[cold]
     #[inline(never)]
-    fn watched_steps(&mut self, end_time: u64, max_steps: u64) -> Result<bool, RuntimeErrorCode> {
-        let mut steps = 0;
+    fn watched_steps(
+        &mut self,
+        end_time: u64,
+        max_steps: u64,
+        steps: &mut u64,
+        interrupt: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, RuntimeErrorCode> {
         while let Some(next_time) = self.state.next_event_time() {
             if next_time > end_time {
                 break;
             }
-            if steps >= max_steps {
+            if *steps >= max_steps || interrupt() {
                 return Ok(false);
             }
             if next_time > self.state.time() {
@@ -950,7 +960,7 @@ impl<B: SimBackend> Simulation<B> {
             // writes is watched before the next runs.
             self.step_until(next_time)?;
             self.watch_reports();
-            steps += 1;
+            *steps += 1;
             if self.state.is_stopped() || self.reports.failure.is_some() {
                 return Ok(false);
             }
@@ -1009,7 +1019,16 @@ impl<B: SimBackend> Simulation<B> {
     /// the time of that step, so none are missed and their reports have an
     /// exact time. They wait for [`Self::drain_runtime_events`]. `None`
     /// stops only at `$fatal`, as before.
+    ///
+    /// # Panics
+    ///
+    /// When `severity` is set while a [`crate::RuntimeEventDrain`] is
+    /// active: the drain would take the reports to watch.
     pub fn set_fail_on(&mut self, severity: Option<crate::Severity>) {
+        assert!(
+            severity.is_none() || !self.simulator.runtime_event_drain_active(),
+            "cannot watch reports while a RuntimeEventDrain is active",
+        );
         self.reports.fail_on = severity;
     }
 
@@ -1057,7 +1076,7 @@ impl<B: SimBackend> Simulation<B> {
         // With reports to watch, step one slot at a time; the run below
         // then only advances the time.
         if self.reports.fail_on.is_some() {
-            if !self.watched_steps(end_time, u64::MAX)? {
+            if !self.watched_steps(end_time, u64::MAX, &mut 0, &mut || false)? {
                 return Ok(());
             }
         } else {
@@ -1140,7 +1159,7 @@ impl<B: SimBackend> Simulation<B> {
         }
         self.reports.failure = None;
         if self.reports.fail_on.is_some() {
-            if !self.watched_steps(end_time, max_steps)? {
+            if !self.watched_steps(end_time, max_steps, &mut 0, &mut || false)? {
                 return Ok(false);
             }
             self.run_until(end_time)?;
@@ -1167,6 +1186,55 @@ impl<B: SimBackend> Simulation<B> {
         }
         self.run_until(end_time)?;
         Ok(!self.state.is_stopped())
+    }
+
+    /// Run time slots, compiled where the scheduler can, until the
+    /// simulation finishes or stops, nothing is scheduled, `max_steps` steps
+    /// have run, or `interrupt` returns `true` before a step. A run of the
+    /// compiled scheduler counts a step for each slot it runs, and runs at
+    /// most 65536 of them before `interrupt` is asked again. Unlike [`Self::run_until`], the simulation
+    /// stays at the time of its last step. Returns the steps run.
+    pub fn run_slots(
+        &mut self,
+        max_steps: u64,
+        mut interrupt: impl FnMut() -> bool,
+    ) -> Result<u64, RuntimeErrorCode> {
+        self.reports.failure = None;
+        let mut steps = 0;
+        // Reports to watch take a slot at a time, settling what no step
+        // settles before the run ends.
+        if self.reports.fail_on.is_some() {
+            self.watched_steps(u64::MAX, max_steps, &mut steps, &mut interrupt)?;
+            return Ok(steps);
+        }
+        // So does a shadow to compare.
+        if self.shadow.is_some() {
+            while steps < max_steps
+                && !self.is_finished()
+                && self.state.next_event_time().is_some()
+                && !interrupt()
+            {
+                let step = self.step()?;
+                steps += 1;
+                if step.is_none() || self.is_stopped() || self.reports.failure.is_some() {
+                    break;
+                }
+            }
+            return Ok(steps);
+        }
+        let was_stopped = self.is_stopped();
+        self.end_idle_slot(self.state.next_event_time().unwrap_or(u64::MAX))?;
+        if !was_stopped && self.is_stopped() {
+            return Ok(steps);
+        }
+        let mut observer = SlotSteps {
+            left: max_steps,
+            compiled: 0,
+            interrupt: &mut interrupt,
+        };
+        self.state
+            .run_slots_observed(&mut self.simulator, &mut observer)?;
+        Ok(max_steps - observer.left)
     }
 
     /// End simulation at its current time, running final procedures once.
@@ -1213,6 +1281,19 @@ impl<B: SimBackend> Simulation<B> {
     /// state), as (event id, period).
     pub fn clock_periods(&self) -> Vec<(usize, u64)> {
         self.state.clock_periods()
+    }
+
+    /// A handle that takes the runtime events from another thread while the
+    /// simulation runs (see [`Simulator::runtime_event_drain`]), or `None`
+    /// when the backend has no shared ring buffer, a handle is active, or
+    /// the simulation reads the events itself: to watch reports
+    /// ([`Self::set_fail_on`]) or to compare them with a shadow
+    /// ([`SchedulerMode::Differential`](crate::SchedulerMode)).
+    pub fn runtime_event_drain(&mut self) -> Option<crate::RuntimeEventDrain> {
+        if self.reports.fail_on.is_some() || self.shadow.is_some() {
+            return None;
+        }
+        self.simulator.runtime_event_drain()
     }
 
     /// Takes the runtime events (`$display`, messages, `$finish`, ...) the
@@ -1403,6 +1484,47 @@ impl<B: SimBackend> Simulation<B> {
                 event_id
             )))
         }
+    }
+}
+
+/// The most slots a run of the compiled scheduler takes in
+/// [`Simulation::run_slots`] before it asks the caller whether to go on.
+const SLOT_BATCH: u64 = 1 << 16;
+
+/// Counts the steps of [`Simulation::run_slots`] and ends its run when they
+/// run out or the caller interrupts it.
+struct SlotSteps<'a, F> {
+    left: u64,
+    /// The compiled slots before the current step.
+    compiled: u64,
+    interrupt: &'a mut F,
+}
+
+impl<B: SimBackend, F: FnMut() -> bool> celox_runtime::StepObserver<Simulator<B>>
+    for SlotSteps<'_, F>
+{
+    fn budget(&self, _: &SimulationState<B>) -> u64 {
+        self.left.min(SLOT_BATCH)
+    }
+
+    fn interrupts(&mut self, _: &SimulationState<B>) -> bool {
+        self.left == 0 || (self.interrupt)()
+    }
+
+    fn before_step(&mut self, state: &SimulationState<B>, _: &mut Simulator<B>) {
+        self.compiled = state.scheduler_stats().compiled_slots;
+    }
+
+    fn after_step(
+        &mut self,
+        state: &SimulationState<B>,
+        _: &mut Simulator<B>,
+        _: u64,
+        _: &Result<Option<u64>, celox_runtime::SimulatorErrorCode>,
+    ) -> Result<(), celox_runtime::SimulatorErrorCode> {
+        let compiled = state.scheduler_stats().compiled_slots - self.compiled;
+        self.left = self.left.saturating_sub(compiled.max(1));
+        Ok(())
     }
 }
 
