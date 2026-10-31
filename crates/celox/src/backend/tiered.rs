@@ -38,7 +38,6 @@
 
 #![cfg(feature = "host-runtime")]
 
-use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::mpsc;
 use std::thread::JoinHandle;
@@ -644,13 +643,13 @@ struct NativeUpgrade {
 }
 
 struct DerivedCompileRequest {
-    sent: Cell<bool>,
+    sent: bool,
     sender: mpsc::Sender<()>,
 }
 
 impl DerivedCompileRequest {
-    fn request(&self) {
-        if !self.sent.replace(true) {
+    fn request(&mut self) {
+        if !std::mem::replace(&mut self.sent, true) {
             let _ = self.sender.send(());
         }
     }
@@ -1028,7 +1027,7 @@ impl TieredBackend {
                 let (sender, receiver) = mpsc::channel();
                 (
                     Some(DerivedCompileRequest {
-                        sent: Cell::new(false),
+                        sent: false,
                         sender,
                     }),
                     Some(receiver),
@@ -1500,10 +1499,13 @@ impl SimBackend for TieredBackend {
     }
 
     fn runs_derived_edge_units(&self) -> bool {
-        if let Some(request) = &self.derived_compile_request {
+        matches!(self.phase, Phase::Compiled(_)) && self.derived_edges_live
+    }
+
+    fn request_derived_edge_units(&mut self) {
+        if let Some(request) = &mut self.derived_compile_request {
             request.request();
         }
-        matches!(self.phase, Phase::Compiled(_)) && self.derived_edges_live
     }
 
     type Event = TieredEventRef;
@@ -3236,6 +3238,7 @@ module Top (
         adopt_lazy_core(&mut sim, &gates, &stages);
         let core = adopted_native_code(&sim.backend);
         let base = sim.backend.memory_as_ptr().0;
+        sim.backend.request_derived_edge_units();
         assert!(!sim.backend.runs_derived_edge_units());
         assert_eq!(stages.recv_timeout(Duration::from_secs(60)).unwrap(), 2);
         gates[2].open();
@@ -3254,6 +3257,7 @@ module Top (
     #[test]
     fn native_lazy_derived_early_request_keeps_two_stage_path() {
         let (mut sim, gates, stages) = build_lazy_derived_test(None);
+        sim.backend.request_derived_edge_units();
         assert!(!sim.backend.runs_derived_edge_units());
         gates[0].open();
         assert_eq!(stages.recv_timeout(Duration::from_secs(60)).unwrap(), 2);
@@ -3289,6 +3293,7 @@ module Top (
         let (mut sim, gates, stages) = build_lazy_derived_test(Some(2));
         adopt_lazy_core(&mut sim, &gates, &stages);
         let core = adopted_native_code(&sim.backend);
+        sim.backend.request_derived_edge_units();
         assert!(!sim.backend.runs_derived_edge_units());
         assert_eq!(stages.recv_timeout(Duration::from_secs(60)).unwrap(), 2);
         gates[2].open();

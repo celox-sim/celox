@@ -243,6 +243,12 @@ impl<W: Write> VcdWriter<W> {
         self.output.writer.get_ref()
     }
 
+    /// The underlying writer. Writing to it directly bypasses the buffered
+    /// output, like [`BufWriter::get_mut`].
+    pub fn get_mut(&mut self) -> &mut W {
+        self.output.writer.get_mut()
+    }
+
     /// The last timestamp written to the file, if any. Later dumps must not
     /// be earlier.
     pub fn last_timestamp(&self) -> Option<u64> {

@@ -150,6 +150,10 @@ mod host {
         // Temporarily detached while advancing the simulator. Keep the queue
         // in place instead of copying its entire state at every clock edge.
         pub(crate) component_simulation: Option<Box<celox_runtime::SimulationState<B>>>,
+        /// Generated TB scheduler unit runs, host edge batches and host
+        /// statement services, which tests take.
+        #[cfg(test)]
+        pub(crate) tb_counters: (usize, usize, usize),
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
         pub(super) comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
@@ -1286,6 +1290,8 @@ mod host {
                 sample_shadows,
                 components: Default::default(),
                 component_simulation: None,
+                #[cfg(test)]
+                tb_counters: (0, 0, 0),
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 comb_observer_snapshots: Vec::new(),
@@ -2685,9 +2691,11 @@ mod host {
             self.begin_host_slot()?;
             if let Some(Some(unit)) = self.derived_units.get(event.id()).copied()
                 && !self.finish_sites
-                && self.backend.runs_derived_edge_units()
             {
-                return self.edge_unit(event, info, edge, unit);
+                self.backend.request_derived_edge_units();
+                if self.backend.runs_derived_edge_units() {
+                    return self.edge_unit(event, info, edge, unit);
+                }
             }
             let plans = std::sync::Arc::clone(&self.derived_ticks);
             let plan = plans.get(event.id()).and_then(Option::as_ref);

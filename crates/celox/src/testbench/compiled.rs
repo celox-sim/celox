@@ -7,10 +7,8 @@ use celox_testbench::*;
 // Unit runs, host edge batches and host statement services since the last
 // call.
 #[cfg(test)]
-thread_local! { static COUNTERS: std::cell::Cell<(usize, usize, usize)> = const { std::cell::Cell::new((0, 0, 0)) }; }
-#[cfg(test)]
-pub(super) fn take_counters() -> (usize, usize, usize) {
-    COUNTERS.with(|c| c.replace((0, 0, 0)))
+pub(super) fn take_counters<B: SimBackend>(sim: &mut Simulator<B>) -> (usize, usize, usize) {
+    std::mem::take(&mut sim.tb_counters)
 }
 
 pub(super) fn run<B: SimBackend>(
@@ -189,10 +187,9 @@ pub(super) fn run<B: SimBackend>(
             },
         );
         #[cfg(test)]
-        COUNTERS.with(|c| {
-            let (runs, edges, host) = c.get();
-            c.set((runs + 1, edges, host));
-        });
+        {
+            sim.tb_counters.0 += 1;
+        }
         if let Err(e) = sim.backend.run_process(entry) {
             // A fatal assertion in a domain the unit ran ends it with an
             // error; its message is in the runtime events.
@@ -272,10 +269,9 @@ pub(super) fn run<B: SimBackend>(
             }
             TB_HOST | TB_RESET => {
                 #[cfg(test)]
-                COUNTERS.with(|c| {
-                    let (runs, edges, host) = c.get();
-                    c.set((runs, edges, host + 1));
-                });
+                {
+                    sim.tb_counters.2 += 1;
+                }
                 let index = sim.backend.get_as::<u64>(m.control[TB_CURRENT]) as usize;
                 let p = m.processes[index];
                 let kernel = &tb.kernels()[index];
@@ -391,10 +387,9 @@ pub(super) fn run<B: SimBackend>(
             }
             TB_EDGES => {
                 #[cfg(test)]
-                COUNTERS.with(|c| {
-                    let (runs, edges, host) = c.get();
-                    c.set((runs, edges + 1, host));
-                });
+                {
+                    sim.tb_counters.1 += 1;
+                }
                 let mut state = sim
                     .component_simulation
                     .take()

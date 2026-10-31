@@ -193,6 +193,10 @@ pub trait SimBackend {
         true
     }
 
+    /// A host is about to run a derived edge: a backend that compiles the
+    /// derived-edge units on demand starts doing so.
+    fn request_derived_edge_units(&mut self) {}
+
     // ── event enumeration ───────────────────────────────────────
     fn id_to_addr_slice(&self) -> &[AbsoluteAddr];
     fn id_to_event_slice(&self) -> &[Self::Event];
