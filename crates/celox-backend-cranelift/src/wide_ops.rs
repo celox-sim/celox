@@ -435,12 +435,14 @@ pub(crate) fn emit_wide_unsigned_cmp(
             for i in 0..num_chunks {
                 let l = get_chunk_as_i64(builder, l_chunks, i);
                 let r = get_chunk_as_i64(builder, r_chunks, i);
-                let eq = builder.ins().icmp(IntCC::Equal, l, r);
+                // Each comparison gives 0 or 1, which a branch may test
+                // directly: no bitwise complement of it.
                 cond = if matches!(op, BinaryOp::Eq) {
+                    let eq = builder.ins().icmp(IntCC::Equal, l, r);
                     builder.ins().band(cond, eq)
                 } else {
-                    let neq = builder.ins().bnot(eq);
-                    builder.ins().bor(cond, neq)
+                    let ne = builder.ins().icmp(IntCC::NotEqual, l, r);
+                    builder.ins().bor(cond, ne)
                 };
             }
             cond
