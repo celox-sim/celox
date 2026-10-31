@@ -1013,7 +1013,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .get(node)
             .map_addr(node, arena, &mut mapped_arena, &mut cache, &map)
             .map_err(slt_error)?;
-        let lowerer = SLTToSIRLowerer::new(self.m.four_state)
+        let mut lowerer = SLTToSIRLowerer::new(self.m.four_state)
             .with_unpacked_input_types(&mapped_arena, &self.element_widths);
         let mut lower_cache = HashMap::default();
         Ok(lowerer.lower(&mut self.b, mapped, &mapped_arena, &mut lower_cache))

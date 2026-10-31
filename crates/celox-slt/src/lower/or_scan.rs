@@ -576,7 +576,7 @@ pub fn matches_slt_or_scan_group<A: Hash + Eq + Clone>(
 
 impl SLTToSIRLowerer {
     pub(super) fn lower_or_scan_plan<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,

@@ -5,15 +5,14 @@ use super::*;
 
 impl SLTToSIRLowerer {
     fn mask_constant<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         root: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> Option<(BigUint, BigUint)> {
         self.prepare_cost_cache(arena);
-        let mut memo = self.cost_cache.borrow_mut();
         let mut work = vec![(root, false)];
         while let Some((node, expanded)) = work.pop() {
-            if memo.mask_constants[node.0].is_some() {
+            if self.cost_cache.mask_constants[node.0].is_some() {
                 continue;
             }
             let supported = matches!(
@@ -35,21 +34,26 @@ impl SLTToSIRLowerer {
                     | SLTNode::Slice { .. }
                     | SLTNode::Concat(_)
             );
-            memo.touch(node);
+            self.cost_cache.touch(node);
             if !supported {
-                memo.mask_constants[node.0] = Some(None);
+                self.cost_cache.mask_constants[node.0] = Some(None);
                 continue;
             }
             if !expanded {
                 work.push((node, true));
                 for child in Self::node_children(node, arena).into_iter().rev() {
-                    if memo.mask_constants[child.0].is_none() {
+                    if self.cost_cache.mask_constants[child.0].is_none() {
                         work.push((child, false));
                     }
                 }
                 continue;
             }
-            let get = |child: NodeId| memo.mask_constants[child.0].as_ref().unwrap().clone();
+            let get = |child: NodeId| {
+                self.cost_cache.mask_constants[child.0]
+                    .as_ref()
+                    .unwrap()
+                    .clone()
+            };
             let width = self.get_width(node, arena);
             let all = (BigUint::from(1u8) << width) - 1u8;
             let result = (|| {
@@ -138,13 +142,16 @@ impl SLTToSIRLowerer {
                 };
                 Some((value & &all, mask & &all))
             })();
-            memo.mask_constants[node.0] = Some(result);
+            self.cost_cache.mask_constants[node.0] = Some(result);
         }
-        memo.mask_constants[root.0].as_ref().unwrap().clone()
+        self.cost_cache.mask_constants[root.0]
+            .as_ref()
+            .unwrap()
+            .clone()
     }
 
     pub(super) fn projected_mask_constant<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         node: NodeId,
         access: BitAccess,
         arena: &SLTNodeArena<A>,
