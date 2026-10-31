@@ -248,8 +248,15 @@ impl<'a> CombSlicer<'a> {
         let mut seen: HashSet<Need> = HashSet::default();
         let mut work: Vec<Need> = reads
             .into_iter()
-            .map(|address| Need::Storage(self.representative(address)))
+            .map(|address| self.representative(address))
+            .filter(|address| self.stores.contains_key(address))
+            .map(Need::Storage)
             .collect();
+        // Reads no unit stores hold their values already. Built from no
+        // needs, the part would still keep the loops it cannot fold.
+        if work.is_empty() {
+            return Vec::new();
+        }
         let mut units: Vec<Unit>;
         loop {
             self.walk(&mut work, &mut seen, &mut kept);
@@ -576,5 +583,73 @@ mod tests {
                 .is_none_or(|read| read.addr.absolute_addr() == address(1))),
             "`a` is no longer read"
         );
+    }
+
+    /// `for i in 0..a { z = c; }`
+    fn looping_settle() -> Unit {
+        let mut b = Builder::new();
+        let [a, c, z] = [0, 1, 4];
+        let bound = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Load(
+            bound,
+            stable(a),
+            SIROffset::Static(0),
+            8,
+        ));
+        let zero = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u8)));
+        let index = b.alloc_bit(8, false);
+        let header = b.new_block_with(vec![index]);
+        let body = b.new_block();
+        let exit = b.new_block();
+        b.seal_block(SIRTerminator::Jump(header, vec![zero]));
+        b.switch_to_block(header);
+        let more = b.alloc_bit(1, false);
+        b.emit(SIRInstruction::Binary(more, index, BinaryOp::LtU, bound));
+        b.seal_block(SIRTerminator::Branch {
+            cond: more,
+            true_block: (body, Vec::new()),
+            false_block: (exit, Vec::new()),
+        });
+        b.switch_to_block(body);
+        let value = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Load(
+            value,
+            stable(c),
+            SIROffset::Static(0),
+            8,
+        ));
+        b.emit(SIRInstruction::Store(
+            stable(z),
+            SIROffset::Static(0),
+            8,
+            value,
+            Vec::new(),
+            Vec::new(),
+        ));
+        let one = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Imm(one, SIRValue::new(1u8)));
+        let next = b.alloc_bit(8, false);
+        b.emit(SIRInstruction::Binary(next, index, BinaryOp::Add, one));
+        b.seal_block(SIRTerminator::Jump(header, vec![next]));
+        b.switch_to_block(exit);
+        b.seal_block(SIRTerminator::Return);
+        let (blocks, register_map, _) = b.drain();
+        Unit {
+            entry_block_id: BlockId(0),
+            blocks,
+            register_map,
+        }
+    }
+
+    #[test]
+    fn slice_of_storage_no_unit_stores_is_empty() {
+        let units = [looping_settle()];
+        let slicer = CombSlicer::new(&units, HashMap::default());
+        // `a` is an input of the settle: nothing computes it, not even the
+        // loop it bounds.
+        assert!(slicer.slice([address(0)]).is_empty());
+        let slice = slicer.slice([address(0), address(4)]);
+        assert_eq!(stored(&slice), [address(4)]);
     }
 }
