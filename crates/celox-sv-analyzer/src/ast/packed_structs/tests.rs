@@ -45,6 +45,21 @@ fn preserves_layout_signedness_and_state_kind() {
 }
 
 #[test]
+fn selects_members_of_unpacked_array_elements() {
+    for body in [
+        "struct packed { logic a; } value[2]; assign y = value[0].a;",
+        "struct packed { logic a; } value[2]; assign y = value[index].a;",
+        "struct packed { logic a; } value[2][2]; assign y = value[index][1].a;",
+    ] {
+        let source = format!("module Top(input bit index, output logic y); {body} endmodule");
+        assert!(
+            analyze_source(&source, Path::new("element_member.sv")).is_ok(),
+            "{body}"
+        );
+    }
+}
+
+#[test]
 fn rejects_invalid_or_unsupported_struct_shapes() {
     for body in [
         "union { logic a; } value;",
@@ -60,7 +75,8 @@ fn rejects_invalid_or_unsupported_struct_shapes() {
         "struct packed { missing_t a; } value;",
         "struct packed { logic a; } value; assign y = value.missing;",
         "struct packed { logic [3:0] a; } value; assign y = value.a[index];",
-        "struct packed { logic a; } value[2]; assign y = value[0].a;",
+        // A member select of a subarray, which has no members (7.4.5).
+        "struct packed { logic a; } value[2][2]; assign y = value[0].a;",
         "typedef struct packed { logic a; logic b; } t; localparam t P = 2'b10; if (P.b) assign y = 1; else assign y = 0;",
     ] {
         let source = format!("module Top(input bit index, output logic y); {body} endmodule");

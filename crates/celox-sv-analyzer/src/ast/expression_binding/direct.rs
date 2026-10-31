@@ -2371,7 +2371,11 @@ fn selected_value(
         };
         return selects::aggregate_selection_value(tree, expr, selection, dimensions);
     }
-    let (parts, qualified) = path(base, native, tree, session, dimensions)?;
+    let (parts, qualified) =
+        match element_members::element_member(base, native, tree, session, dimensions) {
+            Some(_) => (Vec::new(), None),
+            None => path(base, native, tree, session, dimensions)?,
+        };
     if dimensions.constant_indexed_base && parts.len() == 1 {
         let name = qualified.clone().unwrap_or_else(|| parts[0].clone());
         let mut indices = Vec::new();
@@ -2454,7 +2458,27 @@ pub(in crate::ast) fn selected_lvalue(
         base = *expression;
     }
     suffix.reverse();
-    let (parts, qualified) = path(base, native, tree, session, dimensions)?;
+    let element = match element_members::element_member(base, native, tree, session, dimensions) {
+        Some(element) => {
+            let indices = element
+                .indices
+                .iter()
+                .map(|id| {
+                    Ok(selects::self_determined_index(
+                        tree,
+                        index_value(*id, native, tree, session, dimensions)?,
+                        dimensions,
+                    ))
+                })
+                .collect::<Converted<Vec<_>>>()?;
+            Some((element, indices))
+        }
+        None => None,
+    };
+    let (parts, qualified) = match element {
+        Some(_) => (Vec::new(), None),
+        None => path(base, native, tree, session, dimensions)?,
+    };
     if suffix.is_empty() && parts.len() > 1 {
         return packed_structs::whole_member(tree, parts, qualified, dimensions);
     }
@@ -2555,7 +2579,16 @@ pub(in crate::ast) fn selected_lvalue(
             selects::lvalue_from_indices(tree, name, indices, context)
         }
     };
-    let lvalue = if parts.len() > 1 {
+    let lvalue = if let Some((element, indices)) = element {
+        packed_structs::select_element_member(
+            tree,
+            element.name,
+            &element.members,
+            indices,
+            dimensions,
+            finish,
+        )?
+    } else if parts.len() > 1 {
         packed_structs::select_member(tree, parts, qualified, dimensions, finish)?
     } else {
         finish(
@@ -2811,6 +2844,10 @@ pub(in crate::ast) fn member_context(
     }
     if !matches!(native.expression(root).kind, ExprKind::Member { .. }) {
         return Ok(None);
+    }
+    if let Some(element) = element_members::element_member(root, native, tree, session, dims) {
+        let (_, ty) = packed_structs::element_member(&element.name, &element.members, dims)?;
+        return Ok(Some((Vec::new(), ty.clone())));
     }
     let (mut parts, qualified) = path(root, native, tree, session, dims)?;
     if let Some(name) = qualified {

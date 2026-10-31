@@ -285,14 +285,24 @@ fn continuous_assignments(
                 session,
                 dimensions,
             )?;
-            let rhs = expression_binding::expression(
+            let rhs = match expression_binding::selected_pattern(
+                assignment.left,
                 assignment.right,
-                tree.declarations(),
                 &lhs,
                 tree,
                 session,
                 dimensions,
-            )?;
+            )? {
+                Some(rhs) => rhs,
+                None => expression_binding::expression(
+                    assignment.right,
+                    tree.declarations(),
+                    &lhs,
+                    tree,
+                    session,
+                    dimensions,
+                )?,
+            };
             // A variable of unpacked structure type: drive its leaves.
             if let LValue::Ident(name) = &lhs
                 && let Some(parts) = unpacked_structs::targets(name, dimensions)
