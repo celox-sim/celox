@@ -647,6 +647,55 @@ fn validate_specialized_instance_net_drivers(
         let drivers =
             ModuleDrivers::new(&module.source, &module.constants, &module.parameter_types);
         let children = child_output_drivers(module, module_ids, modules);
+        // Table 10-1 permits procedural writes only to variables. Include
+        // suspended processes and writes made by their called subroutines;
+        // declaration initializers of nets remain continuous drivers.
+        let mut procedural_writes = HashSet::default();
+        for body in module
+            .source
+            .comb_processes()
+            .iter()
+            .filter(|process| process.kind() != sv::ir::CombProcessKind::ContinuousAssign)
+            .map(sv::ir::CombProcess::body)
+            .chain(
+                module
+                    .source
+                    .ff_processes()
+                    .iter()
+                    .map(sv::ir::FfProcess::body),
+            )
+            .chain(
+                module
+                    .source
+                    .initial_processes()
+                    .iter()
+                    .map(|process| process.body()),
+            )
+        {
+            procedural::written_names_with_calls(&module.source, body, &mut procedural_writes);
+        }
+        // Hierarchical aliases keep the specific driver diagnostics below.
+        for name in module
+            .source
+            .signals()
+            .iter()
+            .filter(|signal| signal.is_net() && signal.hierarchical().is_none())
+            .map(|signal| signal.name())
+            .chain(
+                module
+                    .source
+                    .ports()
+                    .iter()
+                    .filter(|port| port.is_net())
+                    .map(|port| port.name()),
+            )
+        {
+            if procedural_writes.contains(name) {
+                return Err(sv::AnalyzerError::ProceduralNetAssignment {
+                    name: name.to_string(),
+                });
+            }
+        }
         for port in module
             .source
             .ports()

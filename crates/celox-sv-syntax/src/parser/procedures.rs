@@ -739,24 +739,27 @@ impl Parser<'_> {
         }
     }
 
-    fn timing_range(&mut self) -> Result<(TokenRange, Option<TimingControlId>)> {
+    fn timing_range(&mut self) -> Result<(TokenRange, Option<TimingControlId>, Option<ExprId>)> {
         let start = self.at;
-        let event = match self.peek() {
+        let mut repeat_count = None;
+        let control = match self.peek() {
             "repeat" => {
                 self.at += 1;
-                self.parentheses()?;
+                self.expect("(")?;
+                repeat_count = Some(self.expression(0)?);
+                self.expect(")")?;
                 if !matches!(self.peek(), "@" | "@*") {
                     return Err(self.error("expected event control after repeat count"));
                 }
                 Some(self.typed_timing_control()?)
             }
-            "@" | "@*" => Some(self.typed_timing_control()?),
+            "#" | "@" | "@*" => Some(self.typed_timing_control()?),
             _ => {
                 self.timing_atom()?;
                 None
             }
         };
-        Ok((self.range(start), event))
+        Ok((self.range(start), control, repeat_count))
     }
 
     fn timing_atom(&mut self) -> Result<()> {
@@ -1378,12 +1381,13 @@ impl Parser<'_> {
                                 let operator = self.peek().to_owned();
                                 let nonblocking = operator == "<=";
                                 self.at += 1;
-                                let (timing, event_control) =
+                                let (timing, timing_control, repeat_count) =
                                     if matches!(self.peek(), "#" | "@" | "@*" | "repeat" | "##") {
-                                        let (tokens, event) = self.timing_range()?;
-                                        (Some(tokens), event)
+                                        let (tokens, control, repeat_count) =
+                                            self.timing_range()?;
+                                        (Some(tokens), control, repeat_count)
                                     } else {
-                                        (None, None)
+                                        (None, None, None)
                                     };
                                 let right = self.expression(0)?;
                                 self.expect(";")?;
@@ -1395,7 +1399,8 @@ impl Parser<'_> {
                                         right,
                                         nonblocking,
                                         timing,
-                                        event_control,
+                                        timing_control,
+                                        repeat_count,
                                     },
                                 )?);
                             } else {

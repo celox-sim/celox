@@ -296,6 +296,28 @@ other side-effecting expressions, selected targets with effectful right-hand
 sides, unpacked aggregate results, and selected nominal target types remain
 explicitly unsupported.
 
+Blocking intra-assignment controls (9.4.5, 10.4.1) update 12 rows: six of the
+seven `chapter-9/9.4.5--event_*` cases now pass in both state modes. The focused
+official run checked all 14 combinations. Several upstream filenames say
+`nonblocking`, but their source uses blocking `=` assignments; the actual
+`<= #10` case remains unsupported in both modes. Shared regressions check
+RHS sampling and destination conversion before suspension, LHS evaluation
+after suspension, delay/event/repeat controls, nonpositive and X/Z repeat
+counts, and concurrent automatic tasks. Nonblocking controls, implicit
+intra-assignment events, cycle controls, nonintegral targets, concatenations,
+and indirect writes such as object properties or dynamic-container elements
+remain explicitly unsupported.
+Repeat counts must be integral and at most 64 bits; wider counts are rejected
+rather than truncated. This is not a full-corpus measurement.
+
+Procedural net-write rejection (10.3 Table 10-1) restores the existing pass for
+`chapter-10/10.3--proc-assignment--bad.sv` in both modes and improves both modes
+of `chapter-14/14.3--clocking-block-signals-error.sv` from fail to pass. These
+are negative tests: assigning procedurally to their nets now causes the
+required rejection. The broader review recheck covered 1,478 pinned files in
+both modes (2,956 verdicts), excluding 172 source/path UVM-related cases.
+After the two reviewed expectation updates, all selected verdicts match.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
