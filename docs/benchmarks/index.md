@@ -28,6 +28,11 @@ The [Taxi / cocotb comparison](./taxi.md) runs daily at 03:17 UTC and publishes
 Celox/Verilator results for five fixed configurations (472 tests per sample).
 Its tab separates test-body, whole-process and HDL compilation time.
 
+The [RTLMeter comparison](./rtlmeter.md) measures cold source-to-finish latency for
+XuanTie-E902/E906 hello programs in separate 2-state and 4-state charts, with
+Verilator and the stable xezim release pinned by Nix. Unsupported modes and
+failed qualifications remain visible in its status tables.
+
 ## Reading results
 
 The regular Benchmark workflow runs daily at 01:47 UTC (10:47 JST) and can also
