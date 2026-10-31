@@ -1,10 +1,4 @@
 use super::*;
-use std::cell::Cell;
-
-thread_local! {
-    /// Calls made on this thread, which is the one running the generated code.
-    static CALLS: Cell<u64> = const { Cell::new(0) };
-}
 
 fn weighted(args: &[u64]) -> u64 {
     args.iter()
@@ -13,8 +7,9 @@ fn weighted(args: &[u64]) -> u64 {
         .fold(0, u64::wrapping_add)
 }
 
-/// Returns a weighted sum of its arguments after overwriting every register a
-/// System V callee may change.
+/// Counts the call in the word `a0` points to and returns a weighted sum of
+/// its arguments after overwriting every register a System V callee may
+/// change.
 #[allow(clippy::too_many_arguments)]
 extern "C" fn trashing_weighted_sum(
     a0: u64,
@@ -26,7 +21,8 @@ extern "C" fn trashing_weighted_sum(
     a6: u64,
     a7: u64,
 ) -> u64 {
-    CALLS.set(CALLS.get() + 1);
+    // SAFETY: callers pass the address of a call counter they own as `a0`.
+    unsafe { *(a0 as *mut u64) += 1 };
     let sum = weighted(&[a0, a1, a2, a3, a4, a5, a6, a7]);
     // SAFETY: the block writes only registers declared as clobbered.
     unsafe {
@@ -142,14 +138,17 @@ fn run(state_base: StateBaseStrategy, tick_loop: bool) {
     let event_sequence = 0u64;
     memory[STATE_HEADER_RUNTIME_EVENT_ADDR_OFFSET / 8] = (&event_sequence as *const u64) as u64;
     memory[STATE_HEADER_NATIVE_LOOP_REMAINING_OFFSET / 8] = 1;
-    let values = (0..LIVE as u64)
+    // The first argument of each call points to that call's counter.
+    let mut calls = [0u64; 2];
+    let mut values = (0..LIVE as u64)
         .map(|index| 0x0101_0101_0000_0000 * (index + 1) + index)
         .collect::<Vec<_>>();
+    values[0] = &raw mut calls[0] as u64;
+    values[ARGS] = &raw mut calls[1] as u64;
     memory[BASE / 8..BASE / 8 + LIVE].copy_from_slice(&values);
 
-    let calls = CALLS.get();
     assert_eq!(unsafe { (jit.fn_ptr)(memory.as_mut_ptr().cast()) }, 0);
-    assert_eq!(CALLS.get(), calls + 2);
+    assert_eq!(calls, [1, 1]);
     assert_eq!(
         &memory[BASE / 8 + LIVE..BASE / 8 + 2 * LIVE],
         &values[..],
@@ -173,10 +172,15 @@ fn extern_calls_preserve_live_values_with_a_segment_state_base() {
     run(StateBaseStrategy::Gs, true);
 }
 
+/// Word of the kernel test's state that counts the kernel's calls.
+const KERNEL_CALLS: usize = RESULT + 8;
+
 /// The implicit state argument and signed status must survive ABI register
 /// clobbers, spills across the call, and both state-base strategies.
 extern "sysv64" fn kernel_with_status(state: *mut u8) -> i64 {
-    let _ = trashing_weighted_sum(1, 2, 3, 4, 5, 6, 7, 8);
+    // SAFETY: the generated caller passes this test's complete state buffer.
+    let calls = unsafe { state.add(KERNEL_CALLS) } as u64;
+    let _ = trashing_weighted_sum(calls, 2, 3, 4, 5, 6, 7, 8);
     // SAFETY: the generated caller passes this test's complete state buffer.
     unsafe { *state.add(RESULT + 16).cast::<i64>() }
 }
@@ -224,9 +228,8 @@ fn native_kernel_calls_preserve_live_values_and_propagate_signed_status() {
                 memory[(RESULT + 16) / 8] = status as u64;
                 let values = (1..=LIVE as u64).collect::<Vec<_>>();
                 memory[BASE / 8..BASE / 8 + LIVE].copy_from_slice(&values);
-                let calls = CALLS.get();
                 assert_eq!(unsafe { (jit.fn_ptr)(memory.as_mut_ptr().cast()) }, status);
-                assert_eq!(CALLS.get() - calls, if status == 0 { 2 } else { 1 });
+                assert_eq!(memory[KERNEL_CALLS / 8], if status == 0 { 2 } else { 1 });
                 if status == 0 {
                     assert_eq!(&memory[BASE / 8 + LIVE..BASE / 8 + 2 * LIVE], &values);
                 } else {
