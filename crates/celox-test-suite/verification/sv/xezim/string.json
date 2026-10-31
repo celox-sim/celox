@@ -37,6 +37,17 @@
       "category": "Types",
       "detail": "",
       "expectation": "Simulation",
+      "name": "string::characters_are_signed_bytes",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
       "name": "string::comparisons",
       "phase": "execute",
       "status": "passed",

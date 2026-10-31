@@ -42,6 +42,7 @@ mod host {
     mod deferred_tests;
     mod distribution;
     mod file_io;
+    mod format;
     mod fread;
     mod scan;
     use super::*;
@@ -131,6 +132,7 @@ mod host {
         /// Set while handles live outside state memory, where no collection
         /// may run: between the polls of concurrent testbench processes.
         pub(crate) heap_safepoints_blocked: bool,
+        pub(crate) testbench_hardware_ranges: std::sync::OnceLock<Vec<std::ops::Range<usize>>>,
         pub(crate) process_heap_roots: Vec<celox_heap::Root>,
         pub(super) file_io: celox_runtime::file_io::FileIo,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
@@ -145,7 +147,9 @@ mod host {
         pub(crate) declaration_phase: bool,
         pub(crate) warnings: Vec<CompilationWarning>,
         pub(crate) components: crate::component::ComponentRuntime,
-        pub(crate) component_simulation: Option<celox_runtime::SimulationState<B>>,
+        // Temporarily detached while advancing the simulator. Keep the queue
+        // in place instead of copying its entire state at every clock edge.
+        pub(crate) component_simulation: Option<Box<celox_runtime::SimulationState<B>>>,
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
         pub(super) comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
@@ -185,6 +189,7 @@ mod host {
         derived_ticks: celox_runtime::DerivedTickPlans<B::Event>,
         /// Boxed, so that taking it out for a tick moves one pointer.
         derived_scratch: Option<Box<celox_runtime::DerivedTickScratch>>,
+        coincident_edges: celox_runtime::CoincidentEdgeCache<B::Event>,
         /// Per event ID, the generated units that run an edge of the event
         /// with its derived domains. Empty without them.
         derived_units: Arc<[Option<DerivedEdgeUnit>]>,
@@ -837,6 +842,37 @@ mod host {
                     out.extend_from_slice(&runtime_event_format_arg(arg, 'd', site.sizing, field));
                     arg_idx += 1;
                 }
+                // The analyzer rewrites each `%p` of a literal format; one of a
+                // format read at run time prints a string in quotes and any
+                // other value as `%0d` does (IEEE 1800-2023 21.2.1.6).
+                'p' | 'P' if site.sizing == DisplaySizing::Ieee => {
+                    let Some(arg) = args.get(arg_idx) else {
+                        arg_idx += 1;
+                        continue;
+                    };
+                    if arg.is_string {
+                        out.push(b'"');
+                        out.extend_from_slice(&runtime_event_format_arg(
+                            arg,
+                            's',
+                            site.sizing,
+                            FieldSpec::default(),
+                        ));
+                        out.push(b'"');
+                    } else {
+                        let field = FieldSpec {
+                            width: Some(0),
+                            ..FieldSpec::default()
+                        };
+                        out.extend_from_slice(&runtime_event_format_arg(
+                            arg,
+                            'd',
+                            site.sizing,
+                            field,
+                        ));
+                    }
+                    arg_idx += 1;
+                }
                 't' | 'T' | 'm' | 'M' => {
                     let text = if matches!(spec, 't' | 'T') {
                         ctx.tb_time.unwrap_or(0).to_string()
@@ -1232,6 +1268,7 @@ mod host {
                 warnings,
                 handle_slots: Default::default(),
                 heap_safepoints_blocked: false,
+                testbench_hardware_ranges: Default::default(),
                 process_heap_roots: Vec::new(),
                 file_io: Default::default(),
                 pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
@@ -1264,6 +1301,7 @@ mod host {
                 tick_timing_eval_comb_ns: 0,
                 derived_ticks,
                 derived_scratch: Some(Box::new(derived_scratch)),
+                coincident_edges: Default::default(),
                 derived_units,
                 derived_settle,
                 frozen: false,
@@ -1576,6 +1614,17 @@ mod host {
         ) -> Vec<RuntimeEvent> {
             let queue = Arc::clone(&self.pending_host_events);
             let mut pending = queue.lock().unwrap();
+            // Most clock boundaries produce no reports. Preserve queued host
+            // records, losses and deferred string snapshots, but avoid the
+            // collector and formatter when neither queue has any new work.
+            if pending.events.is_empty()
+                && pending.missed == 0
+                && pending.deferred.waiting.is_empty()
+                && self.runtime_event_read_seq.load(Ordering::Acquire)
+                    == self.runtime_event_write_seq()
+            {
+                return Vec::new();
+            }
             pending.extend(
                 self.collect_backend_runtime_events(),
                 self.backend.layout().runtime_event_capacity,
@@ -2390,7 +2439,7 @@ mod host {
                 celox_runtime::set_level,
             );
             if let Some(old) = moved {
-                if info.comb_read {
+                if self.clock_move_needs_settle(event, info.comb_read)? {
                     self.dirty = true;
                 }
                 if info.fires(old, active) {
@@ -2398,7 +2447,7 @@ mod host {
                 }
             }
             self.backend.set(info.signal, inactive.level());
-            if info.comb_read || observers {
+            if self.clock_move_needs_settle(event, info.comb_read)? || observers {
                 self.dirty = true;
             }
             Ok(())
@@ -2417,10 +2466,22 @@ mod host {
             }
             self.backend
                 .set(info.signal, info.active_edge().opposite().level());
-            if info.comb_read || !self.program.runtime_schema.comb_observers.is_empty() {
+            if self.clock_move_needs_settle(event, info.comb_read)?
+                || !self.program.runtime_schema.comb_observers.is_empty()
+            {
                 self.dirty = true;
             }
             Ok(())
+        }
+
+        /// Publish wiring immediately when the previous state was settled;
+        /// otherwise leave the entire pending evaluation to the normal path.
+        fn clock_move_needs_settle(
+            &mut self,
+            event: B::Event,
+            comb_read: bool,
+        ) -> Result<bool, RuntimeErrorCode> {
+            Ok(comb_read && (self.dirty || !self.backend.eval_clock_aliases(event)?))
         }
 
         /// Run the event's domain as its active edge does, with the signal
@@ -2518,7 +2579,9 @@ mod host {
                     // wait behind the kernel's stores (4 KiB aliasing),
                     // which made a period cost almost two domain runs.
                     self.backend.set(info.signal, edge.level());
-                    if info.comb_read || !self.program.runtime_schema.comb_observers.is_empty() {
+                    if self.clock_move_needs_settle(event, info.comb_read)?
+                        || !self.program.runtime_schema.comb_observers.is_empty()
+                    {
                         self.dirty = true;
                     }
                     return Ok(());
@@ -2535,7 +2598,7 @@ mod host {
                 else {
                     return Ok(());
                 };
-                if info.comb_read {
+                if self.clock_move_needs_settle(event, info.comb_read)? {
                     self.dirty = true;
                 }
                 if info.fires(old, edge) {
@@ -2555,7 +2618,7 @@ mod host {
                 && !self.finish_sites
                 && self.backend.runs_derived_edge_units()
             {
-                return self.edge_unit(info, edge, unit);
+                return self.edge_unit(event, info, edge, unit);
             }
             let plans = std::sync::Arc::clone(&self.derived_ticks);
             let plan = plans.get(event.id()).and_then(Option::as_ref);
@@ -2577,6 +2640,7 @@ mod host {
         #[inline(never)]
         fn edge_unit(
             &mut self,
+            event: B::Event,
             info: celox_runtime::EventEdge,
             edge: celox_runtime::Edge,
             unit: DerivedEdgeUnit,
@@ -2593,9 +2657,9 @@ mod host {
                 return Ok(());
             };
             let fires = info.fires(old, edge);
+            let comb_read = self.clock_move_needs_settle(event, info.comb_read)?;
             if let Some(flag) = self.derived_settle {
-                self.backend
-                    .set(flag, u8::from(self.dirty || info.comb_read));
+                self.backend.set(flag, u8::from(self.dirty || comb_read));
             }
             let index = match edge {
                 celox_runtime::Edge::Rising => unit.rising,
@@ -2609,7 +2673,7 @@ mod host {
             // in the plan walk.
             let outcome = if unit.gated || fires {
                 celox_runtime::EdgeOutcome::Settled
-            } else if info.comb_read {
+            } else if comb_read {
                 celox_runtime::EdgeOutcome::Moved
             } else {
                 celox_runtime::EdgeOutcome::Stored
@@ -2688,8 +2752,14 @@ mod host {
             let mut watch = std::mem::take(&mut self.host_watch);
             let dirty = self.dirty;
             let write = watched_write(&mut watch);
-            let result =
-                celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty, write);
+            let result = if moves.len() < 2 {
+                celox_runtime::run_edges(self, &plans, &edges, &mut scratch, moves, dirty, write)
+            } else {
+                let mut cache = std::mem::take(&mut self.coincident_edges);
+                let result = cache.run(self, &plans, &edges, &mut scratch, moves, dirty, write);
+                self.coincident_edges = cache;
+                result
+            };
             self.host_watch = watch;
             self.derived_scratch = Some(scratch);
             self.note_edge(result)
@@ -3779,6 +3849,85 @@ mod host {
             assert_eq!(sim.get(seen), BigUint::from(2u8));
         }
 
+        #[cfg(feature = "systemverilog")]
+        #[test_case::test_case(false; "two_state")]
+        #[test_case::test_case(true; "four_state")]
+        fn cached_coincident_edges_match_fresh_plans_after_level_and_gate_changes(
+            four_state: bool,
+        ) {
+            let source = "module Top(input logic aclk, bclk, cclk, en,
+                output logic [15:0] a, b, c, g);
+                wire gated = aclk & en;
+                always @(posedge aclk) a <= a + 1;
+                always @(posedge bclk) b <= a;
+                always @(posedge cclk) c <= b;
+                always @(posedge gated) g <= g + 1;
+            endmodule";
+            let build = || {
+                Simulator::from_sv_sources(vec![(source, std::path::Path::new("cache.sv"))], "Top")
+                    .four_state(four_state)
+                    .build()
+                    .unwrap()
+            };
+            let mut cached = build();
+            let mut fresh = build();
+            for sim in [&mut cached, &mut fresh] {
+                for name in ["a", "b", "c", "g", "aclk", "bclk", "cclk", "en"] {
+                    let signal = sim.signal(name);
+                    sim.set_four_state(signal, BigUint::from(0u8), BigUint::from(0u8));
+                }
+            }
+            let mut random = 13u32;
+            for step in 0..256 {
+                random = random.wrapping_mul(1664525).wrapping_add(1013904223);
+                for (sim, reuse) in [(&mut cached, true), (&mut fresh, false)] {
+                    let enable = sim.signal("en");
+                    sim.modify(|io| io.set(enable, (step % 3 == 0) as u8))
+                        .unwrap();
+                    if four_state && step % 7 == 0 {
+                        let clock = sim.signal("aclk");
+                        sim.set_four_state(clock, BigUint::from(0u8), BigUint::from(1u8));
+                    }
+                    if !reuse {
+                        sim.coincident_edges = Default::default();
+                    }
+                    let mut moves: Vec<_> = ["aclk", "bclk", "cclk"]
+                        .into_iter()
+                        .enumerate()
+                        .map(|(bit, name)| {
+                            (
+                                sim.event(name),
+                                if random & (1 << bit) == 0 {
+                                    celox_runtime::Edge::Falling
+                                } else {
+                                    celox_runtime::Edge::Rising
+                                },
+                            )
+                        })
+                        .collect();
+                    if step % 2 == 0 {
+                        moves.reverse();
+                    }
+                    // Duplicate signals and transitions to the existing level
+                    // must not change which domains belong to the cached plan.
+                    if step % 5 == 0 {
+                        moves.push((moves[0].0, moves[0].1.opposite()));
+                    }
+                    sim.edges(&moves).unwrap();
+                }
+                for name in ["a", "b", "c", "g", "aclk", "bclk", "cclk"] {
+                    let left = cached.signal(name);
+                    let right = fresh.signal(name);
+                    assert_eq!(
+                        cached.get_four_state(left),
+                        fresh.get_four_state(right),
+                        "step {step}: {name}"
+                    );
+                }
+                assert_eq!(cached.dirty, fresh.dirty);
+            }
+        }
+
         #[test]
         fn edges_leave_a_finished_simulation_unchanged() {
             let mut sim = Simulator::builder(GATED_COUNTER, "Top").build().unwrap();
@@ -3841,7 +3990,11 @@ mod host {
                         assign seen = {seen};
                     }}"
                 );
-                let mut sim = Simulator::builder(&source, "Top").build().unwrap();
+                // The interpreter requests the generic full-settle fallback.
+                // Native wiring-only cones are checked in native_clock_aliases.
+                let mut sim = Simulator::builder(&source, "Top")
+                    .build_interpreter()
+                    .unwrap();
                 let clk = sim.event("clk");
                 sim.posedge(clk).unwrap();
                 assert!(!sim.dirty);

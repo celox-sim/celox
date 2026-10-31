@@ -267,6 +267,21 @@ fn continuous_assignments(
                 tree,
                 dimensions,
             )?;
+            // A variable of unpacked structure type: drive its leaves.
+            if let LValue::Ident(name) = &lhs
+                && let Some(parts) = unpacked_structs::targets(name, dimensions)
+            {
+                unpacked_structs::check_assignment(name, assignment.right, tree, dimensions)?;
+                return Ok(CombProcess::procedural(
+                    CombProcessKind::ContinuousAssign,
+                    None,
+                    vec![Stmt::AssignConcat {
+                        parts,
+                        rhs,
+                        nonblocking: false,
+                    }],
+                ));
+            }
             let rhs = if matches!(
                 lhs,
                 LValue::Select {

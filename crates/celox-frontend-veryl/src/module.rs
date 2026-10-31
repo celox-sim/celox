@@ -2370,6 +2370,13 @@ pub(crate) fn visit_initial_statement(
         &mut veryl_analyzer::Context,
     ) -> Result<(), ParserError>,
 ) -> Result<(), ParserError> {
+    // Native testbenches retain runtime loops in initial declarations. This
+    // visitor only extracts memory initialization: do not execute their loop
+    // ranges or evaluate their conditions when there is nothing to extract.
+    // Keep unsupported statements reachable so existing diagnostics survive.
+    if !has_initial_memory_effect(stmt) {
+        return Ok(());
+    }
     match stmt {
         Statement::SystemFunctionCall(call) => {
             if let SystemFunctionKind::Readmemh(filename, output) = &call.kind {
@@ -2421,6 +2428,27 @@ pub(crate) fn visit_initial_statement(
         )),
         _ => Ok(()),
     }
+}
+
+fn has_initial_memory_effect(stmt: &Statement) -> bool {
+    let mut pending = vec![stmt];
+    while let Some(stmt) = pending.pop() {
+        match stmt {
+            Statement::SystemFunctionCall(call) => {
+                if matches!(call.kind, SystemFunctionKind::Readmemh(..)) {
+                    return true;
+                }
+            }
+            Statement::Unsupported(_) => return true,
+            Statement::If(stmt) => {
+                pending.extend(&stmt.true_side);
+                pending.extend(&stmt.false_side);
+            }
+            Statement::For(stmt) => pending.extend(&stmt.body),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// The writes performed by `$readmemh(filename, destination)`.
@@ -2876,6 +2904,38 @@ mod tests {
                 _ => None,
             })
             .expect("Top module not found")
+    }
+
+    #[test]
+    fn memory_extraction_does_not_execute_testbench_only_loops() {
+        let module = parse_top_module(
+            "#[test(Top)] module Top { var x: u32; initial {
+                for i in 0..32 { if i <: 16 { x = i; } }
+                $assert(x == 15);
+            } }",
+        );
+        let mut context = Context::default();
+        context.variables = module.variables.clone();
+        let before: Vec<_> = context
+            .variables
+            .iter()
+            .map(|(id, var)| (*id, var.get_value(&[]).cloned()))
+            .collect();
+        for declaration in &module.declarations {
+            if let Declaration::Initial(initial) = declaration {
+                for stmt in &initial.statements {
+                    super::visit_initial_statement(stmt, &mut context, &mut |_, _, _| {
+                        panic!("no memory initialization in this testbench")
+                    })
+                    .unwrap();
+                }
+            }
+        }
+        // Walking a runtime loop used to overwrite its induction variable
+        // during memory extraction, even though it contained no readmemh.
+        for (id, value) in before {
+            assert_eq!(context.variables[&id].get_value(&[]), value.as_ref());
+        }
     }
 
     #[test]

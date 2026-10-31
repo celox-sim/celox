@@ -29,6 +29,27 @@ pub(in crate::ast) fn native_class(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<String> {
+    let id = ungroup(id, native);
+    if let ExprKind::Call { expression, .. } = &native.expression(id).kind
+        && let ExprKind::Member {
+            expression: base,
+            separator,
+            name,
+        } = &native.expression(*expression).kind
+        && separator == "::"
+        && name.spelling == "self"
+        && super::super::processes::scope(tree, *base, native, dimensions)
+    {
+        return Some(super::super::processes::CLASS.to_owned());
+    }
+    // A class handle member of an unpacked structure variable.
+    if let Some(name) = unpacked_structs::native_member(ungroup(id, native), native, dimensions) {
+        return dimensions.get(&name)?.class.clone();
+    }
+    // A class handle member of a container element of unpacked structure type.
+    if let Ok(Some((ty, _))) = containers::element_member(id, native, tree, dimensions) {
+        return ty.class().map(str::to_owned);
+    }
     let expression = native.expression(ungroup(id, native));
     if let ExprKind::Select {
         expression,
@@ -60,6 +81,33 @@ pub(in crate::ast) fn native_class(
         if name == "super" {
             return super_class(tree, dimensions);
         }
+    }
+    // The receiver of `h.p` is resolved once for both kinds of property, so
+    // a chain `a.b.c` takes one walk.
+    if let ExprKind::Member {
+        expression: receiver,
+        separator,
+        name,
+    } = &expression.kind
+        && separator == "."
+        // Otherwise a member of a property of unpacked structure type, found
+        // as a property below.
+        && let Some(owner) = native_class(tree, *receiver, native, dimensions)
+    {
+        let member = instances::normalize_identifier(&name.spelling);
+        let receiver = (!is_super(*receiver, native)).then_some(*receiver);
+        if let Some((property, _)) =
+            property_in(tree, dimensions, &owner, &member, receiver).ok()?
+        {
+            return property.r#type.class().map(str::to_owned);
+        }
+        return class(tree, dimensions, &owner)
+            .ok()?
+            .static_property(&member)
+            .and_then(|property| property.r#type.class().map(str::to_owned));
+    }
+    if let Some(class) = static_property_class(tree, id, native, dimensions).ok()? {
+        return Some(class);
     }
     let (property, _) = property(tree, id, native, dimensions).ok()??;
     property.r#type.class().map(str::to_owned)
@@ -123,7 +171,7 @@ fn is_super(id: ExprId, native: &Declarations) -> bool {
 /// The class that native expression `id` names, as the scope of `C::name`:
 /// a class, or the specialization that a parameter value assignment or the
 /// defaults of a parameterized class make (IEEE 1800-2023 8.25.1).
-fn named_class(
+pub(in crate::ast) fn named_class(
     tree: &AnalysisContext<'_>,
     id: ExprId,
     native: &Declarations,
@@ -139,11 +187,20 @@ fn named_class(
             let ExprKind::Name(package) = &native.expression(*expression).kind else {
                 return Ok(None);
             };
-            let class = scope::qualified_name(
-                &tree.state,
-                &instances::normalize_identifier(&package.spelling),
-                &instances::normalize_identifier(&name.spelling),
-            );
+            let scope_name = instances::normalize_identifier(&package.spelling);
+            let member_name = instances::normalize_identifier(&name.spelling);
+            if let Some(scope_class) = dimensions
+                .type_aliases
+                .get(&scope_name)
+                .and_then(|ty| ty.class().map(str::to_owned))
+                .or_else(|| classes::resolve(tree, &scope_name))
+                && let Some(ty) =
+                    classes::specializations::member_type(tree, &scope_class, &member_name)
+                && let Some(class) = ty.class()
+            {
+                return Ok(Some(class.to_owned()));
+            }
+            let class = scope::qualified_name(&tree.state, &scope_name, &member_name);
             // A typedef of the package may name a class or a specialization.
             if let Some(aliased) = dimensions
                 .type_aliases
@@ -160,17 +217,36 @@ fn named_class(
             return Ok(classes::resolve(tree, &class)
                 .filter(|class| classes::handle_type(tree, class).is_some()));
         }
-        ExprKind::Name(name) => (name, None),
+        ExprKind::Name(name) => (instances::normalize_identifier(&name.spelling), None),
         ExprKind::Parameterized {
             expression,
             arguments,
         } => match &native.expression(*expression).kind {
-            ExprKind::Name(name) => (name, Some(&arguments[..])),
+            ExprKind::Name(name) => (
+                instances::normalize_identifier(&name.spelling),
+                Some(&arguments[..]),
+            ),
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "::" => {
+                let ExprKind::Name(package) = &native.expression(*expression).kind else {
+                    return Ok(None);
+                };
+                (
+                    format!(
+                        "{}::{}",
+                        instances::normalize_identifier(&package.spelling),
+                        instances::normalize_identifier(&name.spelling)
+                    ),
+                    Some(&arguments[..]),
+                )
+            }
             _ => return Ok(None),
         },
         _ => return Ok(None),
     };
-    let name = instances::normalize_identifier(&name.spelling);
     if dimensions.get(&name).is_some() {
         return Ok(None);
     }
@@ -266,6 +342,9 @@ pub(in crate::ast) fn static_property(
     let Some(class_name) = class_name else {
         return Ok(None);
     };
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
     let class = class(tree, dimensions, &class_name)?;
     let Some(property) = class.static_property(&instances::normalize_identifier(&name.spelling))
     else {
@@ -320,37 +399,39 @@ pub(in crate::ast) fn property(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<(classes::Property, Option<ExprId>)>> {
-    let (class_name, name, receiver) = match &native.expression(ungroup(id, native)).kind {
-        ExprKind::Member {
-            expression,
-            separator,
-            name,
-        } if separator == "." => match native_class(tree, *expression, native, dimensions) {
-            Some(class) => (
-                class,
-                name,
-                (!is_super(*expression, native)).then_some(*expression),
-            ),
-            None => return Ok(None),
-        },
-        ExprKind::Name(name) => {
-            if dimensions
-                .get(&instances::normalize_identifier(&name.spelling))
-                .is_some()
-            {
-                return Ok(None);
-            }
-            match scope_class(dimensions) {
-                Some(class) => (class, name, None),
-                None => return Ok(None),
-            }
-        }
-        _ => return Ok(None),
+    let Some((class, name, receiver)) = member_chain(tree, id, native, dimensions)? else {
+        return Ok(None);
     };
-    let class = class(tree, dimensions, &class_name)?;
-    let name = instances::normalize_identifier(&name.spelling);
-    let Some(property) = class.property(&name) else {
-        if let Some(property) = class.static_property(&name) {
+    property_of(tree, dimensions, &class, &name, receiver)
+}
+
+/// The instance property `name` of class `class_name`, read through
+/// `receiver` as [`property`] returns it.
+fn property_in(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    class_name: &str,
+    name: &str,
+    receiver: Option<ExprId>,
+) -> Converted<Option<(classes::Property, Option<ExprId>)>> {
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
+    let class = class(tree, dimensions, class_name)?;
+    property_of(tree, dimensions, &class, name, receiver)
+}
+
+/// The instance property `name` of `class`, read through `receiver` as
+/// [`property`] returns it.
+fn property_of(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    class: &Class,
+    name: &str,
+    receiver: Option<ExprId>,
+) -> Converted<Option<(classes::Property, Option<ExprId>)>> {
+    let Some(property) = class.property(name) else {
+        if let Some(property) = class.static_property(name) {
             check_access(
                 tree,
                 dimensions,
@@ -377,6 +458,122 @@ pub(in crate::ast) fn property(
         )));
     }
     Ok(Some((property.clone(), receiver)))
+}
+
+/// The property of unpacked structure type, or member of one, that native
+/// expression `id` names, with the receiver as for [`property`].
+pub(in crate::ast) fn aggregate_property(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(classes::AggregateProperty, Rc<Class>, Option<ExprId>)>> {
+    let Some((class, name, receiver)) = member_chain(tree, id, native, dimensions)? else {
+        return Ok(None);
+    };
+    let Some(aggregate) = class.aggregate(&name).cloned() else {
+        return Ok(None);
+    };
+    check_access(
+        tree,
+        dimensions,
+        &aggregate.owner,
+        &aggregate.name,
+        aggregate.local,
+        aggregate.protected,
+    )?;
+    if receiver.is_none() && dimensions.get(THIS).is_none() {
+        return Err(unsupported(format!(
+            "non-static property `{}` in a static method",
+            aggregate.name
+        )));
+    }
+    Ok(Some((aggregate, class, receiver)))
+}
+
+/// The flat value of property `aggregate` of `class` in the object
+/// `handle`: the concatenation of its leaf properties.
+pub(in crate::ast) fn aggregate_load(
+    aggregate: &classes::AggregateProperty,
+    class: &Class,
+    handle: &Expr,
+) -> Converted<Expr> {
+    let leaves = aggregate
+        .r#type
+        .unpacked_struct()
+        .expect("an unpacked structure property")
+        .leaves();
+    // Each member is read through the receiver, so it must not change: a
+    // subroutine call, pop or `$urandom` would be made once per member.
+    if leaves.len() > 1 && inlining::effectful(handle) {
+        return Err(unsupported(
+            "whole unpacked structure property read through a receiver with a side effect",
+        ));
+    }
+    Ok(Expr::Concat(
+        leaves
+            .iter()
+            .map(|leaf| {
+                let property = class
+                    .property(&leaf.name(&aggregate.name))
+                    .ok_or_else(|| unsupported("unpacked structure property member"))?;
+                Ok(load(property, handle.clone()))
+            })
+            .collect::<Converted<Vec<_>>>()?,
+    ))
+}
+
+/// The class, property path and receiver of `h.p`, `h.p.m`, or an
+/// unqualified `p`/`p.m` inside a method of its class. A path names a
+/// member of a property of unpacked structure type.
+fn member_chain(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(Rc<Class>, String, Option<ExprId>)>> {
+    let mut names = Vec::new();
+    let mut current = ungroup(id, native);
+    let (class_name, receiver) = loop {
+        match &native.expression(current).kind {
+            ExprKind::Member {
+                expression,
+                separator,
+                name,
+            } if separator == "." => {
+                names.push(instances::normalize_identifier(&name.spelling));
+                if let Some(class) = native_class(tree, *expression, native, dimensions) {
+                    break (
+                        class,
+                        (!is_super(*expression, native)).then_some(*expression),
+                    );
+                }
+                current = ungroup(*expression, native);
+            }
+            ExprKind::Name(name) => {
+                let name = instances::normalize_identifier(&name.spelling);
+                if dimensions.get(&name).is_some() {
+                    return Ok(None);
+                }
+                names.push(name);
+                match scope_class(dimensions) {
+                    Some(class) => break (class, None),
+                    None => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        }
+    };
+    names.reverse();
+    // A process handle has no properties (IEEE 1800-2023 9.7).
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
+    Ok(Some((
+        class(tree, dimensions, &class_name)?,
+        names.join("."),
+        receiver,
+    )))
 }
 
 /// The handle of the object that `receiver` of [`property`] refers to.
@@ -410,6 +607,9 @@ pub(in crate::ast) fn unqualified_property(
     let Some(class_name) = scope_class(dimensions) else {
         return Ok(None);
     };
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
     let class = class(tree, dimensions, &class_name)?;
     let Some(property) = class.property(name) else {
         if let Some(property) = class.static_property(name) {
@@ -453,7 +653,7 @@ pub(in crate::ast) enum Receiver {
 
 /// The method that native callee expression `id` names: through a handle
 /// (`h.m`), `this.m`, `super.m`, `C::m`, or unqualified inside a method.
-/// Returns the method's subroutine, its number of formals, and the object
+/// Returns the method's subroutine, the names of its formals, and the object
 /// it is called on. A virtual method is called through its dispatcher,
 /// except as `super.m`, which names the base's implementation (IEEE
 /// 1800-2023 8.15, 8.20).
@@ -462,7 +662,7 @@ pub(in crate::ast) fn method(
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
-) -> Converted<Option<(String, usize, Receiver)>> {
+) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
     let mut through_super = false;
     let (class_name, method_name, receiver) = match &native.expression(ungroup(id, native)).kind {
         ExprKind::Member {
@@ -497,6 +697,9 @@ pub(in crate::ast) fn method(
         }
         _ => return Ok(None),
     };
+    if class_name == super::super::processes::CLASS {
+        return Ok(None);
+    }
     let class = class(tree, dimensions, &class_name)?;
     let method_name = instances::normalize_identifier(&method_name.spelling);
     if method_name == "new" {
@@ -521,7 +724,7 @@ pub(in crate::ast) fn method(
         }
         return Ok(Some((
             Class::subroutine_name(&class_name, &method_name),
-            1,
+            vec![None],
             receiver,
         )));
     }
@@ -561,7 +764,7 @@ pub(in crate::ast) fn method(
             receiver => receiver,
         }
     };
-    let formals = method.formals.len();
+    let formals = method.formals.clone();
     let subroutine = if method.is_virtual && !through_super && receiver != Receiver::Static {
         Class::dispatcher_name(&method.owner, &method.name)
     } else {
@@ -602,6 +805,12 @@ fn derives_from(
     class_name: &str,
     ancestor: &str,
 ) -> Converted<bool> {
+    if class_name == ancestor {
+        return Ok(true);
+    }
+    if class_name == super::super::processes::CLASS || ancestor == super::super::processes::CLASS {
+        return Ok(false);
+    }
     Ok(class(tree, dimensions, class_name)?.derives_from(
         tree,
         ancestor,
@@ -689,6 +898,10 @@ pub(in crate::ast) fn constructor(
     // of its class; handles are copied, not the objects they refer to (IEEE
     // 1800-2023 8.12).
     if let ExprKind::Copy(source) = &native.expression(ungroup(id, native)).kind {
+        if class_name == super::super::processes::CLASS {
+            return Err(unsupported("constructing a process with new"));
+        }
+
         let source_class = match native_class(tree, *source, native, dimensions) {
             Some(class) => Some(class),
             None => static_property_class(tree, *source, native, dimensions)?,
@@ -739,6 +952,9 @@ pub(in crate::ast) fn constructor(
         }
         _ => return Ok(None),
     };
+    if class_name == super::super::processes::CLASS {
+        return Err(unsupported("constructing a process with new"));
+    }
     let class = class(tree, dimensions, &class_name)?;
     if let Some(method) = class.method("new") {
         check_access(
@@ -813,8 +1029,13 @@ pub(super) fn random_selection(
                 if property.constant {
                     return Err(unsupported("randomize argument is a const property"));
                 }
+                // The constraint solver writes plain property bytes, not
+                // the planes of a 4-state value (IEEE 1800-2023 18.4).
+                if property.field.four_state {
+                    return Err(unsupported("randomization of a 4-state class property"));
+                }
                 if property.field.handle.is_some()
-                    || (property.r#type.is_enum && property.r#type.enum_values.is_none())
+                    || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
                     || (property.randc && property.cyclic_domain_size().is_none())
                 {
                     return Err(unsupported(
@@ -1205,4 +1426,39 @@ pub(super) fn randomize_with(
         args: [vec![Some(handle), Some(selection)], input_values].concat(),
         arg_order: Vec::new(),
     })
+}
+
+/// The declared result type of the method that native callee expression
+/// `id` names (`h.m`, `C::m`, or unqualified inside a method), when known.
+pub(in crate::ast) fn method_result(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Type>> {
+    let (class_name, name) = match &native.expression(ungroup(id, native)).kind {
+        ExprKind::Member {
+            expression,
+            separator,
+            name,
+        } => match separator.as_str() {
+            "." => (native_class(tree, *expression, native, dimensions), name),
+            "::" => (named_class(tree, *expression, native, dimensions)?, name),
+            _ => return Ok(None),
+        },
+        ExprKind::Name(name)
+            if dimensions
+                .get(&instances::normalize_identifier(&name.spelling))
+                .is_none() =>
+        {
+            (scope_class(dimensions), name)
+        }
+        _ => return Ok(None),
+    };
+    let Some(class_name) = class_name.filter(|name| name != super::super::processes::CLASS) else {
+        return Ok(None);
+    };
+    Ok(class(tree, dimensions, &class_name)?
+        .method(&instances::normalize_identifier(&name.spelling))
+        .and_then(|method| method.result.clone().flatten()))
 }

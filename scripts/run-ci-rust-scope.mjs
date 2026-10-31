@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { intersectTestFilters } from "./ci-backend-tests.mjs";
-import { runtimeCasesFeature } from "./run-vtest.mjs";
+import { runtimeCasesFeature, testProfile } from "./run-vtest.mjs";
 import { clearCurrentReport, saveCurrentReport } from "./ci-rust-reports.mjs";
 
 // Keep target flags local to their packages. Cargo applies --test to every -p.
@@ -17,7 +17,7 @@ export function cargoCommands(mode, builds, filter, backendFilter = "all()") {
     if (!packages.length || (mode === "test" && !filter))
       throw new Error("Empty package or test selection");
     const args = mode === "test"
-      ? ["nextest", "run", "--locked", "--profile", "ci", "--no-tests=pass"]
+      ? ["nextest", "run", "--locked", "--profile", "ci", "--cargo-profile", testProfile, "--no-tests=pass"]
       : ["clippy", "--locked"];
     for (const name of packages) args.push("-p", name);
     const enabled = mode === "test" && packages.includes("celox")
@@ -37,7 +37,7 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   let reportIndex = 0;
   for (const args of cargoCommands(
     process.argv[2], JSON.parse(process.env.BUILDS), process.env.FILTER,
-    process.env.RUST_BACKEND_FILTER || "all()",
+    process.env.CELOX_BACKEND_FILTER || "all()",
   )) {
     if (process.argv[2] === "test"
       && args.some((arg, index) => arg === "celox" && args[index - 1] === "-p")

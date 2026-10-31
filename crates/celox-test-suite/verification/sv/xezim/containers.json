@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "containers::methods_of_nested_container_elements at 1035:3: expect_output: expected [50, 32, 50, 32, 49, 32, 48, 10, 49, 32, 50, 10, 50, 32, 52, 32, 53, 32, 48, 10, 50, 32, 48, 32, 51, 10], got [50, 32, 50, 32, 49, 32, 48, 10, 49, 32, 50, 10, 50, 32, 52, 32, 53, 32, 48, 10, 50, 32, 48, 32, 48, 10]",
+      "expectation": "Simulation",
+      "name": "containers::methods_of_nested_container_elements",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::nested_containers_and_class_keys at 1007:3: expect_output: expected [49, 32, 48, 32, 49, 10, 50, 32, 49, 32, 50, 32, 49, 10, 50, 32, 48, 10, 102, 105, 114, 115, 116, 32, 97, 10, 107, 101, 121, 32, 97, 10, 107, 101, 121, 32, 98, 10, 48, 32, 55, 10], got [49, 32, 48, 32, 49, 10, 50, 32, 49, 32, 50, 32, 49, 10, 50, 32, 48, 10, 107, 101, 121, 32, 97, 10, 107, 101, 121, 32, 98, 10, 48, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "containers::nested_containers_and_class_keys",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::nested_updates_evaluate_indices_once at 1059:3: expect_output: expected [50, 32, 49, 32, 55, 32, 56, 32, 50, 10, 50, 32, 51, 10], got [50, 32, 48, 32, 48, 32, 48, 32, 54, 10, 49, 32, 50, 10]",
+      "expectation": "Simulation",
+      "name": "containers::nested_updates_evaluate_indices_once",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

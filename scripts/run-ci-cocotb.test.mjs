@@ -20,7 +20,7 @@ test("cocotb preserves build resolution and selects only its ignored tests", () 
   for (const full of ["true", "", undefined]) {
     const [args] = cocotbCommands(full, null);
     assert.ok(args.includes("--workspace"));
-    assert.ok(!args.includes("--cargo-profile"));
+    assert.deepEqual(args.slice(args.indexOf("--cargo-profile"), args.indexOf("--cargo-profile") + 2), ["--cargo-profile", "vtest"]);
     assert.ok(!args.includes("--no-tests=pass"));
     assert.deepEqual(args.slice(-4), ["--run-ignored", "only", "-E", cocotbFilter]);
   }

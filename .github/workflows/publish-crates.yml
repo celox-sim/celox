@@ -123,7 +123,7 @@ jobs:
           sparse-checkout: scripts
           persist-credentials: false
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - name: Validate every public crate package
         run: |
@@ -170,7 +170,7 @@ jobs:
           sparse-checkout: scripts
           persist-credentials: false
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - name: Authenticate to crates.io
         id: crates_io_auth

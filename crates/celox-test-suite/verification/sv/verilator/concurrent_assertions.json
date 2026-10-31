@@ -1,0 +1,50 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_concurrent_regions.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_concurrent_regions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
+        "upstream": []
+      },
+      "name": "concurrent_assertions::disable_iff_after_nba",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_concurrent_regions.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_concurrent_regions",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
+        "upstream": []
+      },
+      "name": "concurrent_assertions::sampled_predicate_live_action",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

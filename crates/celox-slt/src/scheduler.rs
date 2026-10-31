@@ -2423,6 +2423,14 @@ pub struct ScheduleResult<Addr> {
     /// The partitions of a partitioned settle, in schedule order; empty when
     /// the schedule runs as one pass.
     pub partitions: Vec<SettlePartition<Addr>>,
+    /// The targets of the paths that keep state from one settle to the next:
+    /// paths that read a previous value or loop, and guarded processes.
+    /// Every other path computes what it stores from its inputs alone (a
+    /// bit-level order may still load a range before the bits it needs are
+    /// stored, and then discards the stale bits). `None` when that is not
+    /// known per path: capture events, and partitioned settles, whose flags
+    /// keep what changed since the last one.
+    pub stateful_targets: Option<Vec<VarAtomBase<Addr>>>,
 }
 
 /// Request to split a combinational schedule into partitions that run only
@@ -4661,6 +4669,33 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         ff.as_deref().map(|lowering| lowering.summaries()),
     )
     .map_err(ClockSortError::Scheduler)?;
+    let component = &prepared.component_by_path;
+    let looping: HashSet<usize> = prepared
+        .adj
+        .iter()
+        .enumerate()
+        .flat_map(|(v, successors)| {
+            successors
+                .iter()
+                .filter(move |&&u| component[u] == component[v])
+                .flat_map(move |&u| [u, v])
+        })
+        .collect();
+    let stateful_targets = prepared
+        .input
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| match &path.target {
+            LogicPathTarget::CombCaptureEvent { .. } => Some(None),
+            LogicPathTarget::Process { target, .. } => Some(Some(*target)),
+            LogicPathTarget::Var(target)
+                if !path.previous_sources.is_empty() || looping.contains(&index) =>
+            {
+                Some(Some(*target))
+            }
+            LogicPathTarget::Var(_) => None,
+        })
+        .collect::<Option<Vec<_>>>();
     let direct_ff_writes = prepared
         .direct_ff_writes_by_action
         .iter()
@@ -4741,6 +4776,8 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
             .finish(&mut lowering.builder, &prepared.direct_ff_writes_by_action)
             .map_err(ClockSortError::Lowering)?;
     }
+    // Partition flags carry what changed from one settle to the next.
+    let stateful_targets = stateful_targets.filter(|_| plan.is_none());
     Ok(ScheduleResult {
         execution_units: lowering.finish(),
         runtime_errors,
@@ -4757,6 +4794,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
                     .collect()
             })
             .unwrap_or_default(),
+        stateful_targets,
     })
 }
 

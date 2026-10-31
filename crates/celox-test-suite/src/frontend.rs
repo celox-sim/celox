@@ -108,6 +108,7 @@ pub(crate) fn stage(
         top = PARAMETERS_TOP.to_string();
     }
     if let Some(case) = script.filter(|case| case.expectation != Expectation::CompilationError) {
+        crate::script::sv::validate_final_signal_reads(case, &prepared.sources)?;
         let info = prepared
             .info
             .as_ref()
@@ -125,4 +126,146 @@ pub(crate) fn stage(
         testbench,
         edges: prepared.edges,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Emitted(Vec<String>);
+    impl Frontend for Emitted {
+        fn source_extension(&self) -> &'static str {
+            "sv"
+        }
+        fn prepare(&self, _: &Design) -> Result<PreparedDesign> {
+            Ok(PreparedDesign {
+                sources: self.0.clone(),
+                top: "Top".into(),
+                native_testbench: false,
+                edges: Default::default(),
+                info: Some(DesignInfo {
+                    top: "Top".into(),
+                    inputs: vec![],
+                    outputs: vec!["value".into()],
+                    edges: Default::default(),
+                    max_width: 32,
+                    parameters: vec![],
+                    arrays: Default::default(),
+                }),
+            })
+        }
+    }
+
+    fn staged(sources: Vec<String>, script: &str) -> Result<Staged> {
+        // The original source has no final: validation must inspect emitted SV.
+        let text = format!(
+            r##"(group timing (category sequential))
+            (case finals (source "top.sv" #"module Top; endmodule"#) (top Top) {script})"##
+        );
+        let case = crate::load_group("timing.vtest", &text, crate::no_std_library)[0];
+        let directory = tempfile::tempdir()?;
+        stage(
+            &Emitted(sources),
+            &case.design(),
+            directory.path(),
+            Some(case.script()),
+            &[],
+        )
+    }
+
+    #[test]
+    fn post_finish_signal_reads_reject_potential_final_effects() {
+        for body in [
+            "value=1;",
+            "begin value=1; end",
+            "write_value();",
+            "$display(\"%0d\", write_value());",
+            "$display(\"%0d\", write_value);",
+            "$display(\"%0d\", value++);",
+            "$display(\"%0d\", (value=1));",
+            "$display(\"%0d\", $urandom(value));",
+        ] {
+            let source = format!(
+                "module Top(output int value); \
+                 function int write_value(); value=1; return 1; endfunction \
+                 final {body} endmodule"
+            );
+            for check in [
+                "(assert_eq value 1)",
+                "(assert_eq (+ (get value) 0) 1)",
+                "(assert_eq (+ 1 0) (get value))",
+                "(assert (== (get value) 1))",
+            ] {
+                let error = staged(vec![source.clone()], &format!("(run_to_finish) {check}"))
+                    .err()
+                    .expect("potential final writes must not race a signal check");
+                assert!(
+                    error.to_string().contains("final ordering is unspecified"),
+                    "{error}"
+                );
+            }
+            staged(vec![source], "(run_to_finish) (expect_output \"done\")").unwrap();
+        }
+        let sources = vec![
+            "`define CLEANUP final begin value=1; end\n".into(),
+            "module Top(output int value); `CLEANUP endmodule".into(),
+        ];
+        assert!(staged(sources, "(run_to_finish) (assert_eq value 1)").is_err());
+        // Writes in another module can affect an output through hierarchy or
+        // combinational dependencies; do not try matching assignment names.
+        assert!(
+            staged(
+                vec![
+                    "module Top(output int value); Child c(value); endmodule\n\
+             module Child(output int v); final v=1; endmodule"
+                        .into()
+                ],
+                "(run_to_finish) (assert_eq value 1)"
+            )
+            .is_err()
+        );
+        let escaped = r#"module Top(output int value);
+            function void \$display (input string text); value=1; endfunction
+            final \$display ("done"); endmodule"#;
+        assert!(staged(vec![escaped.into()], "(run_to_finish) (assert_eq value 1)").is_err());
+    }
+
+    #[test]
+    fn post_finish_checks_keep_safe_final_output_and_captured_values() {
+        for source in [
+            "module Top(output int value); endmodule",
+            "module Top(output int value); final $write(\"final\"); endmodule",
+            "module Top(output int value); final begin $display(\"at %0d\", $time); $write(\"done\"); end endmodule",
+            "module Top(output int value); final $display(\"%0d %0f\", $time(), $realtime()); endmodule",
+            "module Top(output int value); initial assert final (1); endmodule",
+            "module Top(output int value);\n`ifdef DISABLED\nfinal value=1;\n`endif\nendmodule",
+        ] {
+            staged(vec![source.into()], "(run_to_finish) (assert_eq value 0)")
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
+        }
+        let source = "module Top(output int value); final value=1; endmodule";
+        for script in [
+            "(run_to_finish) (assert (== 1 1))",
+            "(run_until 0) (let saved (get value)) (run_to_finish) (assert_eq (+ saved 0) 0)",
+            "(run_until 0) (assert_eq value 0) (run_to_finish) (expect_output \"\")",
+        ] {
+            staged(vec![source.into()], script).unwrap();
+        }
+    }
+
+    #[test]
+    fn shared_sv_post_finish_checks_are_independent_of_final_order() {
+        for case in
+            crate::sv::cases().filter(|case| case.expectation == crate::Expectation::Simulation)
+        {
+            let sources = case
+                .design()
+                .sources
+                .into_iter()
+                .map(|source| source.text)
+                .collect::<Vec<_>>();
+            crate::script::sv::validate_final_signal_reads(case.script(), &sources)
+                .unwrap_or_else(|error| panic!("{}: {error}", case.name));
+        }
+    }
 }

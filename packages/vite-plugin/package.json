@@ -41,7 +41,7 @@
     "@celox-sim/celox": "workspace:*"
   },
   "devDependencies": {
-    "@types/node": "^25.3.2",
+    "@types/node": "^26.0.0",
     "typescript": "^7.0.0",
     "vite": "^8.0.0"
   }

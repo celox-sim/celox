@@ -35,6 +35,29 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator 5.052 reads a string character, s[i] and s.getc(i), as an unsigned 8-bit value: a character code of 255 converts to int 255 and compares greater than 0. IEEE 1800-2023 6.16 makes a character a byte and 6.11 makes byte signed, so the code reads as -1; xezim 0.11.3 agrees with the expected values and Icarus 13.0 also reads it as 255.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_string_character_signedness.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_string_character_signedness",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 reads a string character, s[i] and s.getc(i), as an unsigned 8-bit value: a character code of 255 converts to int 255 and compares greater than 0. IEEE 1800-2023 6.16 makes a character a byte and 6.11 makes byte signed, so the code reads as -1; xezim 0.11.3 agrees with the expected values and Icarus 13.0 also reads it as 255.",
+        "upstream": []
+      },
+      "name": "string::characters_are_signed_bytes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "string::comparisons",

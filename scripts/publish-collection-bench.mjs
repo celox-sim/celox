@@ -48,7 +48,7 @@ export function metrics(report) {
       testbench: result.testbench, testbenchSha256: result.testbenchSha256, workUnits: result.workUnits,
       stateModel: result.stateModel, optimization: result.optimization, threads: result.threads };
     const id = createHash("sha256").update(JSON.stringify(contract)).digest("hex").slice(0, 12);
-    return [["compilation", "compileNs"], ["execution", "executeNs"], ["total", "processNs"]].map(([phase, field]) => {
+    return [["total", "processNs"]].map(([phase, field]) => {
       const values = result.samples.map(s => s[field]).sort((a, b) => a - b);
       return { name: `collection-${result.runner}/collection_${result.circuit}_${id}_${report.host.arch}_${phase}`,
         unit: "ns", value: values[1], range: `${values[0]}–${values[2]}`,

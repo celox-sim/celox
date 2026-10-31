@@ -1016,6 +1016,7 @@ mod tests {
                 is_2state: false,
                 string: false,
                 pattern_type: None,
+                enum_domain: None,
             },
         );
         for declaration in &tree.declarations().data_declarations {

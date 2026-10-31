@@ -490,6 +490,88 @@ fn test_selected_testbench_destinations_update_only_selected_targets() {
 }
 
 #[test]
+fn test_destination_index_reads_settled_hardware() {
+    let code = r#"
+        module Dut (drive: input logic<2>, index: output logic<2>) {
+            assign index = drive + 1;
+        }
+        #[test(t)]
+        module t {
+            var drive: logic<2>;
+            var index: logic<2>;
+            var values: logic<8>[4];
+            inst dut: Dut (drive, index);
+            initial {
+                for i in 0..4 {
+                    values[i] = 0;
+                }
+                drive = 0;
+                values[index] = 8'h11;
+                drive = 2;
+                values[index] = 8'hff;
+                $assert(values[1] == 8'h11);
+                $assert(values[2] == 8'h00);
+                $assert(values[3] == 8'hff);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass,
+    );
+}
+
+#[test]
+fn test_out_of_range_testbench_destinations_write_nothing() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var guard_lo: logic<32>;
+            var bits: logic<8>;
+            var part: logic<8>;
+            var values: logic<8>[4];
+            var guard_hi: logic<32>;
+            var index: logic<32>;
+            initial {
+                guard_lo = 0;
+                bits = 0;
+                part = 0;
+                values[0] = 0;
+                values[1] = 0;
+                values[2] = 0;
+                values[3] = 0;
+                guard_hi = 0;
+                index = 12;
+                bits[index] = 1;
+                index = 5;
+                values[index] = 8'hff;
+                index = 32'h7fff_fff0;
+                bits[index] = 1;
+                values[index] = 8'hff;
+                index = 6;
+                part[index +: 4] = 4'hf;
+                $assert(part == 8'hc0, "part=%h", part);
+                $assert(guard_lo == 0, "guard_lo=%h", guard_lo);
+                $assert(bits == 0, "bits=%h", bits);
+                $assert(values[0] == 0 && values[1] == 0, "values");
+                $assert(values[2] == 0 && values[3] == 0, "values");
+                $assert(guard_hi == 0, "guard_hi=%h", guard_hi);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass
+    );
+    assert_eq!(
+        Simulator::builder(code, "t").run_test_cranelift().unwrap(),
+        TestResult::Pass
+    );
+}
+
+#[test]
 fn test_packed_prefix_and_low_bound_testbench_destinations() {
     let code = r#"
         #[test(t)]
@@ -939,6 +1021,36 @@ fn test_clock_only_self_updating_ff_advances_in_native_testbench_instance() {
     );
 }
 
+#[test]
+fn test_fall_through_after_clock_wait_stops_after_one_period() {
+    let code = r#"
+        module ClockTickCounter (
+            clk  : input  clock    ,
+            ticks: output logic<32>,
+        ) {
+            always_ff (clk) {
+                ticks += 1;
+            }
+        }
+
+        #[test(t)]
+        module t {
+            inst clk: $tb::clock_gen;
+            var ticks: logic<32>;
+            inst dut: ClockTickCounter (clk, ticks);
+
+            initial {
+                clk.next(1);
+            }
+        }
+    "#;
+
+    let mut sim = Simulator::builder(code, "t").build().unwrap();
+    let tb = compile_initial_testbench(&sim).unwrap();
+    assert_eq!(run_compiled_testbench(&mut sim, &tb), TestResult::Pass);
+    assert_eq!(sim.get_as::<u32>(sim.signal("ticks")), 1);
+}
+
 // ── Wide signal (>64 bit) ──────────────────────────────────────────────
 
 #[test]
@@ -1380,6 +1492,58 @@ fn test_for_loop_i32_or_step_with_only_existing_low_bits_fails() {
         panic!("expected non-progressing loop failure");
     };
     assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
+fn test_for_loop_dynamic_shift_step_wider_than_counter_reports_non_progress() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var start: logic<32>;
+            var end_bound: logic<32>;
+            var last: logic<32>;
+            initial {
+                start = 1;
+                end_bound = 3;
+                last = 0;
+                for i in start..end_bound step <<= 4294967297 {
+                    last = i;
+                }
+                $finish();
+            }
+        }
+    "#;
+    let TestResult::Fail(message) = Simulator::builder(code, "t").run_test().unwrap() else {
+        panic!("expected non-progressing loop failure");
+    };
+    assert!(message.contains("non-progressing stepped for loop"));
+}
+
+#[test]
+fn test_for_loop_empty_wide_dynamic_range_skips_body() {
+    let code = r#"
+        #[test(t)]
+        module t {
+            var bound: logic<128>;
+            var count: logic<32>;
+            initial {
+                bound = 128'd1 << 100;
+                count = 0;
+                for _i in bound..bound {
+                    count += 1;
+                }
+                for _i in rev bound..bound {
+                    count += 1;
+                }
+                $assert(count == 0, "count=%d", count);
+                $finish();
+            }
+        }
+    "#;
+    assert_eq!(
+        Simulator::builder(code, "t").run_test().unwrap(),
+        TestResult::Pass
+    );
 }
 
 #[test]
@@ -2030,7 +2194,7 @@ fn test_for_loop_dynamic_wide_signed_bound_small_value_still_runs() {
 }
 
 #[test]
-fn test_expression_vm_preserves_width_signedness_and_casts() {
+fn test_compiled_expression_preserves_width_signedness_and_casts() {
     let code = r#"
         #[test(t)]
         module t {
@@ -2118,7 +2282,7 @@ fn test_expression_vm_preserves_width_signedness_and_casts() {
 }
 
 #[test]
-fn test_expression_vm_preserves_wide_fixed_width_semantics() {
+fn test_compiled_expression_preserves_wide_fixed_width_semantics() {
     let code = r#"
         #[test(t)]
         module t {

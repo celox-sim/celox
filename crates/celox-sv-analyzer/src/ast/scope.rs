@@ -15,6 +15,8 @@ use super::*;
 /// The symbols of a scope, independent of the syntax they came from.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct ScopeSymbols {
+    /// User package qualifiers precede implicit std declarations (26.7).
+    pub package_scopes: HashSet<String>,
     /// Declaration inspection omits executable bodies; it is not simulation validation.
     pub declarations_only: bool,
     /// Constant values of parameters and enum members, with their type
@@ -188,6 +190,8 @@ pub(super) fn split_marker(key: &str) -> Option<(&str, &str)> {
 impl ScopeSymbols {
     /// Add the symbols of `other` that this scope does not already have.
     pub fn extend(&mut self, other: &ScopeSymbols) {
+        self.package_scopes
+            .extend(other.package_scopes.iter().cloned());
         for request in &other.inline_randomizations {
             if !self
                 .inline_randomizations
@@ -449,6 +453,7 @@ impl ScopeSymbols {
             })
             .collect();
         ScopeSymbols {
+            package_scopes: self.package_scopes.clone(),
             // Classes have their qualified names already.
             classes: self.classes.clone(),
             class_member_types: self.class_member_types.clone(),
@@ -1060,6 +1065,7 @@ impl Renamer<'_> {
                 .map(|param| crate::procedural::SubroutineParamBase {
                     name: self.name(&param.name),
                     default: param.default.map(|default| self.expr(default)),
+                    leaves: param.leaves.iter().map(|leaf| self.name(leaf)).collect(),
                     ..param
                 })
                 .collect(),

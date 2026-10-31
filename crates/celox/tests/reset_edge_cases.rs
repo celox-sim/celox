@@ -117,7 +117,9 @@ fn reset_literals_follow_the_builder_reset_type_in_rtl_and_testbenches() {
                 };
             }
             check_backend!(build_interpreter);
+            #[cfg(feature = "cranelift")]
             check_backend!(build_cranelift);
+            #[cfg(feature = "wasm-runtime")]
             check_backend!(build_wasm);
             #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
             check_backend!(build_native);

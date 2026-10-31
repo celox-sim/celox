@@ -28,6 +28,7 @@ use super::super::RuntimeEventBuffer;
 use super::super::compile_cancel::{CompileCancel, cancelled, cancelled_error};
 use super::super::traits::SimulatorErrorCode;
 use super::super::{MemoryLayout, get_byte_size, memory_image::MemoryImage};
+use super::code_bytes::NativeCodeBytes;
 #[cfg(any(
     feature = "x86_64-codegen",
     all(target_arch = "x86_64", not(feature = "arm64-codegen"))
@@ -166,6 +167,7 @@ impl super::super::EventHandle for NativeEventRef {
 /// that share the same compiled machine code.
 pub struct SharedNativeCode {
     comb_func: NativeSimFunc,
+    clock_alias_funcs: Vec<Option<NativeSimFunc>>,
     comb_unit_funcs: Vec<NativeSimFunc>,
     /// One function per process kernel.
     process_funcs: Vec<NativeSimFunc>,
@@ -242,13 +244,57 @@ impl SharedNativeCode {
                 name: symbol.name.clone(),
             })
             .collect::<Vec<_>>();
-        let jit_image = jit_mem::JitCode::new_named_with_symbols_profiled(
-            program_image.code_image(),
-            "celox_native_image",
-            &symbols,
-            program_image.options.perf_map,
-        )
-        .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "x86_64",
+            not(feature = "arm64-codegen")
+        ))]
+        let mapped = match &program_image.code {
+            NativeCodeBytes::Mapped { owner, range }
+                if program_image
+                    .code_image()
+                    .as_ptr()
+                    .addr()
+                    .is_multiple_of(64) =>
+            {
+                // Retain the previous executable allocation as a fallback if
+                // file execution is unavailable (for example a no-exec mount).
+                if owner.make_executable(range.clone()).is_ok() {
+                    // Safety: image validation and the caller establish trusted
+                    // target code; the Arc retains its immutable executable
+                    // file mapping for every entry pointer's lifetime.
+                    Some(unsafe {
+                        jit_mem::JitCode::from_executable_owner(
+                            owner.clone(),
+                            program_image.code_image().as_ptr(),
+                            program_image.code_image().len(),
+                            "celox_native_image",
+                            &symbols,
+                            program_image.options.perf_map,
+                        )
+                    })
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        #[cfg(not(all(
+            target_os = "linux",
+            target_arch = "x86_64",
+            not(feature = "arm64-codegen")
+        )))]
+        let mapped: Option<Result<jit_mem::JitCode, std::io::Error>> = None;
+        let jit_image = mapped
+            .unwrap_or_else(|| {
+                jit_mem::JitCode::new_named_with_symbols_profiled(
+                    program_image.code_image(),
+                    "celox_native_image",
+                    &symbols,
+                    program_image.options.perf_map,
+                )
+            })
+            .map_err(|source| codegen_err(CodegenError::NativeMemory { source }))?;
         let kernel_addresses = program_image
             .runtime_schema
             .native_kernel_offsets
@@ -308,8 +354,25 @@ impl SharedNativeCode {
             .map(materialize)
             .collect::<Result<Vec<_>, _>>()?;
 
+        // Optional named exports keep older images usable: absence requests a
+        // full settle. Export names are part of the native runtime contract.
+        let mut clock_alias_funcs = vec![None; id_to_event.len()];
+        for entry in &program_image.code_entries {
+            if let Some(id) = entry.name.strip_prefix(crate::clock_aliases::EXPORT_PREFIX) {
+                let id = id
+                    .strip_suffix(']')
+                    .and_then(|id| id.parse::<usize>().ok())
+                    .filter(|&id| id < clock_alias_funcs.len())
+                    .ok_or_else(|| codegen_message("invalid clock alias export"))?;
+                if clock_alias_funcs[id].is_some() {
+                    return Err(codegen_message("duplicate clock alias export"));
+                }
+                clock_alias_funcs[id] = Some(native_function_at(&jit_image, entry.offset)?);
+            }
+        }
         Ok(Self {
             comb_func,
+            clock_alias_funcs,
             comb_unit_funcs,
             process_funcs,
             lane_kernels,
@@ -359,7 +422,8 @@ impl SharedNativeCode {
 /// One callable function in a packed native code image.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeCodeEntry {
-    /// Stable diagnostic name for the emitted function.
+    /// Stable name for the emitted function. `clock_alias_update[N]` names
+    /// an optional clock-wiring update entry for event N; other names are diagnostic.
     pub name: String,
     /// Byte offset from the start of the native image.
     pub offset: usize,
@@ -410,6 +474,8 @@ pub(crate) struct NativeRuntimeSchema {
     pub(crate) native_kernel_offsets: Vec<usize>,
     pub(crate) comb_observers: Vec<RuntimeCombObserver<AbsoluteAddr>>,
     pub(crate) testbench_read_roots: HashSet<AbsoluteAddr>,
+    pub(crate) rtl_accesses: std::collections::BTreeSet<AbsoluteAddr>,
+    pub(crate) persistent_comb_state: std::collections::BTreeSet<AbsoluteAddr>,
     pub(crate) rtl_writes: HashSet<celox_design::VarAtomBase<AbsoluteAddr>>,
     /// Ordered so that the encoded image does not depend on hash order.
     pub(crate) comb_writes: std::collections::BTreeSet<AbsoluteAddr>,
@@ -439,7 +505,7 @@ pub(crate) struct NativeRuntimeSchema {
 /// precompiled Celox runtime.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct NativeProgramImage {
-    code: Vec<u8>,
+    code: NativeCodeBytes,
     code_entries: Vec<NativeCodeEntry>,
     symbols: Vec<NativeCodeSymbol>,
     comb_offset: usize,
@@ -464,7 +530,86 @@ pub struct NativeProgramImage {
     lanes: Option<super::lanes::NativeLaneImage>,
 }
 
+// Keep this private Postcard decoder in field order with NativeProgramImage.
+// Postcard encodes both Vec<u8> and byte slices as a length followed by raw
+// bytes. Borrowing that slice avoids per-byte sequence visits and allows file
+// storage to back the code directly. The public Serde representation and payload
+// remain unchanged, including for formats that distinguish arrays and bytes.
+#[derive(Deserialize)]
+#[serde(remote = "NativeProgramImage")]
+struct PostcardNativeProgramImage {
+    #[serde(deserialize_with = "deserialize_postcard_code")]
+    code: NativeCodeBytes,
+    code_entries: Vec<NativeCodeEntry>,
+    symbols: Vec<NativeCodeSymbol>,
+    comb_offset: usize,
+    comb_unit_offsets: Vec<usize>,
+    /// Entry offset of each process kernel.
+    process_offsets: Vec<usize>,
+    required_native_features: u8,
+    event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    eval_only_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    apply_event_map: HashMap<AbsoluteAddr, NativeEventImageRef>,
+    id_to_addr: Vec<AbsoluteAddr>,
+    id_to_event: Vec<NativeEventImageRef>,
+    reflection: DesignReflection,
+    design: crate::ir::RuntimeDesign,
+    testbench: Option<TestbenchProgram<AbsoluteAddr>>,
+    runtime_schema: NativeRuntimeSchema,
+    layout: MemoryLayout,
+    native_memory_size: usize,
+    options: NativeRuntimeOptions,
+    four_state_inits: Vec<(usize, usize)>,
+    /// Lane-partitioned kernels, one function per task.
+    lanes: Option<super::lanes::NativeLaneImage>,
+}
+
+fn deserialize_postcard_code<'de, D>(deserializer: D) -> Result<NativeCodeBytes, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // The caller installs owned or mapped storage after decoding metadata.
+    <&[u8]>::deserialize(deserializer).map(|_| NativeCodeBytes::Owned(Vec::new()))
+}
+
 impl NativeProgramImage {
+    pub(super) fn from_postcard_bytes(bytes: &[u8]) -> Result<Self, postcard::Error> {
+        let (code, _) = postcard::take_from_bytes::<&[u8]>(bytes)?;
+        let mut image = PostcardNativeProgramImage::deserialize(
+            &mut postcard::Deserializer::from_bytes(bytes),
+        )?;
+        image.code = code.to_vec().into();
+        Ok(image)
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(super) fn from_mapped_postcard_bytes(
+        bytes: &[u8],
+        owner: Arc<super::executable_mapping::ExecutableMapping>,
+    ) -> Result<Self, postcard::Error> {
+        let (code, _) = postcard::take_from_bytes::<&[u8]>(bytes)?;
+        let mut image = PostcardNativeProgramImage::deserialize(
+            &mut postcard::Deserializer::from_bytes(bytes),
+        )?;
+        if !code.is_empty() {
+            // The container reader passes a payload slice from this same owner.
+            let start = code
+                .as_ptr()
+                .addr()
+                .checked_sub(owner.as_bytes().as_ptr().addr())
+                .ok_or(postcard::Error::DeserializeBadEncoding)?;
+            let end = start
+                .checked_add(code.len())
+                .filter(|&end| end <= owner.as_bytes().len())
+                .ok_or(postcard::Error::DeserializeBadEncoding)?;
+            image.code = NativeCodeBytes::Mapped {
+                owner,
+                range: start..end,
+            };
+        }
+        Ok(image)
+    }
+
     /// Physical duration of one tick, retained in serialized native images.
     pub fn time_precision(&self) -> celox_design::TimePrecision {
         self.design.time_precision
@@ -543,7 +688,10 @@ impl NativeProgramImage {
     /// Whether the design has process kernels, which only a timed
     /// [`crate::Simulation`] runs.
     pub fn has_processes(&self) -> bool {
-        !self.runtime_schema.processes.is_empty()
+        self.runtime_schema
+            .processes
+            .iter()
+            .any(|process| process.kind != celox_design::ProcessKind::Callable)
     }
 
     /// The compiler-inserted override slots of a reflected signal, as
@@ -585,6 +733,7 @@ impl NativeProgramImage {
     pub(crate) fn runtime_program(&self) -> crate::ir::RuntimeProgram {
         crate::ir::RuntimeProgram {
             design: self.design.clone(),
+            rtl_accesses: self.runtime_schema.rtl_accesses.iter().copied().collect(),
             runtime_schema: RuntimeSchema {
                 runtime_errors: self.runtime_schema.runtime_errors.clone(),
                 runtime_event_sites: self.runtime_schema.runtime_event_sites.clone(),
@@ -593,9 +742,12 @@ impl NativeProgramImage {
                 testbench_read_roots: self.runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: self.runtime_schema.rtl_writes.clone(),
                 comb_writes: self.runtime_schema.comb_writes.iter().copied().collect(),
-                // The image retains the final classification in comb_writes;
-                // optimization-time classification roots are no longer used.
-                persistent_comb_state: Default::default(),
+                persistent_comb_state: self
+                    .runtime_schema
+                    .persistent_comb_state
+                    .iter()
+                    .copied()
+                    .collect(),
                 declaration_startup: self.runtime_schema.declaration_startup.clone(),
                 dead_store_policy: self.runtime_schema.dead_store_policy,
                 live_signals: self.runtime_schema.live_signals.iter().copied().collect(),
@@ -714,7 +866,25 @@ impl NativeProgramImage {
                     usize::MAX
                 }
             });
-        // The derived-edge units follow the kernels and the scheduler.
+        let testbench_units = self
+            .testbench
+            .as_ref()
+            .and_then(|tb| tb.scheduler())
+            .and_then(|scheduler| scheduler.entry)
+            .map_or(0, |unit| {
+                if unit
+                    == self
+                        .runtime_schema
+                        .processes
+                        .len()
+                        .saturating_add(scheduler_units)
+                {
+                    1
+                } else {
+                    usize::MAX
+                }
+            });
+        // Derived-edge units follow process and scheduler entries.
         let derived_units = 2 * self.runtime_schema.derived_edges.len();
         let derived_in_range = self.runtime_schema.derived_edges.iter().all(|units| {
             units.rising < self.process_offsets.len() && units.falling < self.process_offsets.len()
@@ -726,9 +896,55 @@ impl NativeProgramImage {
                     .processes
                     .len()
                     .saturating_add(scheduler_units)
+                    .saturating_add(testbench_units)
                     .saturating_add(derived_units)
         {
             return Err("process kernels and their control slots disagree".into());
+        }
+        if let Some(tb) = &self.testbench
+            && let Some(scheduler) = tb.scheduler()
+        {
+            let valid_slot = |a: &AbsoluteAddr| {
+                self.design
+                    .state_objects
+                    .get(a)
+                    .is_some_and(|info| info.width == 64 && !info.is_4state)
+            };
+            if scheduler.processes.len() != tb.kernels().len()
+                || scheduler.locals.len() != tb.kernels().len()
+                || scheduler.clocks.len() != scheduler.events.len()
+                || scheduler.clocks.len() != scheduler.periods.len()
+                || scheduler.declared > scheduler.clocks.len()
+                || scheduler.periods.iter().any(|&period| period < 2)
+                || !scheduler
+                    .control
+                    .iter()
+                    .chain(scheduler.processes.iter().flatten())
+                    .chain(scheduler.clocks.iter().flatten())
+                    .all(valid_slot)
+                || scheduler
+                    .events
+                    .iter()
+                    .any(|a| !self.design.state_objects.contains_key(a))
+                || scheduler
+                    .locals
+                    .iter()
+                    .flatten()
+                    .chain(&scheduler.baselines)
+                    .any(|(a, b)| {
+                        let Some(a) = self.design.state_objects.get(a) else {
+                            return true;
+                        };
+                        let Some(b) = self.design.state_objects.get(b) else {
+                            return true;
+                        };
+                        a.width != b.width
+                            || a.array_dims != b.array_dims
+                            || a.is_4state != b.is_4state
+                    })
+            {
+                return Err("invalid testbench scheduler storage".into());
+            }
         }
         if self.runtime_schema.process_frames.len() != self.runtime_schema.processes.len() {
             return Err("process kernels and their activation frames disagree".into());
@@ -1726,6 +1942,7 @@ fn format_native_codegen_trace(
     comb: &CompiledNativeFunction,
     ff_codes: &HashMap<usize, CompiledNativeFunction>,
     tasks: &[NativeCompileTask<'_>],
+    processes: &[CompiledNativeFunction],
 ) -> NativeCodegenTrace {
     let mut optimized_sir = String::from("=== Optimized SIR used by native emission ===\n");
     let mut mir = String::from("=== MIR used by native emission ===\n");
@@ -1770,6 +1987,20 @@ fn format_native_codegen_trace(
                 .trace
                 .as_ref()
                 .expect("explicit native trace must capture every FF function"),
+        );
+    }
+    for (index, process) in processes.iter().enumerate() {
+        append_native_function_trace(
+            &mut optimized_sir,
+            &mut mir,
+            &mut reactive_graph,
+            &mut state_layout,
+            &format!("process[{index}]"),
+            &[],
+            process
+                .trace
+                .as_ref()
+                .expect("explicit native trace must capture every process"),
         );
     }
     NativeCodegenTrace {
@@ -2642,7 +2873,7 @@ fn compile_program_with_outlining_threshold(
             NativeMergeKind::Complete,
             None,
             &process_options,
-            false,
+            capture_trace,
             &options.optimize_options.diagnostics,
             cancel,
         )
@@ -2653,13 +2884,39 @@ fn compile_program_with_outlining_threshold(
             .into_iter()
             .collect::<Result<Vec<_>, _>>()?;
     let lane_kernels = super::lanes::compile_lane_kernels(sir, options, cancel)?;
-    let codegen_trace = capture_trace
-        .then(|| format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks));
+    let mut clock_alias_jits = Vec::new();
+    if !options.four_state && !options.native_force_support && force_bindings.is_empty() {
+        let (_, clocks) = crate::backend::event_ids(sir);
+        for (id, clock) in clocks.into_iter().enumerate() {
+            if let Some(units) = crate::clock_aliases::extract(sir, clock) {
+                let name = format!("{}{}]", crate::clock_aliases::EXPORT_PREFIX, id);
+                let compiled = compile_units(
+                    &units,
+                    layout,
+                    false,
+                    &name,
+                    &options.x86_options,
+                    false,
+                    &options.optimize_options.diagnostics,
+                    cancel,
+                )?;
+                clock_alias_jits.push((name, compiled));
+            }
+        }
+    }
+    let codegen_trace = capture_trace.then(|| {
+        format_native_codegen_trace(&comb_jit, &compiled_ff_codes, &compile_tasks, &process_jits)
+    });
     let semantic_memory_size = layout
         .merged_total_size
         .checked_add(layout.triggered_bits_total_size)
         .expect("native semantic-memory size overflow");
     let native_memory_size = std::iter::once(comb_jit.required_state_size)
+        .chain(
+            clock_alias_jits
+                .iter()
+                .map(|(_, code)| code.required_state_size),
+        )
         .chain(comb_chunk_jits.iter().map(|code| code.required_state_size))
         .chain(
             compiled_ff_codes
@@ -2680,6 +2937,11 @@ fn compile_program_with_outlining_threshold(
         )
         .fold(semantic_memory_size, usize::max);
     let required_native_features = std::iter::once(comb_jit.required_native_features)
+        .chain(
+            clock_alias_jits
+                .iter()
+                .map(|(_, code)| code.required_native_features),
+        )
         .chain(
             comb_chunk_jits
                 .iter()
@@ -2764,6 +3026,15 @@ fn compile_program_with_outlining_threshold(
             &compiled_ff_codes[&task_id],
         )?;
         task_offsets.insert(task_id, offset);
+    }
+    for (name, compiled) in &clock_alias_jits {
+        append_native_code(
+            &mut packed_image,
+            &mut code_entries,
+            &mut image_symbols,
+            name.clone(),
+            compiled,
+        )?;
     }
     let lane_image = lane_kernels
         .map(|kernels| kernels.pack(&mut packed_image, &mut code_entries, &mut image_symbols))
@@ -2897,7 +3168,7 @@ fn compile_program_with_outlining_threshold(
 
     Ok((
         NativeProgramImage {
-            code: packed_image,
+            code: packed_image.into(),
             code_entries,
             symbols: image_symbols,
             comb_offset,
@@ -2921,6 +3192,14 @@ fn compile_program_with_outlining_threshold(
                 comb_observers: sir.runtime().runtime_schema.comb_observers.clone(),
                 testbench_read_roots: sir.runtime().runtime_schema.testbench_read_roots.clone(),
                 rtl_writes: sir.runtime().runtime_schema.rtl_writes.clone(),
+                rtl_accesses: sir.runtime().rtl_accesses.iter().copied().collect(),
+                persistent_comb_state: sir
+                    .runtime()
+                    .runtime_schema
+                    .persistent_comb_state
+                    .iter()
+                    .copied()
+                    .collect(),
                 comb_writes: sir
                     .runtime()
                     .runtime_schema
@@ -3684,6 +3963,14 @@ impl super::super::SimBackend for NativeBackend {
         self.call_func_timed(func)
     }
 
+    fn eval_clock_aliases(&mut self, event: NativeEventRef) -> Result<bool, SimulatorErrorCode> {
+        let Some(func) = self.compiled.clock_alias_funcs[event.id] else {
+            return Ok(false);
+        };
+        self.call_func_timed(func)?;
+        Ok(true)
+    }
+
     fn eval_apply_ff_at(&mut self, event: NativeEventRef) -> Result<(), SimulatorErrorCode> {
         if self.lane_event_kernel(event) {
             let compiled = Arc::clone(&self.compiled);
@@ -4073,6 +4360,106 @@ mod tests {
     use crate::ir::{
         BasicBlock, BlockId, RegisterId, RegisterType, SIRInstruction, SIRTerminator, SIRValue,
     };
+
+    #[test]
+    fn replacing_images_does_not_accumulate_alignment_padding() {
+        let source =
+            "module Top(a: input bit<8>, b: input bit<8>, y: output bit<8>) { assign y = a + b; }";
+        let mut image = crate::Simulator::builder(source, "Top")
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        let original_code = image.code.to_vec();
+        assert!(original_code.len() < 16_383);
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("runtime");
+        std::fs::write(&runtime, b"precompiled runtime").unwrap();
+        let mut sizes = Vec::new();
+        // Crossing a Postcard length-prefix boundary changes the required
+        // padding. Trailing zeros test framing only and are never executed.
+        for length in [16_383, 16_384, 16_383, 16_384] {
+            let mut code = original_code.clone();
+            code.resize(length, 0);
+            image.code = code.into();
+            image.write_attached_runtime(&runtime, &runtime).unwrap();
+            let bytes = std::fs::read(&runtime).unwrap();
+            let found = NativeProgramImage::discover_appended(&bytes)
+                .unwrap()
+                .unwrap();
+            assert_eq!(found.image.code_image().len(), length);
+            assert!(bytes.starts_with(b"precompiled runtime"));
+            sizes.push(bytes.len());
+        }
+        assert_eq!(sizes[0], sizes[2]);
+        assert_eq!(sizes[1], sizes[3]);
+        assert_eq!(sizes[1], sizes[0] + 1);
+    }
+
+    #[test]
+    fn postcard_code_decoder_preserves_legacy_payloads() {
+        let source = "module Top(clk: input clock, d: input bit<8>, q: output bit<8>) { always_ff (clk) { q = d; } }";
+        let mut image = crate::Simulator::builder(source, "Top")
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        // These byte patterns exercise the wire decoder only; no synthetic
+        // machine code is validated, mapped executable, or invoked.
+        for length in [0, 1, 127, 128, 255, 256, 1024] {
+            image.code = (0..length)
+                .map(|index| index as u8)
+                .collect::<Vec<_>>()
+                .into();
+            let payload = postcard::to_allocvec(&image).unwrap();
+            let legacy: NativeProgramImage = postcard::from_bytes(&payload).unwrap();
+            let decoded = NativeProgramImage::from_postcard_bytes(&payload).unwrap();
+            assert_eq!(&*decoded.code, &*image.code);
+            assert_eq!(
+                postcard::to_allocvec(&decoded).unwrap(),
+                postcard::to_allocvec(&legacy).unwrap(),
+            );
+            for end in [0, 1, payload.len() - 1] {
+                assert!(postcard::from_bytes::<NativeProgramImage>(&payload[..end]).is_err());
+                assert!(NativeProgramImage::from_postcard_bytes(&payload[..end]).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn image_without_clock_alias_exports_uses_full_settle() {
+        let source = r#"
+            module Child (clk: input clock, d: input bit<8>, q: output bit<8>) {
+                always_ff (clk) { q = d; }
+            }
+            module Top (clk: input clock, d: input bit<8>, q: output bit<8>) {
+                inst child: Child (clk, d, q);
+            }
+        "#;
+        let mut image = crate::Simulator::builder(source, "Top")
+            .four_state(false)
+            .compile_native()
+            .unwrap()
+            .into_program_image();
+        let previous = image.code_entries.len();
+        image
+            .code_entries
+            .retain(|entry| !entry.name.starts_with(crate::clock_aliases::EXPORT_PREFIX));
+        assert_eq!(previous, image.code_entries.len() + 1);
+        let image =
+            NativeProgramImage::from_container_bytes(&image.to_container_bytes().unwrap()).unwrap();
+        let mut sim = crate::Simulator::from_sources(Vec::new(), "Top")
+            .build_native_from_image(image)
+            .unwrap();
+        let event = sim.event("clk");
+        let d = sim.signal("d");
+        sim.set(d, 42u8);
+        sim.active_edge(event).unwrap();
+        sim.inactive_edge(event).unwrap();
+        assert_eq!(sim.get(sim.signal("q")), 42u8.into());
+        assert_eq!(
+            sim.get(sim.child_signal(&[("child", 0)], "clk")),
+            0u8.into()
+        );
+    }
 
     /// A unit of `blocks` blocks loading `value`, with its maps filled in
     /// forward or reverse order.

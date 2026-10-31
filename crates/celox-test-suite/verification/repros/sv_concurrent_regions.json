@@ -1,0 +1,329 @@
+{
+  "standard": "IEEE 1800-2023 16.5, 16.5.1, 16.12, 16.14.1",
+  "expected": "Predicates use Preponed values; disable iff uses live values after NBA. All Observed decisions precede Reactive actions, which read live values.",
+  "xezim_build": "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+  "xezim_limitation": "Available installed 0.11.3 build, git unknown. The current flake pin cannot build because the dependency lock omits its requested xezim-core revision. No claim of current-pin validation.",
+  "probes": [
+    {
+      "case": "concurrent_assertions::sampled_predicate_live_action",
+      "source": "sv_concurrent_sampled_predicate_live_action.sv",
+      "expected_output": "passed=1 failed=1 action=1",
+      "observations": [
+        {
+          "top": "Top",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "--assert",
+              "--coverage-user",
+              "-Wno-fatal",
+              "--top-module",
+              "Top",
+              "--Mdir",
+              "<checkout>/work/concurrent-probes/sampled_predicate_live_action-Top/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Top",
+              "-o",
+              "<checkout>/work/concurrent-probes/sampled_predicate_live_action-Top/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv"
+            ],
+            "exit_code": 1,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv:4: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\npassed=1 failed=1 action=1\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/concurrent-probes/sampled_predicate_live_action-Top/obj/VTop"
+            ],
+            "exit_code": 0,
+            "output": "passed=1 failed=1 action=0\n- <checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv:7: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 29.416 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        },
+        {
+          "top": "Wrapped",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "--assert",
+              "--coverage-user",
+              "-Wno-fatal",
+              "--top-module",
+              "Wrapped",
+              "--Mdir",
+              "<checkout>/work/concurrent-probes/sampled_predicate_live_action-Wrapped/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Wrapped",
+              "-o",
+              "<checkout>/work/concurrent-probes/sampled_predicate_live_action-Wrapped/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv"
+            ],
+            "exit_code": 1,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv:4: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\npassed=1 failed=1 action=1\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/concurrent-probes/sampled_predicate_live_action-Wrapped/obj/VWrapped"
+            ],
+            "exit_code": 0,
+            "output": "passed=1 failed=1 action=0\n- <checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_sampled_predicate_live_action.sv:7: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 46.426 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        }
+      ]
+    },
+    {
+      "case": "concurrent_assertions::disable_iff_after_nba",
+      "source": "sv_concurrent_disable_iff_after_nba.sv",
+      "expected_output": "passed=0 failed=0",
+      "observations": [
+        {
+          "top": "Top",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "--assert",
+              "--coverage-user",
+              "-Wno-fatal",
+              "--top-module",
+              "Top",
+              "--Mdir",
+              "<checkout>/work/concurrent-probes/disable_iff_after_nba-Top/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Top",
+              "-o",
+              "<checkout>/work/concurrent-probes/disable_iff_after_nba-Top/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv"
+            ],
+            "exit_code": 1,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv:4: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\npassed=0 failed=0\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/concurrent-probes/disable_iff_after_nba-Top/obj/VTop"
+            ],
+            "exit_code": 0,
+            "output": "passed=0 failed=1\n- <checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv:7: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 41.460 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        },
+        {
+          "top": "Wrapped",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "--assert",
+              "--coverage-user",
+              "-Wno-fatal",
+              "--top-module",
+              "Wrapped",
+              "--Mdir",
+              "<checkout>/work/concurrent-probes/disable_iff_after_nba-Wrapped/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Wrapped",
+              "-o",
+              "<checkout>/work/concurrent-probes/disable_iff_after_nba-Wrapped/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv"
+            ],
+            "exit_code": 1,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv:4: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\npassed=0 failed=0\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/concurrent-probes/disable_iff_after_nba-Wrapped/obj/VWrapped"
+            ],
+            "exit_code": 0,
+            "output": "passed=0 failed=1\n- <checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_disable_iff_after_nba.sv:7: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 34.250 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        }
+      ]
+    },
+    {
+      "case": "concurrent_assertions::predicates_before_all_actions",
+      "source": "sv_concurrent_predicates_before_all_actions.sv",
+      "expected_output": "first=1 second=1",
+      "observations": [
+        {
+          "top": "Top",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "--assert",
+              "--coverage-user",
+              "-Wno-fatal",
+              "--top-module",
+              "Top",
+              "--Mdir",
+              "<checkout>/work/concurrent-probes/predicates_before_all_actions-Top/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Top",
+              "-o",
+              "<checkout>/work/concurrent-probes/predicates_before_all_actions-Top/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv"
+            ],
+            "exit_code": 2,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv:3: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv:5: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Top",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nfirst=1 second=0\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/concurrent-probes/predicates_before_all_actions-Top/obj/VTop"
+            ],
+            "exit_code": 0,
+            "output": "first=1 second=1\n- <checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv:8: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 41.494 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        },
+        {
+          "top": "Wrapped",
+          "verilator_compile": {
+            "command": [
+              "/nix/store/i5hjqqy2qk6jac8mnnaxnlh8yfi49wjh-verilator-5.052/bin/verilator",
+              "--binary",
+              "--timing",
+              "--assert",
+              "--coverage-user",
+              "-Wno-fatal",
+              "--top-module",
+              "Wrapped",
+              "--Mdir",
+              "<checkout>/work/concurrent-probes/predicates_before_all_actions-Wrapped/obj",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv"
+            ],
+            "exit_code": 0,
+            "output": ""
+          },
+          "icarus_compile": {
+            "command": [
+              "/nix/store/l2wn6zv7pwybn4vi7q2xgw8snzla1azh-iverilog-13.0/bin/iverilog",
+              "-g2012",
+              "-s",
+              "Wrapped",
+              "-o",
+              "<checkout>/work/concurrent-probes/predicates_before_all_actions-Wrapped/probe.vvp",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv"
+            ],
+            "exit_code": 2,
+            "output": "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv:3: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv:5: sorry: concurrent_assertion_item not supported. Try -gno-assertions or -gsupported-assertions to turn this message off.\n"
+          },
+          "xezim_run": {
+            "command": [
+              "/nix/store/1869dyxd44fz4kh02dmng33gyxdx5m61-xezim-0.11.3/bin/xezim",
+              "-s",
+              "Wrapped",
+              "<checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv"
+            ],
+            "exit_code": 0,
+            "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nfirst=1 second=0\nSimulation finished at time 4 ($finish called)\n"
+          },
+          "verilator_run": {
+            "command": [
+              "<checkout>/work/concurrent-probes/predicates_before_all_actions-Wrapped/obj/VWrapped"
+            ],
+            "exit_code": 0,
+            "output": "first=1 second=1\n- <checkout>/crates/celox-test-suite/verification/repros/sv_concurrent_predicates_before_all_actions.sv:8: Verilog $finish\n- S i m u l a t i o n   R e p o r t: Verilator 5.052 2026-09-05\n- Verilator: $finish at 4ps; walltime 0.000 s; speed 40.763 ns/s\n- Verilator: cpu 0.000 s on 1 threads; allocated 4 MB\n"
+          }
+        }
+      ]
+    }
+  ]
+}

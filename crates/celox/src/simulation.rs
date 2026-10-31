@@ -202,6 +202,9 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         timestamp: u64,
     ) -> Result<(), Halt> {
         match request.kind {
+            celox_design::HostRequestKind::Process | celox_design::HostRequestKind::Testbench => {
+                Err(celox_runtime::SimulatorErrorCode::InternalError.into())
+            }
             celox_design::HostRequestKind::Plusargs => {
                 self.run_plusargs_request(request, timestamp)
             }
@@ -211,6 +214,7 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
             celox_design::HostRequestKind::FileIo => self.run_file_io_request(request, timestamp),
             celox_design::HostRequestKind::Vcd => self.run_vcd_request(request, timestamp),
             celox_design::HostRequestKind::Scan => self.run_scan_request(request, timestamp),
+            celox_design::HostRequestKind::Format => self.run_format_request(request, timestamp),
         }
     }
 }
@@ -596,7 +600,7 @@ impl<B: SimBackend> Simulation<B> {
         self.simulator.check_vcd_rewind(record.time)?;
         self.simulator
             .validate_activation_queue_values(&record.processes)?;
-        let mut parts = self.simulator.resolve_schedule(record, &file.strings)?;
+        let mut parts = self.simulator.resolve_schedule(record, file)?;
         let host_writes = self
             .simulator
             .resolve_host_writes(&record.processes.host_writes)?;
@@ -2037,6 +2041,8 @@ endmodule
     }
 }
 
+#[cfg(all(test, feature = "host-runtime", feature = "systemverilog"))]
+mod process_control_tests;
 #[cfg(all(test, feature = "host-runtime"))]
 mod runtime_core_tests;
 

@@ -16,26 +16,64 @@ pub(in crate::ast) fn bind_in(
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
-    bind_in_with_validation(root, native, tree, context, true)
+    bind_in_mode(root, native, tree, context, BindingMode::Use)
 }
 
 /// Typedef discovery precedes enum constant resolution, so dependent aliases
-/// may still have provisional widths. Validate them when collecting members.
+/// may still have provisional widths. The initial pass can also wait for
+/// enclosing constants before specializing a class default.
 pub(in crate::ast) fn bind_alias_in(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
+    defer_defaults: bool,
 ) -> Converted<Option<Type>> {
-    bind_in_with_validation(root, native, tree, context, false)
+    bind_in_mode(
+        root,
+        native,
+        tree,
+        context,
+        BindingMode::Alias { defer_defaults },
+    )
 }
 
-fn bind_in_with_validation(
+#[derive(Clone, Copy)]
+enum BindingMode {
+    Use,
+    Alias { defer_defaults: bool },
+}
+
+impl BindingMode {
+    fn specialize(
+        self,
+        tree: &AnalysisContext<'_>,
+        generic: &str,
+        arguments: &[celox_sv_syntax::Argument],
+        context: &PackedDimensions,
+    ) -> Converted<Option<String>> {
+        if matches!(
+            self,
+            Self::Alias {
+                defer_defaults: true
+            }
+        ) {
+            super::super::classes::specializations::specialize_if_ready(
+                tree, generic, arguments, context,
+            )
+        } else {
+            super::super::classes::specializations::specialize(tree, generic, arguments, context)
+                .map(Some)
+        }
+    }
+}
+
+fn bind_in_mode(
     root: TypeId,
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
-    validate_enums: bool,
+    mode: BindingMode,
 ) -> Converted<Option<Type>> {
     enum Job {
         Enter(TypeId),
@@ -50,6 +88,7 @@ fn bind_in_with_validation(
             signed: bool,
             names: Vec<String>,
             ranges: Vec<PackedRange>,
+            packed: bool,
         },
     }
     let mut jobs = vec![Job::Enter(root)];
@@ -81,6 +120,10 @@ fn bind_in_with_validation(
                         values.push(ty);
                     }
                     DataTypeKind::Named(path) => {
+                        if let Some(ty) = super::super::processes::qualified_type(path) {
+                            values.push(types::enclose_aliased_packed_type(ty, ranges));
+                            continue;
+                        }
                         // A class with a parameter value assignment, or one
                         // whose defaults the name alone refers to (IEEE
                         // 1800-2023 8.25).
@@ -91,20 +134,43 @@ fn bind_in_with_validation(
                                 && let Some(name) = super::super::classes::resolve(tree, &name)
                                 && super::super::classes::is_parameterized(tree, &name)
                             {
-                                let name = super::super::classes::specializations::specialize(
+                                let Some(name) = mode.specialize(
                                     tree,
                                     &name,
                                     part.arguments.as_deref().unwrap_or_default(),
                                     context,
-                                )?;
+                                )?
+                                else {
+                                    return Ok(None);
+                                };
                                 values.push(super::super::classes::handle(&name));
+                                continue;
+                            }
+                        }
+                        if let [package, class, member] = path.as_slice() {
+                            let name = scope::qualified_name(
+                                &tree.state,
+                                &normalize_identifier(&package.name.spelling),
+                                &normalize_identifier(&class.name.spelling),
+                            );
+                            if let Some(class) =
+                                class_scope_named(class, tree, context, mode, name)?
+                            {
+                                let member = normalize_identifier(&member.name.spelling);
+                                let ty = super::super::classes::specializations::member_type(
+                                    tree, &class, &member,
+                                )
+                                .ok_or_else(|| {
+                                    unsupported(format!("type `{member}` of class `{class}`"))
+                                })?;
+                                values.push(types::enclose_aliased_packed_type(ty, ranges));
                                 continue;
                             }
                         }
                         // A type that a class declares, `C::T` (IEEE 1800-2023
                         // 8.23, 8.25.1).
                         if let [scope, member] = path.as_slice()
-                            && let Some(class) = class_scope(scope, tree, context)?
+                            && let Some(class) = class_scope(scope, tree, context, mode)?
                         {
                             let member = normalize_identifier(&member.name.spelling);
                             let ty = super::super::classes::specializations::member_type(
@@ -132,6 +198,25 @@ fn bind_in_with_validation(
                                 )),
                                 _ => None,
                             };
+                            if let Some(class) = class
+                                .as_ref()
+                                .filter(|class| tree.state.foreign.contains(class))
+                            {
+                                let arguments = path
+                                    .last()
+                                    .and_then(|part| part.arguments.as_deref())
+                                    .unwrap_or_default();
+                                let Some(name) =
+                                    mode.specialize(tree, class, arguments, context)?
+                                else {
+                                    return Ok(None);
+                                };
+                                values.push(types::enclose_aliased_packed_type(
+                                    super::super::classes::handle(&name),
+                                    ranges,
+                                ));
+                                continue;
+                            }
                             if let Some(class) = class.filter(|class| {
                                 imported
                                     .classes
@@ -181,10 +266,11 @@ fn bind_in_with_validation(
                         } else {
                             let mut ty = builtin_type("int", None).unwrap();
                             ty.is_enum = true;
-                            if validate_enums {
+                            if matches!(mode, BindingMode::Use) {
                                 validate_enum_initializers(id, native, tree, context, &ty)?;
                             }
-                            ty.enum_values = enum_values(id, native, tree, context, &ty);
+                            ty.enum_domain = enum_values(id, native, tree, context, &ty);
+                            ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
                             ty.packed_ranges = ranges.into_iter().chain(ty.packed_ranges).collect();
                             values.push(ty);
                         }
@@ -196,7 +282,8 @@ fn bind_in_with_validation(
                         packed,
                         fields,
                     } => {
-                        if !packed && !soft {
+                        // Unpacked unions are not supported (IEEE 1800-2023 7.3).
+                        if !packed && !soft && (*union || *tagged) {
                             return Ok(None);
                         }
                         let mut names = Vec::new();
@@ -240,6 +327,7 @@ fn bind_in_with_validation(
                             signed: data.signed.unwrap_or(false),
                             names,
                             ranges,
+                            packed: *packed || *soft,
                         });
                         jobs.extend(fields.iter().zip(voids).rev().map(|(field, is_void)| {
                             if is_void {
@@ -278,14 +366,15 @@ fn bind_in_with_validation(
                 let Some(mut ty) = values.pop() else {
                     return Err(unsupported("enum base type"));
                 };
-                if validate_enums {
+                if matches!(mode, BindingMode::Use) {
                     validate_enum_initializers(id, native, tree, context, &ty)?;
                 }
                 let mut outer = ranges;
                 outer.extend(ty.packed_ranges);
                 ty.packed_ranges = outer;
                 ty.is_enum = true;
-                ty.enum_values = enum_values(id, native, tree, context, &ty);
+                ty.enum_domain = enum_values(id, native, tree, context, &ty);
+                ty.packed_enum = !native.data_type(id).packed_dimensions.is_empty();
                 values.push(ty);
             }
             Job::Aggregate {
@@ -297,11 +386,28 @@ fn bind_in_with_validation(
                 signed,
                 names,
                 ranges,
+                packed,
             } => {
                 let start = values
                     .len()
                     .checked_sub(names.len())
                     .ok_or_else(|| unsupported("aggregate fields"))?;
+                if !packed {
+                    if !ranges.is_empty() {
+                        return Ok(None);
+                    }
+                    let fields = names.into_iter().zip(values.split_off(start)).collect();
+                    let Some(ty) = unpacked_structs::native_type(
+                        &tree.state,
+                        owner,
+                        fields,
+                        &context.const_env,
+                    ) else {
+                        return Ok(None);
+                    };
+                    values.push(ty);
+                    continue;
+                }
                 let fields = names
                     .into_iter()
                     .zip(values.split_off(start))
@@ -389,8 +495,24 @@ fn class_scope(
     scope: &celox_sv_syntax::TypeSegment,
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
+    mode: BindingMode,
 ) -> Converted<Option<String>> {
-    let name = normalize_identifier(&scope.name.spelling);
+    class_scope_named(
+        scope,
+        tree,
+        context,
+        mode,
+        normalize_identifier(&scope.name.spelling),
+    )
+}
+
+fn class_scope_named(
+    scope: &celox_sv_syntax::TypeSegment,
+    tree: &AnalysisContext<'_>,
+    context: &PackedDimensions,
+    mode: BindingMode,
+    name: String,
+) -> Converted<Option<String>> {
     if scope.arguments.is_none()
         && let Some(class) = context
             .type_aliases
@@ -407,9 +529,17 @@ fn class_scope(
     {
         return Ok(Some(class));
     }
-    let Some(name) = super::super::classes::resolve(tree, &name) else {
+    let Some(class) = super::super::classes::resolve(tree, &name) else {
         return Ok(None);
     };
+    // Resolve a user package before std's implicit class fallback for this
+    // qualified type; explicit std::process remains unambiguous (26.7).
+    if class == super::super::processes::CLASS
+        && scope::imported(&tree.state).package_scopes.contains(&name)
+    {
+        return Ok(None);
+    }
+    let name = class;
     if !super::super::classes::is_parameterized(tree, &name) {
         if scope
             .arguments
@@ -424,15 +554,16 @@ fn class_scope(
         if super::super::classes::handle_type(tree, &name).is_some()
             && super::super::classes::specializations::lookup(tree, &name).is_none()
             && super::super::classes::is_declared(tree, &name)
+            && mode.specialize(tree, &name, &[], context)?.is_none()
         {
-            super::super::classes::specializations::specialize(tree, &name, &[], context)?;
+            return Ok(None);
         }
         return Ok(Some(name));
     }
     let Some(arguments) = &scope.arguments else {
         return Err(AnalyzerError::UnspecializedClassScope { class: name });
     };
-    super::super::classes::specializations::specialize(tree, &name, arguments, context).map(Some)
+    mode.specialize(tree, &name, arguments, context)
 }
 
 pub(in crate::ast) fn expression_type(
@@ -606,7 +737,7 @@ fn enum_values(
     tree: &AnalysisContext<'_>,
     context: &PackedDimensions,
     ty: &Type,
-) -> Option<Vec<i128>> {
+) -> Option<Arc<enums::EnumDomain>> {
     let data = native.data_type(id);
     if !data.packed_dimensions.is_empty() {
         return None;
@@ -621,6 +752,7 @@ fn enum_values(
     let mut env = context.const_env.clone();
     let mut next = 0i128;
     let mut values = Vec::new();
+    let mut members = Vec::new();
     for item in items {
         if !item.dimensions.is_empty() {
             return None;
@@ -655,9 +787,20 @@ fn enum_values(
         }
         values.push(value);
         let name = normalize_identifier(&item.name.spelling);
+        members.push(enums::EnumMember {
+            name: name.clone(),
+            value,
+        });
         env.insert(name.clone(), value);
         dimensions::insert_parameter_type_markers(&mut env, &name, shape);
         next = value.checked_add(1)?;
     }
-    (!values.is_empty()).then_some(values)
+    (!members.is_empty()).then(|| {
+        Arc::new(enums::EnumDomain {
+            members,
+            width: shape.width,
+            signed: shape.signed,
+            four_state: !matches!(ty.kind(), TypeKind::Bit),
+        })
+    })
 }

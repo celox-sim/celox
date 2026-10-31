@@ -81,6 +81,9 @@ pub struct Heap {
     next_object: Handle,
     containers: HashMap<Handle, Arc<containers::Container>>,
     container_lookup: HashMap<Arc<containers::Container>, Handle>,
+    /// Structure records by their contents, see [`ops::OBJECT_FINISH_RECORD`].
+    #[serde(default)]
+    record_lookup: HashMap<objects::RecordContents, Handle>,
     /// The first heap operation error since the runtime last checked.
     fault: Option<Fault>,
     /// Entries below this handle are never collected.
@@ -112,6 +115,7 @@ impl Heap {
             next_object: NULL + 1,
             containers: HashMap::default(),
             container_lookup: HashMap::default(),
+            record_lookup: HashMap::default(),
             fault: None,
             pinned: 1,
             created: 0,
@@ -240,6 +244,8 @@ impl Heap {
         self.objects.retain(|handle, _| objects.contains(handle));
         self.containers.retain(|handle, _| objects.contains(handle));
         self.container_lookup
+            .retain(|_, handle| objects.contains(handle));
+        self.record_lookup
             .retain(|_, handle| objects.contains(handle));
         // No buffer outlives the kernel that built it.
         self.buffers.clear();

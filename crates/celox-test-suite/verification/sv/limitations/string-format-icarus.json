@@ -1,0 +1,40 @@
+{
+  "tool": "icarus",
+  "version": "Icarus Verilog 13.0",
+  "source": "src/sv/cases/string_format.vtest",
+  "method": "Each unchanged shared case fails in the verify-sv-icarus run. The reduced sources below, run with iverilog -g2012 -s Top and vvp -n, reproduce each failure without the adapter.",
+  "cases": [
+    {
+      "case": "string_format::sformatf_in_conditional_expressions",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "ivl: eval_vec4.c:1359: draw_eval_vec4: Assertion `ivl_expr_value(expr) == IVL_VT_BOOL || ivl_expr_value(expr) == IVL_VT_VECTOR' failed.\nAborted (core dumped)\n",
+      "exit_status": 134,
+      "reduced_source": "module Top;\n    string a, b, t;\n    int i;\n    initial begin\n        a = \"x\"; b = \"y\"; i = 1;\n        t = i > 0 ? a : b;\n        $display(\"%s\", t);\n    end\nendmodule\n"
+    },
+    {
+      "case": "string_format::sformat_property_output",
+      "status": "runtime_error",
+      "phase": "execute",
+      "stderr": "ERROR:prop_r.sv:8: $sformat's first argument must be a register or SV string.\n",
+      "exit_status": 1,
+      "reduced_source": "class Item;\n    string label;\nendclass\nmodule Top;\n    Item item;\n    initial begin\n        item = new;\n        $sformat(item.label, \"L%0d\", 9);\n        $display(\"%s\", item.label);\n    end\nendmodule\n"
+    },
+    {
+      "case": "string_format::sformatf_packed_runtime_format",
+      "status": "runtime_error",
+      "phase": "execute",
+      "stderr": "ERROR:packed_r.sv:6: $sformatf's first argument must be a string or a register.\n",
+      "exit_status": 1,
+      "reduced_source": "module Top;\n    bit [8*4-1:0] format;\n    string s;\n    initial begin\n        format = \"%0d\";\n        s = $sformatf(format, 42);\n        $display(\"%s\", s);\n    end\nendmodule\n"
+    },
+    {
+      "case": "string_format::sformatf_in_container_operands",
+      "status": "compile_error",
+      "phase": "compile",
+      "stderr": "source_0.sv:8: error: Type names are not valid expressions here.\nsource_0.sv:8: internal error: I do not know how to elaborate this expression.\nsource_0.sv:8: error: Dimensions must be constant.\nsource_0.sv:19: error: Can't find task push_back in class Log\nsource_0.sv:20: error: Can't find task insert in class Log\n",
+      "exit_status": 1,
+      "reduced_source": "class Log;\n    string lines[$];\nendclass\nmodule Top;\n    string m[string];\n    Log log;\n    initial begin\n        log = new;\n        m[\"k\"] = \"v\";\n        log.lines.push_back(\"x\");\n        $display(\"%s %s\", m[\"k\"], log.lines[0]);\n    end\nendmodule\n"
+    }
+  ]
+}

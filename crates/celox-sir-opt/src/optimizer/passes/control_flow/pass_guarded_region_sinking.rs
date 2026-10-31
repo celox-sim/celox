@@ -261,7 +261,7 @@ impl ExecutionUnitPass for GuardedRegionSinkingPass {
         // sinking transform remains independent and can consume either an
         // original branch or a branch introduced above.
 
-        let Ok(cfg) = SirCfg::analyze(eu) else {
+        let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
             return;
         };
         let uses = collect_uses(eu);
@@ -533,7 +533,7 @@ fn split_branch_live_ranges(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
 /// destination must remain in an acyclic region: sinking a loop-invariant
 /// value into a loop would trade one evaluation for one per iteration.
 fn sink_pure_values_to_use_dominators(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return;
     };
     let uses = collect_uses(eu);
@@ -652,7 +652,7 @@ struct PredicatedLiveOutPlan {
 /// makes its conditional availability explicit, after which ordinary sinking
 /// can place the complete producer DAG below the shared guards.
 fn repair_predicated_live_outs(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_structure(eu) else {
         return false;
     };
     let uses = collect_uses(eu);
@@ -962,7 +962,7 @@ struct IncomingPhiEdge {
 /// each incoming edge are sufficient to prove those operands dead without
 /// enumerating paths.
 fn prune_control_dead_phi_operands(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return false;
     };
     let uses = collect_uses(eu);
@@ -1137,7 +1137,7 @@ pub(in crate::optimizer) fn eliminate_dead_control_regions(
     loop {
         prune_dead_block_parameters(eu);
         super::pass_vectorize_concat::remove_dead_definitions(eu);
-        let Ok(cfg) = SirCfg::analyze(eu) else {
+        let Ok(cfg) = SirCfg::analyze_structure(eu) else {
             return;
         };
         let uses = collect_uses(eu);
@@ -1323,7 +1323,7 @@ fn remove_dead_edge_arguments(
 /// priority checks even though the whole decision region and its phi are only
 /// needed by the final normal leaf.
 fn sink_deferred_value_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_structure(eu) else {
         return;
     };
     let uses = collect_uses(eu);
@@ -1610,7 +1610,7 @@ fn distribute_prefix_phi_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) ->
         incoming: Vec<(BlockId, Vec<RegisterId>)>,
     }
 
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return false;
     };
     let mut plans = Vec::new();
@@ -1720,7 +1720,7 @@ fn distribute_prefix_phi_stores(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) ->
 /// introduced by this pass are the desired predecessors, and a global fixed
 /// point would needlessly reshape unrelated CFG.
 fn merge_single_predecessor_jump_blocks(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return;
     };
     let mut claimed = HashSet::default();
@@ -1830,7 +1830,7 @@ fn replace_register_uses_in_terminator(
 }
 
 fn sink_deferred_value_diamonds(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_structure(eu) else {
         return;
     };
     let uses = collect_uses(eu);

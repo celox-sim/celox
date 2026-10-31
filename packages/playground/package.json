@@ -19,7 +19,7 @@
     "@celox-sim/celox": "workspace:*",
     "@celox-sim/vite-plugin": "workspace:*",
     "@playwright/test": "^1.55.1",
-    "@types/node": "^25.3.2",
+    "@types/node": "^26.0.0",
     "monaco-editor": "^0.57.0",
     "sucrase": "^3.35.1",
     "typescript": "^7.0.0",

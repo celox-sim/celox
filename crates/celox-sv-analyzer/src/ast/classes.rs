@@ -13,6 +13,7 @@ use super::*;
 use crate::system_functions::{HandleProperty, ObjectField, ObjectOp};
 
 pub(super) mod constraints;
+pub(super) mod foreign;
 pub(super) mod specializations;
 
 /// Bit width of a handle, see `celox_design::HANDLE_WIDTH`.
@@ -43,7 +44,8 @@ impl Property {
             return None;
         }
         if self.r#type.is_enum {
-            self.r#type.enum_values.as_ref().and_then(|values| {
+            self.r#type.enum_domain.as_ref().and_then(|domain| {
+                let values = &domain.members;
                 (1..=256)
                     .contains(&values.len())
                     .then_some(values.len() as u16)
@@ -54,6 +56,22 @@ impl Property {
                 .then(|| 1u16 << self.field.width)
         }
     }
+}
+
+/// A property of unpacked structure type, or a member of one that is itself
+/// an unpacked structure. It is not laid out: its leaf members are
+/// properties named by their member path (see `unpacked_structs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct AggregateProperty {
+    pub name: String,
+    pub owner: String,
+    pub local: bool,
+    pub protected: bool,
+    pub r#type: Type,
+    pub initializer: Option<celox_sv_syntax::ExprId>,
+    /// How many properties precede it: a later declaration of the same
+    /// name hides an earlier one.
+    pub position: usize,
 }
 
 /// A static property of a class: one variable of the module that declares
@@ -121,6 +139,8 @@ pub(super) struct Class {
     pub properties: Vec<Property>,
     /// How many of `properties` the bases declare.
     pub base_properties: usize,
+    /// Properties of unpacked structure type of the class and its bases.
+    pub aggregates: Vec<AggregateProperty>,
     /// Static properties of the class and its bases.
     pub statics: Vec<StaticProperty>,
     /// Methods visible in the class, overrides replacing inherited ones.
@@ -162,9 +182,12 @@ impl Class {
                     "randc requires a 1-8 bit integer or an enum with at most 256 declared values",
                 ));
             }
+            if (property.rand || property.randc) && property.field.four_state {
+                return Err(unsupported("randomization of a 4-state class property"));
+            }
             if (property.rand || property.randc)
                 && (property.field.handle.is_some()
-                    || (property.r#type.is_enum && property.r#type.enum_values.is_none()))
+                    || (property.r#type.is_enum && property.r#type.enum_domain.is_none()))
             {
                 return Err(unsupported(
                     "class randomize requires integral rand properties with a supported enum domain",
@@ -190,10 +213,42 @@ impl Class {
     /// The property `name`; one the class declares hides one of a base
     /// (IEEE 1800-2023 8.14).
     pub fn property(&self, name: &str) -> Option<&Property> {
-        self.properties
+        let (index, property) = self
+            .properties
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, property)| property.name == name)?;
+        (!self.hidden(name, index + 1, index)).then_some(property)
+    }
+
+    /// The property or member of unpacked structure type `name`.
+    pub fn aggregate(&self, name: &str) -> Option<&AggregateProperty> {
+        let aggregate = self
+            .aggregates
             .iter()
             .rev()
-            .find(|property| property.name == name)
+            .find(|aggregate| aggregate.name == name)?;
+        (!self.hidden(name, aggregate.position, aggregate.position)).then_some(aggregate)
+    }
+
+    /// Whether a later declaration hides the property or member `name`: a
+    /// property from position `properties` on, or a property of unpacked
+    /// structure type after position `aggregates`, of that name or of a
+    /// structure that contains it (`p` for `p.a`).
+    fn hidden(&self, name: &str, properties: usize, aggregates: usize) -> bool {
+        let paths = name
+            .match_indices('.')
+            .map(|(end, _)| &name[..end])
+            .chain([name])
+            .collect::<Vec<_>>();
+        self.properties
+            .iter()
+            .enumerate()
+            .any(|(index, property)| index >= properties && paths.contains(&property.name.as_str()))
+            || self.aggregates.iter().any(|aggregate| {
+                aggregate.position > aggregates && paths.contains(&aggregate.name.as_str())
+            })
     }
 
     pub fn static_property(&self, name: &str) -> Option<&StaticProperty> {
@@ -218,51 +273,14 @@ impl Class {
         &self,
         arguments: &[celox_sv_syntax::Argument],
     ) -> Converted<(Vec<Option<celox_sv_syntax::ExprId>>, Vec<usize>)> {
-        let names = self
+        let formals = self
             .method("new")
             .map_or_else(Vec::new, |method| method.formals.clone());
-        let mut actuals = vec![None; names.len()];
-        let mut order = Vec::new();
-        let mut named = false;
-        for (index, argument) in arguments.iter().enumerate() {
-            let index = match &argument.name {
-                Some(name) => {
-                    named = true;
-                    let name = instances::normalize_identifier(&name.spelling);
-                    names
-                        .iter()
-                        .position(|formal| formal.as_ref() == Some(&name))
-                        .ok_or_else(|| {
-                            unsupported(format!(
-                                "constructor of class `{}` without an argument `{name}`",
-                                self.name
-                            ))
-                        })?
-                }
-                None if named => {
-                    return Err(unsupported("positional argument after named argument"));
-                }
-                None => index,
-            };
-            let Some(actual) = actuals.get_mut(index) else {
-                return Err(unsupported(format!(
-                    "constructor of class `{}` with {} arguments",
-                    self.name,
-                    arguments.len()
-                )));
-            };
-            // An omitted actual `.x()` binds its formal too.
-            if order.contains(&index) {
-                return Err(unsupported("constructor argument passed twice"));
-            }
-            order.push(index);
-            *actual = argument.value;
-        }
-        let unbound = (0..names.len())
-            .filter(|index| !order.contains(index))
-            .collect::<Vec<_>>();
-        order.extend(unbound);
-        Ok((actuals, order))
+        expression_binding::formal_arguments(
+            &Self::subroutine_name(&self.name, "new"),
+            arguments,
+            &formals,
+        )
     }
 
     /// The subroutine name of `method` of `owner`, and the variable name of
@@ -368,7 +386,12 @@ pub(super) fn declared_name(
             instances::normalize_identifier(&unit.name.spelling)
         ),
         Some(_) => name,
-        None => format!("{}::{name}", packages::UNIT),
+        None => {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = fxhash::FxHasher::default();
+            tree.compilation_path().hash(&mut hasher);
+            format!("{}::{name}@{:016x}", packages::UNIT, hasher.finish())
+        }
     }
 }
 
@@ -432,9 +455,15 @@ pub(super) fn scope_class_types(tree: &AnalysisContext<'_>) -> Vec<(String, Type
 /// declares (IEEE 1800-2023 3.12.1). Classes of packages are seen through
 /// imports, as types.
 pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> {
+    if tree.state.foreign.contains(name) {
+        return Some(name.to_owned());
+    }
     let native = tree.declarations();
     let scope = tree.root_unit().ok().map(|unit| unit.tokens);
     let mut unit_class = None;
+    let package_scope = tree
+        .root_unit()
+        .is_ok_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
     for class in &native.classes {
         if instances::normalize_identifier(&class.name.spelling) != name {
             continue;
@@ -443,25 +472,37 @@ pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> 
         if enclosing == scope {
             return Some(declared_name(tree, class));
         }
-        if enclosing.is_none() {
+        if enclosing.is_none() && !package_scope {
             unit_class = Some(declared_name(tree, class));
         }
     }
     // A class an import makes visible (IEEE 1800-2023 26.3).
     let imported = scope::imported(&tree.state);
-    if let Some(class) = imported.aliases.get(name)
-        && imported.classes.iter().any(|known| &known.name == class)
-    {
-        return Some(class.clone());
+    if let Some(alias) = imported.aliases.get(name) {
+        let class = imported
+            .type_aliases
+            .get(alias)
+            .and_then(Type::class)
+            .unwrap_or(alias);
+        if imported.classes.iter().any(|known| known.name == class)
+            || tree.state.foreign.contains(class)
+        {
+            return Some(class.to_owned());
+        }
     }
-    unit_class.or_else(|| {
-        let class = format!("{}::{name}", packages::UNIT);
-        imported
-            .classes
-            .iter()
-            .any(|known| known.name == class)
-            .then_some(class)
-    })
+    unit_class
+        .or_else(|| {
+            if package_scope {
+                return None;
+            }
+            let alias = format!("{}::{name}", packages::UNIT);
+            imported
+                .type_aliases
+                .get(&alias)
+                .and_then(Type::class)
+                .map(str::to_owned)
+        })
+        .or_else(|| (name == "process").then(|| super::processes::CLASS.to_owned()))
 }
 
 /// Whether class `name` is declared in the source of the current scope.
@@ -490,6 +531,7 @@ pub(super) fn is_interface(tree: &AnalysisContext<'_>, name: &str) -> bool {
 /// 1800-2023 8.25).
 pub(super) fn is_parameterized(tree: &AnalysisContext<'_>, name: &str) -> bool {
     declaration(tree, name).is_some_and(|class| class.parameter_ports.is_some())
+        || tree.state.foreign.contains(name)
 }
 
 /// The classes and interface classes that body item `item` declares: of a
@@ -599,7 +641,10 @@ pub(super) fn base_arguments<'a>(
 
 /// The handle type of class `name`, if it is a class.
 pub(super) fn handle_type(tree: &AnalysisContext<'_>, name: &str) -> Option<Type> {
-    (declaration(tree, name).is_some() || imported(tree, name).is_some()).then(|| handle(name))
+    (name == super::processes::CLASS
+        || declaration(tree, name).is_some()
+        || imported(tree, name).is_some())
+    .then(|| handle(name))
 }
 
 /// Class `name` as the scope that declares it laid it out, when the current
@@ -628,7 +673,11 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>) -> Vec<String> {
 
 /// The handle type of class `name`.
 pub(super) fn handle(name: &str) -> Type {
-    let mut ty = Type::new(TypeKind::Object);
+    let mut ty = Type::new(if name == super::processes::CLASS {
+        TypeKind::Process
+    } else {
+        TypeKind::Object
+    });
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal((HANDLE_WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
@@ -710,6 +759,10 @@ pub(super) fn class(
         .map(|base| base.properties.clone())
         .unwrap_or_default();
     let base_properties = properties.len();
+    let mut aggregates = base
+        .as_ref()
+        .map(|base| base.aggregates.clone())
+        .unwrap_or_default();
     let mut statics = base
         .as_ref()
         .map(|base| base.statics.clone())
@@ -746,6 +799,55 @@ pub(super) fn class(
                 return Err(unsupported("const dynamic container class property"));
             }
             let property_name = instances::normalize_identifier(&variable.name.spelling);
+            if let Some(aggregate) = ty.unpacked_struct() {
+                if property.qualifiers.is_static {
+                    return Err(unsupported(
+                        "static class property of unpacked structure type",
+                    ));
+                }
+                if property.qualifiers.rand || property.qualifiers.randc {
+                    return Err(unsupported(
+                        "random class property of unpacked structure type",
+                    ));
+                }
+                if property.declaration.constant {
+                    return Err(unsupported(
+                        "const class property of unpacked structure type",
+                    ));
+                }
+                for (aggregate_name, aggregate_type) in
+                    unpacked_structs::aggregates(&property_name, &ty)
+                {
+                    aggregates.push(AggregateProperty {
+                        initializer: (aggregate_name == property_name)
+                            .then_some(variable.value)
+                            .flatten(),
+                        name: aggregate_name,
+                        owner: name.to_owned(),
+                        local: property.qualifiers.local,
+                        protected: property.qualifiers.protected,
+                        r#type: aggregate_type,
+                        position: properties.len(),
+                    });
+                }
+                for leaf in aggregate.leaves() {
+                    let field = field(&tree.state, &leaf.r#type, env, size)?;
+                    size = field.offset + field.storage();
+                    properties.push(Property {
+                        name: leaf.name(&property_name),
+                        owner: name.to_owned(),
+                        constant: false,
+                        local: property.qualifiers.local,
+                        protected: property.qualifiers.protected,
+                        r#type: leaf.r#type,
+                        field,
+                        rand: false,
+                        randc: false,
+                        initializer: None,
+                    });
+                }
+                continue;
+            }
             if property.qualifiers.is_static {
                 statics.retain(|known| known.name != property_name);
                 statics.push(StaticProperty {
@@ -762,7 +864,7 @@ pub(super) fn class(
             let owner = name.to_owned();
             let name = property_name;
             let field = field(&tree.state, &ty, env, size)?;
-            size = field.offset + field.bytes();
+            size = field.offset + field.storage();
             properties.push(Property {
                 name,
                 owner,
@@ -900,7 +1002,7 @@ pub(super) fn class(
     }
     let class = Rc::new(Class {
         name: name.to_owned(),
-        id: class_id(tree, name),
+        id: class_id(name),
         constraints,
         has_constraints: declaration.has_constraints
             || base.as_ref().is_some_and(|base| base.has_constraints),
@@ -910,6 +1012,7 @@ pub(super) fn class(
         is_interface: false,
         properties,
         base_properties,
+        aggregates,
         statics,
         methods,
         declarations: Vec::new(),
@@ -1021,7 +1124,7 @@ fn interface_class(
     }
     let class = Rc::new(Class {
         name: name.to_owned(),
-        id: class_id(tree, name),
+        id: class_id(name),
         base: None,
         interfaces,
         is_abstract: true,
@@ -1030,6 +1133,7 @@ fn interface_class(
         constraints: Vec::new(),
         properties: Vec::new(),
         base_properties: 0,
+        aggregates: Vec::new(),
         statics: Vec::new(),
         methods,
         declarations,
@@ -1125,17 +1229,21 @@ fn out_of_block_definition(
 
 /// The layout of a property of type `ty` at the first aligned offset at or
 /// after `offset`.
-fn field(
+pub(super) fn field(
     state: &AnalysisState,
     ty: &Type,
     env: &HashMap<String, i128>,
     offset: u32,
 ) -> Converted<ObjectField> {
+    if ty.unpacked_struct().is_some() {
+        return Err(unsupported("class property of unpacked structure type"));
+    }
     let (width, signed, handle) = match ty.kind() {
         _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
-        TypeKind::Bit => {
+        TypeKind::Process => (HANDLE_WIDTH, false, None),
+        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
             let shape = casts::expr_type_from_type(state, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;
             if shape.width > 64 {
@@ -1146,44 +1254,29 @@ fn field(
         TypeKind::Real | TypeKind::Shortreal => {
             return Err(unsupported("real class property"));
         }
-        TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
-            return Err(unsupported("4-state class property"));
-        }
     };
     Ok(ObjectField {
         offset: offset.next_multiple_of(8),
         width: width as u32,
         signed,
         handle,
+        // A 4-state property keeps its X and Z bits (IEEE 1800-2023 6.3.1).
+        four_state: handle.is_none()
+            && matches!(
+                ty.kind(),
+                TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+            ),
+        nullable: false,
     })
 }
 
 /// A run-time identifier of class `name`: an FNV-1a hash, never 0, which
 /// `null` reads as.
-fn class_id(tree: &AnalysisContext<'_>, name: &str) -> u32 {
-    // Classes of the compilation units of two sources may share a name; the
-    // path of the source tells them apart (IEEE 1800-2023 3.12.1).
-    let source = name
-        .starts_with(&format!("{}::", packages::UNIT))
-        .then(|| {
-            let native = tree.declarations();
-            native.tokens.first().map(|token| {
-                native
-                    .sources
-                    .file(token.origin.spelling.file)
-                    .path
-                    .display()
-                    .to_string()
-            })
-        })
-        .flatten()
-        .unwrap_or_default();
-    let hash = name
-        .bytes()
-        .chain(source.bytes())
-        .fold(0x811c_9dc5u32, |hash, byte| {
-            (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
-        });
+fn class_id(name: &str) -> u32 {
+    // Compilation-unit declaration names already contain their source identity.
+    let hash = name.bytes().fold(0x811c_9dc5u32, |hash, byte| {
+        (hash ^ u32::from(byte)).wrapping_mul(0x0100_0193)
+    });
     hash.max(1)
 }
 

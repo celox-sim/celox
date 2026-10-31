@@ -266,6 +266,30 @@ A running simulator retains the elaborated design, source lookup, runtime schema
 bound testbench bytecode, and compiled backend. The backend owns the finalized
 layout. Frontend and optimizer state are discarded after compilation.
 
+Veryl testbench expressions and resumable processes lower to SIR before
+optimization and state layout, using the same process builder and code-generation
+backends as SystemVerilog. Integer operations, including wide values, use normal
+SIR instruction selection. Strings and floating-point operations use the shared
+heap and numeric ABI. There is no separate testbench VM, assembler or Cranelift
+compiler. Tiered execution promotes the DUT and testbench kernels together.
+
+The compiled process stores its continuation before requesting a clock/reset
+wait or a host service such as display, assertions, random generation or component
+calls. A generated SIR scheduler resumes the TB kernels in declaration order,
+tracks their clock waits, and advances all clock generators together. It composes
+the same compiled clock-domain scheduler used by timed simulation. TB arithmetic,
+settlement requests and ordinary clock progress stay inside generated code;
+host services and bounded safe points return to the runtime so tiered compilation
+can be adopted. Observed slots still use the runtime event queue when tracing,
+components or other observers require it.
+
+Scheduler continuations, saved process-local values, event baselines and clock
+state have layout-owned homes. Wait releases precede runnable TB processes, which
+run before the timestamp's clock edges. Simultaneous edges sample before commits;
+tick limits drain pending falling edges and reset releases. The reference
+scheduler remains available for differential checks. Compiler-only builds retain
+the same lowering and serialized kernel metadata without requiring a host JIT.
+
 ## Public API boundary
 
 The Rust `celox` crate is a facade over the compiler and runtime components. The

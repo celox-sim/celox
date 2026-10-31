@@ -1,0 +1,64 @@
+(group concurrent_assertions (category sequential))
+
+; IEEE 1800-2023 16.5.1 and 16.14.1: Preponed predicate, Reactive action.
+(case sampled_predicate_live_action
+ (source "sampling.sv" #"module Top(output int passed, failed, action_value);
+ bit clk, data;
+ always @(posedge clk) data <= 1;
+ p: assert property (@(posedge clk) data == 0)
+    begin passed++; action_value = data; end else failed++;
+ initial begin #1 clk=1; #1 clk=0; #1 clk=1; end
+endmodule"#)
+ (top Top) (run_until 3)
+ (assert_eq passed 1) (assert_eq failed 1) (assert_eq action_value 1))
+
+; disable iff reads the current value after NBA, not the sampled value.
+(case disable_iff_after_nba
+ (source "disable.sv" #"module Top(output int passed, failed);
+ bit clk, reset;
+ always @(posedge clk) reset <= 1;
+ p: assert property (@(posedge clk) disable iff (reset) 0)
+    passed++; else failed++;
+ initial begin #1 clk=1; #1 clk=0; #1 clk=1; end
+endmodule"#)
+ (top Top) (run_until 3)
+ (assert_eq passed 0) (assert_eq failed 0))
+
+; Both Observed predicates see reset=0 before either Reactive action sets it.
+(case predicates_before_all_actions
+ (source "observed.sv" #"module Top(output int first, second);
+ bit clk, reset;
+ p: assert property (@(posedge clk) disable iff (reset) 1)
+    begin first++; reset=1; end else first+=10;
+ q: assert property (@(posedge clk) disable iff (reset) 1)
+    second++; else second+=10;
+ initial #1 clk=1;
+endmodule"#)
+ (top Top) (run_until 2)
+ (assert_eq first 1) (assert_eq second 1))
+
+(case assume_cover_and_generate
+ (source "directives.sv" #"module Top(output int assumed, covered, generated);
+ bit clk, data;
+ a: assume property (@(negedge clk) data) assumed++; else assumed+=10;
+ c: cover property (@(negedge clk) data) covered++;
+ if (1) begin: g
+   p: assert property (@(posedge clk) 1) generated++;
+ end
+ initial begin #1 clk=1; #1 clk=0; #1 data=1; clk=1; #1 clk=0; end
+endmodule"#)
+ (top Top) (run_until 4)
+ (assert_eq assumed 11) (assert_eq covered 1) (assert_eq generated 2))
+
+; An unknown predicate fails; an unknown disable condition does not disable.
+(case unknown_predicates_and_disable_conditions
+ (source "unknown.sv" #"module Top(output int failed, disabled_failed);
+ bit clk;
+ logic unknown_value;
+ p: assert property (@(posedge clk) unknown_value) failed+=10; else failed++;
+ q: assert property (@(posedge clk) disable iff (unknown_value) 0)
+    disabled_failed+=10; else disabled_failed++;
+ initial #1 clk=1;
+endmodule"#)
+ (top Top) (four_state) (run_until 2)
+ (assert_eq failed 1) (assert_eq disabled_failed 1))

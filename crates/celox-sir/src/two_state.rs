@@ -25,6 +25,7 @@ pub fn canonicalize_program<EventAddr, StateAddr>(program: &mut SirProgram<Event
         eval_apply_ffs,
         eval_comb_apply_ffs,
         merge_comb_apply: _,
+        eval_comb_stateful: _,
         eval_only_ffs,
         apply_ffs,
         parallel,

@@ -24,10 +24,9 @@ The benchmark separates three questions:
    while compilation overlaps simulation?
 
 Execution time includes the testbench for both simulators.
-Tiered results have separate charts for startup until simulation begins, execution
-with background compilation, and total time through Linux completion. The tiered
-execution interval includes time on the initial backend and must not be read as
-compiled-code throughput. Veryl-CC may finish on Cranelift before C compilation
+Tiered charts compare only total time through Linux completion, including
+startup and background compilation. Startup and execution intervals remain in
+the diagnostic logs; neither is a separate tiered performance score. Veryl-CC may finish on Cranelift before C compilation
 completes; these runs remain valid tiered measurements. Startup and total time
 begin before design analysis; source-file loading and building the benchmark
 executables with Cargo are excluded.
@@ -43,7 +42,7 @@ A run is accepted only when it:
 
 - uses the pinned Heliodor and workload revisions;
 - reaches the configured Linux completion marker;
-- records compilation and execution separately;
+- records total completion time, retaining timing details for diagnosis;
 - compares runners built from the intended Celox and Veryl revisions;
 - preserves the logs needed to diagnose a timeout or semantic mismatch;
 - proves that Celox tiered promoted and executed at least one generated-code

@@ -227,6 +227,7 @@ fn requires_process(
                     | Stmt::WaitEvent(_)
                     | Stmt::WaitImplicit(_)
                     | Stmt::Wait(_)
+                    | Stmt::AssertionRegion { .. }
                     | Stmt::WaitFork
                     | Stmt::Fork { .. }
             );

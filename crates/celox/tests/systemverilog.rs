@@ -145,6 +145,8 @@ mod review_regressions;
 mod scan;
 #[path = "frontends/systemverilog/string.rs"]
 mod string;
+#[path = "frontends/systemverilog/string_format.rs"]
+mod string_format;
 #[path = "frontends/systemverilog/suite.rs"]
 mod suite;
 #[path = "frontends/systemverilog/synthesizable.rs"]
@@ -251,5 +253,13 @@ mod unions;
 #[path = "frontends/systemverilog/tagged_unions.rs"]
 mod tagged_unions;
 
+#[path = "frontends/systemverilog/references.rs"]
+mod references;
+
 #[path = "frontends/systemverilog/containers.rs"]
 mod containers;
+
+#[path = "frontends/systemverilog/concurrent_assertions.rs"]
+mod concurrent_assertions;
+#[path = "frontends/systemverilog/unpacked_structs.rs"]
+mod unpacked_structs;

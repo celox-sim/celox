@@ -8,6 +8,10 @@ pub(super) struct Group {
 
 pub(super) const GROUPS: &[Group] = &[
     Group {
+        file: "src/sv/cases/concurrent_assertions.vtest",
+        text: include_str!("concurrent_assertions.vtest"),
+    },
+    Group {
         file: "src/sv/cases/containers.vtest",
         text: include_str!("containers.vtest"),
     },
@@ -26,6 +30,10 @@ pub(super) const GROUPS: &[Group] = &[
     Group {
         file: "src/sv/cases/tagged_unions.vtest",
         text: include_str!("tagged_unions.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/references.vtest",
+        text: include_str!("references.vtest"),
     },
     Group {
         file: "src/sv/cases/unions.vtest",
@@ -54,6 +62,10 @@ pub(super) const GROUPS: &[Group] = &[
     Group {
         file: "src/sv/cases/binary_file_io.vtest",
         text: include_str!("binary_file_io.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/string_format.vtest",
+        text: include_str!("string_format.vtest"),
     },
     Group {
         file: "src/sv/cases/scan.vtest",
@@ -122,6 +134,10 @@ pub(super) const GROUPS: &[Group] = &[
     Group {
         file: "src/sv/cases/packed_structs.vtest",
         text: include_str!("packed_structs.vtest"),
+    },
+    Group {
+        file: "src/sv/cases/unpacked_structs.vtest",
+        text: include_str!("unpacked_structs.vtest"),
     },
     Group {
         file: "src/sv/cases/procedural.vtest",

@@ -353,7 +353,7 @@ pub(super) fn query_actual_is_writable(expression: &Expr, dimensions: &PackedDim
 /// Syntax adapters provide normalized names and optional values, not source text.
 pub(super) fn bind_normalized_call_arguments<T: Clone>(
     name: &str,
-    mut positional: Vec<Option<T>>,
+    positional: Vec<Option<T>>,
     named: Vec<(String, Option<T>)>,
     signatures: &HashMap<String, Vec<String>>,
 ) -> Converted<(Vec<Option<T>>, Vec<usize>)> {
@@ -363,26 +363,47 @@ pub(super) fn bind_normalized_call_arguments<T: Clone>(
     let params = signatures
         .get(name)
         .ok_or_else(|| unsupported(format!("named arguments of `{name}`")))?;
-    if positional.len() > params.len() {
-        return Err(unsupported(format!("too many arguments of `{name}`")));
+    bind_to_formals(name, positional, named, params)
+}
+
+/// Binds the positional actuals, then the named ones, to `formals`. An
+/// unnamed formal is the empty string. Returns the actual of each formal,
+/// `None` for one that takes its default (13.5.3), and the formals in the
+/// order their actuals are written, then the rest, which is the order they
+/// are evaluated in.
+pub(super) fn bind_to_formals<T>(
+    name: &str,
+    mut positional: Vec<Option<T>>,
+    named: Vec<(String, Option<T>)>,
+    formals: &[impl AsRef<str>],
+) -> Converted<(Vec<Option<T>>, Vec<usize>)> {
+    let invalid = |detail: String| AnalyzerError::InvalidCallArguments {
+        subroutine: name.to_string(),
+        detail: format!("{detail} (IEEE 1800-2023 13.5.4)"),
+    };
+    if positional.len() > formals.len() {
+        return Err(invalid(format!(
+            "{} actuals for {} formals",
+            positional.len() + named.len(),
+            formals.len()
+        )));
     }
     let mut order: Vec<_> = (0..positional.len()).collect();
     let mut bound: HashSet<_> = order.iter().copied().collect();
-    positional.resize(params.len(), None);
+    positional.resize_with(formals.len(), || None);
     for (formal, expr) in named {
-        let position = params
+        let position = formals
             .iter()
-            .position(|param| *param == formal)
-            .ok_or_else(|| unsupported(format!("argument `{formal}` of `{name}`")))?;
+            .position(|param| !formal.is_empty() && param.as_ref() == formal)
+            .ok_or_else(|| invalid(format!("no formal named `{formal}`")))?;
+        // An empty named actual `.a()` binds its formal too.
         if !bound.insert(position) {
-            return Err(unsupported(format!(
-                "duplicate argument `{formal}` of `{name}`"
-            )));
+            return Err(invalid(format!("formal `{formal}` is bound twice")));
         }
         positional[position] = expr;
         order.push(position);
     }
     // Defaults for unbound formals are resolved by the call lowerer.
-    order.extend((0..params.len()).filter(|position| !bound.contains(position)));
+    order.extend((0..formals.len()).filter(|position| !bound.contains(position)));
     Ok((positional, order))
 }

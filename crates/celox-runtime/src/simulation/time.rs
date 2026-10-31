@@ -196,6 +196,7 @@ impl<B: SimBackend> SimulationState<B> {
             let ready = self.take_ready_processes(current_time);
             if ready.is_empty() && self.process_state.ready.is_empty() {
                 executor.try_observed_deferred_assertions(current_time)?;
+                self.run_observed_assertions(executor, current_time)?;
                 // The active region set is empty: the reactive region set
                 // runs, and the design activity it creates runs in the active
                 // region set again (IEEE 1800-2023 4.5).
@@ -321,6 +322,7 @@ impl<B: SimBackend> SimulationState<B> {
             return None;
         }
         if self.finalizing.is_some()
+            || !self.process_state.observed.is_empty()
             || !self.process_state.ready.is_empty()
             || !self.process_state.reactive.is_empty()
         {

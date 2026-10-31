@@ -151,6 +151,9 @@ pub(in crate::ast) fn bind_inputs(
                     .rev()
                     .find(|(_, p)| p.name == name)
                 {
+                    if property.field.four_state {
+                        return Err("4-state class property in a constraint".into());
+                    }
                     Typed {
                         kind: Kind::Leaf(ConstraintExpr::Field(index)),
                         width: property.field.width,

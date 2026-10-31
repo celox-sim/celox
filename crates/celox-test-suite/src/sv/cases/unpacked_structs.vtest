@@ -1,0 +1,808 @@
+(group unpacked_structs (category types))
+
+(case members_whole_copies_and_equality
+  (source "unpacked_struct_locals.sv" #"
+module Top(output bit done);
+    typedef struct { int level; string name; bit [3:0] l; bit b; } row_t;
+    typedef struct { row_t r; string tag; } outer_t;
+    initial begin
+        row_t a, b;
+        outer_t o;
+        $display("def %0d [%s] %b %b", a.level, a.name, a.l, a.b);
+        a.level = 3;
+        a.name = "n";
+        a.l = 4'b1011;
+        a.b = 1;
+        b = a;
+        b.name = "m";
+        $display("%0d %s %b %b | %0d %s", a.level, a.name, a.l, a.b, b.level, b.name);
+        $display("eq %0d %0d", a == b, a != b);
+        b.name = "n";
+        $display("eq %0d %0d len=%0d", a == b, a === b, b.name.len());
+        o.r = b;
+        o.tag = "t";
+        o.r.level++;
+        o.r.name = {o.r.name, o.tag};
+        $display("nest %0d %s %s %0d", o.r.level, o.r.name, o.tag, o.r == a);
+        b = o.r;
+        $display("copy %0d %s", b.level, b.name);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "def 0 [] 0000 0\n3 n 1011 1 | 3 m\neq 0 1\neq 1 1 len=1\nnest 4 nt t 0\ncopy 4 nt\n"))
+
+(case assignment_patterns
+  (source "unpacked_struct_patterns.sv" #"
+module Top(output bit done);
+    typedef struct { int level; string name; bit [3:0] l; } row_t;
+    typedef struct { row_t r; string tag; } outer_t;
+    initial begin
+        row_t b;
+        outer_t o;
+        b = '{level: 7, name: "pat", default: 0};
+        $display("named %0d %s %b", b.level, b.name, b.l);
+        b = '{1, "pos", 4'b0011};
+        $display("positional %0d %s %b", b.level, b.name, b.l);
+        b = row_t'{-2, "typed", 4'hf};
+        $display("typed %0d %s %b", b.level, b.name, b.l);
+        o = '{r: '{default: 0, name: "z"}, tag: "q"};
+        $display("nested %0d %s %b %s", o.r.level, o.r.name, o.r.l, o.tag);
+        o = '{r: b, tag: "w"};
+        $display("member %0d %s %s", o.r.level, o.r.name, o.tag);
+        o = '{default: 5, tag: "d"};
+        $display("default %0d %b %s", o.r.level, o.r.l, o.tag);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "named 7 pat 0000\npositional 1 pos 0011\ntyped -2 typed 1111\nnested 0 z 0000 q\nmember -2 typed w\ndefault 5 0101 d\n"))
+
+(case subroutine_arguments_and_results
+  (source "unpacked_struct_subroutines.sv" #"
+module Top(output bit done);
+    typedef struct { int level; string name; } row_t;
+    function automatic string format(row_t r);
+        string s;
+        s.itoa(r.level);
+        return {s, ":", r.name};
+    endfunction
+    function automatic row_t make(int level, string name);
+        row_t r;
+        r.level = level;
+        r.name = name;
+        return r;
+    endfunction
+    function automatic void bump(inout row_t r, output row_t o);
+        r.level++;
+        o = '{level: -1, name: {r.name, "!"}};
+        if (r.level > 0) return;
+        o.level = 99;
+    endfunction
+    task automatic later(row_t r, output row_t q);
+        #2 q = r;
+        q.name = {r.name, "+"};
+    endtask
+    initial begin
+        row_t a, b;
+        a = make(5, "five");
+        $display("%s %s", format(a), format('{1, "one"}));
+        bump(a, b);
+        $display("%s %s", format(a), format(b));
+        b = a.level > 5 ? a : b;
+        $display("%s %0d %0d", format(b), make(2, "x") == make(2, "x"), make(2, "x") == make(2, "y"));
+        later(a, b);
+        $display("%0d %s", $time, format(b));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output "5:five 1:one\n6:five -1:five!\n6:five 1 0\n2 6:five+\n"))
+
+(case initializers_results_and_defaults
+  (source "unpacked_struct_initializers.sv" #"
+module Top(output bit done);
+    typedef struct { int a; string s; } row_t;
+    typedef struct { int a; bit [3:0] b; } int_t;
+    row_t g = '{1, "g"};
+    function automatic row_t make();
+        make = '{2, "m"};
+    endfunction
+    function automatic row_t make_members();
+        make_members.a = 3;
+        make_members.s = "n";
+    endfunction
+    function automatic row_t bump(inout row_t r);
+        r.a++;
+        return r;
+    endfunction
+    function automatic row_t twice(inout row_t r);
+        return bump(r);
+    endfunction
+    function automatic int f(row_t r = '{default: 0, s: "d"});
+        return r.a + r.s.len();
+    endfunction
+    initial begin
+        row_t x, y;
+        $display("g %0d %s", g.a, g.s);
+        x = make();
+        y = make_members();
+        $display("make %0d %s %0d %s", x.a, x.s, y.a, y.s);
+        y = twice(x);
+        $display("twice %0d %0d", x.a, y.a);
+        $display("default %0d %0d", f(), f(x));
+        repeat (2) begin
+            static int_t r = '{0, 5};
+            $display("static %0d %0d", r.a, r.b);
+            r.a++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "g 1 g\nmake 2 m 3 n\ntwice 3 3\ndefault 1 4\nstatic 0 5\nstatic 1 5\n"))
+
+(case results_and_outputs
+  (source "unpacked_struct_results.sv" #"
+module Top(output bit done);
+    typedef struct { int a; } row_t;
+    typedef struct { string s; } str_t;
+    typedef struct { int x, y; } inner_t;
+    typedef struct { inner_t i; } outer_t;
+    function automatic row_t make(bit set);
+        if (set) make.a = 7;
+    endfunction
+    function automatic void outs(output str_t r);
+        r.s = "abc";
+    endfunction
+    function automatic void outz(output row_t r);
+        if (0) r.a = 1;
+    endfunction
+    initial begin
+        row_t r;
+        str_t s;
+        r = make(1);
+        r = make(0);
+        $display("make %0d", r.a);
+        outs(s);
+        $display("outs %s", s.s);
+        r.a = 5;
+        outz(r);
+        $display("outz %0d", r.a);
+        repeat (2) begin
+            static outer_t o = '{'{1, 2}};
+            $display("static %0d %0d", o.i.x, o.i.y);
+            o.i.x++;
+        end
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "make 0\nouts abc\noutz 0\nstatic 1 2\nstatic 2 2\n"))
+
+(case module_variables
+  (source "unpacked_struct_module.sv" #"
+module Top(input bit clk, input bit [7:0] a, input bit [3:0] b,
+           output bit [7:0] next_a, output bit [3:0] next_b,
+           output bit [7:0] stored_a, output bit [3:0] stored_b, output bit same);
+    typedef struct { bit [7:0] a; bit [3:0] b; } pair_t;
+    pair_t p, q, c, r;
+    assign p = '{a: a, b: b};
+    always_comb begin
+        q = p;
+        q.b = p.b + 1;
+    end
+    assign c = '{a: q.a + 1, b: q.b};
+    always_ff @(posedge clk) begin
+        r <= c;
+        r.b <= c.b ^ 4'hf;
+    end
+    assign next_a = c.a;
+    assign next_b = c.b;
+    assign stored_a = r.a;
+    assign stored_b = r.b;
+    assign same = p == q;
+endmodule
+"#)
+  (top Top)
+  (for (x y) (list (0x10 3) (0xfe 15))
+    (modify (set a x) (set b y))
+    (assert_eq next_a (& (+ x 1) 0xff))
+    (assert_eq next_b (& (+ y 1) 15))
+    (assert_eq same 0)
+    (tick clk)
+    (assert_eq stored_a (& (+ x 1) 0xff))
+    (assert_eq stored_b (^ (& (+ y 1) 15) 15))))
+
+(case handle_members_survive_heap_collections
+  (source "unpacked_struct_handles.sv" #"
+module Top(output int n);
+    class Node;
+        string text;
+        function new(string text);
+            this.text = text;
+        endfunction
+        function string get();
+            return text;
+        endfunction
+    endclass
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    logic clk = 0;
+    always #1 clk = ~clk;
+    pair_t kept, last;
+    Node node;
+    string number;
+    initial begin
+        kept.m_type = new("kept");
+        kept.m_type_name = {"na", "me"};
+    end
+    always @(posedge clk) begin
+        number.itoa(n);
+        node = new(number);
+        last = '{m_type: node, m_type_name: {number, "!"}};
+        node = null;
+        n = n + 1;
+    end
+    initial #6000 $display("[%s] [%s] [%s] [%s] %0d %0d", kept.m_type.get(), kept.m_type_name,
+        last.m_type.text, last.m_type_name, kept.m_type != null, n);
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "[kept] [name] [2999] [2999!] 1 3000\n"))
+
+(case four_state_members
+  (four_state)
+  (source "unpacked_struct_four_state.sv" #"
+module Top(output bit done);
+    typedef struct { time t; logic [3:0] l; int i; bit [1:0] b; } access_t;
+    access_t a, b;
+    initial begin
+        $display("def %0d %b %0d %b", a.t, a.l, a.i, a.b);
+        a.l = 4'b1z0x;
+        b = a;
+        $display("copy %b %0d %0d", b.l, a == b, a === b);
+        b = '{t: 5, l: 4'bxx11, i: 'x, b: 2'bx1};
+        $display("pattern %0d %b %0d %b", b.t, b.l, b.i, b.b);
+        b = '{default: 0};
+        $display("default %0d %b %0d %b", b.t, b.l, b.i, b.b);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "def x xxxx 0 00\ncopy 1z0x x 1\npattern 5 xx11 0 01\ndefault 0 0000 0 00\n"))
+
+(case class_properties
+  (source "unpacked_struct_properties.sv" #"
+module Top(output bit done);
+    class Node;
+        string n;
+        function new(string n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    typedef struct { time read_time; int unsigned read_count; bit [3:0] l; } access_t;
+    class Override;
+        string path;
+        pair_t orig;
+        pair_t ovrd = '{null, "init"};
+        access_t acc;
+        function new(string p, string on, Node ot);
+            path = p;
+            this.orig.m_type_name = on;
+            this.orig.m_type = ot;
+        endfunction
+        function bit pair_matches(pair_t m, Node t);
+            return m.m_type == t && m.m_type_name != "";
+        endfunction
+        function void touch(time now);
+            acc.read_count++;
+            acc.read_time = now;
+        endfunction
+    endclass
+    initial begin
+        Node a;
+        Override o, c;
+        pair_t tp;
+        access_t x;
+        a = new("A");
+        o = new("p", "A", a);
+        $display("%s %s %s [%s]", o.orig.m_type_name, o.orig.m_type.n, o.ovrd.m_type_name, o.path);
+        tp = o.orig;
+        tp.m_type_name = "changed";
+        $display("%s %s %0d %0d", o.orig.m_type_name, tp.m_type_name, o.pair_matches(o.orig, a), o.orig == tp);
+        o.ovrd = tp;
+        o.ovrd.m_type = null;
+        $display("%s %0d %0d", o.ovrd.m_type_name, o.ovrd.m_type == null, o.orig.m_type == null);
+        $display("acc %0d %0d %b", o.acc.read_time, o.acc.read_count, o.acc.l);
+        o.touch(5);
+        o.acc.l = 4'b1011;
+        c = new o;
+        c.acc.read_count = 9;
+        x = c.acc;
+        $display("acc %0d %0d %b | %0d %0d %b", o.acc.read_time, o.acc.read_count, o.acc.l, x.read_time, x.read_count, x.l);
+        o.acc = '{default: 0};
+        $display("acc %0d %0d %b", o.acc.read_time, o.acc.read_count, o.acc.l);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "A A init [p]\nA changed 1 0\nchanged 1 0\nacc 0 0 0000\nacc 5 1 1011 | 5 9 1011\nacc 0 0 0000\n"))
+
+(case class_property_assignment_order
+  (source "unpacked_struct_property_order.sv" #"
+module Top(output bit done);
+    typedef struct { int a; int b; } pair_t;
+    class Holder;
+        pair_t p;
+    endclass
+    Holder items[3];
+    int i;
+    function automatic int next_index();
+        i++;
+        return i;
+    endfunction
+    initial begin
+        Holder h;
+        h = new;
+        h.p.a = 1;
+        h.p.b = 2;
+        h.p = '{h.p.b, h.p.a};
+        $display("%0d %0d", h.p.a, h.p.b);
+        foreach (items[k]) begin
+            items[k] = new;
+            items[k].p = '{k, k * 10};
+        end
+        i = 0;
+        items[next_index()].p = '{7, 8};
+        $display("%0d %0d %0d %0d %0d", items[1].p.a, items[1].p.b, items[2].p.a, items[2].p.b, i);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 1\n7 8 2 20 1\n"))
+
+(case class_property_four_state_members
+  (four_state)
+  (source "unpacked_struct_property_states.sv" #"
+module Top(output bit done);
+    typedef struct { time t; int i; logic [3:0] l; } access_t;
+    class Holder;
+        access_t acc;
+    endclass
+    Holder h;
+    access_t copy;
+    initial begin
+        h = new;
+        $display("%0d %0d %b", h.acc.t, h.acc.i, h.acc.l);
+        h.acc.l = 4'b1z0x;
+        copy = h.acc;
+        $display("%b %0d", copy.l, copy === h.acc);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "x 0 xxxx\n1z0x 1\n"))
+
+(case class_properties_inheritance_and_collections
+  (source "unpacked_struct_property_heap.sv" #"
+module Top(output int n);
+    class Node;
+        string text;
+    endclass
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    class Base;
+        pair_t orig;
+        function pair_t get();
+            return orig;
+        endfunction
+        function bit same(pair_t p);
+            return orig == p;
+        endfunction
+        function void set(string s);
+            orig = '{m_type: null, m_type_name: s};
+        endfunction
+    endclass
+    class Derived extends Base;
+        pair_t ovrd;
+        function void swap();
+            pair_t t;
+            t = orig;
+            orig = ovrd;
+            ovrd = t;
+        endfunction
+    endclass
+    logic clk = 0;
+    always #1 clk = ~clk;
+    Derived d;
+    string number;
+    always @(posedge clk) begin
+        number.itoa(n);
+        d.set({number, "!"});
+        d.ovrd.m_type = new;
+        d.ovrd.m_type.text = number;
+        n = n + 1;
+    end
+    initial begin
+        pair_t g;
+        d = new;
+        d.set("x");
+        g = d.get();
+        $display("%s %0d", g.m_type_name, d.same(g));
+        d.ovrd.m_type_name = "o";
+        d.swap();
+        $display("%s %s", d.orig.m_type_name, d.ovrd.m_type_name);
+        #6000 $display("[%s] [%s] %0d", d.orig.m_type_name, d.ovrd.m_type.text, n);
+    end
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "x 1\no x\n[2999!] [2999] 3000\n"))
+
+(case container_elements
+  (source "unpacked_struct_containers.sv" #"
+module Top(output bit done);
+    class Node;
+        string n;
+        function new(string n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef struct { string name; string regex; } acs_t;
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    typedef struct { pair_t orig; string alias_name; } alias_t;
+    typedef struct { int read_time; int write_time; int unsigned read_count; } access_t;
+    typedef enum { NEVER, STARTED, FINISHED } state_e;
+    typedef struct { state_e state; bit ret_val; } info_t;
+    initial begin
+        acs_t q[$];
+        acs_t s, t;
+        alias_t aliases[$];
+        access_t access[string];
+        access_t ar;
+        info_t states[int];
+        info_t da[];
+        Node a;
+        s.name = "foo";
+        s.regex = "";
+        q.push_back(s);
+        q.push_back('{name: "", regex: "b.*"});
+        s.name = "changed";
+        $display("size %0d %s|%s %s", q.size(), q[0].name, q[1].regex, q[$].regex);
+        while (q.size()) begin
+            t = q.pop_front();
+            $display("acs %s|%s", t.name, t.regex);
+        end
+        a = new("A");
+        aliases.push_back('{orig: '{a, "A"}, alias_name: "al"});
+        $display("alias %s %s %s", aliases[0].orig.m_type.n, aliases[0].orig.m_type_name,
+            aliases[0].alias_name);
+        ar = access["x"];
+        $display("miss %0d %0d %0d", ar.read_time, ar.read_count, access.exists("x"));
+        ar.read_count++;
+        ar.read_time = 5;
+        access["x"] = ar;
+        ar.read_count = 99;
+        $display("hit %0d %0d %0d", access["x"].read_count, access["x"].read_time, access.num());
+        states[3] = '{STARTED, 1};
+        $display("info %0d %0d %0d", states[3].state, states[3].ret_val, states[4].state);
+        da = new[2];
+        da[1] = '{FINISHED, 1};
+        $display("da %0d %0d %0d", da[0].state, da[1].state, da[1] == info_t'{FINISHED, 1});
+        foreach (access[k]) $display("key %s %0d", k, access[k].read_count);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "size 2 foo|b.* b.*\nacs foo|\nacs |b.*\nalias A A al\nmiss 0 0 0\nhit 1 5 1\ninfo 1 1 0\nda 0 2 1\nkey x 1\n"))
+
+(case container_element_member_selects
+  (source "unpacked_struct_element_selects.sv" #"
+module Top(output bit done);
+    typedef struct { int x, y; } inner_t;
+    typedef struct { inner_t inner; bit [7:0] data; string s; } element_t;
+    initial begin
+        element_t q[$];
+        inner_t i;
+        int k;
+        q.push_back('{'{1, 2}, 8'hA5, "a"});
+        q.push_back('{'{3, 4}, 8'h3C, "b"});
+        k = 1;
+        $display("%h %h %b %0d", q[0].data[3:0], q[k].data[7:4], q[1].data[0], q[0].inner.y);
+        i = q[1].inner;
+        $display("%0d %0d %0d", i.x, i.y, q.size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "5 3 0 2\n3 4 2\n"))
+
+(case container_element_four_state_defaults
+  (four_state)
+  (source "unpacked_struct_container_states.sv" #"
+module Top(output bit done);
+    typedef struct { time t; int unsigned n; logic [3:0] l; } access_t;
+    typedef struct { logic [3:0] a; logic [3:0] b; } nibbles_t;
+    initial begin
+        access_t access[string];
+        nibbles_t q[];
+        access_t x;
+        x = access["missing"];
+        $display("%0d %0d %b", x.t, x.n, x.l);
+        x.l = 4'b1z0x;
+        access["k"] = x;
+        $display("%0d %b", access["k"].t, access["k"].l);
+        q = new[2];
+        q[0] = '{4'bx01z, 4'b0011};
+        $display("%b %b %b", q[0].a, q[0].b, q[1].a);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "x 0 xxxx\nx 1z0x\nx01z 0011 xxxx\n"))
+
+(case container_records_survive_heap_collections
+  (source "unpacked_struct_container_heap.sv" #"
+module Top(output int n);
+    typedef struct { string name; string regex; } acs_t;
+    logic clk = 0;
+    always #1 clk = ~clk;
+    acs_t names[$];
+    acs_t byname[string];
+    string number;
+    always @(posedge clk) begin
+        number.itoa(n);
+        names.push_back('{name: number, regex: {number, "*"}});
+        if (names.size() > 3) void'(names.pop_front());
+        byname[number] = '{name: {"n", number}, regex: ""};
+        n = n + 1;
+    end
+    initial #6000 $display("%0d [%s] [%s] [%s] %0d", names.size(), names[0].name, names[$].regex,
+        byname["2999"].name, byname.num());
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "3 [2997] [2999*] [n2999] 3000\n"))
+
+(case reference_formals
+  (source "unpacked_struct_references.sv" #"
+module Top(output bit done);
+    class Node;
+        string n;
+        function new(string n);
+            this.n = n;
+        endfunction
+    endclass
+    typedef enum { READ, WRITE } kind_e;
+    typedef struct { kind_e kind; bit [63:0] addr; string tag; Node node; int n; } op_t;
+    typedef struct { op_t op; int count; } outer_t;
+    function automatic void fill(ref op_t r, input string tag);
+        r = '{kind: WRITE, addr: 64'h10, tag: tag, node: null, n: 0};
+        r.node = new({tag, "!"});
+        r.n = 7;
+        r.addr++;
+    endfunction
+    function automatic bit same(const ref op_t a, const ref op_t b);
+        return a.kind == b.kind && a.addr == b.addr && a.tag == b.tag;
+    endfunction
+    function automatic int sum(op_t r);
+        return int'(r.addr) + r.n;
+    endfunction
+    function automatic void forward(ref op_t r);
+        op_t copy;
+        fill(r, {r.tag, "f"});
+        r.n = sum(r);
+        copy = r;
+        copy.tag = "copy";
+    endfunction
+    function automatic void bump(ref int i);
+        i++;
+    endfunction
+    function automatic void bump64(ref bit [63:0] i);
+        i++;
+    endfunction
+    function automatic void show(const ref op_t r);
+        $display("%s %0d %s %s %0d", r.kind == WRITE ? "W" : "R", r.addr, r.tag, r.node.n, r.n);
+    endfunction
+    class Holder;
+        op_t p;
+        function void touch();
+            forward(p);
+        endfunction
+    endclass
+    initial begin
+        op_t a, b;
+        outer_t o;
+        Holder h;
+        h = new;
+        fill(a, "a");
+        show(a);
+        b = a;
+        $display("same %0d", same(a, b));
+        b.tag = "b";
+        $display("same %0d", same(a, b));
+        o.op.tag = "o";
+        forward(o.op);
+        bump(o.count);
+        show(o.op);
+        $display("nested %0d %0d", o.op.n, o.count);
+        h.p.tag = "h";
+        h.touch();
+        forward(h.p);
+        bump64(h.p.addr);
+        show(h.p);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "W 17 a a! 7\nsame 1\nsame 0\nW 17 of of! 24\nnested 24 1\nW 18 hff hff! 24\n"))
+
+(case reference_formals_of_virtual_methods
+  (source "unpacked_struct_virtual_references.sv" #"
+module Top(output bit done);
+    typedef enum { UVM_READ, UVM_WRITE } uvm_access_e;
+    typedef enum { UVM_IS_OK, UVM_NOT_OK } uvm_status_e;
+    typedef struct {
+        uvm_access_e kind;
+        bit [63:0] addr;
+        bit [63:0] data;
+        int n_bits;
+        bit [7:0] byte_en;
+        uvm_status_e status;
+    } bus_op_t;
+    class item;
+        bit [31:0] addr, data;
+        bit write;
+    endclass
+    virtual class adapter;
+        pure virtual function item reg2bus(const ref bus_op_t rw);
+        pure virtual function void bus2reg(item bus_item, ref bus_op_t rw);
+    endclass
+    class my_adapter extends adapter;
+        virtual function item reg2bus(const ref bus_op_t rw);
+            item i = new;
+            i.addr = rw.addr;
+            i.data = rw.data;
+            i.write = rw.kind == UVM_WRITE;
+            return i;
+        endfunction
+        virtual function void bus2reg(item bus_item, ref bus_op_t rw);
+            rw.kind = bus_item.write ? UVM_WRITE : UVM_READ;
+            rw.addr = bus_item.addr;
+            rw.data = bus_item.data + 1;
+            rw.n_bits = 32;
+            rw.byte_en = 8'hf;
+            rw.status = UVM_IS_OK;
+        endfunction
+    endclass
+    initial begin
+        adapter a;
+        my_adapter m;
+        bus_op_t op, back;
+        item i;
+        m = new;
+        a = m;
+        op = '{kind: UVM_WRITE, addr: 'h40, data: 'h1234, n_bits: 32, byte_en: 'hf, status: UVM_NOT_OK};
+        i = a.reg2bus(op);
+        $display("reg2bus %h %h %0d", i.addr, i.data, i.write);
+        back.status = UVM_NOT_OK;
+        a.bus2reg(i, back);
+        $display("bus2reg %0d %h %h %0d %h %0d", back.kind, back.addr, back.data, back.n_bits, back.byte_en, back.status);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "reg2bus 00000040 00001234 1\nbus2reg 1 0000000000000040 0000000000001235 32 0f 0\n"))
+
+(case reference_formals_across_time
+  (source "unpacked_struct_timed_references.sv" #"
+module Top(output bit done);
+    typedef struct { int a; string s; } row_t;
+    row_t shared;
+    task automatic watch(ref row_t r, output int seen);
+        #2 seen = r.a;
+        r.s = {r.s, "+"};
+        #2 r.a = r.a * 10;
+    endtask
+    initial begin
+        int seen;
+        shared = '{1, "x"};
+        fork
+            watch(shared, seen);
+            begin
+                #1 shared.a = 5;
+                #2 $display("mid %0d %s", shared.a, shared.s);
+            end
+        join
+        $display("end %0d %s %0d %0d", shared.a, shared.s, seen, $time);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 10) (assert_eq done 1)
+  (expect_output "mid 5 x+\nend 50 x+ 5 4\n"))
+
+(case reference_formals_four_state
+  (four_state)
+  (source "unpacked_struct_four_state_references.sv" #"
+module Top(output bit done);
+    typedef struct { logic [3:0] l; int i; bit [1:0] b; } access_t;
+    class Holder;
+        access_t p;
+    endclass
+    function automatic void mark(ref access_t r);
+        r.l = 4'b1z0x;
+        r = '{l: {r.l[3:1], 1'bx}, i: 'x, b: 2'b1x};
+    endfunction
+    function automatic bit unknown(const ref access_t r);
+        return $isunknown(r.l);
+    endfunction
+    initial begin
+        access_t a;
+        Holder h;
+        h = new;
+        $display("def %b %0d", a.l, unknown(a));
+        mark(a);
+        $display("mark %b %0d %b %0d", a.l, a.i, a.b, unknown(a));
+        mark(h.p);
+        $display("prop %b %0d %b", h.p.l, h.p.i, h.p.b);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "def xxxx 1\nmark 1z0x 0 10 1\nprop 1z0x 0 10\n"))
+
+(case reference_formal_handles_survive_heap_collections
+  (source "unpacked_struct_reference_handles.sv" #"
+module Top(output int n);
+    class Node;
+        string text;
+        function new(string text);
+            this.text = text;
+        endfunction
+    endclass
+    typedef struct { Node m_type; string m_type_name; } pair_t;
+    class Holder;
+        pair_t p;
+    endclass
+    logic clk = 0;
+    always #1 clk = ~clk;
+    pair_t last;
+    Holder h = new;
+    string number;
+    function automatic void set(ref pair_t r, input string text);
+        r = '{m_type: null, m_type_name: {text, "!"}};
+        r.m_type = new(text);
+    endfunction
+    initial forever begin
+        @(posedge clk);
+        number.itoa(n);
+        set(last, number);
+        set(h.p, {"h", number});
+        n = n + 1;
+    end
+    initial #6000 $display("[%s] [%s] [%s] [%s] %0d", last.m_type.text, last.m_type_name,
+        h.p.m_type.text, h.p.m_type_name, n);
+endmodule
+"#)
+  (top Top)
+  (run_until 6000)
+  (expect_output "[2999] [2999!] [h2999] [h2999!] 3000\n"))

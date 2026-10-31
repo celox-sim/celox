@@ -23,6 +23,37 @@ impl<B: SimBackend> SimulationState<B> {
         })
     }
 
+    /// Resensitize an event wait after process suspension. A saved expression
+    /// slot may predate changes to shared automatic operands, so recompute the
+    /// relevant pure probes before taking the new baselines (9.7).
+    pub(super) fn rearm_waiter(
+        &mut self,
+        backend: &mut B,
+        process: usize,
+        site: usize,
+    ) -> Result<(), Halt> {
+        let refs = &self.model.processes[process];
+        let terms = refs
+            .wait_sites
+            .get(site)
+            .ok_or_else(|| Self::site_error(process, site))?;
+        if let Some(frame) = &refs.frame {
+            for probe in &frame.event_probes {
+                if terms.iter().any(|term| term.signal == probe.result) {
+                    let value = super::activation::event_probe(
+                        backend,
+                        refs,
+                        &self.process_state.activations[process],
+                        &self.process_state.cells,
+                        probe,
+                    )?;
+                    backend.set_four_state(probe.result, value.0, value.1);
+                }
+            }
+        }
+        self.register_waiter(backend, process, site)
+    }
+
     /// Process `process` waits at its wait site `site`: remember what each
     /// term compares against from now on.
     pub(super) fn register_waiter(

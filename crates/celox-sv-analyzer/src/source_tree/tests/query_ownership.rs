@@ -72,9 +72,19 @@ fn attribute_queries_keep_native_validation_without_executing_metadata() {
 }
 
 #[test]
-fn opaque_assertion_queries_retain_the_explicit_rejection() {
+fn boolean_concurrent_queries_bind_from_native_nodes() {
     let tree = parse_source(
         "module M(input logic[3:0]a);assert property(@(posedge a[0]) $bits(a)==4);endmodule",
+        Path::new("native-query-concurrent.sv"),
+    )
+    .unwrap();
+    crate::analyze::analyze_source(Source::from_syntax(&tree).unwrap()).unwrap();
+}
+
+#[test]
+fn opaque_assertion_queries_retain_the_explicit_rejection() {
+    let tree = parse_source(
+        "module M(input logic[3:0]a);assert property(@(posedge a[0]) $bits(a)==4 |=> $bits(a)==4);endmodule",
         Path::new("native-query-opaque.sv"),
     )
     .unwrap();

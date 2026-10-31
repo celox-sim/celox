@@ -395,7 +395,37 @@ pub(super) fn signals_from_body_item(
         _ => Vec::new(),
     };
     substitute_signal_local_constants(&mut declared, env);
-    signals.extend(declared);
+    for signal in declared {
+        if signal.r#type.unpacked_struct().is_none() {
+            signals.push(signal);
+            continue;
+        }
+        if signal.is_net {
+            return Err(unsupported("net of unpacked structure type"));
+        }
+        if !signal.r#type.unpacked_ranges.is_empty() {
+            return Err(unsupported("array of unpacked structures"));
+        }
+        if signal.is_const {
+            return Err(unsupported("const variable of unpacked structure type"));
+        }
+        if signal.package_variable.is_some() || signal.hierarchical.is_some() {
+            return Err(unsupported("shared variable of unpacked structure type"));
+        }
+        // The variable and its structure members only name its leaf
+        // variables; they are not storage (see `unpacked_structs`).
+        let leaves = signal
+            .r#type
+            .unpacked_struct()
+            .expect("checked above")
+            .leaves();
+        for (name, r#type) in unpacked_structs::aggregates(&signal.name, &signal.r#type) {
+            signals.push(Signal::new(name, r#type));
+        }
+        for leaf in leaves {
+            signals.push(Signal::new(leaf.name(&signal.name), leaf.r#type));
+        }
+    }
     Ok(())
 }
 

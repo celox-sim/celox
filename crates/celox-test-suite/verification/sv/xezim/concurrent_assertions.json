@@ -1,0 +1,15 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "concurrent_assertions::predicates_before_all_actions at 38:22: assert_eq second: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "concurrent_assertions::predicates_before_all_actions",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

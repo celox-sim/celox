@@ -65,6 +65,182 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n<case>/source_0.sv:14: syntax error\n<case>/source_0.sv:14: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_finished_parent_kills_descendants",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 21; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:4: error: Invalid module instantiation\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_identity_and_status",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 13; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: process doesn't name a type.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module instantiation\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Syntax error in task arguments.\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_random_state_and_handles",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_self_suspend_and_await",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: Malformed statement\n<case>/source_0.sv:6: syntax error\n<case>/source_0.sv:6: error: Malformed statement\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_status_wait_and_disable",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_suspend_and_resume_waits",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_external_kill_finishes_program",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_self_kill_finishes_program",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_program_exit_wakes_sibling_observers",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_mutual_status_waits_advance_to_cancellation",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_final_kill_preserves_cleanup",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_final_procedures_share_identity_and_rng",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 12; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:10: error: Malformed statement\n<case>/source_0.sv:12: syntax error\n<case>/source_0.sv:12: error: Malformed statement\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_ancestor_kill_preserves_caller_rng",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module instantiation\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_nested_calls_preserve_level_wait_resume",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 5; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module instantiation\n<case>/source_0.sv:5: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_resume_resamples_automatic_event_expression",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "fork_control::process_resume_after_program_exit_is_noop",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

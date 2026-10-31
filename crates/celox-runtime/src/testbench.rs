@@ -10,19 +10,35 @@ use celox_testbench::{
 
 use crate::{SignalRef, backend::SimBackend};
 
+struct Binding<'a, B> {
+    backend: &'a B,
+    hardware: Vec<std::ops::Range<usize>>,
+}
+
+impl<B> std::ops::Deref for Binding<'_, B> {
+    type Target = B;
+    fn deref(&self) -> &B {
+        self.backend
+    }
+}
+
 fn bind_expr<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     expr: ExprBytecode<StateLocation<AbsoluteAddr>>,
 ) -> Option<CompiledExpr> {
     let layout = backend.layout();
     let bytecode = expr
         .bind_with(|address| layout.offsets.get(address).copied())
         .ok()?;
-    Some(CompiledExpr::new(bytecode))
+    Some(
+        CompiledExpr::new(bytecode).classify_hardware_access(|offset| {
+            backend.hardware.iter().any(|range| range.contains(&offset))
+        }),
+    )
 }
 
 fn bind_component<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     component: SemanticComponentBinding<AbsoluteAddr>,
     rtl_writes: &fxhash::FxHashSet<VarAtomBase<AbsoluteAddr>>,
 ) -> Option<celox_testbench::ExecutableComponentBinding<B::Event, SignalRef>> {
@@ -82,7 +98,7 @@ fn bind_component<B: SimBackend>(
 }
 
 fn bind_assert_arg<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     arg: SemanticArgument<AbsoluteAddr>,
 ) -> Option<ExecutableArgument> {
     Some(ExecutableArgument {
@@ -95,7 +111,7 @@ fn bind_assert_arg<B: SimBackend>(
 }
 
 fn bind_assert_message<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     message: GenericAssertMessage<SemanticArgument<AbsoluteAddr>>,
 ) -> Option<ExecutableAssertMessage> {
     match message {
@@ -117,7 +133,7 @@ fn bind_assert_message<B: SimBackend>(
 }
 
 fn bind_clock_count<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     count: GenericClockCount<ExprBytecode<StateLocation<AbsoluteAddr>>>,
 ) -> Option<ExecutableClockCount> {
     match count {
@@ -129,7 +145,7 @@ fn bind_clock_count<B: SimBackend>(
 }
 
 fn bind_loop_bound<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     bound: GenericLoopBound<ExprBytecode<StateLocation<AbsoluteAddr>>>,
 ) -> Option<ExecutableLoopBound> {
     match bound {
@@ -147,7 +163,7 @@ fn bind_loop_bound<B: SimBackend>(
 }
 
 fn bind_target<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     target: TestbenchTarget<
         celox_testbench::SemanticSignal<AbsoluteAddr>,
         ExprBytecode<StateLocation<AbsoluteAddr>>,
@@ -167,7 +183,7 @@ fn bind_target<B: SimBackend>(
 }
 
 fn bind_optional_target<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     target: Option<
         TestbenchTarget<
             celox_testbench::SemanticSignal<AbsoluteAddr>,
@@ -182,7 +198,7 @@ fn bind_optional_target<B: SimBackend>(
 }
 
 fn bind_statement<B: SimBackend>(
-    backend: &B,
+    backend: &Binding<'_, B>,
     statement: SemanticStatement<AbsoluteAddr>,
 ) -> Option<ExecutableStatement<B::Event, SignalRef>> {
     match statement {
@@ -261,21 +277,26 @@ fn bind_statement<B: SimBackend>(
             step_op,
             reverse,
             body,
-        } => Some(GenericTestbenchStatement::For {
-            loop_var: loop_var.map(|(signal, width, signed)| {
-                (backend.resolve_signal(&signal.address), width, signed)
-            }),
-            start: bind_loop_bound(backend, start)?,
-            end: bind_loop_bound(backend, end)?,
-            inclusive,
-            step,
-            step_op,
-            reverse,
-            body: body
+        } => {
+            let start = bind_loop_bound(backend, start)?;
+            let end = bind_loop_bound(backend, end)?;
+            let body = body
                 .into_iter()
                 .map(|statement| bind_statement(backend, statement))
-                .collect::<Option<Vec<_>>>()?,
-        }),
+                .collect::<Option<Vec<_>>>()?;
+            Some(GenericTestbenchStatement::For {
+                loop_var: loop_var.map(|(signal, width, signed)| {
+                    (backend.resolve_signal(&signal.address), width, signed)
+                }),
+                start,
+                end,
+                inclusive,
+                step,
+                step_op,
+                reverse,
+                body,
+            })
+        }
         GenericTestbenchStatement::Assign { dst, expr } => {
             Some(GenericTestbenchStatement::Assign {
                 dst: bind_target(backend, dst)?,
@@ -386,6 +407,56 @@ pub fn bind_testbench_program<B: SimBackend>(
     program: TestbenchProgram<AbsoluteAddr>,
     rtl_writes: &fxhash::FxHashSet<VarAtomBase<AbsoluteAddr>>,
 ) -> Option<ExecutableTestbench<B::Event, SignalRef>> {
+    // Resolve whole objects, including aliases, rather than comparing source
+    // addresses: a TB read through a port alias still observes its RTL driver.
+    let mut hardware = rtl_writes
+        .iter()
+        .map(|write| {
+            let signal = backend.resolve_signal(&write.id);
+            let start = signal.offset;
+            let bytes = backend.layout().plane_size(&write.id);
+            start..start + bytes
+        })
+        .collect::<Vec<_>>();
+    hardware.sort_unstable_by_key(|range| (range.start, range.end));
+    hardware.dedup();
+    let backend = &Binding { backend, hardware };
+    let kernels = program
+        .kernels()
+        .iter()
+        .map(|kernel| celox_testbench::TestbenchKernel {
+            entry: kernel.entry,
+            resume: backend.resolve_signal(&kernel.resume),
+            status: backend.resolve_signal(&kernel.status),
+            request: backend.resolve_signal(&kernel.request),
+            requests: kernel
+                .requests
+                .iter()
+                .map(|request| match request {
+                    celox_testbench::KernelRequest::Statement(site) => {
+                        celox_testbench::KernelRequest::Statement(*site)
+                    }
+                    celox_testbench::KernelRequest::Settle { reads } => {
+                        celox_testbench::KernelRequest::Settle {
+                            reads: reads
+                                .iter()
+                                .map(|address| backend.resolve_signal(address))
+                                .collect(),
+                        }
+                    }
+                    celox_testbench::KernelRequest::Written { address, width } => {
+                        celox_testbench::KernelRequest::Written {
+                            address: backend.resolve_signal(address),
+                            width: *width,
+                        }
+                    }
+                    celox_testbench::KernelRequest::Error(message) => {
+                        celox_testbench::KernelRequest::Error(message.clone())
+                    }
+                })
+                .collect(),
+        })
+        .collect();
     let lengths = program.process_lengths().to_vec();
     if lengths
         .iter()
@@ -440,6 +511,10 @@ pub fn bind_testbench_program<B: SimBackend>(
         .into_iter()
         .map(|component| bind_component(backend, component, rtl_writes))
         .collect::<Option<Vec<_>>>()?;
+    let scheduler = program
+        .scheduler()
+        .cloned()
+        .map(|s| s.map(|a| backend.resolve_signal(&a)));
     let statements = program
         .into_statements()
         .into_iter()
@@ -452,6 +527,8 @@ pub fn bind_testbench_program<B: SimBackend>(
         .collect();
     Some(
         ExecutableTestbench::from_processes(processes, random_seed)
+            .with_kernels(kernels)
+            .with_scheduler(scheduler)
             .with_clocks(clocks)
             .with_private_signals(private_signals)
             .with_component_runtime(

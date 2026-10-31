@@ -1,0 +1,35 @@
+{
+  "tool": "xezim",
+  "version": "xezim version 0.11.3",
+  "source_revision": "5eab5f276c9062cfd17db4987a1e91de74fdbe5d",
+  "core_revision": "1947ac68859f823610c63833f61d52d6d7695342",
+  "build": "Pinned upstream sources, built with the existing Nix package recipe and a regenerated dependency lock in an isolated validation package; no simulator source changes. The repository lock itself still refers to a different core revision.",
+  "source": "sv_class_named_aggregate_arguments_xezim.sv",
+  "standard": "IEEE 1800-2023 6.18, 6.19, 6.22.1, 8.25",
+  "expected_output": "first=2 alias=2 second=1 s1=1 s2=2",
+  "observations": [
+    {
+      "top": "Top",
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nfirst=1 alias=1 second=1 s1=1 s2=2\nSimulation finished at time 0\n"
+    },
+    {
+      "top": "Wrapped",
+      "exit_code": 0,
+      "output": "=== xezim 0.11.3 ===\ngit unknown (unknown)\nfirst=1 alias=1 second=1 s1=1 s2=2\nSimulation finished at time 0\n"
+    }
+  ],
+  "verilator_version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "verilator_observations": [
+    {
+      "top": "Top",
+      "exit_code": 0,
+      "output": "first=2 alias=2 second=1 s1=1 s2=2\n"
+    },
+    {
+      "top": "Wrapped",
+      "exit_code": 0,
+      "output": "first=2 alias=2 second=1 s1=1 s2=2\n"
+    }
+  ]
+}

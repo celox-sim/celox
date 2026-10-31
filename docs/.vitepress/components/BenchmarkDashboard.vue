@@ -485,15 +485,11 @@ const allSeries = computed<Series[]>(() => {
         if (isRetiredBenchmark(b.name)) continue;
         const seriesRuntime = runtime(b.name);
         if (!seriesRuntime) continue;
-        let benchName = normalizeBenchName(stripPrefix(b.name));
-        // Historical Celox tiered points also include background compilation.
-        // Keep their history, but do not mix them with post-compile throughput.
-        if (
-          seriesRuntime.includes("tiered") &&
-          /^heliodor_(?:linux_boot|suite_.+)_execution$/.test(benchName)
-        ) {
-          benchName = benchName.replace(/_execution$/, "_tiered_execution");
-        }
+        const benchName = normalizeBenchName(stripPrefix(b.name));
+        // Keep historical phase samples in the archive, but compare tiered
+        // implementations only by complete workload time.
+        if (seriesRuntime.includes("tiered") &&
+            !benchName.endsWith("_total") && !benchName.endsWith("_end_to_end")) continue;
         // Hosted runners hand out different CPU models between runs, so one
         // backend is one series per CPU. Merging them would read as a
         // regression whenever the runner happens to change model.
@@ -824,17 +820,17 @@ onBeforeUnmount(() => {
       <p v-if="activeTab === 'heliodor'" class="bench-methodology">
         Synchronous runs finish compilation before simulation begins. Tiered runs
         start on the interpreter (Celox) or Cranelift (Veryl-CC), then switch to
-        compiled code when it is ready. Startup measures time until simulation
-        begins; end-to-end measures time through Linux boot completion. Both
-        start before design analysis. Each Veryl-CC run uses an empty C compilation
+        compiled code when it is ready. Tiered charts show the complete interval
+        from before design analysis through Linux boot completion, including
+        compilation while simulation is running. Each Veryl-CC run uses an empty C compilation
         cache. Building the benchmark executables is excluded.
         Execution time includes the testbench for both simulators.
       </p>
 
       <p v-if="activeTab === 'circuits'" class="bench-methodology">
-        Fixed self-checking workloads, with compilation, execution and total time
-        shown separately. Each point is the median of three fresh processes.
-        Execution includes resets, stimulus and assertions. Different workload
+        Fixed self-checking workloads, compared by total process time including
+        compilation, resets, stimulus and assertions. Each point is the median
+        of three fresh processes. Different workload
         contracts and host architectures have separate charts. No SV frontend
         comparison is implied by the Veryl results.
       </p>

@@ -911,6 +911,64 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 18 31\n44\n"))
 
+(case named_method_arguments
+  (source "class.sv" #"
+module Top(output bit done);
+    class Pair;
+        string name;
+        function new(string name);
+            this.name = name;
+        endfunction
+    endclass
+    class Base;
+        virtual function int m(int a, int b = 5, int c = 7);
+            return a * 100 + b * 10 + c;
+        endfunction
+    endclass
+    class Derived extends Base;
+        static function int sf(int x = 1, int y = 2);
+            return x * 10 + y;
+        endfunction
+        virtual function int m(int a, int b = 6, int c = 8);
+            return 1000 + super.m(.c(c), .a(a));
+        endfunction
+        function int own();
+            return this.m(.b(1), .a(2)) + m(3, .c(4));
+        endfunction
+        task automatic t(input int a, output int o, input int d = 9);
+            #1 o = a + d;
+        endtask
+        function bit pair_matches(Pair match_pair, Pair requested, string requested_name);
+            return match_pair == requested || match_pair.name == requested_name;
+        endfunction
+        function int find(Pair pair, string name);
+            if (pair_matches(.match_pair(pair), .requested(null), .requested_name(name)))
+                return 1;
+            return pair_matches(.requested_name(name), .requested(pair), .match_pair(pair)) ? 2 : 0;
+        endfunction
+    endclass
+    Derived d;
+    Base b;
+    Pair pair;
+    int o;
+    initial begin
+        d = new;
+        pair = new("x");
+        b = d;
+        $display("%0d %0d %0d", d.m(.a(1)), b.m(.c(2), .a(1)), d.m(1, , 3));
+        $display("%0d %0d %0d", Derived::sf(.y(5)), Derived::sf(.x(), .y()), d.own());
+        d.t(.o(o), .a(4));
+        $display("%0d", o);
+        d.t(5, .o(o), .d());
+        $display("%0d", o);
+        $display("%0d %0d", d.find(pair, "x"), d.find(pair, "y"));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq done 1)
+  (expect_output "1158 1152 1153\n15 12 2612\n13\n14\n1 2\n"))
+
 (case typedefs_of_interface_classes
   (source "class.sv" #"
 module Top(output bit done);
@@ -2638,3 +2696,638 @@ module Top(output int sum, output bit done);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq sum 165) (assert_eq done 1))
+(case package_constant_class_defaults
+  (source "package.sv" #"
+package p;
+    parameter int WIDTH = 5;
+    class Box #(int N = WIDTH, int M = N + 2);
+        function int get(); return WIDTH + 10 * N + M; endfunction
+    endclass
+    typedef Box#() Small;
+    typedef Box Implicit;
+    typedef Box#(9) Wide;
+    function automatic int read();
+        Small defaulted = new();
+        Implicit normal = new();
+        Wide wide = new();
+        return defaulted.get() + normal.get() + wide.get();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    localparam int WIDTH = 29;
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 230))
+(case package_constant_type_arguments
+  (source "package.sv" #"
+package p;
+    parameter int W = 6;
+    typedef bit signed [W-1:0] word_t;
+    class Utils #(type T = int);
+        static function int width();
+            T v;
+            return $bits(v);
+        endfunction
+        static function int negative();
+            T v = '1;
+            return v < 0;
+        endfunction
+    endclass
+    typedef Utils#(word_t) word_utils;
+    typedef Utils#(bit [W:0]) wide_utils;
+    function automatic int read();
+        return 100 * word_utils::width() + 10 * wide_utils::width()
+            + 2 * word_utils::negative() + wide_utils::negative();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    localparam int W = 29;
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 672))
+(case named_aggregate_type_arguments
+  (source "package.sv" #"
+package p;
+    typedef enum {A0, A1} first_e;
+    typedef enum {B0, B1} second_e;
+    typedef first_e alias_e;
+    typedef struct packed { bit [3:0] a; } s1_t;
+    typedef struct packed { bit [3:0] a; } s2_t;
+    class Box #(type T = int);
+        static int count;
+        function new();
+            count++;
+        endfunction
+        static function int width();
+            T v;
+            return $bits(v);
+        endfunction
+    endclass
+    function automatic int read();
+        Box#(first_e) a = new();
+        Box#(alias_e) b = new();
+        Box#(second_e) c = new();
+        Box#(s1_t) d = new();
+        Box#(s2_t) e = new();
+        Box#(s2_t) f = new();
+        return 10000 * Box#(first_e)::count + 1000 * Box#(second_e)::count
+            + 100 * Box#(s1_t)::count + 10 * Box#(s2_t)::count + Box#(s1_t)::width();
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    initial sum = p::read();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 21124))
+(case generate_scope_enum_type_arguments
+  (source "top.sv" #"
+module Top(output int sum, output bit done);
+    class Box #(type T = int);
+        static int count;
+        function new();
+            count++;
+        endfunction
+    endclass
+    typedef enum {C0, C1} shared_e;
+    int counts[2];
+    for (genvar i = 0; i < 2; i++) begin : g
+        typedef enum {A, B} e_t;
+        typedef shared_e alias_e;
+        initial begin
+            automatic Box#(e_t) local_box = new();
+            automatic Box#(alias_e) shared_box = new();
+            #1 counts[i] = 10 * Box#(e_t)::count + Box#(alias_e)::count;
+        end
+    end
+    initial begin
+        #2;
+        sum = 100 * counts[0] + counts[1];
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 2) (assert_eq sum 1212) (assert_eq done 1))
+
+(case four_state_properties
+  (four_state)
+  (source "class.sv" #"
+module Top(output bit done);
+    class C;
+        time t;
+        logic [3:0] l;
+        integer i = 7;
+        reg signed [7:0] r;
+        bit [3:0] b;
+        logic [63:0] w;
+    endclass
+    C x, y;
+    initial begin
+        x = new;
+        $display("init %0d %b %0d %0d %b %h", x.t, x.l, x.i, x.r, x.b, x.w);
+        #5 x.t = $time;
+        x.l = 4'b1z0x;
+        x.r = -3;
+        x.i += 1;
+        x.w = 64'hdead_beef_0123_4567;
+        $display("set %0d %b %0d %0d %h", x.t, x.l, x.i, x.r, x.w);
+        y = new x;
+        y.l = 4'b1110;
+        $display("copy %b %b %0d %0d", x.l, y.l, y.t, x.l === 4'b1z0x);
+        x.w = 'x;
+        $display("x %h %0d", x.w, x.w === 64'bx);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq done 1)
+  (expect_output "init x xxxx 7 x 0000 xxxxxxxxxxxxxxxx\nset 5 1z0x 8 -3 deadbeef01234567\ncopy 1z0x 1110 5 1\nx xxxxxxxxxxxxxxxx 1\n"))
+(case method_ranges_of_scope_declarations
+  (source "top.sv" #"
+module Top(output int a, output int b);
+    logic [7:0] data;
+    class C;
+        static function logic [$bits(data)-1:0] f();
+            return '1;
+        endfunction
+    endclass
+    logic [$bits(C::f())-1:0] y;
+    assign a = $bits(y);
+    assign b = $bits(C::f());
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq a 8) (assert_eq b 8))
+
+(case waits_on_static_properties
+  ; A static property is a variable of the declaring scope, so a wait in a
+  ; method wakes when another process writes it (IEEE 1800-2023 8.9, 9.4.3).
+  (source "class.sv" #"
+class C;
+    static int s_state;
+    task wait_for(int s);
+        wait (s_state >= s);
+        $display("reached %0d at %0d", s, $time);
+    endtask
+endclass
+module Top;
+    C c;
+    initial begin
+        c = new;
+        fork
+            c.wait_for(2);
+            begin #1 c.s_state = 1; #1 c.s_state = 2; end
+        join
+    end
+endmodule
+"#)
+  (top Top) (run_until 5)
+  (expect_output "reached 2 at 2\n"))
+; Package generic requests are bound where used and share static state across
+; importing module scopes. Matching aliases select the same specialization (8.25).
+(case foreign_generic_static_state_across_modules
+ (source "foreign_state.sv" #"
+package p;
+ class Db #(type T=int);
+  static T last;
+  static int count=0;
+  static function void set(T v); last=v; count++; endfunction
+ endclass
+endpackage
+module Writer;
+ initial begin #1; p::Db#(byte)::set(8'h35); p::Db#(int)::set(32'h12345678); end
+endmodule
+module Reader(output int narrow, wide, narrow_count, wide_count);
+ typedef p::Db#(byte) ByteDb;
+ initial begin
+  #2; narrow=ByteDb::last; wide=p::Db#(int)::last;
+  narrow_count=ByteDb::count; wide_count=p::Db#(int)::count;
+ end
+endmodule
+module Top(output int narrow, wide, narrow_count, wide_count);
+ Writer writer();
+ Reader reader(narrow, wide, narrow_count, wide_count);
+endmodule"#)
+ (top Top) (run_until 3)
+ (assert_eq narrow 0x35) (assert_eq wide 0x12345678)
+ (assert_eq narrow_count 1) (assert_eq wide_count 1))
+
+; A package factory receives a compilation-unit class as a type parameter and
+; resolves its constructor in that class's declaration scope, including type_id.
+(case foreign_generic_unit_type_constructor
+ (source "foreign_factory.sv" #"
+package p;
+ class Registry #(type T, string NAME="User");
+  static function string get_name(); return T::type_name(); endfunction
+  static function string registered_name(); return NAME; endfunction
+  static function int get_kind(); return T::kind; endfunction
+  static function string get_label(); return T::label; endfunction
+  static function T create(int n);
+   T object;
+   object=new(n);
+   return object;
+  endfunction
+ endclass
+endpackage
+import p::*;
+class User;
+ static function string type_name(); return "User"; endfunction
+ parameter string label="unit_label";
+ static const int kind=7;
+ typedef Registry#(User, "user_registry") type_id;
+ int value;
+ function new(int n); value=n; endfunction
+ static function User make();
+  if (type_id::get_name() != "User" || type_id::registered_name() != "user_registry" || type_id::get_kind() != 7 || type_id::get_label() != "unit_label") return type_id::create(-1);
+  return type_id::create(23);
+ endfunction
+endclass
+module Top(output int result);
+ User object;
+ initial begin object=User::make(); result=object.value; end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq result 23))
+
+; The same specialized static handle is one object when accessed from multiple
+; modules; another type argument has independent static storage (8.25).
+(case foreign_generic_static_handle_identity
+ (source "foreign_handles.sv" #"
+package p;
+ class Item;
+  int value;
+  function new(int n); value=n; endfunction
+ endclass
+ class Other;
+  int value;
+  function new(int n); value=n; endfunction
+ endclass
+ class Slot #(type T);
+  static T saved;
+  static function void put(T h); saved=h; endfunction
+ endclass
+endpackage
+module Writer;
+ p::Item item;
+ p::Other other;
+ initial begin
+  item=new(41); other=new(99);
+  #1; p::Slot#(p::Item)::put(item); p::Slot#(p::Other)::put(other);
+ end
+endmodule
+module Reader(output int value, other_value, same);
+ p::Item item;
+ initial begin
+  #2; item=p::Slot#(p::Item)::saved;
+  same=(item==p::Slot#(p::Item)::saved);
+  item.value++; value=p::Slot#(p::Item)::saved.value;
+  other_value=p::Slot#(p::Other)::saved.value;
+ end
+endmodule
+module Top(output int value, other_value, same);
+ Writer writer(); Reader reader(value, other_value, same);
+endmodule"#)
+ (top Top) (run_until 3)
+ (assert_eq value 42) (assert_eq other_value 99) (assert_eq same 1))
+
+; Explicit actuals are evaluated in the importing module; defaults and qualified
+; package references retain the declaration scope, despite local shadows (8.25).
+(case foreign_generic_declaration_scope_and_equivalent_defaults
+ (source "foreign_scopes.sv" #"
+package p;
+ parameter int W=5;
+ typedef bit [W-1:0] word_t;
+ class Box #(int N=W, type T=word_t);
+  static int count=0;
+  T value;
+  function new(); count++; endfunction
+  static function int width(); return $bits(T); endfunction
+  static function int number(); return N; endfunction
+  static function int from_pkg(); int W; W=77; return p::W; endfunction
+ endclass
+endpackage
+module Top(output int checks);
+ parameter int W=9;
+ typedef bit [W-1:0] word_t;
+ typedef p::Box#(.T(word_t)) Wide;
+ typedef p::Box#(.T(word_t),.N(5)) Same;
+ typedef Wide::T word_again;
+ Wide a; Same b; p::Box#() c;
+ initial begin
+  a=new(); b=new(); c=new();
+  checks=(Wide::number()==5);
+  checks+=(Wide::width()==9)*2;
+  checks+=(p::Box#()::width()==5)*4;
+  checks+=(Wide::N==5)*8;
+  checks+=($bits(word_again)==9)*16;
+  checks+=(Wide::count==2 && Same::count==2 && p::Box#()::count==1)*32;
+  checks+=(Wide::from_pkg()==5)*64;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 127))
+
+; Distinct caller classes from different source files specialize one package
+; factory independently, under either compilation-unit model (8.25).
+(case foreign_generic_multiple_user_classes
+ (source "registry.sv" #"
+package p;
+ class Registry #(type T);
+  static int count=0;
+  static function T create(); T object; object=new(); count++; return object; endfunction
+ endclass
+endpackage"#)
+ (source "first.sv" #"
+import p::*;
+class FirstUser;
+ int value;
+ function new(); value=42; endfunction
+ typedef Registry#(FirstUser) type_id;
+endclass
+module First(output int result, count);
+ FirstUser object;
+ initial begin object=FirstUser::type_id::create(); result=object.value; count=FirstUser::type_id::count; end
+endmodule"#)
+ (source "second.sv" #"
+import p::*;
+class SecondUser;
+ int padding;
+ int value;
+ function new(); padding=99; value=73; endfunction
+ typedef Registry#(SecondUser) type_id;
+endclass
+module Second(output int result, count);
+ SecondUser object;
+ initial begin object=SecondUser::type_id::create(); result=object.value; count=SecondUser::type_id::count; end
+endmodule"#)
+ (source "top.sv" #"
+module Top(output int first, second, first_count, second_count);
+ First a(first, first_count); Second b(second, second_count);
+endmodule"#)
+ (top Top) (run_until 0)
+ (assert_eq first 42) (assert_eq second 73)
+ (assert_eq first_count 1) (assert_eq second_count 1))
+
+; Aliases match their original enum/struct, while distinct declarations and
+; nested package generic actuals remain distinct specializations (6.22.1, 8.25).
+(case foreign_generic_nominal_and_nested_types
+ (source "foreign_types.sv" #"
+package p;
+ class Counter #(type T);
+  static int count=0;
+  static function int tick(); count++; return count; endfunction
+ endclass
+ class Wrap #(type T); endclass
+endpackage
+module Top(output int checks);
+ typedef enum bit [1:0] {A0=0,A1=1} A;
+ typedef A Alias;
+ typedef enum bit [1:0] {B0=0,B1=1} B;
+ typedef struct packed {bit [3:0] x;} S;
+ typedef struct packed {bit [3:0] x;} U;
+ typedef p::Wrap#(byte)::T element_t;
+ typedef int int_queue[$];
+ typedef byte byte_queue[$];
+ initial begin
+  checks=(p::Counter#(A)::tick()==1);
+  checks+=(p::Counter#(Alias)::tick()==2)*2;
+  checks+=(p::Counter#(B)::tick()==1)*4;
+  checks+=(p::Counter#(S)::tick()==1)*8;
+  checks+=(p::Counter#(U)::tick()==1)*16;
+  checks+=(p::Counter#(p::Wrap#(byte))::tick()==1)*32;
+  checks+=(p::Counter#(p::Wrap#(byte))::tick()==2)*64;
+  checks+=(p::Counter#(p::Wrap#(int))::tick()==1)*128;
+  checks+=($bits(element_t)==8)*256;
+  checks+=(p::Counter#(int_queue)::tick()==1)*512;
+  checks+=(p::Counter#(byte_queue)::tick()==1)*1024;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 2047))
+
+; Inherited parameters are class members; the derived declaration sees their
+; bound values instead of same-named package constants (8.13, 8.25).
+(case foreign_generic_inherited_constants
+ (source "foreign_inheritance.sv" #"
+package p;
+ class Base #(int N=3, type T=bit[N-1:0]);
+  localparam int LOCAL=N+1;
+  parameter string LABEL="base";
+  typedef T item_t;
+ endclass
+endpackage
+package q;
+ import p::*;
+ parameter int N=99, LOCAL=23;
+ parameter string LABEL="package_q";
+ class Child #(int M=5) extends Base#(M);
+  bit[LOCAL-1:0] field;
+  function int checks();
+   return (N==5) + (LOCAL==6)*2 + ($bits(item_t)==5)*4
+          + ($bits(field)==6)*8 + (LABEL=="base")*16;
+  endfunction
+ endclass
+endpackage
+module Top(output int checks);
+ q::Child#(5) child;
+ initial begin child=new(); checks=child.checks(); end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq checks 31))
+
+; A factory's type argument constructor retains compilation-unit functions and
+; mutable variables from its declaration scope (3.12.1, 8.25).
+(case foreign_generic_constructor_lexical_scope
+ (source "foreign_constructor_scope.sv" #"
+package p;
+ int source_value=96;
+ function automatic int initial_value(); return source_value+3; endfunction
+ class Factory #(type T);
+  static int count=0;
+  static function T create(); T result; result=new(); count++; return result; endfunction
+ endclass
+endpackage
+int value=20;
+function automatic int initial_value(); return value+3; endfunction
+class User;
+ int value;
+ function new(int n=initial_value()); value=n; endfunction
+endclass
+module Top(output int result, count);
+ User object;
+ initial begin
+  object=p::Factory#(User)::create(); result=object.value; count=p::Factory#(User)::count;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq result 23) (assert_eq count 1))
+
+; A caller supplies a class from a package the generic owner does not import.
+; Its static fields retain their original package storage (8.9, 8.25, 26.2).
+(case foreign_generic_package_type_static_storage
+ (source "foreign_package_type.sv" #"
+package p;
+ class Item;
+  static int tag=7;
+  int value;
+  function new(); value=42; endfunction
+ endclass
+endpackage
+package q;
+ class Factory #(type T);
+  static int count=0;
+  static function T create(); T result; result=new(); count++; return result; endfunction
+  static function int type_tag(); return T::tag; endfunction
+ endclass
+endpackage
+module Top(output int result, tag, count);
+ p::Item object;
+ initial begin
+  object=q::Factory#(p::Item)::create(); result=object.value;
+  tag=q::Factory#(p::Item)::type_tag(); count=q::Factory#(p::Item)::count;
+ end
+endmodule"#)
+ (top Top) (run_until 0) (assert_eq result 42) (assert_eq tag 7) (assert_eq count 1))
+(case foreign_generic_template_of_the_named_package
+  (source "packages.sv" #"
+package a;
+    class C #(type U = int);
+        static function int width();
+            U v;
+            return $bits(v);
+        endfunction
+    endclass
+endpackage
+package p;
+    class C #(type T = int);
+        static function int width();
+            T v;
+            return 100 + $bits(v);
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int w);
+    initial w = p::C#(.T(byte))::width();
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq w 108))
+(case foreign_generic_in_a_module_with_interface_instances
+  (source "package.sv" #"
+package p;
+    class C #(type T = int);
+        static T v;
+        static function void set(T value);
+            v = value;
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+interface bus_if;
+    logic x;
+endinterface
+module Top(output int got);
+    import p::*;
+    bus_if b();
+    initial begin
+        C#(byte)::set(2);
+        got = C#(byte)::v;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq got 2))
+(case enumeration_constants_of_classes
+  (source "package.sv" #"
+package p;
+    class C;
+        typedef bit [1:0] mode_t;
+        typedef enum mode_t {STRICT = 2'b00, HIGHEST = 2'b01, CHECK = 2'b10} mode_e;
+        localparam mode_t DEFAULT = CHECK;
+        mode_e m = HIGHEST;
+        function int f();
+            return DEFAULT + 10 * m;
+        endfunction
+        static function int g();
+            return C::CHECK;
+        endfunction
+    endclass
+    class P #(int N = 1);
+        typedef enum {A = N, B} e;
+        static function int b();
+            return B;
+        endfunction
+    endclass
+    typedef P#(5) P5;
+    typedef P#() P1;
+    typedef enum {OTHER = 1} other_e;
+    class Q;
+        localparam int OTHER = 7;
+        typedef other_e alias_e;
+        static function int f();
+            return OTHER;
+        endfunction
+    endclass
+    class Base;
+        typedef enum bit [1:0] {FIRST = 2'b01} base_e;
+    endclass
+    class Derived extends Base;
+        typedef enum bit [1:0] {SECOND = FIRST} derived_e;
+        static function int f();
+            return SECOND;
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic C c = new();
+        sum = c.f() + 100 * C::g() + 1000 * C::CHECK + 10000 * C::DEFAULT
+            + 100000 * P5::b() + 1000000 * P1::b() + 10000000 * Q::f()
+            + 100000000 * Derived::f();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 172622212))
+(case container_type_aliases_of_classes
+  (source "package.sv" #"
+package p;
+    class C;
+        typedef int queue_t[$];
+        typedef bit flags_t[string];
+        typedef byte bytes_t[];
+        queue_t q;
+        flags_t flags;
+        bytes_t b;
+        function void fill(ref queue_t r);
+            foreach (q[i]) r.push_back(q[i] * 2);
+        endfunction
+        function int f();
+            queue_t copy;
+            q.push_back(3);
+            q.push_back(4);
+            flags["a"] = 1;
+            flags["b"] = 0;
+            b = new[3];
+            fill(copy);
+            return copy.size() + 10 * copy[1] + 100 * flags.num() + 1000 * b.size();
+        endfunction
+    endclass
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    initial begin
+        automatic C c = new();
+        C::queue_t outside;
+        outside.push_back(7);
+        sum = c.f() + 100000 * outside[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 703282))

@@ -11,8 +11,11 @@
 
 mod containers;
 mod file_io;
+mod format;
 mod fread;
 mod objects;
+mod process;
+mod references;
 mod scan;
 mod strings;
 
@@ -89,6 +92,11 @@ pub(super) struct Ff<'p, 'a> {
     /// directly.
     kernel: Option<ProcessKernelBuilder>,
     forked: bool,
+    /// Whether [`Self::freeze_lvalue`] keeps its copies in the activation
+    /// frame of a forked process.
+    frame_positions: bool,
+    process_control: bool,
+    process_predicate: bool,
     frame_locals: Vec<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
     unobserved_function_writes: HashSet<SourceVarId>,
@@ -188,6 +196,9 @@ impl<'p, 'a> Ff<'p, 'a> {
             dist_seed: None,
             kernel: None,
             forked: false,
+            frame_positions: false,
+            process_control: false,
+            process_predicate: false,
             frame_locals: Vec::new(),
             event_probes: Vec::new(),
             unobserved_function_writes: HashSet::default(),
@@ -902,6 +913,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                         | SystemFunction::UrandomRange => {
                             self.urandom_state();
                         }
+                        SystemFunction::Process(_) => {
+                            self.urandom_state();
+                        }
                         SystemFunction::Random if args.is_empty() => {
                             self.dist_seed();
                         }
@@ -920,7 +934,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 }
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
-                | sv::ir::Callee::Checked { .. } => continue,
+                | sv::ir::Callee::Checked { .. }
+                | sv::ir::Callee::Lookup { .. } => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
@@ -1403,6 +1418,23 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(lvalue)
     }
 
+    /// A copy of a position for [`Self::freeze_const`].
+    fn position_temp(
+        &mut self,
+        width: usize,
+        signed: bool,
+        is_4state: bool,
+    ) -> Result<(SourceVarId, String), sv::AnalyzerError> {
+        let (temp, name) = self.m.temp("position", width, signed, is_4state);
+        if self.frame_positions && self.forked {
+            let slot = self.frame_locals.len();
+            self.frame_locals.push(temp);
+            self.with_kernel(|kernel| kernel.local(slot))
+                .map_err(kernel_error)?;
+        }
+        Ok((temp, name))
+    }
+
     /// `lvalue` with the variables its select positions read replaced by
     /// copies of their current values, so a later write to one does not move
     /// the target.
@@ -1441,7 +1473,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let variable = self.m.var(id);
                 let (width, signed, is_4state) =
                     (variable.width, variable.signed, variable.is_4state);
-                let (temp, temp_name) = self.m.temp("position", width, signed, is_4state);
+                let (temp, temp_name) = self.position_temp(width, signed, is_4state)?;
                 let value = self.eval(&sv::ir::Expr::Ident(name.clone()), Some((width, signed)))?;
                 self.store(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
@@ -1466,7 +1498,13 @@ impl<'p, 'a> Ff<'p, 'a> {
                 };
                 let value = self.eval(&read, None)?;
                 let width = self.b.register(&value).width();
-                let (temp, temp_name) = self.m.temp("position", width, *signed, is_4state);
+                let (temp, temp_name) = self.position_temp(width, *signed, is_4state)?;
+                // A frame slot starts a new block: read the bits there.
+                let value = if self.frame_positions && self.forked {
+                    self.eval(&read, None)?
+                } else {
+                    value
+                };
                 self.store(temp, SIROffset::Static(0), width, value);
                 ConstExpr::Ident(temp_name)
             }
@@ -1483,8 +1521,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                     lsb: bit,
                     signed: false,
                 };
+                let (temp, temp_name) = self.position_temp(1, false, is_4state)?;
                 let value = self.eval(&read, Some((1, false)))?;
-                let (temp, temp_name) = self.m.temp("position", 1, false, is_4state);
                 self.store(temp, SIROffset::Static(0), 1, value);
                 ConstExpr::Ident(temp_name)
             }
@@ -1559,6 +1597,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Ok(expr.clone());
         }
         Ok(match expr {
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Process(op)),
+                args,
+                ..
+            } => self.process_call(*op, args)?,
             Expr::Call {
                 callee: sv::ir::Callee::Checked { width, signed },
                 args,
@@ -1952,8 +1995,17 @@ impl<'p, 'a> Ff<'p, 'a> {
         } else {
             arg_order.to_vec()
         };
+        // A register would not survive a host request in a later actual:
+        // each actual before the last one that can make a request is kept, as
+        // its C type, in a temporary until the call.
+        let last_request = positions.iter().rposition(|&position| {
+            args.get(position)
+                .and_then(Option::as_ref)
+                .is_some_and(|arg| self.m.makes_host_request(arg))
+        });
+        let mut kept = Vec::new();
         // Evaluate actuals in source order, then pass registers in C formal order.
-        for position in positions {
+        for (index, position) in positions.into_iter().enumerate() {
             let argument = import.arguments().get(position).ok_or_else(|| {
                 unsupported(format!("argument position of DPI-C function `{name}`"))
             })?;
@@ -1966,6 +2018,24 @@ impl<'p, 'a> Ff<'p, 'a> {
             let r#type = argument.r#type();
             let arg = self.hoist(arg)?;
             let value = self.eval(&arg, Some((r#type.width(), r#type.is_signed())))?;
+            let register = self.dpi_register(value, r#type);
+            if last_request.is_some_and(|last| index < last) {
+                let four_state = matches!(self.b.register(&register), RegisterType::Logic { .. });
+                let (temp, name) =
+                    self.m
+                        .temp("dpi_input", r#type.width(), r#type.is_signed(), four_state);
+                self.store(temp, SIROffset::Static(0), r#type.width(), register);
+                kept.push((position, name));
+            } else {
+                registers[position] = Some(register);
+            }
+        }
+        for (position, name) in kept {
+            let r#type = import.arguments()[position].r#type();
+            let value = self.eval(
+                &sv::ir::Expr::Ident(name),
+                Some((r#type.width(), r#type.is_signed())),
+            )?;
             registers[position] = Some(self.dpi_register(value, r#type));
         }
         let registers = registers
@@ -2810,11 +2880,73 @@ impl<'p, 'a> Ff<'p, 'a> {
         Ok(Expr::Ident(ret_name))
     }
 
+    /// Heap helpers emit several registers before their call. Materialize
+    /// operands first so an operand's synchronous host request cannot leave
+    /// those registers live across a kernel return. Preserve formal sizing and
+    /// handle roots, including an object receiver captured before side effects.
+    fn heap_operand(
+        &mut self,
+        expr: &sv::ir::Expr,
+        context: Option<(usize, bool)>,
+        kind: Option<celox_design::ValueKind>,
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        let expr = self.hoist(expr)?;
+        let value_kind = kind.unwrap_or_else(|| {
+            if let sv::ir::Expr::Ident(name) = &expr {
+                self.m
+                    .id(name)
+                    .and_then(|id| self.m.variables.get(&id))
+                    .map(|v| v.value_kind)
+                    .unwrap_or(celox_design::ValueKind::Bits)
+            } else if self.m.expr_is_string(&expr) {
+                celox_design::ValueKind::StrRef
+            } else {
+                celox_design::ValueKind::Bits
+            }
+        });
+        let float = self.m.expr_float_precision(&expr);
+        let signed = context.map_or_else(|| self.expr_signed(&expr), |(_, signed)| signed);
+        let value = self.eval(&expr, context)?;
+        let register = self.b.register(&value);
+        let width = register.width();
+        let four_state = matches!(register, celox_sir::RegisterType::Logic { .. });
+        let (id, name) = self.m.temp("heap_operand", width, signed, four_state);
+        let variable = self.m.variables.get_mut(&id).unwrap();
+        variable.value_kind = value_kind;
+        variable.float = float;
+        self.store(id, SIROffset::Static(0), width, value);
+        Ok(sv::ir::Expr::Ident(name))
+    }
+
+    /// The input `value` of formal `id`, or with `keep` the name of a
+    /// temporary of the formal's type that holds it across a later host
+    /// request.
+    fn kept_input(
+        &mut self,
+        id: SourceVarId,
+        value: RegisterId,
+        keep: bool,
+    ) -> Result<RegisterId, String> {
+        if !keep {
+            return Ok(value);
+        }
+        let formal = self.m.var(id);
+        let (width, signed, value_kind, float) =
+            (formal.width, formal.signed, formal.value_kind, formal.float);
+        let four_state = matches!(self.b.register(&value), RegisterType::Logic { .. });
+        let (temp, name) = self.m.temp("input", width, signed, four_state);
+        let variable = self.m.variables.get_mut(&temp).unwrap();
+        variable.value_kind = value_kind;
+        variable.float = float;
+        self.store(temp, SIROffset::Static(0), width, value);
+        Err(name)
+    }
+
     /// The value of `expr` now, in a temporary of its type.
     fn keep_argument(&mut self, expr: &sv::ir::Expr) -> Result<sv::ir::Expr, sv::AnalyzerError> {
         let signed = self.expr_signed(expr);
         let float = floating::precision(expr, self.m.variables, self.m.name_to_id);
-        let handle = reads_string_variable(expr, self.m.variables, self.m.name_to_id);
+        let handle = self.m.expr_is_string(expr);
         let value = self.eval(expr, None)?;
         let register = self.b.register(&value).clone();
         let width = register.width();
@@ -3007,10 +3139,23 @@ impl<'p, 'a> Ff<'p, 'a> {
         lhs: &sv::ir::LValue,
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        self.assign_value(lhs, rhs, true)
+    }
+
+    /// Assign `rhs` to `lhs`; `convert` turns an integral value assigned to
+    /// a string variable into its bytes. The parts of a concatenation target
+    /// take the bits of the value instead: a part that is a string is a
+    /// member of an unpacked structure, and its bits are a handle.
+    fn assign_value(
+        &mut self,
+        lhs: &sv::ir::LValue,
+        rhs: &sv::ir::Expr,
+        convert: bool,
+    ) -> Result<(), sv::AnalyzerError> {
         let lhs = self.propagate_lvalue(lhs);
         let lhs = self.hoist_lvalue(&lhs)?;
         let converted = match self.m.id(lhs.name()) {
-            Some(id) if matches!(lhs, sv::ir::LValue::Ident(_)) => {
+            Some(id) if convert && matches!(lhs, sv::ir::LValue::Ident(_)) => {
                 self.string_conversion(id, rhs.clone())
             }
             _ => rhs.clone(),
@@ -3477,9 +3622,11 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut arena = SLTNodeArena::new();
         let node = self.expr_slt(rhs, Some((total, signed)), &mut arena)?;
         let node = coerce_node_width(&mut arena, node, Some(total), signed).map_err(slt_error)?;
-        // Capture the value before any part is written.
-        let (temp, temp_name) = self.m.temp("concat", total, false, true);
+        // Capture the value before any part is written, in a temporary of
+        // the value's state kind.
         let value = self.lower_slt(&arena, node)?;
+        let four_state = matches!(self.b.register(&value), RegisterType::Logic { .. });
+        let (temp, temp_name) = self.m.temp("concat", total, false, four_state);
         self.store(temp, SIROffset::Static(0), total, value);
         let mut lsb = total;
         for (part, width) in parts.iter().zip(widths) {
@@ -3490,7 +3637,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
                 signed: false,
             };
-            self.assign(part, &slice)?;
+            self.assign_value(part, &slice, false)?;
         }
         Ok(())
     }
@@ -3597,6 +3744,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             sv::ir::Stmt::Wait(condition) => {
                 self.wait_level(condition)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::AssertionRegion { reactive } => {
+                self.with_kernel(|kernel| kernel.assertion_region(*reactive))
+                    .map_err(kernel_error)?;
                 Ok(true)
             }
             sv::ir::Stmt::WaitFork | sv::ir::Stmt::DisableFork => {
@@ -3925,11 +4077,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::SystemTaskArg::Expr(expr) => {
                     let expr = expr.clone();
                     let signed = self.expr_signed(&expr);
-                    arg_is_handle.push(reads_string_variable(
-                        &expr,
-                        self.m.variables,
-                        self.m.name_to_id,
-                    ));
+                    arg_is_handle.push(self.m.expr_is_string(&expr));
                     arg_float_precision.push(floating::precision(
                         &expr,
                         self.m.variables,
@@ -4480,6 +4628,14 @@ impl<'p, 'a> Ff<'p, 'a> {
         let mut activation = Vec::new();
         if self.kernel.is_some() && (subroutine.is_task || self.forked) {
             for name in &subroutine.automatic_locals {
+                // A reference formal, or a member of one, has no storage of
+                // its own.
+                if subroutine.params.iter().any(|param| {
+                    param.direction.is_reference()
+                        && (&param.name == name || param.leaves.contains(name))
+                }) {
+                    continue;
+                }
                 let original = self
                     .m
                     .id(name)
@@ -4516,16 +4672,98 @@ impl<'p, 'a> Ff<'p, 'a> {
         // read a formal of an enclosing call of another subroutine.
         let mut outputs = Vec::new();
         let mut inputs = Vec::new();
+        let mut references = Vec::new();
+        let mut aliases = Vec::new();
+        let mut property_outputs = Vec::new();
         let positions: Vec<_> = if arg_order.is_empty() {
             (0..subroutine.params.len()).collect()
         } else {
             arg_order.to_vec()
         };
-        for position in positions {
+        // The objects and positions that references capture come first (the
+        // order of evaluation of arguments is undefined, IEEE 1800-2023
+        // 13.5): keeping one in a forked activation's frame starts a new
+        // resume point, which no evaluated input may span.
+        for &position in &positions {
+            let Some(param) = subroutine
+                .params
+                .get(position)
+                .filter(|param| param.direction.is_reference())
+            else {
+                continue;
+            };
+            let id = self
+                .m
+                .id(&param.name)
+                .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+            let actual = args
+                .get(position)
+                .cloned()
+                .flatten()
+                .or_else(|| param.default.clone());
+            if param.leaves.is_empty() {
+                match self.reference(name, param, actual)? {
+                    Reference::Variable(target) => {
+                        references.push((param.name.clone(), id, target));
+                    }
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
+                continue;
+            }
+            // Each member of a formal of unpacked structure type refers to
+            // the matching member of the actual, which the analyzer binds as
+            // the concatenation of its members.
+            let parts = match actual {
+                Some(sv::ir::Expr::Concat(parts)) if parts.len() == param.leaves.len() => parts,
+                _ => {
+                    return Err(unsupported(format!(
+                        "ref argument `{}` of `{name}`",
+                        param.source_name
+                    )));
+                }
+            };
+            for (leaf, part) in param.leaves.iter().zip(parts) {
+                let id = self
+                    .m
+                    .id(leaf)
+                    .ok_or_else(|| unsupported(format!("argument `{}`", param.source_name)))?;
+                let member = sv::ir::SubroutineParam {
+                    name: leaf.clone(),
+                    leaves: Vec::new(),
+                    default: None,
+                    ..param.clone()
+                };
+                match self.reference(name, &member, Some(part))? {
+                    Reference::Variable(target) => references.push((leaf.clone(), id, target)),
+                    Reference::Alias(alias) => aliases.push(*alias),
+                }
+            }
+        }
+        // An input evaluates into a register, which a host request in a later
+        // input, a default included, would lose: each input before the last
+        // one that can make a request is kept, converted to its formal, in a
+        // temporary until the formals are written.
+        let last_request = positions.iter().rposition(|&position| {
+            subroutine.params.get(position).is_some_and(|param| {
+                param.direction.is_read()
+                    && !param.direction.is_reference()
+                    && args
+                        .get(position)
+                        .cloned()
+                        .flatten()
+                        .or_else(|| param.default.clone())
+                        .is_some_and(|actual| self.m.makes_host_request(&actual))
+            })
+        });
+        for (index, position) in positions.into_iter().enumerate() {
+            let keep = last_request.is_some_and(|last| index < last);
             let param = subroutine
                 .params
                 .get(position)
                 .ok_or_else(|| unsupported(format!("argument position of `{name}`")))?;
+            if param.direction.is_reference() {
+                continue;
+            }
             let id = self
                 .m
                 .id(&param.name)
@@ -4539,15 +4777,28 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let reference = actual
                     .as_ref()
                     .ok_or_else(|| unsupported("missing output argument"))?;
-                let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
-                    unsupported(format!(
-                        "output argument `{}` of `{name}`",
-                        param.source_name
-                    ))
-                })?;
-                let guards = tagged_actual_guards(reference);
-                self.check_tagged_guards(&guards)?;
-                outputs.push((param.name.clone(), id, lvalues, guards));
+                // A reference formal bound to a class property, forwarded:
+                // its object was evaluated when the reference was made.
+                if let Some(store) =
+                    forwarded_property(reference, sv::ir::Expr::Ident(param.name.clone()))
+                {
+                    property_outputs.push(store);
+                } else if let Some(stores) = forwarded_members(reference, &param.name) {
+                    property_outputs.extend(stores);
+                } else {
+                    let lvalues = lvalue_from_expr(reference).ok_or_else(|| {
+                        unsupported(format!(
+                            "output argument `{}` of `{name}`",
+                            param.source_name
+                        ))
+                    })?;
+                    let guards = tagged_actual_guards(reference);
+                    self.check_tagged_guards(&guards)?;
+                    // The members of an unpacked structure take the formal's
+                    // bits, even a single string or handle member.
+                    let concat = matches!(reference, sv::ir::Expr::Concat(_));
+                    outputs.push((param.name.clone(), id, lvalues, guards, concat));
+                }
             }
             if param.direction.is_read() {
                 let actual = actual.ok_or_else(|| {
@@ -4597,20 +4848,31 @@ impl<'p, 'a> Ff<'p, 'a> {
                         .alloc(SLTNode::Unary(UnaryOp::ToTwoState, node))
                         .map_err(slt_error)?;
                 }
-                inputs.push((id, self.lower_slt(&arena, node)?));
+                let value = self.lower_slt(&arena, node)?;
+                inputs.push((id, self.kept_input(id, value, keep)));
             } else if !subroutine.persistent_locals.contains(&param.name)
                 && (self.kernel.is_none()
                     || !subroutine.is_task
                     || subroutine.automatic_locals.contains(&param.name))
             {
                 let value = self.default_reg(id);
-                inputs.push((id, value));
+                inputs.push((id, self.kept_input(id, value, keep)));
             }
         }
         for (id, value) in inputs {
+            let value = match value {
+                Ok(value) => value,
+                Err(name) => self.eval(&sv::ir::Expr::Ident(name), None)?,
+            };
             let width = self.m.var(id).width;
             let offset = sv_memory_offset(self.m.var(id), 0, width);
             self.store(id, offset, width, value);
+        }
+        // The body names each reference formal's actual itself, so its reads
+        // and writes are those of the actual, also across suspensions of a
+        // task and through any other name of it (IEEE 1800-2023 13.5.2).
+        for (formal, _, target) in &references {
+            self.m.name_to_id.insert(formal.clone(), *target);
         }
         if let Some(return_var) = &subroutine.return_var {
             let id = self
@@ -4627,24 +4889,41 @@ impl<'p, 'a> Ff<'p, 'a> {
             return_var: subroutine.return_var.clone(),
             loop_depth: self.loops.len(),
         });
+        let mut body = subroutine.body;
+        let (constants, parameter_types) = (self.m.constants, self.m.parameter_types);
+        let constant = |position: &sv::ir::ConstExpr| {
+            sv::typecheck::eval_const_expr_with_types(position, constants, parameter_types)
+        };
+        self.split_property_concats(&mut body, &aliases);
+        for alias in &aliases {
+            body = alias.rewrite(body, &constant)?;
+        }
         self.active_calls.push(name.to_string());
-        let falls = self.exec_block(&subroutine.body);
+        let falls = self.exec_block(&body);
         self.active_calls.pop();
         self.functions.pop();
+        for (formal, original, _) in references {
+            self.m.name_to_id.insert(formal, original);
+        }
         if falls? {
             self.jump(return_block);
         }
         self.b.switch_to_block(return_block);
-        for (formal, id, lvalues, guards) in outputs {
+        for (formal, id, lvalues, guards, concat) in outputs {
             self.check_tagged_guards(&guards)?;
             let signed = self.m.var(id).signed;
-            if let [lvalue] = lvalues.as_slice() {
+            if let [lvalue] = lvalues.as_slice()
+                && !concat
+            {
                 self.assign(lvalue, &sv::ir::Expr::Ident(formal))?;
             } else {
                 let _ = signed;
                 self.assign_concat(&lvalues, &sv::ir::Expr::Ident(formal))?;
             }
             self.observe_assignment(&lvalues)?;
+        }
+        for store in property_outputs {
+            self.exec_block(&[store])?;
         }
         let result = subroutine.return_var.as_ref().map(|name| {
             if activation.iter().any(|(local, _)| local == name) {
@@ -4657,6 +4936,159 @@ impl<'p, 'a> Ff<'p, 'a> {
             self.m.name_to_id.insert(name, original);
         }
         Ok(result)
+    }
+
+    /// Rewrite each assignment in `body` to a concatenation that has members
+    /// of a structure reference formal bound to a class property, which
+    /// [`references::Alias::rewrite`] stores one property at a time: the
+    /// concatenation writes temporaries in their place, so every position
+    /// of its other parts is taken before any write, and each property is
+    /// then stored from its temporary.
+    fn split_property_concats(&mut self, body: &mut [sv::ir::Stmt], aliases: &[references::Alias]) {
+        let properties: HashSet<&str> = aliases
+            .iter()
+            .filter(|alias| matches!(alias.target, references::Target::Property { .. }))
+            .map(|alias| alias.formal.as_str())
+            .collect();
+        if properties.is_empty() {
+            return;
+        }
+        for stmt in body {
+            stmt.walk_mut(&mut |stmt| {
+                let sv::ir::Stmt::AssignConcat {
+                    parts,
+                    nonblocking,
+                    ..
+                } = stmt
+                else {
+                    return;
+                };
+                if !parts.iter().any(|part| properties.contains(part.name())) {
+                    return;
+                }
+                let nonblocking = *nonblocking;
+                let mut stores = Vec::new();
+                for part in parts.iter_mut() {
+                    if !matches!(part, sv::ir::LValue::Ident(name) if properties.contains(name.as_str()))
+                    {
+                        continue;
+                    }
+                    // A select of a member is left to the rewrite to reject.
+                    let Ok(width) = self.lvalue_width(part) else {
+                        continue;
+                    };
+                    let (_, temp) = self.m.temp("ref_member", width, false, self.m.four_state);
+                    let member = std::mem::replace(part, sv::ir::LValue::Ident(temp.clone()));
+                    stores.push(sv::ir::Stmt::Assign {
+                        lhs: member,
+                        rhs: sv::ir::Expr::Ident(temp),
+                        nonblocking,
+                    });
+                }
+                if stores.is_empty() {
+                    return;
+                }
+                let assignment = std::mem::replace(stmt, sv::ir::Stmt::Break);
+                stores.insert(0, assignment);
+                *stmt = sv::ir::Stmt::If {
+                    condition: sv::ir::Expr::Literal("1'b1".into()),
+                    then_body: stores,
+                    else_body: Vec::new(),
+                };
+            });
+        }
+    }
+
+    /// What reference formal `param` of `name` refers to for a call with
+    /// `actual`. The object of a property is evaluated here, at the call.
+    fn reference(
+        &mut self,
+        name: &str,
+        param: &sv::ir::SubroutineParam,
+        actual: Option<sv::ir::Expr>,
+    ) -> Result<Reference, sv::AnalyzerError> {
+        match actual {
+            Some(sv::ir::Expr::Ident(actual)) => self
+                .m
+                .id(&actual)
+                .map(Reference::Variable)
+                .ok_or_else(|| unsupported(format!("reference to `{actual}`"))),
+            Some(sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                args,
+                ..
+            }) if matches!(*op, sv::ir::ObjectOp::Load(_)) => {
+                let sv::ir::ObjectOp::Load(field) = *op else {
+                    unreachable!()
+                };
+                let [Some(object)] = args.as_slice() else {
+                    return Err(unsupported("class property receiver"));
+                };
+                let (handle, handle_name) = self.m.temp(references::OBJECT_TEMP, 32, false, false);
+                self.m.variables.get_mut(&handle).unwrap().value_kind =
+                    celox_design::ValueKind::ObjRef;
+                // A forked activation keeps its own object.
+                if self.forked {
+                    let slot = self.frame_locals.len();
+                    self.frame_locals.push(handle);
+                    self.with_kernel(|kernel| kernel.local(slot))
+                        .map_err(kernel_error)?;
+                }
+                let object = self.handle(object)?;
+                self.store(handle, SIROffset::Static(0), 32, object);
+                Ok(Reference::Alias(Box::new(references::Alias {
+                    formal: param.name.clone(),
+                    source_name: param.source_name.clone(),
+                    target: references::Target::Property {
+                        handle: handle_name,
+                        field,
+                    },
+                })))
+            }
+            // An element of a fixed-size unpacked array, which the analyzer
+            // has checked: its index is evaluated at the call.
+            Some(actual @ sv::ir::Expr::Select { .. }) => {
+                let signed = self.expr_signed(&actual);
+                let element = match lvalue_from_expr(&actual).as_deref() {
+                    Some([element @ sv::ir::LValue::Select { .. }]) => element.clone(),
+                    _ => {
+                        return Err(unsupported(format!(
+                            "ref argument `{}` of `{name}`",
+                            param.source_name
+                        )));
+                    }
+                };
+                let element = self.hoist_lvalue(&element)?;
+                // A forked activation keeps its own copies of the positions.
+                self.frame_positions = true;
+                let element = self.freeze_lvalue(element);
+                self.frame_positions = false;
+                let element = element?;
+                let width = self.m.var(self.m.id(&param.name).expect("a formal")).width;
+                let total = self
+                    .m
+                    .var(self.m.id(element.name()).expect("an array"))
+                    .width;
+                Ok(Reference::Alias(Box::new(references::Alias {
+                    formal: param.name.clone(),
+                    source_name: param.source_name.clone(),
+                    target: references::Target::Element {
+                        element: Box::new(element),
+                        signed,
+                        width,
+                        total,
+                    },
+                })))
+            }
+            Some(_) => Err(unsupported(format!(
+                "ref argument `{}` of `{name}` bound to a structure member",
+                param.source_name
+            ))),
+            None => Err(unsupported(format!(
+                "missing argument `{}` of `{name}`",
+                param.source_name
+            ))),
+        }
     }
 
     // -------------------------------------------------------------- process
@@ -5855,6 +6287,7 @@ impl Ff<'_, '_> {
         body: &[sv::ir::Stmt],
         slots: ProcessSlots<SourceVarId>,
         process: usize,
+        final_process: bool,
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
         let starts_with_event_wait = slots.requires_timed_simulation;
@@ -5955,12 +6388,67 @@ impl Ff<'_, '_> {
         }
         self.observe_blocking_assignments =
             has_activation_event(self.m, body, &mut HashSet::default());
+        fn has_process(
+            m: &ProcModule<'_>,
+            body: &[sv::ir::Stmt],
+            visited: &mut HashSet<String>,
+            defaults: &mut HashSet<(String, usize)>,
+        ) -> bool {
+            let mut calls = Vec::new();
+            for stmt in body {
+                stmt.walk(&mut |stmt| {
+                    stmt_calls(stmt, &mut calls);
+                    match stmt {
+                        sv::ir::Stmt::Wait(condition) => collect_calls(condition, &mut calls),
+                        sv::ir::Stmt::WaitEvent(items) => {
+                            for item in items {
+                                collect_calls(&item.expr, &mut calls);
+                            }
+                        }
+                        sv::ir::Stmt::Delay { amount, .. } => collect_calls(amount, &mut calls),
+                        _ => {}
+                    }
+                });
+            }
+            while let Some((callee, args)) = calls.pop() {
+                match callee {
+                    sv::ir::Callee::System(sv::ir::SystemFunction::Process(_)) => return true,
+                    sv::ir::Callee::Subroutine(name) => {
+                        let Some(sub) = m.subroutine(&name) else {
+                            continue;
+                        };
+                        for (position, param) in sub.params.iter().enumerate() {
+                            if matches!(args.get(position), None | Some(None))
+                                && let Some(default) = &param.default
+                                && defaults.insert((name.clone(), position))
+                            {
+                                collect_calls(default, &mut calls);
+                            }
+                        }
+                        if visited.insert(name) && has_process(m, &sub.body, visited, defaults) {
+                            return true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            false
+        }
+        self.process_control = has_process(
+            self.m,
+            body,
+            &mut HashSet::default(),
+            &mut HashSet::default(),
+        );
         self.forked = has_fork(
             self.m,
             body,
             &mut HashSet::default(),
             &mut HashSet::default(),
         );
+        // Finals share one process RNG even when a particular body only
+        // draws random values and never exposes process::self().
+        self.forked |= self.process_control || final_process;
         // Forks reached through inlined tasks also need per-activation random state.
         if self.forked {
             self.urandom_state();
@@ -7132,6 +7620,11 @@ impl Ff<'_, '_> {
         }) {
             return Err(unsupported("wait condition reading a static task argument"));
         }
+        // A write of a class property does not wake a waiting process yet, so
+        // a condition that reads one would never be checked again.
+        if let Some(op) = heap_read(self.m, condition) {
+            return Err(unsupported(format!("{op} in a wait condition")));
+        }
         let mut ids: Vec<_> = names
             .iter()
             .filter_map(|name| self.m.id(name))
@@ -7148,7 +7641,11 @@ impl Ff<'_, '_> {
         // Keep the kernel available while evaluating the predicate: functions
         // may perform synchronous process control such as disable fork.
         let direct = std::mem::replace(&mut self.direct, true);
+        let predicate = std::mem::replace(&mut self.process_predicate, true);
         let result = (|| {
+            if self.process_control {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
             let (holds, _) = self.eval_truth(condition)?;
             let join = self.b.new_block();
             let wait = self.b.new_block();
@@ -7158,8 +7655,18 @@ impl Ff<'_, '_> {
                 false_block: (wait, Vec::new()),
             });
             self.b.switch_to_block(wait);
-            self.with_kernel(|kernel| kernel.suspend_wait(site))
-                .map_err(kernel_error)?;
+            let process_control = self.process_control;
+            self.with_kernel(|kernel| {
+                if process_control {
+                    kernel.suspend_level_wait(site)
+                } else {
+                    kernel.suspend_wait(site)
+                }
+            })
+            .map_err(kernel_error)?;
+            if self.process_control {
+                self.process_call(celox_design::ProcessOp::Observe, &[])?;
+            }
             let (holds, _) = self.eval_truth(condition)?;
             self.with_kernel(|kernel| kernel.wake_if(holds));
             self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
@@ -7167,6 +7674,7 @@ impl Ff<'_, '_> {
             Ok(())
         })();
         self.direct = direct;
+        self.process_predicate = predicate;
         result
     }
 
@@ -7344,6 +7852,66 @@ fn subroutine_reads(pm: &ProcModule<'_>, expr: &sv::ir::Expr, names: &mut HashSe
     }
 }
 
+/// The name of an operation in `expr` that reads the class object heap,
+/// directly or through the functions it calls: a class property, or the
+/// random mode of one. Container contents are values of their handles. The
+/// default of an argument counts only where a call omits the argument.
+fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
+    let mut pending = vec![expr.clone()];
+    let mut calls = Vec::new();
+    let mut visited = HashSet::default();
+    let mut defaults = HashSet::default();
+    loop {
+        while let Some(expr) = pending.pop() {
+            let found = std::cell::RefCell::new(None);
+            expr_calls(&expr, &|callee| {
+                if let sv::ir::Callee::Object(op) = callee
+                    && matches!(
+                        **op,
+                        sv::ir::ObjectOp::Load(_)
+                            | sv::ir::ObjectOp::ModeGet(..)
+                            | sv::ir::ObjectOp::ConstraintModeGet(_)
+                    )
+                {
+                    found.borrow_mut().get_or_insert(op.to_string());
+                }
+                false
+            });
+            if let Some(op) = found.into_inner() {
+                return Some(op);
+            }
+            collect_calls(&expr, &mut calls);
+        }
+        let (callee, args) = calls.pop()?;
+        let sv::ir::Callee::Subroutine(name) = callee else {
+            continue;
+        };
+        let Some(subroutine) = pm.subroutine(&name) else {
+            continue;
+        };
+        for (position, param) in subroutine.params.iter().enumerate() {
+            if matches!(args.get(position), None | Some(None))
+                && let Some(default) = &param.default
+                && defaults.insert((name.clone(), position))
+            {
+                pending.push(default.clone());
+            }
+        }
+        if !visited.insert(name) {
+            continue;
+        }
+        for stmt in &subroutine.body {
+            let mut stmt = stmt.clone();
+            stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
+            stmt.visit_mut(
+                &mut |expr| pending.push(expr.clone()),
+                &mut |_| {},
+                &mut |_| {},
+            );
+        }
+    }
+}
+
 /// The name of a call in `expr` that has an effect or reads the state of the
 /// simulation, directly or through the functions it calls: an event
 /// expression must be a value of the variables it reads.
@@ -7364,19 +7932,20 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                     }
                     continue;
                 }
-                // A string operation is a value of its operands.
-                sv::ir::Callee::String(_) => continue,
+                // A string operation or lookup is a value of its operands.
+                sv::ir::Callee::String(_) | sv::ir::Callee::Lookup { .. } => continue,
                 // Container contents are immutable: reading an element is a
                 // value of the container handle and index, unlike a class
                 // property that can change without its handle changing.
+                // A record of a structure element is immutable as well.
                 sv::ir::Callee::Object(op)
                     if matches!(
                         *op,
                         sv::ir::ObjectOp::Container {
                             op: sv::ir::ContainerOp::Get,
                             ..
-                        }
-                    ) =>
+                        } | sv::ir::ObjectOp::Unbox(_)
+                    ) || matches!(*op, sv::ir::ObjectOp::Load(field) if field.nullable) =>
                 {
                     continue;
                 }
@@ -7900,4 +8469,73 @@ fn past_depth_and_gate(
         }
     };
     Ok((depth, args.get(2).cloned().flatten()))
+}
+
+/// What a reference formal names during an inlined call.
+enum Reference {
+    Variable(SourceVarId),
+    Alias(Box<references::Alias>),
+}
+
+/// The store that copies `value` back into the class property that `actual`
+/// reads through the object of a reference formal (see
+/// [`references::Alias`]), when it is such a read.
+fn forwarded_property(actual: &sv::ir::Expr, value: sv::ir::Expr) -> Option<sv::ir::Stmt> {
+    let sv::ir::Expr::Call {
+        callee: sv::ir::Callee::Object(op),
+        args,
+        ..
+    } = actual
+    else {
+        return None;
+    };
+    let (sv::ir::ObjectOp::Load(field), [Some(sv::ir::Expr::Ident(handle))]) =
+        (&**op, args.as_slice())
+    else {
+        return None;
+    };
+    handle.starts_with(references::OBJECT_TEMP).then(|| {
+        sv::ir::Stmt::Eval(sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Object(Box::new(sv::ir::ObjectOp::Store(*field))),
+            args: vec![Some(sv::ir::Expr::Ident(handle.clone())), Some(value)],
+            arg_order: Vec::new(),
+        })
+    })
+}
+
+/// The stores that copy the members of formal `formal` of unpacked
+/// structure type back into the class properties that `actual`, the members
+/// of a structure reference formal bound to a property, read.
+fn forwarded_members(actual: &sv::ir::Expr, formal: &str) -> Option<Vec<sv::ir::Stmt>> {
+    let sv::ir::Expr::Concat(parts) = actual else {
+        return None;
+    };
+    let widths = parts
+        .iter()
+        .map(|part| match part {
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Object(op),
+                ..
+            } => match **op {
+                sv::ir::ObjectOp::Load(field) => Some(field.width as usize),
+                _ => None,
+            },
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut lsb = widths.iter().sum::<usize>();
+    parts
+        .iter()
+        .zip(widths)
+        .map(|(part, width)| {
+            lsb -= width;
+            let bits = sv::ir::Expr::Select {
+                expr: Box::new(sv::ir::Expr::Ident(formal.to_owned())),
+                msb: sv::ir::ConstExpr::Literal((lsb + width - 1).to_string()),
+                lsb: sv::ir::ConstExpr::Literal(lsb.to_string()),
+                signed: false,
+            };
+            forwarded_property(part, bits)
+        })
+        .collect()
 }

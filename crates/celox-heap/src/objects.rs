@@ -79,7 +79,36 @@ impl std::fmt::Display for Fault {
     }
 }
 
+/// The contents of a structure record: its bytes and handle fields.
+pub(crate) type RecordContents = (Box<[u8]>, Vec<(u32, HandleKind)>);
+
 impl Heap {
+    /// The handle of the record with the contents of the finished `record`,
+    /// so that equal values of an unpacked structure have one handle, as
+    /// equal strings and containers do: `null` for the default value, whose
+    /// bytes are all zero (a `null` record reads as its members' defaults).
+    /// A record is never written after it is finished.
+    pub fn finish_record(&mut self, record: Handle) -> Handle {
+        let Some(object) = self.objects.get(&record) else {
+            return record;
+        };
+        if object.bytes.iter().all(|&byte| byte == 0) {
+            self.objects.remove(&record);
+            return NULL;
+        }
+        let contents = (object.bytes.clone(), object.handles.clone());
+        match self.record_lookup.get(&contents) {
+            Some(&canonical) if canonical != record && self.objects.contains_key(&canonical) => {
+                self.objects.remove(&record);
+                canonical
+            }
+            _ => {
+                self.record_lookup.insert(contents, record);
+                record
+            }
+        }
+    }
+
     /// A new object of `class` with `size` zeroed bytes.
     pub fn new_object(&mut self, class: u32, size: usize) -> Handle {
         let handle = self.next_object;
@@ -333,6 +362,28 @@ mod tests {
         assert_eq!(heap.load(object, 4, 4), 0x5678_9abc);
         assert_eq!(heap.load(object, 0, 8), 0x5678_9abc_0000_0000);
         assert_eq!(heap.take_fault(), None);
+    }
+
+    #[test]
+    fn equal_records_share_one_handle_until_collected() {
+        let mut heap = Heap::new();
+        let record = |heap: &mut Heap, value: u64| {
+            let record = heap.new_object(u32::MAX, 8);
+            heap.declare_handle(record, 0, HandleKind::String);
+            heap.store(record, 4, 4, value);
+            heap.finish_record(record)
+        };
+        let first = record(&mut heap, 1);
+        let second = record(&mut heap, 1);
+        let other = record(&mut heap, 2);
+        assert_eq!(first, second);
+        assert_ne!(first, other);
+        assert_eq!(heap.objects.len(), 2);
+        assert_eq!(record(&mut heap, 0), NULL);
+        assert_eq!(heap.objects.len(), 2);
+        heap.collect([Root::object(other)]);
+        assert_eq!(heap.record_lookup.len(), 1);
+        assert_ne!(record(&mut heap, 1), first);
     }
 
     #[test]

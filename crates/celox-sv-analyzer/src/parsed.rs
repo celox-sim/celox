@@ -345,6 +345,23 @@ impl ParsedSource {
         overrides: &HashMap<String, ir::ConstExpr>,
         packages: &Packages,
     ) -> Result<Ir, AnalyzerError> {
+        self.analyze_module_declarations_with_interfaces(
+            module_name,
+            overrides,
+            &ModuleInterfaces::default(),
+            packages,
+        )
+    }
+
+    /// Inspect declaration shapes with interfaces of modules in other sources.
+    /// This retains the metadata-only contract of `analyze_module_declarations`.
+    pub fn analyze_module_declarations_with_interfaces(
+        &self,
+        module_name: &str,
+        overrides: &HashMap<String, ir::ConstExpr>,
+        interfaces: &ModuleInterfaces,
+        packages: &Packages,
+    ) -> Result<Ir, AnalyzerError> {
         self.validate_module_namespace(module_name, packages)?;
         let overrides = overrides
             .iter()
@@ -362,7 +379,7 @@ impl ParsedSource {
                 patterns: &[],
                 hierarchical: &[],
             },
-            &ModuleInterfaces::default(),
+            interfaces,
             packages,
         )?;
         analyze::analyze_source(source)

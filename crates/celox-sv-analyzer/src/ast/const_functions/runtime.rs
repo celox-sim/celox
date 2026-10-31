@@ -100,6 +100,7 @@ impl<'a> RuntimeConstantFunctions<'a> {
                     | Stmt::WaitImplicit(_)
                     | Stmt::Wait(_)
                     | Stmt::Fork { .. }
+                    | Stmt::AssertionRegion { .. }
                     | Stmt::WaitFork
                     | Stmt::DisableFork => impure = true,
                     _ => {}

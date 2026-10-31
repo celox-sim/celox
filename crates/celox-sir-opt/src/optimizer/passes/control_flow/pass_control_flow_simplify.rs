@@ -379,7 +379,7 @@ fn simplify_dominated_muxes(
     }) {
         return false;
     }
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return false;
     };
     let parameter_facts = collect_edge_parameter_facts(eu);
@@ -713,7 +713,7 @@ struct CaseThreadPlan {
 /// per taken arm is quadratic for large generated cases; the indexed form is
 /// linear in CFG size plus one constant lookup per candidate edge.
 fn thread_correlated_case_edges(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) -> bool {
-    let Ok(cfg) = SirCfg::analyze(eu) else {
+    let Ok(cfg) = SirCfg::analyze_forward_structure(eu) else {
         return false;
     };
     let definitions = instruction_definition_locations(eu);

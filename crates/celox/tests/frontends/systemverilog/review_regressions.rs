@@ -710,7 +710,9 @@ fn rejects_dropped_unrepresentable_function_call_actuals() {
         "#,
     );
     assert!(
-        error.contains("combinational expression") || error.contains("function call"),
+        error.contains("combinational expression")
+            || error.contains("function call")
+            || error.contains("2 actuals for 1 formals"),
         "unexpected error: {error}"
     );
 }
@@ -5502,7 +5504,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
             "concurrent assertion",
             r#"
             module Top(input logic clk, valid);
-                assert property (@(posedge clk) valid);
+                assert property (@(posedge clk) valid |=> valid);
             endmodule
         "#,
         ),
@@ -8778,6 +8780,7 @@ mod aggregate_regressions {
         fn parameter_element_forwarding(sim) { @case "aggregate_regressions::parameter_element_forwarding"; }
         fn parameter_runtime_element_bit(sim) { @case "aggregate_regressions::parameter_runtime_element_bit"; }
         fn independent_clock_memory_writers(sim) { @case "aggregate_regressions::independent_clock_memory_writers"; }
+        fn wide_concatenated_procedural_targets(sim) { @case "aggregate_regressions::wide_concatenated_procedural_targets"; }
     }
 }
 

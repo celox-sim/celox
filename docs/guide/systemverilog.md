@@ -95,12 +95,12 @@ ports, types, statements or system functions before porting a design.
 
 Common reasons a design needs changes are:
 
-- Class-based verification beyond [simple classes](./systemverilog-reference#classes) and concurrent assertions.
+- Class-based verification beyond [simple classes](./systemverilog-reference#classes) and concurrent assertions beyond the [single-cycle Boolean subset](./systemverilog-reference#concurrent-assertions).
 - `fork` / `join`, named events, intra-assignment timing such as `a = #1 b`
   and `iff` in `always_ff` event controls ([#452](https://github.com/celox-sim/celox/issues/452)).
 - Nonblocking latch assignments, multiple drivers and tri-state buses. Inferred latches in `always_comb` require `inferred_latch = "warn"` or `"allow"` in the common `[diagnostics]` configuration.
 - Non-ANSI module ports, wildcard `.*` connections, gate primitives and `bind`.
-- `real`, unpacked structs and several interface features.
+- `real`, unpacked structs in ports and fixed-size arrays, and several interface features.
 
 The [complete limitations list](./systemverilog-reference#what-is-not-supported)
 includes narrower restrictions and tracking issues. Unsupported constructs

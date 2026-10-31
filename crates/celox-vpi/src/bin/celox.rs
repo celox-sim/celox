@@ -914,7 +914,7 @@ fn python_output(python: &Path, arguments: &[&OsStr], purpose: &str) -> Result<S
         ));
     }
     let value = String::from_utf8(output.stdout)
-        .map_err(|_| format!("Python returned a non-UTF-8 path for {purpose}"))?;
+        .map_err(|_| format!("Python returned non-UTF-8 output for {purpose}"))?;
     let value = value.trim();
     if value.is_empty() {
         return Err(format!("Python returned an empty path for {purpose}"));
@@ -922,74 +922,56 @@ fn python_output(python: &Path, arguments: &[&OsStr], purpose: &str) -> Result<S
     Ok(value.to_string())
 }
 
-fn discover_libpython(python: &Path) -> Result<PathBuf, String> {
-    python_output(
-        python,
-        &[
-            OsStr::new("-m"),
-            OsStr::new("cocotb_tools.config"),
-            OsStr::new("--libpython"),
-        ],
-        "libpython",
-    )
-    .map(PathBuf::from)
+#[derive(Clone, Copy)]
+struct PythonDiscovery {
+    vpi: bool,
+    libpython: bool,
+    pygpi_entry_point: bool,
 }
 
-fn discover_pygpi_entry_point(python: &Path) -> Result<Option<String>, String> {
-    const SUPPORTED_PREFIX: &str = "celox-pygpi-entry-point:";
-    const UNSUPPORTED: &str = "celox-pygpi-entry-point-unavailable";
+#[derive(serde::Deserialize)]
+struct PythonConfiguration {
+    python: PathBuf,
+    vpi: Option<PathBuf>,
+    libpython: Option<PathBuf>,
+    pygpi_entry_point: Option<String>,
+}
 
-    // cocotb 2.1 exposes PyGPI as a separate GPI user. Older cocotb releases
-    // embed Python directly and do not provide this configuration function.
+fn discover_python_configuration(
+    python: &Path,
+    request: PythonDiscovery,
+) -> Result<PythonConfiguration, String> {
+    let flag = |enabled| OsStr::new(if enabled { "1" } else { "0" });
     let output = python_output(
         python,
         &[
             OsStr::new("-c"),
-            OsStr::new(
-                "from cocotb_tools import config; entry = getattr(config, 'pygpi_entry_point', None); print('celox-pygpi-entry-point:' + entry() if entry is not None else 'celox-pygpi-entry-point-unavailable')",
-            ),
+            OsStr::new(include_str!("../cocotb_config.py")),
+            flag(request.vpi),
+            flag(request.libpython),
+            flag(request.pygpi_entry_point),
         ],
-        "cocotb's PyGPI entry point",
+        "cocotb runtime configuration",
     )?;
-    if output == UNSUPPORTED {
-        return Ok(None);
+    let configuration: PythonConfiguration = serde_json::from_str(&output)
+        .map_err(|error| format!("Python returned invalid cocotb configuration: {error}"))?;
+    if configuration.python.as_os_str().is_empty() {
+        return Err("Python returned an empty interpreter path".into());
     }
-    output
-        .strip_prefix(SUPPORTED_PREFIX)
-        .filter(|entry| !entry.is_empty())
-        .map(|entry| Some(entry.to_string()))
-        .ok_or_else(|| format!("Python returned an invalid PyGPI entry point: {output}"))
+    Ok(configuration)
+}
+
+fn discovered_path(value: Option<PathBuf>, purpose: &str) -> Result<PathBuf, String> {
+    value
+        .filter(|path| !path.as_os_str().is_empty())
+        .ok_or_else(|| format!("Python returned an empty path for {purpose}"))
 }
 
 fn gpi_users_value(libpython: &Path, pygpi_entry_point: &str) -> String {
     format!("{};{pygpi_entry_point}", libpython.display())
 }
 
-fn discover_python(python: &Path) -> Result<PathBuf, String> {
-    python_output(
-        python,
-        &[
-            OsStr::new("-c"),
-            OsStr::new("import sys; print(sys.executable)"),
-        ],
-        "the Python executable",
-    )
-    .map(PathBuf::from)
-}
-
-fn discover_vpi(python: &Path) -> Result<PathBuf, String> {
-    let configured = python_output(
-        python,
-        &[
-            OsStr::new("-m"),
-            OsStr::new("cocotb_tools.config"),
-            OsStr::new("--lib-name-path"),
-            OsStr::new("vpi"),
-            OsStr::new("icarus"),
-        ],
-        "cocotb's VPI adapter",
-    )
-    .map(PathBuf::from)?;
+fn loadable_vpi(configured: PathBuf) -> Result<PathBuf, String> {
     if configured.is_file() {
         return Ok(configured);
     }
@@ -1075,20 +1057,34 @@ fn run_simulation(image: NativeProgramImage, arguments: SimulationArgs) -> Resul
         .python
         .or_else(|| environment_path("PYGPI_PYTHON_BIN"))
         .unwrap_or_else(|| PathBuf::from("python3"));
-    let python = discover_python(&python_command)?;
-    let vpi = arguments
+    let configured_vpi = arguments
         .vpi
-        .or_else(|| environment_path("CELOX_COCOTB_VPI"))
-        .map_or_else(|| discover_vpi(&python), Ok)?;
-    let libpython = match environment_path("LIBPYTHON_LOC") {
+        .or_else(|| environment_path("CELOX_COCOTB_VPI"));
+    let configured_libpython = environment_path("LIBPYTHON_LOC");
+    let request = PythonDiscovery {
+        vpi: configured_vpi.is_none(),
+        libpython: configured_libpython.is_none(),
+        pygpi_entry_point: env::var_os("GPI_USERS").is_none(),
+    };
+    let configuration = discover_python_configuration(&python_command, request)?;
+    let python = configuration.python;
+    let vpi = match configured_vpi {
         Some(path) => path,
-        None => discover_libpython(&python)?,
+        None => loadable_vpi(discovered_path(configuration.vpi, "cocotb's VPI adapter")?)?,
+    };
+    let libpython = match configured_libpython {
+        Some(path) => path,
+        None => discovered_path(configuration.libpython, "libpython")?,
     };
     // Preserve an explicitly configured user chain. Otherwise, match cocotb
     // 2.1's runner and load libpython before the PyGPI entry point.
-    let gpi_users = if env::var_os("GPI_USERS").is_none() {
-        discover_pygpi_entry_point(&python)?
-            .map(|pygpi_entry_point| gpi_users_value(&libpython, &pygpi_entry_point))
+    let gpi_users = if request.pygpi_entry_point {
+        match configuration.pygpi_entry_point {
+            Some(entry) if entry.is_empty() => {
+                return Err("Python returned an empty PyGPI entry point".into());
+            }
+            entry => entry.map(|entry| gpi_users_value(&libpython, &entry)),
+        }
     } else {
         None
     };
