@@ -48,11 +48,12 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "bincode"
-version = "1.3.3"
+version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+checksum = "36eaf5d7b090263e8150820482d5d93cd964a81e4019913c972f4edcc6edb740"
 dependencies = [
  "serde",
+ "unty",
 ]
 
 [[package]]
@@ -315,12 +316,12 @@ dependencies = [
 
 [[package]]
 name = "fst-writer"
-version = "0.3.1"
+version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77be37fdc968866fa4f0cee73e42185e6d4699a761a51a54e6ebc9a3d73ed537"
+checksum = "cfc1b0991a72353e4d7bdcb162f9bf480fee0abc7f25aeeebe59f74c889b2c3e"
 dependencies = [
- "lz4_flex 0.11.6",
- "miniz_oxide 0.8.9",
+ "lz4_flex 0.14.0",
+ "miniz_oxide 0.9.1",
  "thiserror",
 ]
 
@@ -469,24 +470,24 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.34"
+version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
-
-[[package]]
-name = "lz4_flex"
-version = "0.11.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "373f5eceeeab7925e0c1098212f2fbc4d416adec9d35051a6ab251e824c1854a"
-dependencies = [
- "twox-hash",
-]
+checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
 name = "lz4_flex"
 version = "0.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7ef0d4ed8669f8f8826eb00dc878084aa8f253506c4fd5e8f58f5bce72ddb97e"
+dependencies = [
+ "twox-hash",
+]
+
+[[package]]
+name = "lz4_flex"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ecbdfe44b1bd960b68170b417450a628c43f7cf56bb3c5317e61cb230ee7f226"
 dependencies = [
  "twox-hash",
 ]
@@ -753,8 +754,8 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "sv-parser"
-version = "0.11.3"
-source = "git+https://github.com/aionhw/xezim-core.git?rev=48820a89e113df68687a10831e7051fbeb97340e#48820a89e113df68687a10831e7051fbeb97340e"
+version = "0.11.4"
+source = "git+https://github.com/aionhw/xezim-core.git?rev=8ebdf4a3f1346fe758e98f4a6a6c822f17f38e54#8ebdf4a3f1346fe758e98f4a6a6c822f17f38e54"
 dependencies = [
  "serde",
  "serde_json",
@@ -849,6 +850,12 @@ name = "unicode-ident"
 version = "1.0.27"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
+
+[[package]]
+name = "unty"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
 
 [[package]]
 name = "version_check"
@@ -998,7 +1005,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "xezim"
-version = "0.11.3"
+version = "0.11.4"
 dependencies = [
  "ahash",
  "bincode",
@@ -1024,8 +1031,8 @@ dependencies = [
 
 [[package]]
 name = "xezim-core"
-version = "0.11.3"
-source = "git+https://github.com/aionhw/xezim-core.git?rev=48820a89e113df68687a10831e7051fbeb97340e#48820a89e113df68687a10831e7051fbeb97340e"
+version = "0.11.4"
+source = "git+https://github.com/aionhw/xezim-core.git?rev=8ebdf4a3f1346fe758e98f4a6a6c822f17f38e54#8ebdf4a3f1346fe758e98f4a6a6c822f17f38e54"
 dependencies = [
  "ahash",
  "bincode",
@@ -1064,18 +1071,18 @@ checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"
 
 [[package]]
 name = "zstd"
-version = "0.13.3"
+version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e91ee311a569c327171651566e07972200e76fcfe2242a4fa446149a3881c08a"
+checksum = "db3ae9bf90af6e40197bef767eeefc46ad6397420fe873830bd85e5fbbfb3c70"
 dependencies = [
  "zstd-safe",
 ]
 
 [[package]]
 name = "zstd-safe"
-version = "7.3.0"
+version = "8.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "64d80649ab6db9d9f6f9c80a40becd948eda4714a0a5ac8c4d157a32231c7882"
+checksum = "ded520f16b29e1a9b771c722221b2b0a0398c2316d9bb3c42b458a5414d7434b"
 dependencies = [
  "zstd-sys",
 ]

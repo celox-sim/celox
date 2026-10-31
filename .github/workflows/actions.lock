@@ -149,6 +149,7 @@ workflows:
     '.github/workflows/updatecli.yml':
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
+        - 'cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b'
         - 'updatecli/updatecli-action@v3.10.0'
     '.github/workflows/verify-lockfile.yml':
         - 'actions/checkout@v7'

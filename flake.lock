@@ -77,8 +77,8 @@
       },
       "original": {
         "owner": "aionhw",
+        "ref": "0.11.4",
         "repo": "xezim",
-        "rev": "e8266416d52b0bed45c0b78b8b7db39098221391",
         "type": "github"
       }
     }
