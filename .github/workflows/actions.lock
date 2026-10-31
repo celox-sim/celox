@@ -3,6 +3,7 @@
 # Docs: https://gh.io/actions-lockfile
 version: 'v0.0.3'
 workflows:
+    '.github/workflows/advisory-agent.yml': []
     '.github/workflows/bench.yml':
         - 'actions/checkout@v7'
         - 'actions/download-artifact@v8'
