@@ -1,1 +1,1 @@
-Rebased on master after #2763 (%p of unpacked structures): both PRs' retained Icarus failures are kept.
+Rebased on master after #2755 (queue slices): both PRs' shared cases and retained Icarus reports are kept.
