@@ -1,0 +1,100 @@
+{
+  "schema_version": 3,
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "include_ignored": false,
+  "exclude_stronger_than_sv": false,
+  "scope": "Focused unpacked-structure member-initializer failures retained before exclusions; passes and four-state unsupported cases omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_assignment_context",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_class_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_declaration_scope",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_four_state",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:10: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:15: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:16: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_local_lifetimes",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:6: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_specialized_functions",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 7,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  }
+}

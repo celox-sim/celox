@@ -70,6 +70,13 @@ pub(super) fn ports_from_scope(
             return Err(unsupported("event port"));
         }
         if ty.unpacked_struct().is_some() {
+            if ty.unpacked_struct().is_some_and(|aggregate| {
+                aggregate.leaves().iter().any(|leaf| leaf.default.is_some())
+            }) {
+                return Err(unsupported(
+                    "unpacked structure member initial values on a port",
+                ));
+            }
             if !ty.unpacked_ranges.is_empty() {
                 return Err(unsupported("array of unpacked structures on a port"));
             }

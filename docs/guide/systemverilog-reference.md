@@ -342,6 +342,18 @@ from an assignment pattern (`'{a, b}`, `'{m: v, default: d}`, `T'{...}`, with
 `default` applied to the members of nested structures). Other operators,
 selects and casts of a whole structure are rejected.
 
+Constant integral member initial values are supported for module variables,
+procedural locals and class properties (7.2.2). They are captured in the type's
+declaration scope, including instance parameter overrides, and apply only when
+the variable has no explicit initializer. Nested members inherit their own
+type's initial values. Automatic locals are initialized on each entry; static
+locals are initialized once. Assignment sizing preserves wide values and X/Z.
+
+Member initial values on enum or non-integral members, whole nested-structure
+member initializers, and defaulted structure types in module ports, subroutine
+interfaces or dynamic containers remain unsupported. Constants that cannot be
+resolved in the declaration environment also report `Unsupported`.
+
 ## Unsupported constructs {#what-is-not-supported}
 
 Celox reports an `Unsupported` error naming the construct instead of ignoring
@@ -373,8 +385,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   `real`, and unpacked structs as ports, nets, parameters, static, `rand` or
   `const` class properties, fixed-size array elements, or with members that
-  are arrays (also dynamic arrays, queues and associative arrays), `real`, or
-  have default values.
+  are arrays (also dynamic arrays, queues and associative arrays) or `real`.
+  Restrictions on member initial values are listed [above](#unpacked-structures).
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
   edge signals, and several edges without an asynchronous reset.

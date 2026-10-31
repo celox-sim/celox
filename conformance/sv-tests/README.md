@@ -589,3 +589,11 @@ only literal tags, reported as `meta_tags_expanded: false`. The existing summary
 supplies the corpus revision and incomplete-collection provenance. Without a
 completeness marker in that summary, offline reports use `complete: null`
 (unknown), not a claim that every case ran. Missing logs stay unclassified.
+
+Integral unpacked-structure member initial values update two reviewed expectation
+rows: `chapter-7/structures/unpacked/default-value.sv` passes simulation in both
+state modes. This is a focused official-runner result, not a new full-corpus
+measurement. Shared cases additionally check nested types, explicit-initializer
+suppression, declaration scopes, parameter specializations, constant functions,
+assignment sizing, four-state values, local lifetimes and class properties.
+The supported boundaries are documented in the language reference.

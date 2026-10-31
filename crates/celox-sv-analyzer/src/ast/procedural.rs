@@ -2176,6 +2176,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     "initializer of a static variable of unpacked structure type that is not a pattern or variable",
                 ));
             }
+            None if root.is_none() => aggregate
+                .leaves()
+                .into_iter()
+                .map(|leaf| leaf.default)
+                .collect(),
             other => {
                 init = other;
                 vec![None; leaves.len()]
@@ -3665,6 +3670,17 @@ pub(super) fn lower_subroutine(
         )?,
         None => None,
     };
+    if return_type
+        .as_ref()
+        .into_iter()
+        .chain(params.iter().map(|(_, _, ty, _)| ty))
+        .filter_map(|ty| ty.unpacked_struct())
+        .any(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.default.is_some()))
+    {
+        return Err(unsupported(
+            "unpacked structure member initial values in subroutine interfaces",
+        ));
+    }
     // An event control could not tell a call of such a function from a
     // value (IEEE 1800-2023 15.5).
     if return_type
@@ -4395,6 +4411,25 @@ impl BodyBuilder<'_, '_, '_> {
                     Expr::Ident(this.to_owned()),
                     initializer,
                 )?);
+            } else if !class.aggregates.iter().any(|parent| {
+                parent.owner == aggregate.owner
+                    && parent.position == aggregate.position
+                    && aggregate.name.starts_with(&format!("{}.", parent.name))
+            }) {
+                let structure = aggregate
+                    .r#type
+                    .unpacked_struct()
+                    .expect("an aggregate property");
+                for leaf in structure.leaves() {
+                    let Some(value) = &leaf.default else { continue };
+                    let property = class
+                        .property(&leaf.name(&aggregate.name))
+                        .ok_or_else(|| unsupported("unpacked structure property member"))?;
+                    body.push(Stmt::Eval(classes::object_call(
+                        system_functions::ObjectOp::Store(property.field),
+                        vec![Expr::Ident(this.to_owned()), value.clone()],
+                    )));
+                }
             }
         }
         Ok(body)
@@ -5264,18 +5299,10 @@ pub(super) fn initial_processes_from_scope(
                     tree.declarations(),
                 )
             }) {
-                // The type, possibly an alias of `event`, is checked below.
-                let event = matches!(
-                    &tree.declarations().data_type(declaration.data_type).kind,
-                    celox_sv_syntax::DataTypeKind::Builtin(name) if name == "event"
-                ) || matches!(
-                    &tree.declarations().data_type(declaration.data_type).kind,
-                    celox_sv_syntax::DataTypeKind::Named(_)
-                );
                 let name = instances::normalize_identifier(&variable.name.spelling);
                 if let Some(value) = variable.value {
                     assignments.push((name, Some(value), None));
-                } else if event {
+                } else {
                     assignments.push((name, None, None));
                 }
             }
@@ -5294,6 +5321,20 @@ pub(super) fn initial_processes_from_scope(
             let mut body = Vec::new();
             for (name, native, owner) in assignments {
                 let Some(native) = native else {
+                    if let Some(aggregate) = item_dimensions
+                        .get(&name)
+                        .and_then(|shape| shape.unpacked_struct.as_ref())
+                    {
+                        body.extend(aggregate.leaves().into_iter().filter_map(|leaf| {
+                            let target = leaf.name(&name);
+                            leaf.default.map(|rhs| Stmt::Assign {
+                                lhs: LValue::Ident(target),
+                                rhs,
+                                nonblocking: false,
+                            })
+                        }));
+                        continue;
+                    }
                     // Each declaration of an event creates a synchronization
                     // object (IEEE 1800-2023 15.5).
                     if owner.is_none() {

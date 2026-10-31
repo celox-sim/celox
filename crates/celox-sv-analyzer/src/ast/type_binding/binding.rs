@@ -95,6 +95,7 @@ fn bind_in_mode(
             voids: Vec<bool>,
             signed: bool,
             names: Vec<String>,
+            defaults: Vec<Option<celox_sv_syntax::ExprId>>,
             ranges: Vec<PackedRange>,
             packed: bool,
         },
@@ -308,7 +309,7 @@ fn bind_in_mode(
                         for field in fields {
                             if field.random.is_some()
                                 || !field.dimensions.is_empty()
-                                || field.default.is_some()
+                                || field.default.is_some() && (*packed || *soft || *union)
                             {
                                 return Ok(None);
                             }
@@ -342,6 +343,7 @@ fn bind_in_mode(
                             voids: voids.clone(),
                             signed: data.signed.unwrap_or(false),
                             names,
+                            defaults: fields.iter().map(|field| field.default).collect(),
                             ranges,
                             packed: *packed || *soft,
                         });
@@ -411,6 +413,7 @@ fn bind_in_mode(
                 voids,
                 signed,
                 names,
+                defaults,
                 ranges,
                 packed,
             } => {
@@ -422,7 +425,17 @@ fn bind_in_mode(
                     if !ranges.is_empty() {
                         return Ok(None);
                     }
-                    let fields = names.into_iter().zip(values.split_off(start)).collect();
+                    let fields = names
+                        .into_iter()
+                        .zip(values.split_off(start))
+                        .zip(defaults)
+                        .map(|((name, ty), default)| (name, ty, default))
+                        .collect();
+                    let Some(fields) =
+                        unpacked_member_defaults(fields, native, tree, session, context, mode)?
+                    else {
+                        return Ok(None);
+                    };
                     let Some(ty) = unpacked_structs::native_type(
                         &tree.functions,
                         owner,
@@ -870,4 +883,41 @@ fn enum_values(
             four_state: !matches!(ty.kind(), TypeKind::Bit),
         })
     })
+}
+
+// Keep expression-sized temporaries off the recursive type-binding frame.
+fn unpacked_member_defaults(
+    fields: Vec<(String, Type, Option<celox_sv_syntax::ExprId>)>,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+    mode: BindingMode,
+) -> Converted<Option<Vec<(String, Type, Option<Expr>)>>> {
+    let mut bound = Vec::with_capacity(fields.len());
+    for (name, ty, default) in fields {
+        let default = if let Some(root) = default {
+            let Some(value) =
+                unpacked_structs::member_default(root, &ty, native, tree, session, context)?
+            else {
+                // The preliminary alias pass precedes parameter collection.
+                if matches!(
+                    mode,
+                    BindingMode::Alias {
+                        defer_defaults: true
+                    }
+                ) {
+                    return Ok(None);
+                }
+                return Err(unsupported(
+                    "nonconstant or unresolved unpacked structure member initial value",
+                ));
+            };
+            Some(value)
+        } else {
+            None
+        };
+        bound.push((name, ty, default));
+    }
+    Ok(Some(bound))
 }
