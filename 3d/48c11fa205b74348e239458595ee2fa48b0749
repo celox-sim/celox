@@ -1,0 +1,1 @@
+Builtin outputs forwarded from a reference formal bound to a class property are stored to the property, as for subroutine copy-out (Codex review).
