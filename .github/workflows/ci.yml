@@ -133,7 +133,7 @@ jobs:
           nix flake check --no-build --all-systems --no-update-lock-file
           nix build --no-link --no-update-lock-file .#checks.x86_64-linux.rust-toolchain
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
         if: needs.changes.result != 'success' || needs.changes.outputs.rust == 'true' || needs.changes.outputs.scripts == 'true'
 
       - name: Check public crate compile-time includes
@@ -243,7 +243,7 @@ jobs:
           ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -367,7 +367,7 @@ jobs:
         with:
           ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
@@ -387,7 +387,7 @@ jobs:
         with:
           ref: ${{ inputs.validation_ref || github.sha }}
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -433,7 +433,7 @@ jobs:
         with:
           ref: ${{ inputs.validation_ref || github.sha }}
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -517,7 +517,7 @@ jobs:
           ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -561,7 +561,7 @@ jobs:
           ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
         with:
           targets: wasm32-wasip1-threads
 
@@ -663,7 +663,7 @@ jobs:
           ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -708,7 +708,7 @@ jobs:
           ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -747,7 +747,7 @@ jobs:
           ref: ${{ inputs.validation_ref || github.sha }}
           submodules: recursive
 
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
         with:
           targets: aarch64-unknown-linux-gnu
 

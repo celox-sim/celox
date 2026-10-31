@@ -44,7 +44,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         id: cache
         with:
@@ -76,7 +76,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         id: cache
       - name: Build default-feature library test dependencies
@@ -92,7 +92,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         id: cache
       - uses: pnpm/action-setup@v6
@@ -118,7 +118,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         id: cache
       - name: Build Clippy dependencies with the CI command
@@ -140,7 +140,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         id: cache
       - name: Build the Celox single-case driver with the CI command
@@ -156,7 +156,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         id: cache
       - name: Build the SystemVerilog CLI with the CI command
@@ -172,7 +172,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         id: cache
         with:
@@ -200,7 +200,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
         with:
           targets: wasm32-wasip1-threads
       - uses: Swatinem/rust-cache@v2
@@ -236,7 +236,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
         id: cache
       - name: Build ARM64 backend lint and test dependencies with the CI commands
@@ -258,7 +258,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           submodules: recursive
-      - uses: ./.github/actions/setup-rust
+      - uses: $/.github/actions/setup-rust
         with:
           targets: aarch64-unknown-linux-gnu
       - uses: Swatinem/rust-cache@v2

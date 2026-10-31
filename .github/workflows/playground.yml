@@ -35,7 +35,7 @@ jobs:
           cache: pnpm
 
       - name: Install Rust toolchain
-        uses: ./.github/actions/setup-rust
+        uses: $/.github/actions/setup-rust
         with:
           targets: wasm32-wasip1-threads
 
