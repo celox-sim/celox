@@ -2963,6 +2963,10 @@ fn schedule_sources_collecting(
         .as_ref()
         .is_some_and(|declarations| declarations.elaborated);
     let mut virtual_sources = HashMap::default();
+    // These analyses have no unresolved hierarchical names. Retain them until
+    // their first final lowering, whose scheduling and foreign-writer context
+    // is established below. The cache belongs only to this elaboration attempt.
+    let mut discovery_analyses = HashMap::default();
     while index < queue.len() {
         let key = queue[index].clone();
         index += 1;
@@ -2970,17 +2974,32 @@ fn schedule_sources_collecting(
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         let module_id = module_ids[&key];
-        let module = match specialize_module(
-            base,
-            &mut design,
-            &key,
-            four_state,
-            false,
-            warnings,
-            LevelLists::Processes,
-            HierarchicalNames::default(),
-        ) {
-            Ok(lowered) => {
+        let mut probe_warnings = Vec::new();
+        let analysis = analyze_specialization(base, &mut design, &key, &[], &mut probe_warnings);
+        if analysis.is_err() {
+            // A hierarchy-only fallback must retain diagnostics from the probe.
+            warnings.append(&mut probe_warnings);
+        }
+        // Successful IR warnings are published by `specialize_module`.
+        let discovery = analysis.and_then(|ir| {
+            let lowered = specialize_module(
+                base,
+                &mut design,
+                &key,
+                four_state,
+                false,
+                warnings,
+                LevelLists::Processes,
+                HierarchicalNames {
+                    analyzed: Some(&ir),
+                    ..HierarchicalNames::default()
+                },
+            )?;
+            Ok((lowered, ir))
+        });
+        let module = match discovery {
+            Ok((lowered, ir)) => {
+                discovery_analyses.insert(module_id, ir);
                 if instances_known {
                     virtual_sources.insert(module_id, lowered.source.clone());
                 }
@@ -3020,6 +3039,7 @@ fn schedule_sources_collecting(
                 declarations,
             );
             if !declarations.elaborated {
+                drop(discovery_analyses);
                 warnings.truncate(found_warnings);
                 return schedule_sources_collecting(
                     sources,
@@ -3156,6 +3176,9 @@ fn schedule_sources_collecting(
                 .flatten()
                 .map(|reference: &hierarchy::HierarchicalReference| reference.signal.clone())
                 .collect();
+            // Move out the discovery result: final lowering owns its source
+            // module, so keeping another complete IR through retries is needless.
+            let discovery_analysis = discovery_analyses.remove(&module_id);
             Ok(specialize_module(
                 base,
                 &mut design,
@@ -3167,7 +3190,7 @@ fn schedule_sources_collecting(
                 HierarchicalNames {
                     signals: &signals,
                     foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
-                    analyzed: analyses.get(&module_id),
+                    analyzed: analyses.get(&module_id).or(discovery_analysis.as_ref()),
                 },
             )?)
         };
@@ -3509,6 +3532,8 @@ fn analyze_specialization(
     hierarchical: &[sv::ast::HierarchicalSignal],
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<sv::Ir, sv::AnalyzerError> {
+    #[cfg(test)]
+    tests::record_analysis(key);
     let (overrides, type_overrides, pattern_overrides) = specialization_overrides(key)?;
     let analyzed = module.source.analyze_module_with_hierarchy(
         &module.name,
@@ -11334,6 +11359,18 @@ mod tests {
         static SPECIALIZATIONS: std::cell::RefCell<Option<Vec<(LoweredSvModuleKey, bool)>>> = const {
             std::cell::RefCell::new(None)
         };
+        #[allow(clippy::disallowed_types, reason = "test-local analysis observations")]
+        static ANALYSES: std::cell::RefCell<Option<Vec<LoweredSvModuleKey>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn record_analysis(key: &LoweredSvModuleKey) {
+        ANALYSES.with_borrow_mut(|records| {
+            if let Some(records) = records {
+                records.push(key.clone());
+            }
+        });
     }
 
     pub(super) fn record_specialization(key: &LoweredSvModuleKey, lists: LevelLists<'_>) {
@@ -12021,6 +12058,73 @@ endmodule
             .collect();
         assert_eq!(leaves.len(), 2);
         assert!(leaves.iter().all(|(_, count)| **count == 1), "{leaves:?}");
+    }
+
+    #[test]
+    fn hierarchy_discovery_analyses_are_reused_by_parameter_identity() {
+        let source = "module Leaf #(parameter N = 8)
+                        (input bit [N-1:0] d, output wire [N-1:0] q);
+                        for (genvar i = 0; i < N; i++) assign q[i] = ~d[i];
+                      endmodule
+                      module Top(input bit [15:0] d, output wire [7:0] y,
+                                 output wire [15:0] z);
+                        Leaf #(8) byte_leaf(.d(d[7:0]), .q(y));
+                        Leaf #(16) word_leaf(.d(d), .q(z));
+                      endmodule";
+        for four_state in [false, true] {
+            ANALYSES.set(Some(Vec::new()));
+            let result = schedule_sources(
+                &[(source, Path::new("discovery.sv"))],
+                "Top",
+                &[],
+                &[],
+                &[],
+                four_state,
+                &celox_frontend_core::ParallelScheduleOptions::default(),
+                &FrontendTraceOptions::default(),
+                None,
+                &mut Vec::new(),
+            );
+            let observations = ANALYSES.take().unwrap();
+            result.unwrap_or_else(|error| panic!("{error}"));
+            let mut counts = HashMap::<LoweredSvModuleKey, usize>::default();
+            for key in observations {
+                *counts.entry(key).or_default() += 1;
+            }
+            assert_eq!(counts.len(), 3, "Top and two Leaf parameterizations");
+            assert!(counts.values().all(|&count| count == 1), "{counts:?}");
+        }
+    }
+
+    #[test]
+    fn discovery_reuse_keeps_hierarchical_resolution_separate() {
+        let source = "module Leaf(input bit [7:0] d, output wire [7:0] q);
+                        assign q = d + 1;
+                      endmodule
+                      module Top(input bit [7:0] d, output wire [7:0] y);
+                        Leaf leaf(.d(d), .q());
+                        assign y = leaf.q;
+                      endmodule";
+        for four_state in [false, true] {
+            ANALYSES.set(Some(Vec::new()));
+            let result = schedule_sources(
+                &[(source, Path::new("hierarchical-discovery.sv"))],
+                "Top",
+                &[],
+                &[],
+                &[],
+                four_state,
+                &celox_frontend_core::ParallelScheduleOptions::default(),
+                &FrontendTraceOptions::default(),
+                None,
+                &mut Vec::new(),
+            );
+            let observations = ANALYSES.take().unwrap();
+            result.unwrap_or_else(|error| panic!("{error}"));
+            let count = |name: &str| observations.iter().filter(|key| key.name == name).count();
+            assert_eq!(count("Leaf"), 1, "reuse the independent child analysis");
+            assert!(count("Top") >= 2, "resolve the parent's hierarchical names");
+        }
     }
 
     #[test]
