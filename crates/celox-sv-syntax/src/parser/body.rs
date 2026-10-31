@@ -221,7 +221,15 @@ mod tests {
             let source = format!("module M;{gate}endmodule");
             let tree = Declarations::parse(&source, Path::new("opaque-gate.sv")).unwrap();
             assert!(
-                matches!(&tree.body_item(tree.units[0].items[0]).kind,BodyItemKind::Unconverted{category,..} if matches!(category.as_str(),"and"|"pullup"|"tran"))
+                tree.units[0]
+                    .items
+                    .iter()
+                    .any(|&id| match &tree.body_item(id).kind {
+                        BodyItemKind::LogicGate(_) => true,
+                        BodyItemKind::Unconverted { category, .. } =>
+                            matches!(category.as_str(), "pullup" | "tran"),
+                        _ => false,
+                    })
             );
         }
     }
