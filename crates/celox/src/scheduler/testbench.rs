@@ -1014,11 +1014,18 @@ fn generate(
         // the edges it and this unit judge need the levels of the event
         // signals: compute those (the part of the settle they need, or the
         // settle), or require a settled design.
+        let events = &program.design.events;
         let mut allowed = if deferred {
+            // Only the sources' baselines are compared below.
             let levels: Vec<AbsoluteAddr> = schema
                 .events
                 .iter()
-                .chain(m.baselines.iter().map(|(source, _)| source))
+                .chain(
+                    m.baselines
+                        .iter()
+                        .map(|(source, _)| source)
+                        .filter(|&&source| events.canonical(source) == source),
+                )
                 .copied()
                 .collect();
             let judge = g.b.new_block();
@@ -1056,7 +1063,6 @@ fn generate(
         // clocks included. An alias, such as a port copying a clock, only
         // follows it, and while a settle is pending its baseline was saved
         // before the copy caught up.
-        let events = &program.design.events;
         let offsets = &program.layout().offsets;
         // The resets the TB wrote since the baselines: their writes become
         // edges of their clock slots, applied with the clocks due now.
