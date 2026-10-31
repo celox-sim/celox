@@ -2068,17 +2068,17 @@ fn prove_group(
 
     // The recovered loop runs exactly the proven iterations, so its variable
     // stays within their values. Indices proven in range then need no check.
-    let _loop_range = super::LoopRangeScope::with_max(
-        &scratch,
+    let mut loop_range = super::LoopRangeScope::with_max(
+        &mut scratch,
         first_iteration.loop_var,
         iterations.iter().map(|iteration| iteration.value).max()?,
     );
+    let scoped = &mut *loop_range;
     let mut dynamic = first_template;
     if !rewrite_statements(&mut dynamic, first_iteration.loop_var, RewriteMode::Dynamic) {
         return None;
     }
-    let (proof_updates, _, _) =
-        eval_chunk_outputs_with_facts(module, &dynamic, &targets, &mut scratch)?;
+    let (proof_updates, _, _) = eval_chunk_outputs_with_facts(module, &dynamic, &targets, scoped)?;
 
     // Canonical proof bits depend only on an immutable arena node and its bit
     // position.  The arena is append-only, so results remain valid while later
@@ -2093,7 +2093,7 @@ fn prove_group(
                     update,
                     Some((first_iteration.loop_var, iteration.value)),
                     None,
-                    &mut scratch,
+                    scoped,
                     &mut dynamic_cache,
                 )
             })
@@ -2101,12 +2101,12 @@ fn prove_group(
         let mut actual_cache = HashMap::default();
         let canonical_actual = actual_outputs
             .iter()
-            .map(|&actual| specialize_slt_node(actual, None, None, &mut scratch, &mut actual_cache))
+            .map(|&actual| specialize_slt_node(actual, None, None, scoped, &mut actual_cache))
             .collect::<Option<Vec<_>>>()?;
         if !proof_outputs_match(
             &specialized_updates,
             &canonical_actual,
-            &mut scratch,
+            scoped,
             &mut proof_bits,
         )? {
             return None;
@@ -2120,14 +2120,14 @@ fn prove_group(
         first_iteration.loop_var,
         initial_store,
         production_arena,
-        &mut scratch,
+        scoped,
     )?;
-    let update_sources = collect_slt_input_sources(&updates, &scratch)?;
+    let update_sources = collect_slt_input_sources(&updates, scoped)?;
 
     let mut input_variables = HashSet::default();
     let mut visited = HashSet::default();
     for &update in &updates {
-        if !collect_template_inputs(update, &scratch, &mut visited, &mut input_variables) {
+        if !collect_template_inputs(update, scoped, &mut visited, &mut input_variables) {
             return None;
         }
     }
@@ -2160,7 +2160,7 @@ fn prove_group(
         initial_store,
         statements,
         production_arena,
-        &scratch,
+        scoped,
         &proof_updates,
         &targets,
         first_iteration.loop_var,
@@ -2169,6 +2169,8 @@ fn prove_group(
         return None;
     }
 
+    // Leave the scope so the proven arena no longer records the bound.
+    drop(loop_range);
     Some(ProvenGroup {
         arena: scratch,
         updates,
