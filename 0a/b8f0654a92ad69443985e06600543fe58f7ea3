@@ -1,0 +1,1 @@
+Rebased onto master after #2672 merged: bind_class_signatures now passes #2672's ClassScopes through class_signatures, including in the retry loop; tests from both PRs are kept.
