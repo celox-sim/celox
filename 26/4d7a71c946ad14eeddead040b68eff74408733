@@ -1,1 +1,6 @@
-Review fix: a static whose constant initializer a run-time static initializer reads is classified with all statics of the subroutine, and kept and initialized at time zero too. The package initializer test builds a Simulation. Rebased onto #2775.
+Revision history for #2782:
+
+rev 2 (content) 2026-10-31 18:43 UTC — Review fix: a static whose constant initializer a run-time static initializer reads is classified with all statics of the subroutine, and kept and initialized at time zero too. The package initializer test builds a Simulation. Rebased onto #2775.
+rev 1 (initial) 2026-10-31 18:43 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2782,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fd1f0dc991dcfbc81394422614c8dd049645a673","timestamp_iso":"2026-10-31T18:43:30Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fd1f0dc991dcfbc81394422614c8dd049645a673","new_sha":"264d7a71c946ad14eeddead040b68eff74408733","timestamp_iso":"2026-10-31T18:43:30Z","reason":"Review fix: a static whose constant initializer a run-time static initializer reads is classified with all statics of the subroutine, and kept and initialized at time zero too. The package initializer test builds a Simulation. Rebased onto #2775.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fd1f0dc991dcfbc81394422614c8dd049645a673...264d7a71c946ad14eeddead040b68eff74408733"}]} -->
