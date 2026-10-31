@@ -788,6 +788,31 @@ fn class_scopes_copy_the_scope_tables_once_per_binding() {
 }
 
 #[test]
+fn discovery_binds_class_signatures_once_its_declarations_settle() {
+    // Each declaration's width names the next one: discovering them takes a
+    // pass per declaration, which binds the class signatures only once.
+    let bindings = |declarations: usize| {
+        let variables = (0..declarations)
+            .map(|i| format!("bit [$bits(v{}):0] v{i};", i + 1))
+            .collect::<String>();
+        let source = format!(
+            "package p;
+                class A; function int g(); return 1; endfunction endclass
+                {variables}
+                bit [3:0] v{declarations};
+                function int f(); bit [7:0] local_v; return $bits(local_v) + $bits(v0); endfunction
+            endpackage
+            module Top; endmodule"
+        );
+        SETTLE_CLASS_BINDINGS.with(|count| count.set(0));
+        crate::analyze_source(&source, Path::new("class-signature-passes.sv"))
+            .expect("the package analyzes");
+        SETTLE_CLASS_BINDINGS.with(|count| count.get())
+    };
+    assert_eq!(bindings(2), bindings(16));
+}
+
+#[test]
 fn class_references_of_one_spelling_specialize_once() {
     let specializations = |references: usize| {
         let properties = (0..references)
