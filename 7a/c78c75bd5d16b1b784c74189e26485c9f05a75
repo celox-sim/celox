@@ -1,0 +1,1 @@
+Add retained report rows for the reviewed sampled-history exclusions; the same omission caused PR #2755 CI to fail.
