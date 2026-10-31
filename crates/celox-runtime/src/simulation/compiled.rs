@@ -79,7 +79,7 @@ impl<B: SimBackend> SimulationState<B> {
             || !pending.nba_events.is_empty()
             // A derived clock changes with the slots of its sources, which
             // the scheduler does not tell apart.
-            || self.observed_events & scheduler.derived_events != 0
+            || self.observed_events.intersects(&scheduler.derived_events)
             || pending.waiters.iter().any(|(process, _)| {
                 scheduler.waits.get(process).is_none_or(Option::is_none)
                     || self.writes_observed(scheduler, process)
@@ -109,7 +109,7 @@ impl<B: SimBackend> SimulationState<B> {
             for event in queue {
                 if clock_slot(scheduler, event, clocks).is_some_and(|bit| {
                     compiled >> bit & 1 != 0
-                        && scheduler.clock_events[bit] & self.observed_events == 0
+                        && !scheduler.clock_events[bit].intersects(&self.observed_events)
                 }) {
                     first = first.min(event.time);
                 } else {
@@ -141,7 +141,7 @@ impl<B: SimBackend> SimulationState<B> {
         scheduler
             .kernel_events
             .get(process)
-            .is_some_and(|&events| events & self.observed_events != 0)
+            .is_some_and(|events| events.intersects(&self.observed_events))
     }
 
     /// Run the compiled scheduler for the slots up to `limit`. Returns, like
@@ -293,7 +293,7 @@ impl<B: SimBackend> SimulationState<B> {
         let slot_complete = complete || exit == Some(SchedulerExit::ClockOverflow);
         let overflowed = scheduler
             .clocks
-            .get(backend.get_as::<u64>(scheduler.exit_arg) as usize)
+            .get(backend.get_as::<u64>(scheduler.exit_index()) as usize)
             .map(|&(event, _)| event);
         // Armed clocks wait for their next edge in the event queue again; a
         // clock whose edge applied in a slot the run left unfinished is gone,
@@ -393,12 +393,19 @@ impl<B: SimBackend> SimulationState<B> {
         } else if count > 0 {
             // The baseline is the levels slot `now` started from; events the
             // kernels do not write kept theirs.
-            let levels: u64 = executor.backend().get_as(scheduler.levels);
-            let unknown: u64 = if self.four_state {
-                executor.backend().get_as(scheduler.unknown_levels)
-            } else {
-                0
+            // The frontend sizes the slots from an estimate, so they can be
+            // wider than the events need.
+            let plane = |slot: crate::SignalRef| -> Box<dyn Fn(usize) -> bool> {
+                if slot.width <= 64 {
+                    let bits: u64 = executor.backend().get_as(slot);
+                    Box::new(move |bit| bits >> bit & 1 != 0)
+                } else {
+                    let bits = executor.backend().get(slot);
+                    Box::new(move |bit| bits.bit(bit as u64))
+                }
             };
+            let level = plane(scheduler.levels);
+            let unknown = self.four_state.then(|| plane(scheduler.unknown_levels));
             // A run without clocks records no level of their events, which
             // only the clocks change.
             let scheduler = self
@@ -414,8 +421,11 @@ impl<B: SimBackend> SimulationState<B> {
                     clocked || scheduler.clocks.iter().all(|&(clock, _)| clock != id)
                 })
                 .map(|(bit, &id)| {
-                    let level = (levels >> bit & 1) as u8;
-                    (id, level | ((unknown >> bit & 1) as u8 * LEVEL_UNKNOWN))
+                    let unknown = unknown.as_ref().is_some_and(|unknown| unknown(bit));
+                    (
+                        id,
+                        u8::from(level(bit)) | (u8::from(unknown) * LEVEL_UNKNOWN),
+                    )
                 })
                 .collect();
             for (id, level) in recorded {

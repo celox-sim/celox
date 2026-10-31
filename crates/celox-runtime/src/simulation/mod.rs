@@ -171,7 +171,7 @@ pub struct SimulationState<B: SimBackend> {
     /// The bits of the compiled scheduler's events whose changes the host
     /// observes inside a slot: the kernels and host clocks that write them
     /// run in the reference loop.
-    observed_events: u64,
+    observed_events: crate::schedule::EventMask,
 }
 
 impl<B: SimBackend> SimulationState<B> {
@@ -234,7 +234,7 @@ impl<B: SimBackend> SimulationState<B> {
             return_budget: SLOT_RETURN_BUDGET,
             slot_passes: 0,
             stats: SchedulerStats::default(),
-            observed_events: 0,
+            observed_events: Default::default(),
         };
         state.stats.kernels = (0..state.model.processes.len())
             .map(|index| match state.model.kernel_fallback.get(index) {
@@ -427,11 +427,12 @@ impl<B: SimBackend> SimulationState<B> {
         let Some(scheduler) = &self.model.scheduler else {
             return;
         };
-        self.observed_events = signals
-            .into_iter()
-            .filter_map(|signal| self.model.signal_to_id.get(&signal))
-            .filter_map(|event| scheduler.events.iter().position(|id| id == event))
-            .fold(0, |mask, bit| mask | 1 << bit);
+        self.observed_events = crate::schedule::EventMask::of(
+            signals
+                .into_iter()
+                .filter_map(|signal| self.model.signal_to_id.get(&signal))
+                .filter_map(|event| scheduler.events.iter().position(|id| id == event)),
+        );
     }
 
     /// [`Self::step_until`], showing the step to `observer`. An error of
