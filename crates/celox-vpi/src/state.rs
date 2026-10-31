@@ -66,6 +66,8 @@ pub(crate) trait VpiState {
     }
 
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint);
+    fn get_string(&self, signal: SignalRef) -> Vec<u8>;
+    fn set_string(&mut self, signal: SignalRef, bytes: &[u8]);
 
     /// Override a signal until [`Self::release`]; `false` when it cannot be
     /// forced.
@@ -145,6 +147,17 @@ impl VpiState for NativeProgramInstance {
         } else {
             self.backend_mut().set_four_state(signal, value, mask);
         }
+    }
+
+    fn get_string(&self, signal: SignalRef) -> Vec<u8> {
+        self.backend()
+            .heap()
+            .string(self.backend().get_as::<u32>(signal))
+            .to_vec()
+    }
+    fn set_string(&mut self, signal: SignalRef, bytes: &[u8]) {
+        let handle = self.backend_mut().heap_mut().intern(bytes);
+        self.backend_mut().set(signal, handle);
     }
 
     fn force(&mut self, id: ReflectionSignalId, value: BigUint, mask: BigUint) -> bool {
@@ -261,6 +274,25 @@ impl VpiState for TimedRuntime {
 
     fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
         self.write(signal, value, mask);
+    }
+
+    fn get_string(&self, signal: SignalRef) -> Vec<u8> {
+        if let Some(slot) = self.slot() {
+            slot.get_string(signal)
+        } else if let Some(simulation) = &self.simulation {
+            simulation.peek_string(signal)
+        } else {
+            Vec::new()
+        }
+    }
+    fn set_string(&mut self, signal: SignalRef, bytes: &[u8]) {
+        self.wrote = true;
+        if let Some(slot) = self.slot {
+            // Safety: the observer owns the live slot through leave_slot.
+            unsafe { &mut *slot }.set_string(signal, bytes);
+        } else if let Some(simulation) = &mut self.simulation {
+            let _ = simulation.modify(|io| io.set_string(signal, bytes));
+        }
     }
 
     /// A timed simulation forces through the compiler's override slots only:
