@@ -113,6 +113,11 @@ impl<T> RecordCache<T> {
     }
 }
 
+struct PendingChange {
+    before: Option<ValueSnapshot>,
+    registrations: Vec<u64>,
+}
+
 #[derive(Default)]
 pub(super) struct CallbackState {
     time_records: RecordCache<VpiTime>,
@@ -120,6 +125,9 @@ pub(super) struct CallbackState {
     next_id: u64,
     pub(super) callbacks: BTreeMap<u64, Registration>,
     firing: HashMap<u64, bool>,
+    // Changes collected in a wave but not delivered yet. A callback registered
+    // while an earlier signal is being delivered must still see these edges.
+    pending_changes: HashMap<super::SignalSelection, PendingChange>,
     time: u64,
     pub(super) finish: bool,
     pub(super) running: bool,
@@ -192,7 +200,7 @@ fn registration_ids_for_host(host: &super::VpiHost, reason: i32) -> Vec<u64> {
 
 /// Keep narrow callback samples in machine words. The representation is
 /// canonical in registrations, including samples from forces and timed/array runtimes.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum ValueSnapshot {
     Word(u64, u64),
     Wide(celox::BigUint, celox::BigUint),
@@ -251,14 +259,54 @@ pub(super) fn dispatch_value_changes_for_host(host: &super::VpiHost) -> bool {
         return false;
     }
     let changed = changed_values(host);
-    let progressed = !changed.is_empty();
-    for (id, snapshot) in changed {
-        fire_with_snapshot_for_host(host, id, Some(snapshot));
+    if changed.is_empty() {
+        return false;
+    }
+    let (events, previous_pending) = borrow_cell_mut(&host.callbacks, |state| {
+        let mut pending = HashMap::default();
+        let mut events = Vec::new();
+        for (id, snapshot) in changed {
+            let Some(registration) = state.callbacks.get(&id) else {
+                continue;
+            };
+            let Some(signal) = registration.signal else {
+                continue;
+            };
+            let change = pending.entry(signal).or_insert_with(|| {
+                events.push((signal, snapshot));
+                PendingChange {
+                    before: registration.snapshot.clone(),
+                    registrations: Vec::new(),
+                }
+            });
+            change.registrations.push(id);
+        }
+        (
+            events,
+            std::mem::replace(&mut state.pending_changes, pending),
+        )
+    });
+    for (signal, snapshot) in events {
+        let ids = borrow_cell_mut(&host.callbacks, |state| {
+            state
+                .pending_changes
+                .remove(&signal)
+                .map_or_else(Vec::new, |change| change.registrations)
+        });
+        for id in ids {
+            fire_with_snapshot_for_host(host, id, Some(snapshot.clone()));
+            if borrow_cell(&host.callbacks, |state| state.finish) {
+                break;
+            }
+        }
         if borrow_cell(&host.callbacks, |state| state.finish) {
             break;
         }
     }
-    progressed
+    borrow_cell_mut(&host.callbacks, |state| {
+        state.pending_changes = previous_pending
+    });
+    true
 }
 
 fn due_ids() -> Vec<u64> {
@@ -943,7 +991,12 @@ pub unsafe extern "C" fn vpi_register_cb(data: *const VpiCbData) -> VpiHandle {
         let due = (data.reason == CB_AFTER_DELAY)
             .then(|| state.time.saturating_add(callback_delay(&data)));
         let snapshot = signal.and_then(|signal| {
-            super::value_snapshot_at(&host, signal).map(|(snapshot, _)| snapshot.canonical())
+            if let Some(change) = state.pending_changes.get_mut(&signal) {
+                change.registrations.push(id);
+                change.before.clone()
+            } else {
+                super::value_snapshot_at(&host, signal).map(|(snapshot, _)| snapshot.canonical())
+            }
         });
         state.callbacks.insert(
             id,
@@ -1058,7 +1111,7 @@ pub unsafe extern "C" fn vpi_chk_error(_info: *mut VpiErrorInfo) -> i32 {
 }
 
 #[unsafe(no_mangle)]
-/// Resolve an indexed child. Packed bit handles are not yet materialized.
+/// Resolve an unpacked array element or a packed vector bit.
 ///
 /// # Safety
 ///
