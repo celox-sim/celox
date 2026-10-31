@@ -400,7 +400,7 @@ pub(super) fn symbolic_module_constant_functions(
     if !has_functions {
         return ConstantFunctions::default();
     }
-    let needs_bootstrap = !generate::root_subroutines_only(&tree.state) && has_controls;
+    let needs_bootstrap = !tree.root_subroutines && has_controls;
     if !needs_bootstrap {
         return collect_module_constant_functions(
             tree,
@@ -410,15 +410,19 @@ pub(super) fn symbolic_module_constant_functions(
             symbolic_parameters,
         );
     }
-    let mut roots = generate::with_root_subroutines(&tree.state, || {
-        collect_module_constant_functions(
-            tree,
-            const_env,
-            type_aliases,
-            parameter_literals,
-            symbolic_parameters,
-        )
-    });
+    // Seed the module's functions before conditions need to call them:
+    // generate scopes still select their items, but their subroutines are
+    // left for the full pass.
+    let mut roots = collect_module_constant_functions(
+        &AnalysisContext {
+            root_subroutines: true,
+            ..tree.clone()
+        },
+        const_env,
+        type_aliases,
+        parameter_literals,
+        symbolic_parameters,
+    );
     roots.extend_missing(&scope::imported(tree).constant_functions);
     let tree = &tree.with_functions(roots);
     collect_module_constant_functions(

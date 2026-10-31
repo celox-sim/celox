@@ -519,10 +519,17 @@ fn analyze_package(
         imported: Arc::default(),
         package: None,
         functions: const_functions::ConstantFunctions::default(),
+        root_subroutines: false,
+        active_interfaces: Arc::default(),
+        timescale: Arc::default(),
+        interface_instance: None,
     };
     let tree = &context;
-    let _timescales =
-        timescales::install_for_tree(&tree.state.timescales, packages.timescales.clone(), tree)?;
+    let timed = AnalysisContext {
+        timescale: timescales::for_tree(packages.timescales.clone(), tree)?,
+        ..tree.clone()
+    };
+    let tree = &timed;
     let first = {
         // Inside the package, `p::x` names its own item `x`.
         analyze_package_scope(name, &tree.in_package(name), packages, None)?
