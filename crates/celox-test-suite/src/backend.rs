@@ -1,5 +1,4 @@
 use crate::{BigUint, Result, Scalar};
-use std::cell::RefCell;
 use std::path::PathBuf;
 
 /// An in-memory Veryl compilation unit.
@@ -127,24 +126,24 @@ pub struct Event(usize);
 /// scalar conversion, and keeps all test stimuli independent of native APIs.
 pub struct Simulator {
     backend: Box<dyn Backend>,
-    signals: RefCell<Vec<SignalPath>>,
-    events: RefCell<Vec<String>>,
+    signals: Vec<SignalPath>,
+    events: Vec<String>,
 }
 
 impl Simulator {
     pub fn new(backend: Box<dyn Backend>) -> Self {
         Self {
             backend,
-            signals: RefCell::default(),
-            events: RefCell::default(),
+            signals: Vec::new(),
+            events: Vec::new(),
         }
     }
 
-    pub fn signal(&self, name: &str) -> Signal {
+    pub fn signal(&mut self, name: &str) -> Signal {
         self.child_signal(&[], name)
     }
 
-    pub fn child_signal(&self, instances: &[(&str, Option<usize>)], name: &str) -> Signal {
+    pub fn child_signal(&mut self, instances: &[(&str, Option<usize>)], name: &str) -> Signal {
         let path = SignalPath {
             instances: instances
                 .iter()
@@ -155,19 +154,17 @@ impl Simulator {
                 .collect(),
             name: name.into(),
         };
-        let mut signals = self.signals.borrow_mut();
-        if let Some(index) = signals.iter().position(|signal| signal == &path) {
+        if let Some(index) = self.signals.iter().position(|signal| signal == &path) {
             return Signal(index);
         }
-        let signal = Signal(signals.len());
-        signals.push(path);
+        let signal = Signal(self.signals.len());
+        self.signals.push(path);
         signal
     }
 
-    pub fn event(&self, name: &str) -> Event {
-        let mut events = self.events.borrow_mut();
-        let event = Event(events.len());
-        events.push(name.into());
+    pub fn event(&mut self, name: &str) -> Event {
+        let event = Event(self.events.len());
+        self.events.push(name.into());
         event
     }
 
@@ -180,8 +177,7 @@ impl Simulator {
     }
 
     pub fn set_four_state(&mut self, signal: Signal, payload: BigUint, mask: BigUint) {
-        let signals = self.signals.borrow();
-        let path = &signals[signal.0];
+        let path = &self.signals[signal.0];
         self.backend
             .write(path, payload, mask)
             .unwrap_or_else(|error| panic!("write {path:?}: {error}"));
@@ -196,8 +192,7 @@ impl Simulator {
     }
 
     pub fn get_four_state(&mut self, signal: Signal) -> (BigUint, BigUint) {
-        let signals = self.signals.borrow();
-        let path = &signals[signal.0];
+        let path = &self.signals[signal.0];
         self.backend
             .read(path)
             .unwrap_or_else(|error| panic!("read {path:?}: {error}"))
@@ -229,6 +224,6 @@ impl Simulator {
     }
 
     pub fn tick(&mut self, event: Event) -> Result<()> {
-        self.backend.tick(&self.events.borrow()[event.0])
+        self.backend.tick(&self.events[event.0])
     }
 }
