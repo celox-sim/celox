@@ -1,0 +1,49 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "",
+      "expectation": "Simulation",
+      "name": "containers::wide_associative_keys",
+      "phase": "execute",
+      "status": "passed",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "containers::wide_associative_keys_with_unknown_bits",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 orders the indices of an associative array with a signed bit [127:0] index as unsigned: foreach visits 0, 5, -1 and first returns 0. IEEE 1800-2023 7.8.4 orders an integral index of any width numerically, signed or unsigned by the signedness of the index type, so -1 comes first; Verilator orders the unsigned bit [64:0] and packed structure indices of containers::wide_associative_keys as expected, and xezim 0.11.3 orders neither (wide_associative_keys in its review).",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_wide_associative_keys.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_wide_signed_associative_order",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 orders the indices of an associative array with a signed bit [127:0] index as unsigned: foreach visits 0, 5, -1 and first returns 0. IEEE 1800-2023 7.8.4 orders an integral index of any width numerically, signed or unsigned by the signedness of the index type, so -1 comes first; Verilator orders the unsigned bit [64:0] and packed structure indices of containers::wide_associative_keys as expected, and xezim 0.11.3 orders neither (wide_associative_keys in its review).",
+        "upstream": []
+      },
+      "name": "containers::wide_signed_associative_keys",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}
