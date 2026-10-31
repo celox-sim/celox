@@ -1404,3 +1404,43 @@ endmodule
   (assert_eq count 2)
   (assert_eq first 0x11)
   (assert_eq last (fourstate 0xff 0xff)))
+
+; IEEE 1800-2023 26.3: a package variable named by its package scope, `p::q`,
+; is a container receiver like any other variable (7.10.2), in a statement
+; or an expression, also in a class or another package.
+(case package_scoped_container_methods
+  (source "package_scoped_containers.sv" #"
+package p;
+    int q[$];
+    class C;
+        function void add(int v); p::q.push_back(v); endfunction
+    endclass
+endpackage
+package r;
+    function automatic int take();
+        p::q.push_front(9);
+        return p::q.pop_back();
+    endfunction
+endpackage
+module Top(output bit done);
+    p::C c;
+    int sum;
+    initial begin
+        c = new();
+        c.add(1);
+        c.add(2);
+        p::q.insert(1, 5);
+        $display("q %0d %0d %0d %0d", p::q.size(), p::q[0], p::q[1], p::q[2]);
+        $display("take %0d", r::take());
+        foreach (p::q[i]) sum += p::q[i];
+        $display("sum %0d", sum);
+        void'(p::q.pop_front());
+        $display("rest %0d %0d", p::q.size(), p::q[0]);
+        p::q.delete();
+        $display("empty %0d", p::q.size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "q 3 1 5 2\ntake 2\nsum 15\nrest 2 1\nempty 0\n"))
