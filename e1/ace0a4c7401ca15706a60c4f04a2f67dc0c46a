@@ -1,0 +1,1 @@
+Reject enum members of structure patterns whose values have effects, as Codex found
