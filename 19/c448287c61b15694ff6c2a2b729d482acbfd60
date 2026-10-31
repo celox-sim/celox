@@ -1,0 +1,1 @@
+Clarify review 5724800259 against IEEE 6.20.2: untyped integral parameters are logic vectors. Add rejection/cast regressions and document the enum typing boundary without changing compiler behavior.
