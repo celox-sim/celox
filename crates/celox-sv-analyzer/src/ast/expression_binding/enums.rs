@@ -196,7 +196,7 @@ pub(super) fn domain(
 
 /// The type a cast to native `target` converts to, when `target` names a
 /// type rather than a width or signedness.
-pub(super) fn cast_type(
+pub(in crate::ast) fn cast_type(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     target: ExprId,

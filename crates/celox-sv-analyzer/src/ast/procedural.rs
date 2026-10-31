@@ -10,6 +10,7 @@ use super::*;
 mod assertions;
 mod control;
 mod effects;
+mod enum_assignments;
 mod final_procedures;
 mod foreach;
 mod intra_assignment;
@@ -748,6 +749,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         deferred_destination_checks: Option<&mut Vec<Expr>>,
     ) -> Result<Stmt, AnalyzerError> {
         let (left, right) = native;
+        self.check_enum_assignment(op, left, right)?;
         if containers::element_member(
             left,
             self.tree.declarations(),

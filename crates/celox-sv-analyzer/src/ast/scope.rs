@@ -908,6 +908,9 @@ impl Renamer<'_> {
 
     pub fn parameter(&self, mut parameter: Parameter) -> Parameter {
         parameter.name = self.name(&parameter.name);
+        parameter.enum_type = parameter
+            .enum_type
+            .map(|ty| Arc::new(self.r#type((*ty).clone())));
         parameter.value = parameter.value.map(|value| self.const_expr(value));
         for range in &mut parameter.packed_ranges {
             *range = self.packed_range(range.clone());

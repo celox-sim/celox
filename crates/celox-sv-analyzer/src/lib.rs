@@ -198,6 +198,10 @@ pub enum AnalyzerError {
     /// lists as an input (IEEE 1800-2023 25.5, 23.3.3.4).
     #[error("assignment to `{member}`, an input of `{target}`")]
     InputModportAssignment { member: String, target: String },
+    /// An integral literal or expression assigned without a cast to an enum
+    /// variable (IEEE 1800-2023 6.19.3, 6.19.4).
+    #[error("assignment of a non-enum expression to an enum variable requires an explicit cast")]
+    ImplicitEnumAssignment,
     /// `posedge`, `negedge` or `edge` of a real expression, which has no
     /// least significant bit to judge the edge on (IEEE 1800-2023 6.12).
     #[error("`{edge}` of a real expression: edge event controls do not apply to reals")]

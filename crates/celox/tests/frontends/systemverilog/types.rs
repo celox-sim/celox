@@ -80,6 +80,12 @@ sv_backends! {
 }
 
 sv_backends! {
+    fn enum_explicit_integral_assignments(sim) {
+        @case "types::enum_explicit_integral_assignments";
+    }
+    fn enum_wide_parameters_preserve_declared_types(sim) {
+        @case "types::enum_wide_parameters_preserve_declared_types";
+    }
     fn enum_methods_iterate_members(sim) {
         @case "types::enum_methods_iterate_members";
     }

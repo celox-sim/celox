@@ -2009,7 +2009,9 @@ pub struct Parameter {
     is_local: bool,
     /// See [`Type::signed_element_depth`].
     signed_element_depth: Option<usize>,
-    /// The enumerated type the parameter is declared with.
+    /// The declared scalar enum type (6.20.2), even when its domain is unavailable.
+    enum_type: Option<Arc<Type>>,
+    /// Resolved enum members for enumeration methods (best-effort).
     enum_domain: Option<Arc<enums::EnumDomain>>,
 }
 
@@ -2035,6 +2037,7 @@ impl Parameter {
             has_declared_type,
             is_local,
             signed_element_depth: None,
+            enum_type: None,
             enum_domain: None,
         }
     }

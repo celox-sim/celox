@@ -318,6 +318,15 @@ required rejection. The broader review recheck covered 1,478 pinned files in
 both modes (2,956 verdicts), excluding 172 source/path UVM-related cases.
 After the two reviewed expectation updates, all selected verdicts match.
 
+Implicit integral writes to standalone enum variables (6.19.3, 6.19.4)
+update four rows: both modes of `6.19.3--enum_type_checking_inv.sv` and
+`6.19.4--enum_numerical_expr_no_cast.sv` now pass by rejecting the invalid
+assignments. The checks cover literal and arithmetic RHS expressions,
+compound assignments, increments and decrements, including scalar elements
+of unpacked enum arrays. Explicit enum casts, enum methods and integral
+packed selects retain their existing behavior. This does not establish
+complete nominal enum compatibility or assignment checking in other contexts.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
