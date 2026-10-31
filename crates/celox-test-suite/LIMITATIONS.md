@@ -415,6 +415,15 @@ seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
 backends; the source and observed failures are retained in
 [`sv_dist_uniform_seed_width.json`](verification/repros/sv_dist_uniform_seed_width.json).
 
+`class::static_initializers_run_once_before_time_zero` initializes static
+locals of class methods and tasks, a static property and a package variable
+with constructor and function calls, which run once before any procedure
+starts (IEEE 1800-2023 6.8, 6.21). Celox, Verilator 5.052 and xezim 0.11.3 pass
+it. Icarus 13.0 does not compile it: it reports "Overriding the default
+variable lifetime is not yet supported" for the `static` locals of the methods
+and the `automatic` locals of the `initial` block. This is an executed compile
+failure.
+
 Verilator 5.052 executes `always @*` once at time zero in
 `latch::classic_star_declaration_startup`, before any sensitivity input changes.
 Static declarations initialize before procedures start (IEEE 1800-2023 6.8),

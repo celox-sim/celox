@@ -586,7 +586,6 @@ compound element assignments whose container or index has a side effect or
 whose element is a string, handle or container, container ports and
 const containers remain unsupported. A `new[]` initializer currently requires
 another compatible dynamic array or queue; fixed-size arrays are unsupported.
-Static local initializers retain the existing constant-initializer restriction.
 `$size` queries the current outer dimension. Sequence `$left`, `$right`,
 `$low`, `$high`, `$increment`, and dimension counts are also supported.
 Queries of element dimensions and associative bounds remain unsupported.
@@ -1097,8 +1096,14 @@ run-time initializer in a procedure that runs once, such as `initial`. In an
 because its author likely meant it to run on every entry; declare the local
 `static` or `automatic` to state which.
 
-Nonconstant initializers of static function and task locals remain unsupported;
-declare those locals `automatic`. Package
+A static local of a function, task or class method may have a run-time
+initializer too, such as `static uvm_tree_printer printer = new();`. It runs
+once before any procedure starts, also when no call is ever made, and may read
+module or package variables and other static locals, but no formal or
+automatic local. Package variables and static class properties may likewise be
+initialized with constructor or function calls; IEEE 1800-2023 6.8 and 10.5
+only require those initializers to run before every procedure, so a design
+should not rely on their order across packages and modules. Package
 function state is a
 package variable, which the processes of every instance may write.
 An interface whose default lifetime (`interface automatic`) differs from that of the

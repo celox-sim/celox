@@ -975,9 +975,15 @@ fn lower_package_states(
             );
             lowered.sim_module.time_scale = scope_time_scale(packages, module.name())?;
             // Declaration initializers run before every `initial` block
-            // (IEEE 1800-2023 10.5); one that is not folded into an initial
-            // value would run among them.
-            if !lowered.sim_module.processes.is_empty() {
+            // (IEEE 1800-2023 6.8, 10.5): one that is not folded into an
+            // initial value runs as a declaration initializer, and any other
+            // process would run among the `initial` blocks.
+            if lowered
+                .sim_module
+                .processes
+                .iter()
+                .any(|process| process.slots.kind != celox_design::ProcessKind::Initializer)
+            {
                 return Err(sv::AnalyzerError::Unsupported(format!(
                     "package variable initializer that is not constant in package `{}`",
                     module.name()

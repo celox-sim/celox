@@ -3543,3 +3543,63 @@ module Top(output int ok);
  initial ok = shadow.s() == "a_name_longer_than_sixteen";
 endmodule"#)
  (top Top) (run_until 0) (assert_eq ok 1))
+
+; A static variable's initializer runs once, before any procedure starts,
+; and may call constructors and functions (6.8, 6.21): static locals of
+; functions, methods and tasks, static properties and package variables.
+; Their order is not specified, so no initializer reads another's variable.
+(case static_initializers_run_once_before_time_zero
+ (source "static_initializers_run_once_before_time_zero.sv" #"
+package q;
+ class Counter;
+  int v;
+  function new(int v = 0); this.v = v; endfunction
+ endclass
+ class Pool;
+  static Counter shared = new(5);
+  static function Counter printer();
+   static Counter p = new();
+   p.v++;
+   return p;
+  endfunction
+ endclass
+ function automatic int seed(); Counter c = new(5); return c.v + 1; endfunction
+ int seeded = seed();
+endpackage
+module Top(output int a, output int b, output int c, output int d, output int e);
+ int m = 20;
+ function int f();
+  static int k = m;
+  k++;
+  return k;
+ endfunction
+ class Item;
+  function int bump();
+   static q::Counter c = new(30);
+   c.v++;
+   return c.v;
+  endfunction
+ endclass
+ task t(output int r);
+  static q::Counter c = new(40);
+  #1 c.v++;
+  r = c.v;
+ endtask
+ initial begin
+  automatic Item x = new;
+  automatic Item y = new;
+  q::Counter h;
+  int r;
+  h = q::Pool::printer();
+  h = q::Pool::printer();
+  a = h.v + 10 * q::Pool::shared.v;
+  b = q::seeded;
+  void'(f());
+  c = f();
+  void'(x.bump());
+  d = y.bump();
+  t(r);
+  t(e);
+ end
+endmodule"#)
+ (top Top) (run_until 3) (assert_eq a 52) (assert_eq b 6) (assert_eq c 22) (assert_eq d 32) (assert_eq e 42))

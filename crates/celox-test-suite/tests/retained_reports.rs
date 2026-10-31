@@ -676,6 +676,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "containers::multidimensional_foreach_break") => {
                             ("compile_error", "compile", "Queue of type")
                         }
+                        ("icarus", "class::static_initializers_run_once_before_time_zero") => (
+                            "compile_error",
+                            "compile",
+                            "sorry: Overriding the default variable lifetime is not yet supported.",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
