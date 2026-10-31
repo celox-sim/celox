@@ -937,6 +937,14 @@ interface の既定値で呼び出す定数関数は、native analyzer が本体
 組み合わせ回路からの呼び出し、`context`、task import、`output` / `inout`、packed vector、`real`、`string` などは未対応です。
 同じモジュール・package で定義した関数・task の `export "DPI-C"` 宣言は受理して検査します（1 つのサブルーチンにつき 1 回、C 名の重複なし、`ref` 仮引数とクラスハンドルなし、35.7）。export はサブルーチンを変えず（35.7）、export したサブルーチンを呼べるのは `context` import だけなので（35.5.3）、C から呼ばれることはありません。
 
+UVM の C ライブラリ（UVM `src/dpi`）の関数は Celox が提供するため、UVM は `UVM_NO_DPI` も C ライブラリも
+`sv-dpi` 機能もなしに動きます。それらの C 名と UVM のプロトタイプを持つ import は C 関数ではなく Celox の実装に
+束縛され、同名のユーザー実装は呼ばれません。`uvm_re_comp`・`uvm_re_exec`・`uvm_re_free`・`uvm_re_compexec`・
+`uvm_re_compexecfree`・`uvm_re_buffer`・`uvm_re_deglobbed` は UVM の `uvm_regex.cc` と同じ動作です。ただし正規表現は
+Rust の `regex` クレートでコンパイルするため、まれな構文で POSIX 拡張正規表現と異なる場合があります。`uvm_dpi_get_next_arg_c` は `celox` に続けて
+plusargs を返し、`uvm_dpi_get_tool_name_c` は `Celox` を返します。`uvm_hdl_*` と `uvm_polling_*` は未提供で、0 または
+`null` を返し出力を変更しないため、UVM はその機能が使えないと報告します。
+
 登録のコード例と詳細は[英語版の DPI-C imports](/guide/systemverilog-reference#dpi-c-imports)を参照してください。
 
 ## Veryl が出力する SystemVerilog {#systemverilog-emitted-by-veryl}

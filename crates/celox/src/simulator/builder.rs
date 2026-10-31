@@ -1839,7 +1839,7 @@ mod host {
         let mut sim = Simulator::with_backend_and_program(backend, program, warnings);
         sim.components.set_injected(injected_components);
         sim.diagnostics = options.diagnostics.clone();
-        sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+        sim.set_plusargs(options.plusargs.clone());
         sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
         if let Err(error) = validate_native_vcd_layout(sim.layout(), &sim.program, &vcd_path) {
             return Err(error.with_warnings(std::mem::take(&mut sim.warnings)));
@@ -3164,7 +3164,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
-            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
@@ -3222,7 +3222,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
-            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
@@ -3281,7 +3281,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
-            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
@@ -3354,7 +3354,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
-            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
@@ -3574,7 +3574,7 @@ mod host {
                 Simulator::with_backend_and_program(backend, laid_out.into_runtime(), warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
-            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);
@@ -3795,7 +3795,7 @@ mod host {
                 sim.components
                     .set_injected(self.injected_components.clone());
                 sim.diagnostics = self.options.diagnostics.clone();
-                sim.plusargs = celox_runtime::plusargs::Plusargs(self.options.plusargs.clone());
+                sim.set_plusargs(self.options.plusargs.clone());
                 sim.file_io =
                     celox_runtime::file_io::FileIo::new(self.options.file_system.create());
                 sim.apply_initial_values();
@@ -4224,7 +4224,7 @@ mod host {
                 Simulator::with_backend_and_program_for_simulation(backend, program, warnings);
             sim.components.set_injected(injected_components);
             sim.diagnostics = options.diagnostics.clone();
-            sim.plusargs = celox_runtime::plusargs::Plusargs(options.plusargs.clone());
+            sim.set_plusargs(options.plusargs.clone());
             sim.file_io = celox_runtime::file_io::FileIo::new(options.file_system.create());
             if let Some(path) = vcd_path {
                 let descs = sim.build_vcd_descs(options.four_state);

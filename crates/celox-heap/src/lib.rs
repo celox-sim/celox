@@ -21,6 +21,8 @@ mod objects;
 pub mod ops;
 pub mod randomization;
 pub mod streams;
+mod uvm_dpi;
+pub use uvm_dpi::deglob as uvm_deglob;
 
 pub use objects::{Fault, NULL};
 
@@ -99,6 +101,8 @@ pub struct Heap {
     pinned: Handle,
     created: usize,
     live_after_collection: usize,
+    /// The state of UVM's C library functions, see [`uvm_dpi`].
+    uvm: uvm_dpi::UvmDpi,
 }
 
 impl Default for Heap {
@@ -132,6 +136,7 @@ impl Heap {
             pinned: 1,
             created: 0,
             live_after_collection: 1,
+            uvm: uvm_dpi::UvmDpi::default(),
         }
     }
 
@@ -187,6 +192,7 @@ impl Heap {
             && self.next_object == other.next_object
             && self.events == other.events
             && self.containers == other.containers
+            && self.uvm == other.uvm
     }
 
     /// The number of live strings, including `""`.
