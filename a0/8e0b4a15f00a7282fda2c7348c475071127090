@@ -1,0 +1,1 @@
+Rebase the reviewed enum-assignment change after master advanced; preserve the IEEE 6.20.2 untyped-parameter regression and resolve current conflicts.
