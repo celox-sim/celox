@@ -556,3 +556,24 @@ to succeed; failures, cancellations, and skips block merging. All Mergify queues
 also require the standalone `Verify workflow lockfile` check. Keep that check
 required in the master/develop rulesets so older PR check results cannot bypass
 a newly introduced lockfile requirement.
+
+## Dependency security updates
+
+Dependabot security updates open PRs when GitHub reports a vulnerable dependency
+with an available compatible fix. The root Cargo configuration in
+`.github/dependabot.yml` sets `open-pull-requests-limit: 0`: this disables
+Dependabot version-update PRs while allowing security-update PRs. The required
+`schedule` field does not turn these into routine lockfile refreshes.
+
+Enable Dependabot alerts and security updates in the repository's security
+settings; the YAML file alone does not enable security updates. Security PRs
+carry `dependencies` and require review before queueing.
+
+The daily `cargo-deny` workflow remains the RustSec advisory gate. GitHub's
+advisory database and RustSec can differ, so a cargo-deny failure does not
+guarantee an immediate Dependabot PR. An incompatible requirement in an
+upstream dependency can also prevent an automatic fix; those cases need an
+upstream release or an explicitly maintained patch.
+
+See [Dependabot security updates](https://docs.github.com/en/code-security/concepts/supply-chain-security/dependabot-security-updates)
+and [security-only configuration](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/configure-security-updates).
