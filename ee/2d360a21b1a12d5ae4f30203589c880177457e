@@ -1,1 +1,6 @@
-Add retained report rows for the reviewed sampled-history exclusions; the same omission caused PR #2755 CI to fail.
+Revision history for #2766:
+
+rev 2 (content) 2026-10-31 15:16 UTC — Add retained report rows for the reviewed sampled-history exclusions; the same omission caused PR #2755 CI to fail.
+rev 1 (initial) 2026-10-31 15:16 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2766,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"7ac78c75bd5d16b1b784c74189e26485c9f05a75","timestamp_iso":"2026-10-31T15:16:12Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"7ac78c75bd5d16b1b784c74189e26485c9f05a75","new_sha":"ee2d360a21b1a12d5ae4f30203589c880177457e","timestamp_iso":"2026-10-31T15:16:12Z","reason":"Add retained report rows for the reviewed sampled-history exclusions; the same omission caused PR #2755 CI to fail.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/7ac78c75bd5d16b1b784c74189e26485c9f05a75...ee2d360a21b1a12d5ae4f30203589c880177457e"}]} -->
