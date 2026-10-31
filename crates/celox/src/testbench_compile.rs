@@ -34,6 +34,7 @@ pub(crate) fn lower_expressions(
     sir: &mut crate::ir::SirProgram,
     runtime: &mut crate::ir::RuntimeProgram,
     program: &mut TestbenchProgram<AbsoluteAddr>,
+    four_state: bool,
 ) -> Result<(), String> {
     use celox_design::{ProcessKind, ProcessSlots, RegionedStateAddr, STABLE_REGION};
     use celox_sir::{BlockId, ExecutionUnit, SIRBuilder, SIRInstruction, SIROffset, SIRTerminator};
@@ -52,12 +53,30 @@ pub(crate) fn lower_expressions(
     }
     program.try_visit_expressions(|expression| {
         let mut builder = SIRBuilder::new();
+        let state_objects = &runtime.design.state_objects;
+        let logic = |address: &AbsoluteAddr| {
+            four_state
+                && state_objects
+                    .get(address)
+                    .is_some_and(|object| object.is_4state)
+        };
         let value = celox_testbench::lowering::Expressions {
             builder: &mut builder,
+            four_state,
+            logic: &logic,
         }
         .compile(expression)?;
         let width = builder.register(&value.register).width();
-        let result = runtime.design.allocate_testbench_slot(width, value.string);
+        // A result with unknown bits keeps them in a four-state slot.
+        let logic = matches!(
+            builder.register(&value.register),
+            celox_sir::RegisterType::Logic { .. }
+        );
+        let result = if logic {
+            runtime.design.allocate_testbench_logic_slot(width)
+        } else {
+            runtime.design.allocate_testbench_slot(width, value.string)
+        };
         runtime.runtime_schema.testbench_read_roots.insert(result);
         builder.emit(SIRInstruction::Store(
             result,
@@ -94,6 +113,7 @@ pub(crate) fn lower_expressions(
         }
         let constant = if width <= 64
             && !value.string
+            && !logic
             && writes.is_empty()
             && !unit
                 .blocks
@@ -148,6 +168,7 @@ pub(crate) fn lower_expressions(
             width,
             is_string: value.string,
             writes,
+            four_state: logic,
         });
         Ok(())
     })

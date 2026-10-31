@@ -20,6 +20,7 @@ fn stable(var_id: Addr) -> RegionedVarAddrBase<Addr> {
 }
 struct Lower<'a> {
     runtime: &'a mut RuntimeProgram,
+    four_state: bool,
     kernel: ProcessKernelBuilder<Addr>,
     requests: Vec<KernelRequest<Addr>>,
     site: usize,
@@ -37,6 +38,76 @@ impl Lower<'_> {
             .insert(address);
         address
     }
+    /// A slot that saves `value` with its unknown bits.
+    fn saved_slot(&mut self, width: usize, string: bool, value: RegisterId) -> Addr {
+        if !self.is_logic(value) {
+            return self.slot(width, string);
+        }
+        let address = self.runtime.design.allocate_testbench_logic_slot(width);
+        self.runtime
+            .runtime_schema
+            .testbench_read_roots
+            .insert(address);
+        address
+    }
+    /// Whether loads of `address` keep its unknown bits.
+    fn holds_logic(&self, address: Addr) -> bool {
+        self.four_state
+            && self
+                .runtime
+                .design
+                .state_objects
+                .get(&address)
+                .is_some_and(|object| object.is_4state)
+    }
+    fn is_logic(&mut self, register: RegisterId) -> bool {
+        matches!(
+            self.kernel.builder().register(&register),
+            celox_sir::RegisterType::Logic { .. }
+        )
+    }
+    /// A `width`-bit register for a result computed from `operands`.
+    fn alloc(&mut self, width: usize, signed: bool, operands: &[RegisterId]) -> RegisterId {
+        if operands.iter().any(|&operand| self.is_logic(operand)) {
+            self.kernel.builder().alloc_logic(width.max(1))
+        } else {
+            self.kernel.builder().alloc_bit(width.max(1), signed)
+        }
+    }
+    /// The bit offset of a selected write: an offset with unknown bits is
+    /// invalid and selects nothing (IEEE 1800-2023 11.5.1).
+    fn index(&mut self, offset: RegisterId) -> RegisterId {
+        if !self.is_logic(offset) {
+            return offset;
+        }
+        let known = self.two_state(offset);
+        let valid = self.kernel.builder().alloc_bit(1, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Binary(valid, offset, BinaryOp::EqCase, known));
+        // At least 64 bits, so that the replacement lies past every object.
+        let width = self.kernel.builder().register(&offset).width().max(64);
+        let known = self.cast(known, width, false);
+        let past = self.imm(width, (BigUint::from(1u8) << width) - BigUint::from(1u8));
+        let index = self.kernel.builder().alloc_bit(width, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Mux(index, valid, known, past));
+        index
+    }
+    /// `value` with its unknown bits read as 0, as a two-state use reads them
+    /// (IEEE 1800-2023 6.11.2).
+    fn two_state(&mut self, value: RegisterId) -> RegisterId {
+        if !self.is_logic(value) {
+            return value;
+        }
+        let width = self.kernel.builder().register(&value).width();
+        let reg = self.kernel.builder().alloc_bit(width, false);
+        self.kernel
+            .builder()
+            .emit(Inst::Unary(reg, UnaryOp::ToTwoState, value));
+        reg
+    }
     fn imm(&mut self, width: usize, value: impl Into<BigUint>) -> RegisterId {
         let reg = self.kernel.builder().alloc_bit(width.max(1), false);
         self.kernel.builder().emit(Inst::Imm(
@@ -48,7 +119,11 @@ impl Lower<'_> {
         reg
     }
     fn load(&mut self, address: Addr, width: usize, signed: bool) -> RegisterId {
-        let reg = self.kernel.builder().alloc_bit(width.max(1), signed);
+        let reg = if self.holds_logic(address) {
+            self.kernel.builder().alloc_logic(width.max(1))
+        } else {
+            self.kernel.builder().alloc_bit(width.max(1), signed)
+        };
         self.kernel.builder().emit(Inst::Load(
             reg,
             stable(address),
@@ -121,7 +196,11 @@ impl Lower<'_> {
             let start = self.imm(offset_width.max(64), tail as u64);
             let shift = self.binary(BinaryOp::Sub, bound, start, offset_width.max(64));
             let shift = self.cast(shift, 64, false);
-            let old = self.kernel.builder().alloc_bit(width, false);
+            let old = if self.holds_logic(address) {
+                self.kernel.builder().alloc_logic(width)
+            } else {
+                self.kernel.builder().alloc_bit(width, false)
+            };
             self.kernel.builder().emit(Inst::Load(
                 old,
                 stable(address),
@@ -155,7 +234,7 @@ impl Lower<'_> {
     fn cast(&mut self, value: RegisterId, width: usize, signed: bool) -> RegisterId {
         let source = self.kernel.builder().register(&value).width();
         let extend = self.kernel.builder().register(&value).is_signed() && width > source;
-        let reg = self.kernel.builder().alloc_bit(width.max(1), signed);
+        let reg = self.alloc(width, signed, &[value]);
         if width < source {
             self.kernel
                 .builder()
@@ -169,7 +248,7 @@ impl Lower<'_> {
             let shift = self.imm(64, (width - source) as u64);
             let reg = self.binary(BinaryOp::Shl, reg, shift, width);
             let reg = self.binary(BinaryOp::Sar, reg, shift, width);
-            let typed = self.kernel.builder().alloc_bit(width.max(1), signed);
+            let typed = self.alloc(width, signed, &[reg]);
             self.kernel
                 .builder()
                 .emit(Inst::Unary(typed, UnaryOp::Ident, reg));
@@ -209,7 +288,7 @@ impl Lower<'_> {
             l = self.cast(l, lw.max(rw), signed);
             r = self.cast(r, lw.max(rw), signed);
         }
-        let reg = self.kernel.builder().alloc_bit(width.max(1), false);
+        let reg = self.alloc(width, false, &[l, r]);
         self.kernel.builder().emit(Inst::Binary(reg, l, op, r));
         reg
     }
@@ -228,8 +307,18 @@ impl Lower<'_> {
                 byte_offset: location.byte_offset,
             })
         })?;
+        let state_objects = &self.runtime.design.state_objects;
+        let four_state = self.four_state;
+        let logic = |address: &RegionedVarAddrBase<Addr>| {
+            four_state
+                && state_objects
+                    .get(&address.var_id)
+                    .is_some_and(|object| object.is_4state)
+        };
         let value = lowering::Expressions {
             builder: self.kernel.builder(),
+            four_state,
+            logic: &logic,
         }
         .compile(&expr)?;
         let writes: Vec<_> = expr
@@ -250,7 +339,7 @@ impl Lower<'_> {
         // Host requests resume through a fresh kernel entry. Preserve the
         // expression result in layout-owned state across that boundary.
         let width = self.kernel.builder().register(&value.register).width();
-        let saved = self.slot(width, value.string);
+        let saved = self.saved_slot(width, value.string, value.register);
         self.store(saved, width, value.register);
         for address in writes {
             let width = self.runtime.design.state_objects[&address].width;
@@ -324,6 +413,12 @@ impl Lower<'_> {
                     else_block,
                 } => {
                     let cond = self.settled_expression(expr)?.register;
+                    let cond = lowering::Expressions {
+                        builder: self.kernel.builder(),
+                        four_state: self.four_state,
+                        logic: &|_| false,
+                    }
+                    .condition(cond);
                     let yes = self.kernel.builder().new_block();
                     let no = self.kernel.builder().new_block();
                     let join = self.kernel.builder().new_block();
@@ -346,8 +441,14 @@ impl Lower<'_> {
                 TestbenchStatement::Assign { dst, expr } => {
                     let expression = self.settled_expression(expr)?;
                     let value = self.cast(expression.register, dst.width, false);
+                    // A two-state destination stores no unknown bits.
+                    let value = if self.holds_logic(dst.signal.address) {
+                        value
+                    } else {
+                        self.two_state(value)
+                    };
                     let saved = if dst.selection.is_some() {
-                        let saved = self.slot(dst.width, expression.string);
+                        let saved = self.saved_slot(dst.width, expression.string, value);
                         self.store(saved, dst.width, value);
                         Some(saved)
                     } else {
@@ -355,6 +456,7 @@ impl Lower<'_> {
                     };
                     if let Some(selection) = &dst.selection {
                         let offset = self.settled_expression(&selection.offset)?.register;
+                        let offset = self.index(offset);
                         let saved = saved.expect("selected assignments save their value");
                         self.selected_store(
                             dst.signal.address,
@@ -414,6 +516,7 @@ impl Lower<'_> {
                 signed,
             } => {
                 let value = self.settled_expression(expr)?.register;
+                let value = self.two_state(value);
                 (self.cast(value, *width, *signed), *width, *signed)
             }
         })
@@ -644,6 +747,7 @@ pub(crate) fn lower(
     sir: &mut SirProgram,
     runtime: &mut RuntimeProgram,
     program: &mut TestbenchProgram<Addr>,
+    four_state: bool,
 ) -> Result<(), String> {
     let mut kernels = Vec::new();
     let external_observers = !program.component_bindings().is_empty()
@@ -690,6 +794,7 @@ pub(crate) fn lower(
         }
         let mut lower = Lower {
             runtime,
+            four_state,
             kernel: ProcessKernelBuilder::new(slots),
             requests: vec![],
             site: 0,

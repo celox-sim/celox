@@ -174,6 +174,16 @@ impl RuntimeDesign {
         address
     }
 
+    /// A four-state testbench slot: it keeps the unknown bits of what is
+    /// stored in a four-state build.
+    pub(crate) fn allocate_testbench_logic_slot(&mut self, width: usize) -> AbsoluteAddr {
+        let address = self.allocate_testbench_slot(width, false);
+        let object = self.semantic.state_objects.get_mut(&address).unwrap();
+        object.is_4state = true;
+        object.type_kind = celox_design::PortTypeKind::Logic;
+        address
+    }
+
     pub(crate) fn allocate_testbench_copy(&mut self, source: AbsoluteAddr) -> AbsoluteAddr {
         let info = self.semantic.state_objects[&source].clone();
         let address = self.allocate_testbench_slot(info.width, false);
