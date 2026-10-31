@@ -13,7 +13,7 @@
     },
     {
       "category": "Types",
-      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}).",
+      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}). Enum members, elements and keys inside these patterns print as their values in hexadecimal ('{sw:'h1}, '{'h2:'h7}) where 21.2.1.6 prints the enum name.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_disagreement",
@@ -24,7 +24,7 @@
         "id": "sv_verilator_pattern_format",
         "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
         "phase": "execute",
-        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}).",
+        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}). Enum members, elements and keys inside these patterns print as their values in hexadecimal ('{sw:'h1}, '{'h2:'h7}) where 21.2.1.6 prints the enum name.",
         "upstream": []
       },
       "name": "string_format::pattern_format",
@@ -36,7 +36,7 @@
     },
     {
       "category": "Types",
-      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}).",
+      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}). Enum members, elements and keys inside these patterns print as their values in hexadecimal ('{sw:'h1}, '{'h2:'h7}) where 21.2.1.6 prints the enum name.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_disagreement",
@@ -47,7 +47,30 @@
         "id": "sv_verilator_pattern_format",
         "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
         "phase": "execute",
-        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}).",
+        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}). Enum members, elements and keys inside these patterns print as their values in hexadecimal ('{sw:'h1}, '{'h2:'h7}) where 21.2.1.6 prints the enum name.",
+        "upstream": []
+      },
+      "name": "string_format::pattern_format_enums",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}). Enum members, elements and keys inside these patterns print as their values in hexadecimal ('{sw:'h1}, '{'h2:'h7}) where 21.2.1.6 prints the enum name.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/sv/limitations/pattern-format.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_pattern_format",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}). Enum members, elements and keys inside these patterns print as their values in hexadecimal ('{sw:'h1}, '{'h2:'h7}) where 21.2.1.6 prints the enum name.",
         "upstream": []
       },
       "name": "string_format::pattern_format_keys_and_handles",
@@ -59,7 +82,7 @@
     },
     {
       "category": "Types",
-      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}).",
+      "detail": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}). Enum members, elements and keys inside these patterns print as their values in hexadecimal ('{sw:'h1}, '{'h2:'h7}) where 21.2.1.6 prints the enum name.",
       "expectation": "Simulation",
       "known_issue": {
         "category": "simulator_disagreement",
@@ -70,7 +93,7 @@
         "id": "sv_verilator_pattern_format",
         "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
         "phase": "execute",
-        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}).",
+        "reason": "Verilator 5.052 prints %p of integral container elements and integral associative keys in hexadecimal ('h1, and 'hfffffffe for the int key -2) and a string literal as its packed integer value (7104884 for \"lit\"). IEEE 1800-2023 21.2.1.6 prints singular values as they would print unformatted, which $display prints in decimal, and a string literal enclosed in quotes; xezim 0.11.3 prints the queue and dynamic array elements in decimal. It prints the integral members of unpacked structures in hexadecimal too ('{a:'hfffffffd, b:'hff}). Enum members, elements and keys inside these patterns print as their values in hexadecimal ('{sw:'h1}, '{'h2:'h7}) where 21.2.1.6 prints the enum name.",
         "upstream": []
       },
       "name": "string_format::pattern_format_structure_values",

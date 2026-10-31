@@ -1407,9 +1407,14 @@ associative array of such elements as an assignment pattern, `'{1, 2}` or
 member or class property prints as an assignment pattern with named members,
 `'{name:"a", n:1}`, nested for structure members, and so does each element of
 a queue, dynamic array or associative array of unpacked structures,
-`'{1:'{name:"a", n:1}}`, in a procedural body. `%p` of enums, packed
-structures, fixed-size unpacked arrays, structures with enum or real members,
-other structure values (such as function results) and containers of other
+`'{1:'{name:"a", n:1}}`, in a procedural body. An enum value prints as the
+name of its member, or as its base type does for a value that is no member,
+and so do enum members of these structures, elements of a queue, dynamic
+array or associative array of enums and enum indices of an associative
+array, `'{A:4, B:7}`, in a procedural body. `%p` of an enum value returned
+by a function call or popped from a queue, packed structures, packed arrays
+of enums, fixed-size unpacked arrays, structures with real members, other
+structure values (such as function results) and containers of other
 aggregates is rejected. A `%p` of a format read at run time
 prints a string in quotes and any other value as `%0d`.
 

@@ -21,6 +21,7 @@ sv_backends! {
     fn pattern_format_keys_and_handles(sim) { @case "string_format::pattern_format_keys_and_handles"; }
     fn pattern_format_structure_containers(sim) { @case "string_format::pattern_format_structure_containers"; }
     fn pattern_format_structure_values(sim) { @case "string_format::pattern_format_structure_values"; }
+    fn pattern_format_enums(sim) { @case "string_format::pattern_format_enums"; }
     fn formatted_strings_into_integral_outputs(sim) { @case "string_format::formatted_strings_into_integral_outputs"; }
     // A string literal operand leaves a conditional integral (5.9): `%p`
     // prints it unformatted, not in quotes.
@@ -189,22 +190,17 @@ fn later_formats_keep_default_conversions_of_locals() {
 #[test]
 fn pattern_format_rejects_unsupported_types() {
     for (declarations, expected) in [
-        ("typedef enum {A, B} e_t; e_t v;", "%p of an enum value"),
+        (
+            "typedef enum bit {A, B} e_t; e_t [1:0] v;",
+            "%p of an enum value",
+        ),
         (
             "typedef struct packed { bit [3:0] a; } s_t; s_t v;",
             "%p of a structure or unpacked array",
         ),
         (
-            "typedef enum {A, B} e_t; e_t v[$];",
-            "%p of a container of enum values",
-        ),
-        (
             "class C; endclass int v[C];",
             "%p of an associative array with class handle keys",
-        ),
-        (
-            "typedef enum {A, B} e_t; typedef struct { e_t e; } r_t; r_t v[$];",
-            "%p of a structure with an enum member",
         ),
     ] {
         check_rejected(declarations, "v", expected);
@@ -231,20 +227,24 @@ fn pattern_format_rejects_unsupported_types() {
     ] {
         check_rejected(declarations, value, "%p of a structure or unpacked array");
     }
+    // An enum value is printed by name through more than one evaluation.
     for (declarations, value) in [
-        ("typedef enum {A, B} e_t; e_t q[$];", "q[0]"),
         ("typedef enum {A, B} e_t; e_t q[$];", "q.pop_front()"),
-        ("typedef enum {A, B} e_t; e_t a[2];", "a[1]"),
-        ("typedef enum {A, B} e_t; e_t a, b; bit f;", "f ? a : b"),
-        ("typedef enum {A, B} e_t;", "A"),
-        ("typedef enum {A, B} e_t;", "e_t'(1)"),
-        ("typedef enum {A, B} e_t; e_t v;", "v.next()"),
         (
             "typedef enum {A, B} e_t; function automatic e_t pick(); return B; endfunction",
             "pick()",
         ),
+        (
+            "typedef enum {A, B} e_t; typedef struct { e_t e; } s_t; \
+             function automatic e_t pick(); return B; endfunction",
+            "s_t'{pick()}",
+        ),
     ] {
-        check_rejected(declarations, value, "%p of an enum value");
+        check_rejected(
+            declarations,
+            value,
+            "%p of an enum value of a call with effects",
+        );
     }
 }
 

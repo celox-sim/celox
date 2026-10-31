@@ -394,6 +394,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "semaphores::one_key_admits_one_process_at_a_time",
                 "semaphores::try_get_takes_only_available_keys",
                 "string_format::formatted_strings_into_integral_outputs",
+                "string_format::pattern_format_enums",
                 "string_format::pattern_format_structure_containers",
                 "string_format::pattern_format_structure_values",
                 "tagged_unions::casts_ports_and_registers",
