@@ -120,7 +120,20 @@ pub(in crate::ast) fn named_class(
             name,
         } if separator == "::" => {
             let ExprKind::Name(package) = &native.expression(*expression).kind else {
-                return Ok(None);
+                // A type of a class scope that is itself qualified or
+                // specialized, `p::C::T` or `C#(int)::T` (8.23).
+                return Ok(
+                    match named_class(tree, session, *expression, native, dimensions)? {
+                        Some(scope_class) => classes::specializations::member_type(
+                            tree,
+                            session,
+                            &scope_class,
+                            &instances::normalize_identifier(&name.spelling),
+                        )
+                        .and_then(|ty| ty.class().map(str::to_owned)),
+                        None => None,
+                    },
+                );
             };
             let scope_name = instances::normalize_identifier(&package.spelling);
             let member_name = instances::normalize_identifier(&name.spelling);
