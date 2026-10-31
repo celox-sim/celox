@@ -1,0 +1,1 @@
+Address review r4433143848: retain declared scalar enum parameter types independently of enum-domain metadata, with wide parameter and integral rejection regressions.
