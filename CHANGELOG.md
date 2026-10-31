@@ -1,5 +1,210 @@
 # Changelog
 
+## 0.13.0 (2026-10-31)
+
+## What's Changed
+* fix(sv): keep class type parameters out of package dependencies by @tignear in https://github.com/celox-sim/celox/pull/2292
+* fix(sv): resolve class typedef qualifiers in their lexical scopes by @tignear in https://github.com/celox-sim/celox/pull/2293
+* ci: repair crate publication from immutable source tags by @tignear in https://github.com/celox-sim/celox/pull/2300
+* fix(sv): preserve imported class member types by @tignear in https://github.com/celox-sim/celox/pull/2306
+* fix(vpi): defer inertial deposits before enabling native cocotb clocks by @tignear in https://github.com/celox-sim/celox/pull/2307
+* perf(vpi): reuse selected hosts and callback signal metadata by @tignear in https://github.com/celox-sim/celox/pull/2308
+* ci: repair normalized archive checks in the crate publisher by @tignear in https://github.com/celox-sim/celox/pull/2309
+* fix(veryl): recognize exhaustive binary cases in latch diagnostics by @tignear in https://github.com/celox-sim/celox/pull/2312
+* fix(veryl): infer testbench reset polarity from connected declarations by @tignear in https://github.com/celox-sim/celox/pull/2313
+* feat(benchmarks): add representative circuit workloads and publication by @tignear in https://github.com/celox-sim/celox/pull/2314
+* fix(veryl): mask function-local static partial writes before merging by @tignear in https://github.com/celox-sim/celox/pull/2317
+* test(xezim): update xezim digest to 270b39d by @renovate[bot] in https://github.com/celox-sim/celox/pull/2319
+* fix(veryl): bound compiler stack usage for deep decoder trees by @tignear in https://github.com/celox-sim/celox/pull/2318
+* chore(deps): update actions/download-artifact action to v8 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2327
+* chore(deps): update dependency ubuntu to v26 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2328
+* feat(benchmarks): run rica kernels with Veryl native testbenches by @tignear in https://github.com/celox-sim/celox/pull/2321
+* feat(benchmarks): compare Celox and Veryl tiered execution by @tignear in https://github.com/celox-sim/celox/pull/2323
+* feat(sv)!: judge iff-qualified event controls in processes by @tignear in https://github.com/celox-sim/celox/pull/1829
+* perf(vpi): reduce callback comparison and host lookup overhead by @tignear in https://github.com/celox-sim/celox/pull/2333
+* perf(vpi): avoid redundant untimed value-change polling by @tignear in https://github.com/celox-sim/celox/pull/2334
+* perf(vpi): reuse value buffers and stream packed digits by @tignear in https://github.com/celox-sim/celox/pull/2335
+* perf(vpi): read packed native scalars without wide conversion by @tignear in https://github.com/celox-sim/celox/pull/2336
+* perf(vpi): retain the selected host through deposit settlement by @tignear in https://github.com/celox-sim/celox/pull/2337
+* perf(vpi): decode narrow deposits without wide arithmetic by @tignear in https://github.com/celox-sim/celox/pull/2339
+* perf(vpi): reuse scalar metadata during reads and edge replay by @tignear in https://github.com/celox-sim/celox/pull/2340
+* chore(deps): update dependency node to v26 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2348
+* fix(sir): truncate store operands before coalescing by @tignear in https://github.com/celox-sim/celox/pull/2351
+* perf(vpi): handle packed values up to 128 bits in native words by @tignear in https://github.com/celox-sim/celox/pull/2341
+* perf(vpi): store packed known values without temporary byte vectors by @tignear in https://github.com/celox-sim/celox/pull/2342
+* perf(vpi): avoid redundant work in ordinary signal deposits by @tignear in https://github.com/celox-sim/celox/pull/2343
+* perf(vpi): load packed scalars with matching native word sizes by @tignear in https://github.com/celox-sim/celox/pull/2344
+* perf(cli): discover cocotb runtime configuration in one interpreter by @tignear in https://github.com/celox-sim/celox/pull/2345
+* fix(sir): preserve snapshots across canonical writes by @tignear in https://github.com/celox-sim/celox/pull/2352
+* perf(veryl): avoid redundant work in static loops by @tignear in https://github.com/celox-sim/celox/pull/2353
+* perf(sir): avoid unused CFG facts and duplicate propagation by @tignear in https://github.com/celox-sim/celox/pull/2354
+* perf(testbench): avoid allocations for small expression stacks by @tignear in https://github.com/celox-sim/celox/pull/2355
+* perf(testbench): avoid redundant RTL settling and clock dispatch by @tignear in https://github.com/celox-sim/celox/pull/2356
+* perf(runtime): reuse coincident-edge execution plans by @tignear in https://github.com/celox-sim/celox/pull/2357
+* perf(native): read attached images without copying the runtime prefix by @tignear in https://github.com/celox-sim/celox/pull/2360
+* perf(vpi): retain narrow callback samples in native words by @tignear in https://github.com/celox-sim/celox/pull/2374
+* fix(sv): bind class alias defaults after enclosing parameters by @tignear in https://github.com/celox-sim/celox/pull/2365
+* fix(sv): defer class type arguments bounded by package constants by @tignear in https://github.com/celox-sim/celox/pull/2366
+* feat(sv): accept named enumeration and struct class type arguments by @tignear in https://github.com/celox-sim/celox/pull/2377
+* test(xezim): update xezim digest to d491f94 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2347
+* perf(x86): use popcnt for wide xor reductions by @tignear in https://github.com/celox-sim/celox/pull/2384
+* chore(deps): update dependency vite to v8.3.5 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2401
+* perf(testbench): reuse async loop futures and clock batches by @tignear in https://github.com/celox-sim/celox/pull/2378
+* perf(runtime): defer edge plan preparation until a cache miss by @tignear in https://github.com/celox-sim/celox/pull/2399
+* perf(tiered): compile derived edge kernels on demand by @tignear in https://github.com/celox-sim/celox/pull/2400
+* feat(sv): support 4-state class properties by @tignear in https://github.com/celox-sim/celox/pull/2381
+* perf(vpi): encode native value words without temporary big integers by @tignear in https://github.com/celox-sim/celox/pull/2409
+* perf(vpi): reuse inactive callback request records by @tignear in https://github.com/celox-sim/celox/pull/2410
+* chore(deps): update rust toolchain to 19ecdd0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2413
+* feat(sv)!: execute clocked Boolean concurrent assertions by @tignear in https://github.com/celox-sim/celox/pull/2408
+* feat(sv): implement built-in process handles and control by @tignear in https://github.com/celox-sim/celox/pull/2322
+* fix(native): store the mask plane of wide two-state values by @tignear in https://github.com/celox-sim/celox/pull/2425
+* ci: start the fixer agent from PR mentions by @tignear in https://github.com/celox-sim/celox/pull/2430
+* perf(sv): bind class signatures once per scope during type discovery by @tignear in https://github.com/celox-sim/celox/pull/2421
+* chore(deps): update dependency @biomejs/biome to v2.6.2 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2428
+* chore(deps): update pnpm to v12.15.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2436
+* fix(sv): reject waits on class properties that never wake by @tignear in https://github.com/celox-sim/celox/pull/2434
+* perf(native): specialize wiring-only clock updates by @tignear in https://github.com/celox-sim/celox/pull/2420
+* feat(sv): pass subroutine arguments by reference by @tignear in https://github.com/celox-sim/celox/pull/2411
+* fix(sv): read string characters as signed bytes by @tignear in https://github.com/celox-sim/celox/pull/2446
+* perf(vpi): avoid allocating empty names for temporary handles by @tignear in https://github.com/celox-sim/celox/pull/2449
+* perf(vpi): snapshot pending deposits once per edge batch by @tignear in https://github.com/celox-sim/celox/pull/2450
+* ci: keep every CI job's Rust dependency cache warm and keyed alike by @tignear in https://github.com/celox-sim/celox/pull/2454
+* perf(vpi): skip unused value format metadata by @tignear in https://github.com/celox-sim/celox/pull/2459
+* feat(sv): specialize package classes from importing scopes by @tignear in https://github.com/celox-sim/celox/pull/2429
+* test(xezim): update xezim digest to 21834c5 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2453
+* feat(sv): implement enumerated type methods by @tignear in https://github.com/celox-sim/celox/pull/2390
+* feat(sv): initialize process static locals with run-time values by @tignear in https://github.com/celox-sim/celox/pull/2407
+* perf(native): map attached image input and bulk-decode machine code by @tignear in https://github.com/celox-sim/celox/pull/2465
+* refactor(runtime)!: support explicitly invoked SIR process kernels by @tignear in https://github.com/celox-sim/celox/pull/2444
+* ci: compile the Rust test workspace once for the vtest executor and tests by @tignear in https://github.com/celox-sim/celox/pull/2467
+* chore(deps): update dependency @napi-rs/cli to v3.10.9 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2469
+* fix(sv): keep package specialization state single in interface-bound modules by @tignear in https://github.com/celox-sim/celox/pull/2474
+* fix(deps): drop the zstd versions with open RustSec advisories by @tignear in https://github.com/celox-sim/celox/pull/2475
+* feat(sv): support $sformatf and $sformat by @tignear in https://github.com/celox-sim/celox/pull/2402
+* feat(sv): support the $swrite family by @tignear in https://github.com/celox-sim/celox/pull/2403
+* ci: key the vtest dependency cache by the executor's build plan by @tignear in https://github.com/celox-sim/celox/pull/2487
+* perf(native): keep attached machine code in file mappings by @tignear in https://github.com/celox-sim/celox/pull/2480
+* feat(sv): support unpacked structures by @tignear in https://github.com/celox-sim/celox/pull/2415
+* feat(sv): support class properties of unpacked structure type by @tignear in https://github.com/celox-sim/celox/pull/2419
+* feat(sv): support unpacked structures as dynamic container elements by @tignear in https://github.com/celox-sim/celox/pull/2422
+* feat(sv): support nested dynamic containers and class handle keys by @tignear in https://github.com/celox-sim/celox/pull/2424
+* feat(sv): pass unpacked structures by reference by @tignear in https://github.com/celox-sim/celox/pull/2473
+* feat(sv): bind method arguments by name and default by @tignear in https://github.com/celox-sim/celox/pull/2494
+* feat(sv): support %p for integral, string, handle and container values by @tignear in https://github.com/celox-sim/celox/pull/2423
+* perf(testbench)!: roll up compiled Veryl testbench execution by @tignear in https://github.com/celox-sim/celox/pull/2484
+* perf(runtime)!: defer settles that are a function of their inputs by @tignear in https://github.com/celox-sim/celox/pull/2497
+* feat(sv): use enumeration constants that classes declare by @tignear in https://github.com/celox-sim/celox/pull/2491
+* feat(sv): use container typedefs that classes declare by @tignear in https://github.com/celox-sim/celox/pull/2501
+* feat(sv): pass dynamic containers by value and as output arguments by @tignear in https://github.com/celox-sim/celox/pull/2508
+* perf(sv): stop repeating discovery work per query and class reference by @tignear in https://github.com/celox-sim/celox/pull/2509
+* fix(sv): reject %p of unpacked structures and allow mixed enum conditionals by @tignear in https://github.com/celox-sim/celox/pull/2512
+* perf(sv): leave unchanged signatures out of shared discovery tables by @tignear in https://github.com/celox-sim/celox/pull/2514
+* fix(sv): fix structure defaults, record padding, bare pops and nested reads by @tignear in https://github.com/celox-sim/celox/pull/2500
+* feat(sv): support array locator methods by @tignear in https://github.com/celox-sim/celox/pull/2498
+* ci(bench): publish daily Taxi comparisons with Verilator by @tignear in https://github.com/celox-sim/celox/pull/2499
+* ci: split sv-tests conformance into shards by @tignear in https://github.com/celox-sim/celox/pull/2520
+* chore(deps): update dependency cocotb-test to v0.3.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2522
+* chore(deps): update actions/setup-python action to v7 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2529
+* chore(deps): update dependency scapy to v2.8.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2528
+* feat(sv): support $typename by @tignear in https://github.com/celox-sim/celox/pull/2492
+* chore(deps): update dependency cocotb to v2.1.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2521
+* chore(deps): update dependency ubuntu to v26 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2535
+* feat(cli): report when each tier of a tiered run ran by @tignear in https://github.com/celox-sim/celox/pull/2526
+* perf(tiered): compile the baseline scheduler without fused domain units by @tignear in https://github.com/celox-sim/celox/pull/2533
+* chore(deps): update dependency pytest to v9 [security] by @renovate[bot] in https://github.com/celox-sim/celox/pull/2524
+* feat(sv): select members of class handles that calls return by @tignear in https://github.com/celox-sim/celox/pull/2537
+* chore(deps): update dependency pytest to v9.2.0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2543
+* fix(sv): accept class typedefs as members of class structures by @tignear in https://github.com/celox-sim/celox/pull/2515
+* feat(sv): support increment and decrement in expressions by @tignear in https://github.com/celox-sim/celox/pull/2541
+* feat(sv): accept DPI-C exports by @tignear in https://github.com/celox-sim/celox/pull/2525
+* feat(sv): support virtual interface variables by @tignear in https://github.com/celox-sim/celox/pull/2440
+* chore(deps): update rust toolchain to afcefd0 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2554
+* feat(sv): wait on members through virtual interfaces by @tignear in https://github.com/celox-sim/celox/pull/2441
+* refactor(x86): select the register allocator by strategy by @tignear in https://github.com/celox-sim/celox/pull/2551
+* perf(x86): allocate baseline-tier registers with a linear allocator by @tignear in https://github.com/celox-sim/celox/pull/2552
+* feat(native): add a builder option for the baseline native pipeline by @tignear in https://github.com/celox-sim/celox/pull/2553
+* feat(sv): accept virtual interface class type arguments by @tignear in https://github.com/celox-sim/celox/pull/2442
+* fix(x86): read rotated loop phis before their homes are overwritten by @tignear in https://github.com/celox-sim/celox/pull/2562
+* test(xezim): update xezim digest to 0fca605 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2490
+* feat(sv): implement named events by @tignear in https://github.com/celox-sim/celox/pull/2493
+* feat(sv): support streaming concatenation of fixed-size data by @tignear in https://github.com/celox-sim/celox/pull/2557
+* feat(sv): support streaming concatenation of dynamically sized data by @tignear in https://github.com/celox-sim/celox/pull/2564
+* feat(sv): apply compound assignments to dynamic container elements by @tignear in https://github.com/celox-sim/celox/pull/2575
+* feat(sv): take strings that calls return as associative indices by @tignear in https://github.com/celox-sim/celox/pull/2573
+* perf(sir): optimize the unit groups of all events concurrently by @tignear in https://github.com/celox-sim/celox/pull/2581
+* chore(diagnostics): time the Veryl parser and analyzer passes by @tignear in https://github.com/celox-sim/celox/pull/2582
+* fix(sv): follow event variables in triggered waits and keep saved events distinct by @tignear in https://github.com/celox-sim/celox/pull/2569
+* feat(sv): concatenate arrays as items of unpacked array concatenations by @tignear in https://github.com/celox-sim/celox/pull/2578
+* fix(runtime): order lane tasks by the rounded writes of unpadded strided arrays by @tignear in https://github.com/celox-sim/celox/pull/2587
+* feat(sir): add four-state plane moves by @tignear in https://github.com/celox-sim/celox/pull/2574
+* feat(sv): support class properties wider than 64 bits by @tignear in https://github.com/celox-sim/celox/pull/2579
+* chore(deps): update dependency chart.js to v4.6.1 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2595
+* feat(sv): implement semaphores by @tignear in https://github.com/celox-sim/celox/pull/2570
+* feat(sv): implement parameterized mailboxes by @tignear in https://github.com/celox-sim/celox/pull/2599
+* fix(sv): extend values stored in class properties by their own signedness by @tignear in https://github.com/celox-sim/celox/pull/2600
+* feat(sv): share static task locals between calls by @tignear in https://github.com/celox-sim/celox/pull/2603
+* fix(veryl): compile complete binary cases combinationally in two-state builds by @tignear in https://github.com/celox-sim/celox/pull/2605
+* ci: write the mention agent messages in English by @tignear in https://github.com/celox-sim/celox/pull/2607
+* fix(deps): update dependency vscode-languageclient to v11 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2572
+* perf(testbench): keep latch designs' TB edges in the generated scheduler by @tignear in https://github.com/celox-sim/celox/pull/2609
+* feat(sv): index associative arrays with process handles by @tignear in https://github.com/celox-sim/celox/pull/2610
+* test(suite): expect the retained Icarus failure of process-keyed arrays by @tignear in https://github.com/celox-sim/celox/pull/2616
+* feat(sv): write $swrite and $sformat results into integral outputs by @tignear in https://github.com/celox-sim/celox/pull/2612
+* feat(sv): support bit and part selects of class properties by @tignear in https://github.com/celox-sim/celox/pull/2588
+* feat(sv): support dynamic container elements wider than 64 bits by @tignear in https://github.com/celox-sim/celox/pull/2589
+* perf(scheduler): run four-state designs in the compiled scheduler by @tignear in https://github.com/celox-sim/celox/pull/2621
+* perf(testbench): run TB assertions, displays and $finish in the generated scheduler by @tignear in https://github.com/celox-sim/celox/pull/2623
+* perf(testbench): keep VCD runs and TB-only clocks on native edges by @tignear in https://github.com/celox-sim/celox/pull/2622
+* chore(deps): update rust toolchain to 96a0986 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2637
+* test(xezim): update xezim digest to 80f00d3 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2580
+* fix(sv): bind handles declared with class-scoped typedefs by @tignear in https://github.com/celox-sim/celox/pull/2626
+* chore(deps): update mbx to 1.29.0 by @celox-bot[bot] in https://github.com/celox-sim/celox/pull/2642
+* fix(sv): check element types and every assignment of unpacked arrays by @tignear in https://github.com/celox-sim/celox/pull/2638
+* refactor(sv): intern semantic types of the analyzer by @tignear in https://github.com/celox-sim/celox/pull/2643
+* refactor(sv): define type equivalence and unpacked array assignability by @tignear in https://github.com/celox-sim/celox/pull/2644
+* feat(sv): support unpacked structure input and output ports by @tignear in https://github.com/celox-sim/celox/pull/2548
+* perf(testbench): run rst.assert, its release and reset edges in the generated scheduler by @tignear in https://github.com/celox-sim/celox/pull/2624
+* fix(testbench): keep unknown bits in TB message arguments by @tignear in https://github.com/celox-sim/celox/pull/2625
+* fix(sv): compare unpacked array elements by their semantic types by @tignear in https://github.com/celox-sim/celox/pull/2653
+* refactor(sv): spell unpacked array diagnostics from semantic types by @tignear in https://github.com/celox-sim/celox/pull/2656
+* fix(ci): restore daily Taxi benchmark publication by @tignear in https://github.com/celox-sim/celox/pull/2659
+* ci: lock GitHub Actions workflow dependencies by @tignear in https://github.com/celox-sim/celox/pull/2662
+* refactor(sv): type unpacked array operands by their selects by @tignear in https://github.com/celox-sim/celox/pull/2663
+* fix(ci): build pinned Verilator on Ubuntu 26.04 by @tignear in https://github.com/celox-sim/celox/pull/2664
+* fix(ci): require workflow locks before merging by @tignear in https://github.com/celox-sim/celox/pull/2669
+* chore(deps): update rust crate globset to v0.4.21 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2676
+* refactor(sv): carry the imports of a scope in its analysis context by @tignear in https://github.com/celox-sim/celox/pull/2673
+* fix(testbench): keep unknown bits in TB writes and conditions by @tignear in https://github.com/celox-sim/celox/pull/2654
+* perf(sv): share scope tables between class specializations by @tignear in https://github.com/celox-sim/celox/pull/2672
+* fix(bench): publish rica comparisons on the benchmark dashboard by @tignear in https://github.com/celox-sim/celox/pull/2668
+* refactor(native): own spill-plan costs and test counters instead of sharing them through Cell by @tignear in https://github.com/celox-sim/celox/pull/2681
+* refactor(sir): pass alias oracles and batch verifiers by `&mut` instead of counting through Cell by @tignear in https://github.com/celox-sim/celox/pull/2682
+* refactor(slt): own the lowering caches instead of sharing them through RefCell by @tignear in https://github.com/celox-sim/celox/pull/2683
+* refactor(veryl): scope loop ranges through a borrowing guard instead of a shared RefCell by @tignear in https://github.com/celox-sim/celox/pull/2684
+* refactor(sv): collect call walks and lowering memos without Cell or RefCell by @tignear in https://github.com/celox-sim/celox/pull/2685
+* refactor(runtime): request derived-edge units through `&mut` and drop Cell from tests by @tignear in https://github.com/celox-sim/celox/pull/2686
+* test(suite): intern signal and event names through `&mut self` instead of RefCell by @tignear in https://github.com/celox-sim/celox/pull/2687
+* refactor(lydite): record proof bundle poisoning through `&mut self` instead of Cell by @tignear in https://github.com/celox-sim/celox/pull/2688
+* test(xezim): update xezim digest to 9fadb2e by @renovate[bot] in https://github.com/celox-sim/celox/pull/2678
+* perf(sv): bind class signatures once a scope's declarations settle by @tignear in https://github.com/celox-sim/celox/pull/2658
+* refactor(sv): pass constant functions explicitly instead of installing them by @tignear in https://github.com/celox-sim/celox/pull/2674
+* refactor(sv): carry interface instances and time scopes in the context by @tignear in https://github.com/celox-sim/celox/pull/2675
+* ci(deps): configure security-only Cargo updates by @tignear in https://github.com/celox-sim/celox/pull/2199
+* perf(scheduler): leave settle inputs and aliases out of TB level slices by @tignear in https://github.com/celox-sim/celox/pull/2699
+* chore(deps): update rust toolchain to 6ecf534 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2700
+* refactor(sv)!: pass the analysis session explicitly instead of sharing it through RefCell by @tignear in https://github.com/celox-sim/celox/pull/2695
+* perf(sv): fold zero-argument functions whose kept result is never read by @tignear in https://github.com/celox-sim/celox/pull/2704
+* perf(sv): parse wide based literals in linear time by @tignear in https://github.com/celox-sim/celox/pull/2703
+* ci: stop nightly develop external comparisons and Heliodor by @tignear in https://github.com/celox-sim/celox/pull/2714
+* fix(deps): update Wasmtime to resolve security advisories by @tignear in https://github.com/celox-sim/celox/pull/2706
+* perf(scheduler): settle before asynchronous reset domains instead of fusing them by @tignear in https://github.com/celox-sim/celox/pull/2710
+* test(xezim): update xezim digest to e826641 by @renovate[bot] in https://github.com/celox-sim/celox/pull/2697
+* ci(release): track pending releases in an issue by @tignear in https://github.com/celox-sim/celox/pull/2718
+
+
+**Full Changelog**: https://github.com/celox-sim/celox/compare/v0.12.0...v0.13.0
+
 ## 0.12.0 (2026-10-28)
 
 ## What's Changed
