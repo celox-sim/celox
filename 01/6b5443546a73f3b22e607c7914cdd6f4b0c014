@@ -1,1 +1,6 @@
-Rebased on master after #2747 (wide associative keys): both PRs' tests, shared cases and retained Icarus failures are kept.
+Revision history for #2752:
+
+rev 2 (content) 2026-10-31 15:02 UTC — Rebased on master after #2747 (wide associative keys): both PRs' tests, shared cases and retained Icarus failures are kept.
+rev 1 (initial) 2026-10-31 15:02 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2752,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"9318f90673bca6f451bfe0e5ce4a70309f6bd6ac","timestamp_iso":"2026-10-31T15:02:08Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"9318f90673bca6f451bfe0e5ce4a70309f6bd6ac","new_sha":"016b5443546a73f3b22e607c7914cdd6f4b0c014","timestamp_iso":"2026-10-31T15:02:08Z","reason":"Rebased on master after #2747 (wide associative keys): both PRs' tests, shared cases and retained Icarus failures are kept.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/9318f90673bca6f451bfe0e5ce4a70309f6bd6ac...016b5443546a73f3b22e607c7914cdd6f4b0c014"}]} -->
