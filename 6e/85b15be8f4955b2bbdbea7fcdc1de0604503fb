@@ -1,0 +1,1 @@
+Capture the index before a value with effects and hoist mutating container methods too, as Codex found
