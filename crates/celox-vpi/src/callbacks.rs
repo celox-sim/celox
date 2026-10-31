@@ -542,6 +542,8 @@ fn run_with_host(host: &super::VpiHost) -> bool {
             }
             state.time = next_time;
         });
+        host.published_time
+            .store(next_time, std::sync::atomic::Ordering::Relaxed);
         fire_all_for_host(host, CB_NEXT_SIM_TIME);
         if !borrow_cell(&host.callbacks, |state| state.finish) {
             super::flush_pending_writes_for_host(host);
@@ -585,7 +587,9 @@ fn set_time(time: u64) {
                 state.rounds_at_time = 0;
             }
             state.time = time;
-        })
+        });
+        host.published_time
+            .store(time, std::sync::atomic::Ordering::Relaxed);
     });
 }
 
@@ -1042,7 +1046,7 @@ pub unsafe extern "C" fn vpi_get_time(_object: VpiHandle, time: *mut VpiTime) {
     if time.is_null() {
         return;
     }
-    let now = with_host(|host| borrow_cell(&host.callbacks, |state| state.time));
+    let now = super::published_time();
     // Safety: checked non-null above.
     let time = unsafe { &mut *time };
     if time.type_ == VPI_SCALED_REAL_TIME {
@@ -1131,7 +1135,7 @@ pub unsafe extern "C" fn vpi_handle_by_index(reference: VpiHandle, index: i32) -
 
 #[unsafe(no_mangle)]
 pub extern "C" fn celox_vpi_current_time() -> u64 {
-    with_host(current_time_for_host)
+    super::published_time()
 }
 
 pub(super) fn current_time_for_host(host: &super::VpiHost) -> u64 {
