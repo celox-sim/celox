@@ -244,10 +244,100 @@ fn rejects_non_integral_ports_instead_of_scalarizing_them() {
         endmodule
         "#,
     );
+    // A chandle port is illegal (IEEE 1800-2023 6.14).
     assert!(
-        error.contains("unsupported port data type"),
+        error.contains("port `value` of chandle type"),
         "unexpected error: {error}"
     );
+}
+
+#[test]
+fn chandles_of_child_instances_keep_their_type() {
+    // A hierarchical name denotes the child's chandle (IEEE 1800-2023 6.14, 23.6).
+    let accepted = celox::Simulation::from_sv_sources(
+        vec![(
+            r#"
+            module Child; chandle h; endmodule
+            module Top(output logic y);
+                Child u();
+                chandle a;
+                initial begin a = u.h; if (u.h == a) u.h = a; end
+                assign y = 1'b0;
+            endmodule
+            "#,
+            std::path::Path::new("child_chandle.sv"),
+        )],
+        "Top",
+    )
+    .build();
+    assert!(accepted.is_ok(), "{:?}", accepted.err());
+    for body in [
+        "initial u.h = 64'd1;",
+        "bit [63:0] w; initial w = u.h;",
+        "initial u.h += null;",
+    ] {
+        let error = cranelift_build_error(&format!(
+            r#"
+            module Child; chandle h; endmodule
+            module Top(output logic y);
+                Child u();
+                {body}
+                assign y = 1'b0;
+            endmodule
+            "#
+        ));
+        assert!(
+            error.contains("chandle"),
+            "{body}: unexpected error: {error}"
+        );
+    }
+}
+
+#[test]
+fn chandles_through_virtual_interfaces_keep_their_type() {
+    // A member selected through a virtual interface has its declared type
+    // (IEEE 1800-2023 6.14, 25.9).
+    let accepted = celox::Simulation::from_sv_sources(
+        vec![(
+            r#"
+            interface Bus; chandle h; endinterface
+            module Top(output logic y);
+                Bus bus();
+                virtual Bus v = bus;
+                chandle a;
+                initial begin a = v.h; if (v.h == a) v.h = a; end
+                assign y = 1'b0;
+            endmodule
+            "#,
+            std::path::Path::new("vif_chandle.sv"),
+        )],
+        "Top",
+    )
+    .build();
+    assert!(accepted.is_ok(), "{:?}", accepted.err());
+    for body in [
+        "initial v.h = 64'd1;",
+        "bit [63:0] b; initial b = v.h;",
+        "bit d; initial @(v.h) d = 1;",
+        "bit d; initial @(posedge v.h or v.h) d = 1;",
+        "initial v.h += null;",
+    ] {
+        let error = cranelift_build_error(&format!(
+            r#"
+            interface Bus; chandle h; endinterface
+            module Top(output logic y);
+                Bus bus();
+                virtual Bus v = bus;
+                {body}
+                assign y = 1'b0;
+            endmodule
+            "#
+        ));
+        assert!(
+            error.contains("chandle"),
+            "{body}: unexpected error: {error}"
+        );
+    }
 }
 
 #[test]
@@ -6475,7 +6565,7 @@ fn rejects_unsupported_internal_data_types() {
     let error = cranelift_build_error(
         r#"
         module Top(output logic y);
-            chandle value;
+            type(y) value;
             assign y = 1'b0;
         endmodule
         "#,

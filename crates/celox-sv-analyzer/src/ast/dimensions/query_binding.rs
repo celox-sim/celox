@@ -136,20 +136,42 @@ pub(in crate::ast) fn query_value(
     {
         return Ok(Some(value));
     }
-    let shape = shape(argument, tree, session, &context)?;
+    let mut shape = shape(argument, tree, session, &context)?;
+    // A value whose shape is rebuilt from its bits, such as a conditional
+    // choosing between chandles, is still a chandle.
+    if let Some(shape) = &mut shape
+        && !shape.chandle
+        && shape.unpacked.is_empty()
+        && expression_binding::native_chandle(tree, argument, native, &context, session)
+    {
+        shape.chandle = true;
+    }
+    // The 64 bits of a chandle are its storage, which `$bits` counts; they
+    // are no packed dimension the array queries see (IEEE 1800-2023 6.14,
+    // 20.7).
+    let bits = shape.clone();
+    if let Some(shape) = &mut shape
+        && shape.chandle
+    {
+        shape.packed.clear();
+    }
     let dimension = if let Some(argument) = arguments.get(1) {
+        // The dimension number is evaluated, unlike the queried operand, so
+        // it is bound as a value (IEEE 1800-2023 20.7).
+        let mut evaluated = context.clone();
+        evaluated.type_query = false;
         Some(expression_binding::bind(
             argument.value.unwrap(),
             tree,
             session,
-            &context,
+            &evaluated,
         )?)
     } else {
         None
     };
     let value = match function {
         SystemFunction::Bits => {
-            let width = if let Some(shape) = &shape {
+            let width = if let Some(shape) = &bits {
                 shape
                     .unpacked
                     .iter()
@@ -217,8 +239,12 @@ pub(in crate::ast) fn query_value(
                         })
                 }
                 .or_else(|| {
-                    (shape.unpacked.is_empty() && shape.packed.is_empty() && index == Some(0))
-                        .then_some(1)
+                    // A scalar has one element; a chandle has no dimension.
+                    (shape.unpacked.is_empty()
+                        && shape.packed.is_empty()
+                        && !shape.chandle
+                        && index == Some(0))
+                    .then_some(1)
                 })
             } else {
                 None
@@ -388,7 +414,9 @@ fn function_first_width(
     }
     context
         .function_return_types
-        .get(&name)?
+        .get(&name)
+        // A chandle result has no packed dimension (IEEE 1800-2023 6.14).
+        .filter(|metadata| !metadata.chandle)?
         .first_packed_dimension_width
 }
 
@@ -916,7 +944,11 @@ pub(in crate::ast) fn shape(
                             && let Some(metadata) = context.function_return_types.get(name)
                             && let Some(count) = metadata.dimensions
                         {
-                            if count == 0 {
+                            // The bits of a chandle are its storage, not a
+                            // packed dimension (IEEE 1800-2023 6.14).
+                            if metadata.chandle {
+                                shape.chandle = true;
+                            } else if count == 0 {
                                 shape.packed.clear();
                             }
                         }
@@ -1026,6 +1058,7 @@ mod tests {
                 signed: false,
                 is_2state: false,
                 string: false,
+                chandle: false,
                 pattern_type: None,
                 enum_domain: None,
                 class: None,
@@ -1049,7 +1082,8 @@ mod tests {
                         &context,
                     )
                     .unwrap(),
-                );
+                )
+                .unwrap();
                 context.insert(
                     instances::normalize_identifier(&variable.name.spelling),
                     procedural::dimensions_from_type(&ty),

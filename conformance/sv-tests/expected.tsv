@@ -1107,8 +1107,8 @@ chapter-6/6.12--shortreal.sv	2state	pass
 chapter-6/6.12--shortreal.sv	4state	pass
 chapter-6/6.13--void.sv	2state	pass
 chapter-6/6.13--void.sv	4state	pass
-chapter-6/6.14--chandle.sv	2state	fail
-chapter-6/6.14--chandle.sv	4state	fail
+chapter-6/6.14--chandle.sv	2state	pass
+chapter-6/6.14--chandle.sv	4state	pass
 chapter-6/6.16--string.sv	2state	pass
 chapter-6/6.16--string.sv	4state	pass
 chapter-6/6.16.1--string_len.sv	2state	pass

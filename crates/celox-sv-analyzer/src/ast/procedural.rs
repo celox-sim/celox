@@ -86,6 +86,8 @@ pub(super) struct BodyBuilder<'s, 't, 'a> {
     /// The shape of any return type, which a returned stream is aligned to
     /// (IEEE 1800-2023 11.4.14).
     stream_return_shape: Option<VariableDimensions>,
+    /// Whether the function's result is a chandle, `None` without a result.
+    return_chandle: Option<bool>,
     pub(super) sensitivity_body: Vec<Stmt>,
 }
 
@@ -170,8 +172,10 @@ impl Names {
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
     VariableDimensions {
+        chandle: r#type.chandle,
         container: r#type.container.clone(),
         randomizable: r#type.container.is_none()
+            && !r#type.holds_chandle()
             && (!r#type.is_enum || r#type.enum_domain.is_some()),
         enum_domain: r#type.enum_domain.clone(),
         packed_enum: r#type.packed_enum,
@@ -379,6 +383,7 @@ pub(super) fn rename_expr_idents(
 pub(super) fn int_type() -> Type {
     Type {
         container: None,
+        chandle: false,
         is_enum: false,
         enum_domain: None,
         packed_enum: false,
@@ -421,6 +426,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             task_timing: false,
             return_shape: None,
             stream_return_shape: None,
+            return_chandle: None,
             sensitivity_body: Vec::new(),
             tree,
             session,
@@ -643,9 +649,27 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         Ok(value)
     }
 
+    /// [`Self::native_value`] of a value that may be a chandle: a condition
+    /// tested as a Boolean, or a value compared or assigned as a chandle
+    /// (IEEE 1800-2023 6.14).
+    fn native_chandle_value(&mut self, id: celox_sv_syntax::ExprId) -> Result<Expr, AnalyzerError> {
+        let mut value = expression_binding::bind_chandle_value(
+            id,
+            self.tree.declarations(),
+            self.tree,
+            self.session,
+            &self.dims,
+            None,
+        )?;
+        self.rename_expr(&mut value);
+        Ok(value)
+    }
+
+    /// The target `id` of a write, which may be a chandle if `chandle`.
     fn native_lvalue(
         &mut self,
         id: celox_sv_syntax::ExprId,
+        chandle: bool,
     ) -> Result<(LValue, LValue), AnalyzerError> {
         let lowered = expression_binding::variable_lvalue(
             id,
@@ -653,6 +677,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.tree,
             self.session,
             &self.dims,
+            chandle,
         )?;
         virtual_interfaces::check_target(&lowered)?;
         let mut renamed = lowered.clone();
@@ -692,6 +717,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     self.tree,
                     self.session,
                     &self.dims,
+                    false,
                 )?;
                 virtual_interfaces::check_target(&target)?;
                 self.rename_lvalue(&mut target);
@@ -721,6 +747,33 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 "assignment to a member of a dynamic container element",
             ));
         }
+        let declarations = self.tree.declarations();
+        // A chandle is only assigned (IEEE 1800-2023 6.14); the destinations
+        // dispatched below write without `variable_lvalue`, so its target
+        // check runs here.
+        expression_binding::check_chandle_target(
+            op == "=",
+            left,
+            self.tree,
+            declarations,
+            &self.dims,
+            self.session,
+        )?;
+        let chandle = expression_binding::native_chandle(
+            self.tree,
+            left,
+            declarations,
+            &self.dims,
+            self.session,
+        );
+        expression_binding::check_chandle_assignment(
+            chandle,
+            right,
+            self.tree,
+            declarations,
+            &self.dims,
+            self.session,
+        )?;
         if let Some(mut stmt) = containers::set(
             left,
             right,
@@ -818,7 +871,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if op != "=" {
             self.reject_tagged_integral_target(left)?;
         }
-        let (written, lhs) = self.native_lvalue(left)?;
+        let (written, lhs) = self.native_lvalue(left, op == "=")?;
         if op != "="
             && expression_binding::native_string(
                 self.tree,
@@ -925,6 +978,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.tree,
             self.session,
             &self.dims,
+            op == "=",
         ) else {
             return Ok(None);
         };
@@ -1180,7 +1234,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             stmts.push(self.property_store(&property, handle, "=", value)?);
             return Ok(stmts);
         }
-        let (_, lhs) = self.native_lvalue(output)?;
+        let (_, lhs) = self.native_lvalue(output, false)?;
         let mut rhs = value;
         self.rename_expr(&mut rhs);
         stmts.push(Stmt::Assign {
@@ -1399,6 +1453,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         self.tree,
                         self.session,
                         &self.dims,
+                        false,
                     )?;
                     let mut renamed = lowered.clone();
                     self.rename_lvalue(&mut renamed);
@@ -1588,7 +1643,16 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 {
                     return Ok(None);
                 }
-                expression_binding::value(root, native, self.tree, self.session, &self.dims)?
+                // The result of a call statement is discarded, which a
+                // chandle result may be (IEEE 1800-2023 6.14).
+                expression_binding::bind_chandle_value(
+                    root,
+                    native,
+                    self.tree,
+                    self.session,
+                    &self.dims,
+                    None,
+                )?
             }
             _ => {
                 let Some((name, formals, receiver)) = expression_binding::object_method(
@@ -1693,7 +1757,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.rename_expr(&mut store);
             return Ok(Stmt::Eval(store));
         }
-        let (written, lhs) = self.native_lvalue(string)?;
+        let (written, lhs) = self.native_lvalue(string, false)?;
         let LValue::Ident(name) = &written else {
             return Err(unsupported(format!(
                 "string method `{op}` on an array element"
@@ -1954,6 +2018,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         signal.name().to_string(),
                         dimensions_from_type(signal.r#type()),
                     );
+                    expression_binding::check_chandle_assignment(
+                        signal.r#type().chandle && signal.r#type().unpacked_ranges.is_empty(),
+                        root,
+                        self.tree,
+                        self.tree.declarations(),
+                        &self.dims,
+                        self.session,
+                    )?;
                     let mut init = expression_binding::expression(
                         root,
                         self.tree.declarations(),
@@ -2236,7 +2308,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .map(|arg| arg.value.filter(|_| arg.name.is_none()))
                 .collect::<Option<Vec<_>>>()
                 .filter(|args| args.len() == count)
-                .ok_or_else(|| unsupported(format!("arguments of string method `{op}`")))?
+                .ok_or_else(|| unsupported(format!("arguments of string method `{op}`")))?;
+            let args = args
                 .into_iter()
                 .map(|arg| {
                     expression_binding::value(arg, native, self.tree, self.session, &self.dims)
@@ -2562,6 +2635,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
             system_functions::SystemCall::Task(task) => task,
         };
+        if matches!(task, SystemTask::Readmem(_) | SystemTask::Writemem(_))
+            && let Some(memory) = arguments.get(1).and_then(|arg| arg.value)
+        {
+            expression_binding::check_chandle_memory(memory, self.tree, &self.dims, self.session)?;
+        }
         let args = arguments
             .iter()
             .enumerate()
@@ -2696,12 +2774,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         if item.pattern.is_some() {
             return Err(unsupported("pattern matching in a condition"));
         }
-        let condition = expression_binding::value(
+        // A Boolean test, which may be of a chandle (IEEE 1800-2023 6.14).
+        let condition = expression_binding::bind_chandle_value(
             item.expression,
             self.tree.declarations(),
             self.tree,
             self.session,
             &self.dims,
+            None,
         )?;
         let mut condition =
             statements::simplify_condition(self.tree, self.session, condition, &self.dims);
@@ -2734,6 +2814,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                         let target = LValue::Ident(source.clone());
                         let mut scoped = self.dims.clone();
                         scoped.insert(source.clone(), dimensions_from_type(&ty));
+                        expression_binding::check_chandle_assignment(
+                            ty.chandle && ty.unpacked_ranges.is_empty(),
+                            variable.value,
+                            self.tree,
+                            self.tree.declarations(),
+                            &self.dims,
+                            self.session,
+                        )?;
                         let mut value = expression_binding::expression(
                             variable.value,
                             self.tree.declarations(),
@@ -2769,7 +2857,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             None => (None, Vec::new()),
             Some(id) => match self.loop_condition(id)? {
                 Some(prologue) => (None, prologue),
-                None => (Some(self.native_value(id)?), Vec::new()),
+                None => (Some(self.native_chandle_value(id)?), Vec::new()),
             },
         };
         let mut steps = Vec::new();
@@ -3568,9 +3656,19 @@ pub(super) fn lower_subroutine(
                             &builder.dims,
                         )?;
                     }
-                    // The default of a container input is a container value.
+                    expression_binding::check_chandle_assignment(
+                        ty.chandle && ty.unpacked_ranges.is_empty(),
+                        root,
+                        tree,
+                        tree.declarations(),
+                        &builder.dims,
+                        builder.session,
+                    )?;
+                    // The default of a container input is a container value;
+                    // that of a chandle, a chandle.
                     let shape = (ty.tagged_identity().is_some()
                         || ty.unpacked_struct().is_some()
+                        || ty.chandle && ty.unpacked_ranges.is_empty()
                         || ty.container.is_some() && *direction == ParamDirection::Input)
                         .then(|| dimensions_from_type(ty));
                     let mut value = expression_binding::bind_value(
@@ -3708,6 +3806,9 @@ pub(super) fn lower_subroutine(
     }
     // The members of formals and of the result have the subroutine's
     // lifetime, like the formals themselves.
+    builder.return_chandle = return_type
+        .as_ref()
+        .map(|ty| ty.chandle && ty.unpacked_ranges.is_empty());
     let parameter_locals_end = builder.state.locals.len();
     let mut items = native.items.clone();
     let mut prologue = Vec::new();
@@ -4089,16 +4190,20 @@ impl BodyBuilder<'_, '_, '_> {
             }
             let mut args = vec![Some(Expr::Ident(this.to_owned()))];
             let (actuals, order) = base.constructor_arguments(arguments)?;
-            for actual in actuals {
+            let name = classes::Class::subroutine_name(&base.name, "new");
+            for (index, actual) in actuals.into_iter().enumerate() {
                 args.push(
                     actual
                         .map(|value| {
-                            let mut value = expression_binding::value(
+                            // The formals start with the object's handle.
+                            let mut value = expression_binding::bind_argument(
+                                &name,
+                                index + 1,
                                 value,
                                 native,
                                 self.tree,
-                                self.session,
                                 &self.dims,
+                                self.session,
                             )?;
                             self.rename_expr(&mut value);
                             Ok::<_, AnalyzerError>(value)
@@ -4107,7 +4212,7 @@ impl BodyBuilder<'_, '_, '_> {
                 );
             }
             body.push(Stmt::Call {
-                name: classes::Class::subroutine_name(&base.name, "new"),
+                name,
                 args,
                 arg_order: std::iter::once(0)
                     .chain(order.into_iter().map(|index| index + 1))
@@ -4154,6 +4259,14 @@ impl BodyBuilder<'_, '_, '_> {
                 )?,
                 None => None,
             };
+            expression_binding::check_chandle_assignment(
+                property.r#type.chandle && property.r#type.unpacked_ranges.is_empty(),
+                initializer,
+                self.tree,
+                native,
+                &self.dims,
+                self.session,
+            )?;
             let mut value = match value.take() {
                 Some(value) => value,
                 None => expression_binding::bind_value(
@@ -4373,8 +4486,14 @@ impl BodyBuilder<'_, '_, '_> {
             property.r#type.clone(),
         );
         self.dims.property_select_base = Some(base);
-        let lhs =
-            expression_binding::variable_lvalue(left, native, self.tree, self.session, &self.dims);
+        let lhs = expression_binding::variable_lvalue(
+            left,
+            native,
+            self.tree,
+            self.session,
+            &self.dims,
+            false,
+        );
         self.dims.property_select_base = None;
         let lhs = lhs.and_then(|lhs| self.hoist_index_calls(lhs, op != "=", &mut body));
         // The width of the selection, which a runtime position leaves unknown
@@ -5129,6 +5248,16 @@ pub(super) fn initial_processes_from_scope(
                         item_dimensions,
                     )?;
                 }
+                expression_binding::check_chandle_assignment(
+                    item_dimensions
+                        .get(&name)
+                        .is_some_and(|shape| shape.chandle && shape.unpacked.is_empty()),
+                    native,
+                    tree,
+                    tree.declarations(),
+                    item_dimensions,
+                    session,
+                )?;
                 let lhs = LValue::Ident(name);
                 let rhs = expression_binding::expression(
                     native,

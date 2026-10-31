@@ -1126,6 +1126,11 @@ impl Module {
                 &type_aliases,
                 header_ports,
             )?;
+            if let Some(port) = ports.iter().find(|port| port.r#type.holds_chandle()) {
+                return Err(AnalyzerError::IllegalChandleUse {
+                    detail: format!("port `{}` of chandle type", port.name),
+                });
+            }
             ports.extend(imported.ports.iter().cloned());
             let mut port_names = HashSet::default();
             if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
@@ -1242,6 +1247,37 @@ impl Module {
             let dpi_items = generate::items(syntax_tree, session, &const_env, &type_aliases)?;
             let mut dpi_imports = dpi::imports(&dpi_items, syntax_tree, session, &type_aliases)?;
             for import in &dpi_imports {
+                // Shapes check the actuals as assignments to the formals.
+                subroutine_shapes.insert(
+                    import.name().to_string(),
+                    import
+                        .arguments()
+                        .iter()
+                        .filter_map(|argument| {
+                            let r#type = match argument.r#type() {
+                                crate::ir::DpiType::Bit => type_binding::builtin_type("bit", None),
+                                crate::ir::DpiType::Logic => {
+                                    type_binding::builtin_type("logic", None)
+                                }
+                                crate::ir::DpiType::Chandle => {
+                                    type_binding::builtin_type("chandle", None)
+                                }
+                                crate::ir::DpiType::Integer { width, signed } => {
+                                    type_binding::builtin_type(
+                                        match width {
+                                            8 => "byte",
+                                            16 => "shortint",
+                                            32 => "int",
+                                            _ => "longint",
+                                        },
+                                        Some(signed),
+                                    )
+                                }
+                            }?;
+                            Some(procedural::dimensions_from_type(&r#type))
+                        })
+                        .collect(),
+                );
                 subroutine_params.insert(
                     import.name().to_string(),
                     import
@@ -1434,6 +1470,7 @@ impl Module {
                             signed: function.return_signed,
                             is_2state: function.return_is_2state,
                             string: function.return_string,
+                            chandle: function.return_chandle,
                             pattern_type: function.return_type.clone(),
                             enum_domain: function.return_enum_domain.clone(),
                             class: function.return_class.clone(),
@@ -1452,10 +1489,13 @@ impl Module {
                             width: Some(r#type.width()),
                             first_packed_dimension_width: (r#type.width() > 1)
                                 .then_some(r#type.width()),
-                            dimensions: Some(usize::from(r#type.width() > 1)),
+                            dimensions: Some(usize::from(
+                                r#type.width() > 1 && r#type != crate::ir::DpiType::Chandle,
+                            )),
                             signed: r#type.is_signed(),
                             is_2state: !r#type.is_4state(),
                             string: false,
+                            chandle: r#type == crate::ir::DpiType::Chandle,
                             pattern_type: None,
                             enum_domain: None,
                             class: None,
@@ -2476,6 +2516,9 @@ pub struct Type {
     /// The typedef that names an enumeration, struct or union type, and how
     /// `$typename` spells the type where its structure does not tell.
     spelling: type_names::Spelling,
+    /// A `chandle` (IEEE 1800-2023 6.14): an opaque 64-bit C pointer, held
+    /// as 2-state bits, whose uses the analyzer restricts.
+    chandle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2505,6 +2548,7 @@ impl Type {
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
+            chandle: false,
         }
     }
 
@@ -2524,6 +2568,7 @@ impl Type {
             container: None,
             unpacked_struct: None,
             spelling: type_names::Spelling::default(),
+            chandle: false,
         }
     }
 
@@ -2542,6 +2587,16 @@ impl Type {
     /// The typedef that names this enumeration, struct or union type.
     fn declaration_name(&self) -> Option<&str> {
         self.spelling.declaration()
+    }
+
+    /// Whether the type is a chandle or an unpacked structure with a
+    /// chandle member, which no port may have and no randomization fill
+    /// (IEEE 1800-2023 6.14).
+    pub(in crate::ast) fn holds_chandle(&self) -> bool {
+        self.chandle
+            || self
+                .unpacked_struct()
+                .is_some_and(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.r#type.chandle))
     }
 
     /// The members of an unpacked structure type.
@@ -2623,6 +2678,17 @@ impl Type {
                 .collect(),
             ..Self::new(kind)
         }
+    }
+
+    /// Whether the type is a `chandle`.
+    pub(crate) fn is_chandle(&self) -> bool {
+        self.chandle
+    }
+
+    /// The type, a `chandle` if `chandle` (see [`crate::ir::Type::is_chandle`]).
+    pub fn with_chandle(mut self, chandle: bool) -> Self {
+        self.chandle = chandle;
+        self
     }
 }
 
@@ -3103,6 +3169,8 @@ struct Function {
     return_string: bool,
     /// Whether the function returns a class handle.
     return_handle: bool,
+    /// The function returns a `chandle`.
+    return_chandle: bool,
     name: String,
     params: Vec<FunctionParam>,
     /// The function's value as one expression of its arguments, or `None`
@@ -3357,6 +3425,8 @@ struct VariableDimensions {
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
     /// The declared type, for `$typename`.
     declared: type_names::Declared,
+    /// A `chandle` variable (see [`Type::chandle`]).
+    chandle: bool,
 }
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
@@ -3379,6 +3449,8 @@ struct FunctionReturnMetadata {
     is_2state: bool,
     /// The function returns a `string`.
     string: bool,
+    /// The function returns a `chandle` (IEEE 1800-2023 6.14).
+    chandle: bool,
     /// Declared aggregate type, available before function bodies are inlined.
     pattern_type: Option<Type>,
     /// The members of an enumerated return type, for its methods.

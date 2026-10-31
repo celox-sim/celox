@@ -1,12 +1,16 @@
 //! Assignment targets bind native name/member/selection identities directly.
 use super::*;
+/// The variable target `root` of a procedural write, which may be a chandle
+/// if `chandle`: an assignment with `=` writes one (IEEE 1800-2023 6.14).
 pub(in crate::ast) fn variable_lvalue(
     root: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     dimensions: &PackedDimensions,
+    chandle: bool,
 ) -> Converted<LValue> {
+    chandles::check_target(chandle, root, tree, native, dimensions, session)?;
     direct::selected_lvalue(root, native, tree, session, dimensions, false)
 }
 pub(in crate::ast) fn net_lvalue(
@@ -16,6 +20,8 @@ pub(in crate::ast) fn net_lvalue(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<LValue> {
+    // No continuous assignment drives a chandle (6.14).
+    chandles::check_target(false, root, tree, native, dimensions, session)?;
     if direct::member_context(root, native, tree, session, dimensions)?
         .is_some_and(|(guards, _)| !guards.is_empty())
     {
@@ -66,7 +72,14 @@ mod tests {
                 let target = if continuous {
                     net_lvalue(root, &native, &tree, session, &PackedDimensions::default())
                 } else {
-                    variable_lvalue(root, &native, &tree, session, &PackedDimensions::default())
+                    variable_lvalue(
+                        root,
+                        &native,
+                        &tree,
+                        session,
+                        &PackedDimensions::default(),
+                        false,
+                    )
                 }
                 .unwrap();
                 let LValue::Select { msb, lsb, .. } = target else {
@@ -116,7 +129,14 @@ mod tests {
             let target = if continuous {
                 net_lvalue(root, &native, &tree, session, &PackedDimensions::default())
             } else {
-                variable_lvalue(root, &native, &tree, session, &PackedDimensions::default())
+                variable_lvalue(
+                    root,
+                    &native,
+                    &tree,
+                    session,
+                    &PackedDimensions::default(),
+                    false,
+                )
             }
             .unwrap();
             let LValue::Select { msb, lsb, .. } = target else {

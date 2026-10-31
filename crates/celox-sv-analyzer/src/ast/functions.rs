@@ -248,6 +248,9 @@ fn native_signature(
             .is_some_and(|ty| matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)),
         return_string: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::String),
         return_handle: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Object),
+        return_chandle: ty
+            .as_ref()
+            .is_some_and(|ty| ty.chandle && ty.unpacked_ranges.is_empty()),
         name: instances::normalize_identifier(&native.name.spelling),
         params,
         body: None,
@@ -256,7 +259,8 @@ fn native_signature(
         return_first_packed_dimension_width: first,
         return_dimensions: ty.as_ref().map(|ty| {
             ty.unpacked_ranges().len()
-                + if matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
+                // A chandle has no packed dimensions (IEEE 1800-2023 6.14).
+                + if ty.chandle || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
                     0
                 } else {
                     ty.packed_ranges().len()

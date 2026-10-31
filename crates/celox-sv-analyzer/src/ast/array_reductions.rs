@@ -3,6 +3,13 @@ use super::*;
 use celox_sv_syntax::{Declarations, ExprId, ExprKind};
 use system_functions::ContainerOp;
 
+/// A chandle is no integral value to combine (IEEE 1800-2023 6.14).
+fn chandle_elements() -> AnalyzerError {
+    AnalyzerError::IllegalChandleUse {
+        detail: "an array reduction of chandle elements".into(),
+    }
+}
+
 pub(super) fn bind(
     id: ExprId,
     native: &Declarations,
@@ -53,6 +60,9 @@ pub(super) fn bind(
                 "array reduction of elements wider than 64 bits",
             ));
         }
+        if expression_binding::type_holds_chandle(&container.element) {
+            return Err(chandle_elements());
+        }
         if container.layout.handle.is_some() {
             return Err(unsupported("array reduction requires integral elements"));
         }
@@ -86,6 +96,9 @@ pub(super) fn bind(
         return Err(unsupported(
             "array reduction arguments require a with expression",
         ));
+    }
+    if expression_binding::holds_chandle(shape) {
+        return Err(chandle_elements());
     }
     if shape.unpacked.len() != 1 || shape.real || shape.string || shape.class.is_some() {
         return Err(unsupported(

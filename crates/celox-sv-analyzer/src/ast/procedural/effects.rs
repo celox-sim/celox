@@ -284,12 +284,13 @@ impl BodyBuilder<'_, '_, '_> {
     /// Evaluate the truth of `id` into a hidden 1-bit local, which `id`
     /// binds to from now on, and return its unique name.
     fn truth(&mut self, id: ExprId, stmts: &mut Vec<Stmt>) -> Converted<String> {
-        let value = expression_binding::value(
+        let value = expression_binding::bind_chandle_value(
             id,
             self.tree.declarations(),
             self.tree,
             self.session,
             &self.dims,
+            None,
         )?;
         let (source, unique) = self.hidden(Type::new(TypeKind::Logic));
         let truth = |value: Expr| Expr::Unary {
@@ -438,7 +439,7 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(None);
         }
         stmts.push(Stmt::If {
-            condition: self.native_value(id)?,
+            condition: self.native_chandle_value(id)?,
             then_body: Vec::new(),
             else_body: vec![Stmt::Break],
         });

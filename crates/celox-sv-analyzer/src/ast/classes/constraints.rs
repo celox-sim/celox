@@ -166,6 +166,10 @@ pub(in crate::ast) fn bind_inputs(
                     if property.field.four_state {
                         return Err("4-state class property in a constraint".into());
                     }
+                    // A chandle has no integral value to constrain (6.14).
+                    if property.r#type.holds_chandle() {
+                        return Err("a chandle in a constraint".into());
+                    }
                     Typed {
                         kind: Kind::Leaf(ConstraintExpr::Field(index)),
                         width: property.field.width,
