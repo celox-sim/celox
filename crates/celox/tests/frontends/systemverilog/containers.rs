@@ -5,6 +5,9 @@ sv_backends! {
     fn queue_slice_updates_and_copies(sim) { @case "containers::queue_slice_updates_and_copies"; }
     fn queue_slice_wide_and_unknown_bounds(sim) { @case "containers::queue_slice_wide_and_unknown_bounds"; }
     fn class_container_inheritance_static(sim) { @case "containers::class_container_inheritance_static"; }
+    fn nested_container_foreach(sim) { @case "containers::nested_container_foreach"; }
+    fn multidimensional_foreach_break(sim) { @case "containers::multidimensional_foreach_break"; }
+    fn nested_container_foreach_skipped_index(sim) { @case "containers::nested_container_foreach_skipped_index"; }
     fn wide_associative_keys(sim) { @case "containers::wide_associative_keys"; }
     fn wide_signed_associative_keys(sim) { @case "containers::wide_signed_associative_keys"; }
     fn wide_associative_keys_with_unknown_bits(sim) { @case "containers::wide_associative_keys_with_unknown_bits"; }

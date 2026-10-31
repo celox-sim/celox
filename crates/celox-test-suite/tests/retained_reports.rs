@@ -660,6 +660,22 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "containers::package_scoped_container_methods") => {
                             ("compile_error", "compile", "syntax error")
                         }
+                        ("verilator", "containers::nested_container_foreach_skipped_index") => {
+                            ("compile_error", "compile", "Verilator internal fault")
+                        }
+                        ("icarus", "containers::nested_container_foreach") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
+                        ("icarus", "containers::nested_container_foreach_skipped_index") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
+                        ("icarus", "containers::multidimensional_foreach_break") => {
+                            ("compile_error", "compile", "Queue of type")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

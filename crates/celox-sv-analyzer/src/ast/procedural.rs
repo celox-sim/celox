@@ -2951,8 +2951,27 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
         Ok(loops)
     }
-    fn fold_foreach(loops: Vec<ForeachLoop>, mut body: Vec<Stmt>) -> Vec<Stmt> {
+    /// The nested loops of a foreach, the first dimension outermost. With
+    /// `stop`, a `break` of the body sets that local, after which each outer
+    /// loop breaks too.
+    fn fold_foreach(
+        loops: Vec<ForeachLoop>,
+        mut body: Vec<Stmt>,
+        stop: Option<String>,
+    ) -> Vec<Stmt> {
+        if let Some(stop) = &stop {
+            body = control::mark_breaks(body, stop);
+        }
+        let mut innermost = true;
         for bound in loops.into_iter().rev() {
+            if let Some(stop) = stop.as_ref().filter(|_| !innermost) {
+                body.push(Stmt::If {
+                    condition: Expr::Ident(stop.clone()),
+                    then_body: vec![Stmt::Break],
+                    else_body: Vec::new(),
+                });
+            }
+            innermost = false;
             let (name, left, right) = match bound {
                 ForeachLoop::Static(name, left, right) => (name, left, right),
                 ForeachLoop::Container {
@@ -3049,7 +3068,17 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 body,
             }];
         }
-        body
+        match stop {
+            Some(stop) => {
+                let mut stmts = vec![Stmt::Local {
+                    name: stop,
+                    init: Some(Expr::Literal("0".into())),
+                }];
+                stmts.extend(body);
+                stmts
+            }
+            None => body,
+        }
     }
 }
 

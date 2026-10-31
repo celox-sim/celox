@@ -8173,6 +8173,21 @@ fn package_scoped_container_receivers_are_not_interface_handles() {
 }
 
 #[test]
+fn container_foreach_rejects_indices_beyond_its_dimensions() {
+    // A foreach over a queue of `int` has one dimension (IEEE 1800-2023
+    // 12.7.3).
+    let source = "module Top; int q[$]; initial foreach (q[i, j]) $display(i); endmodule";
+    let error = analyze_source(source, Path::new("foreach_dims.sv"))
+        .expect_err("the second index must be rejected");
+    assert!(
+        error
+            .to_string()
+            .contains("beyond the container dimensions"),
+        "{error}"
+    );
+}
+
+#[test]
 fn wide_container_elements_reject_whole_container_operations() {
     // Elements wider than 64 bits are held in records, which these
     // operations would compare or combine as handles.
