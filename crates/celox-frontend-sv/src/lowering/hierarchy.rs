@@ -38,24 +38,7 @@ pub(super) struct ElaboratedModule {
 }
 
 impl ElaboratedModule {
-    pub(super) fn from_lowered(lowered: LoweredSvModule) -> Self {
-        Self {
-            name: lowered.source.name().to_string(),
-            interface_handles: lowered.source.interface_handles().to_vec(),
-            signals: signals(&lowered.source),
-            interface_scopes: lowered
-                .source
-                .interface_scope_names()
-                .iter()
-                .cloned()
-                .collect(),
-            instances: lowered.instances,
-            constants: lowered.constants,
-            parameter_types: lowered.parameter_types,
-        }
-    }
-
-    /// The declarations and instances of a module with hierarchical names.
+    /// Project declarations and instance bindings without lowering executable bodies.
     pub(super) fn from_declarations(
         source: &sv::ir::Module,
         force_signals: &[String],
