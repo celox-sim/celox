@@ -4014,9 +4014,6 @@ pub(super) fn lower_subroutine(
             });
         }
     }
-    if suspends {
-        lifetimes::check_constant_initializers(tree, builder.session, &subroutine.body, &statics)?;
-    }
     if !builder.state.constant_evaluation {
         let retain_result = !builder.automatic
             && lifetimes::check_static_result(
@@ -4046,13 +4043,23 @@ pub(super) fn lower_subroutine(
             })
             .map(|(name, ty)| (name.clone(), ty.clone()))
             .collect::<HashMap<_, _>>();
+        // The initializer of a static local runs once, before simulation
+        // starts, whatever it calls (IEEE 1800-2023 6.8, 6.21), unless it
+        // reads a formal or an automatic local.
+        let formals = subroutine
+            .params
+            .iter()
+            .map(|param| param.name.clone())
+            .chain(subroutine.return_var.clone())
+            .collect::<Vec<_>>();
         let (mut kept, mut initializers) = lifetimes::keep_static_locals(
             tree,
             builder.session,
             &retained_types,
             builder.state.subroutine_directions,
             std::iter::once((&mut subroutine.body, false)),
-            None,
+            &statics,
+            &formals,
             suspends,
         )?;
         if retain_result {
