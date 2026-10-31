@@ -15,7 +15,7 @@
     # The xezim reference simulator for the shared test suite, pinned by
     # revision so that Renovate proposes updates.
     xezim = {
-      url = "github:aionhw/xezim/9fadb2eb4996d5b18100455e82e27f0de573fa4f";
+      url = "github:aionhw/xezim/e8266416d52b0bed45c0b78b8b7db39098221391";
       flake = false;
     };
   };
