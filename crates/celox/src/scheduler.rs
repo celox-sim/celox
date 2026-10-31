@@ -804,6 +804,11 @@ impl Plan {
                     if !event.eval_apply.iter().any(reads) {
                         return DomainSettle::Pending;
                     }
+                    // An asynchronous reset has few edges: a fused copy of
+                    // the settle for them would only lengthen the build.
+                    if !event.clock {
+                        return DomainSettle::Settled;
+                    }
                     let fused = &sir.eval_comb_apply_ffs;
                     let aliased = fused.keys().any(|key| {
                         *key != event.signal && topology.canonical(*key) == event.signal
