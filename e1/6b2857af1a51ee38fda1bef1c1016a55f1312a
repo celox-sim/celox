@@ -1,1 +1,1 @@
-Rebase PR #2760 onto current master, preserving assignment-expression semantics, shared cases and reviewed external evidence.
+Add the missing retained rows for the already reviewed assignment-expression exclusions; focused Verilator/Icarus results and retained-report tests verify the metadata.
