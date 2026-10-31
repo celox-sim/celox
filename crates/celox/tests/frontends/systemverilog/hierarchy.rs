@@ -1,6 +1,12 @@
 use super::*;
 
 sv_backends! {
+    fn coalesces_repeated_literal_net_drivers(sim) {
+        @case "hierarchy::coalesces_repeated_literal_net_drivers";
+    }
+    fn repeated_literal_net_drivers_preserve_four_state_equality(sim) {
+        @case "hierarchy::repeated_literal_net_drivers_preserve_four_state_equality";
+    }
     fn coalesces_repeated_net_aliases(sim) {
         @case "hierarchy::coalesces_repeated_net_aliases";
     }
