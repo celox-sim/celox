@@ -260,8 +260,11 @@ pub(super) fn assignment_value(
             ));
         }
     }
-    if shape.unpacked_struct.is_some()
-        || value_type.is_some_and(|ty| ty.unpacked_struct().is_some())
+    // Structure metadata on an array describes its element, not a scalar
+    // structure value. Array-valued items use the compatibility path below.
+    if (shape.unpacked.is_empty() && shape.unpacked_struct.is_some())
+        || value_type
+            .is_some_and(|ty| ty.unpacked_ranges().is_empty() && ty.unpacked_struct().is_some())
     {
         return Err(unsupported(
             "assignment pattern with incompatible unpacked structure operand or target",

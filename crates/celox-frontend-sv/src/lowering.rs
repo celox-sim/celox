@@ -4009,7 +4009,9 @@ fn lower_module_with_overrides(
     }
 
     for signal in module.signals() {
-        if signal.r#type().structure_identity().is_some() {
+        if signal.r#type().structure_identity().is_some()
+            && signal.r#type().unpacked_ranges().is_empty()
+        {
             continue;
         }
         if name_to_id.contains_key(signal.name()) {

@@ -101,6 +101,106 @@
     },
     {
       "category": "Types",
+      "detail": "Xezim 0.11.4 treats an X index of an unpacked-structure array as element 0 for both reads and writes, and copies a selected subarray to a differently bounded destination as zero. IEEE 1800-2023 7.4.5 requires type-default reads and ignored writes for invalid indices; 7.6 copies compatible arrays by left-to-right element position regardless of their index bounds.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_fixed_struct_arrays",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 treats an X index of an unpacked-structure array as element 0 for both reads and writes, and copies a selected subarray to a differently bounded destination as zero. IEEE 1800-2023 7.4.5 requires type-default reads and ignored writes for invalid indices; 7.6 copies compatible arrays by left-to-right element position regardless of their index bounds.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-arrays-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_xezim_struct_array_unknown_index.sv",
+          "verification/repros/sv_struct_array_subarray_and_bounds.sv"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 treats an X index of an unpacked-structure array as element 0 for both reads and writes, and copies a selected subarray to a differently bounded destination as zero. IEEE 1800-2023 7.4.5 requires type-default reads and ignored writes for invalid indices; 7.6 copies compatible arrays by left-to-right element position regardless of their index bounds.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_multidimensional_and_bounds",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_fixed_struct_arrays",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 treats an X index of an unpacked-structure array as element 0 for both reads and writes, and copies a selected subarray to a differently bounded destination as zero. IEEE 1800-2023 7.4.5 requires type-default reads and ignored writes for invalid indices; 7.6 copies compatible arrays by left-to-right element position regardless of their index bounds.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-arrays-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite",
+          "verification/repros/sv_xezim_struct_array_unknown_index.sv",
+          "verification/repros/sv_struct_array_subarray_and_bounds.sv"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 does not copy array-valued struct rows in list and default assignment patterns: the two-state probe prints zero for all rows instead of {1,-2} and {3,-4}, and the four-state probe prints 000x for each member instead of preserving the source X/Z values. IEEE 1800-2023 7.6 and 10.9.1 require assignment-compatible row values to be copied by element position.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_pattern_rows",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_array_pattern_rows",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 does not copy array-valued struct rows in list and default assignment patterns: the two-state probe prints zero for all rows instead of {1,-2} and {3,-4}, and the four-state probe prints 000x for each member instead of preserving the source X/Z values. IEEE 1800-2023 7.6 and 10.9.1 require assignment-compatible row values to be copied by element position.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-pattern-rows-xezim.json",
+          "verification/repros/sv_struct_array_pattern_rows.sv",
+          "verification/repros/sv_struct_array_pattern_rows_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 does not copy array-valued struct rows in list and default assignment patterns: the two-state probe prints zero for all rows instead of {1,-2} and {3,-4}, and the four-state probe prints 000x for each member instead of preserving the source X/Z values. IEEE 1800-2023 7.6 and 10.9.1 require assignment-compatible row values to be copied by element position.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_pattern_rows_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_array_pattern_rows",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 does not copy array-valued struct rows in list and default assignment patterns: the two-state probe prints zero for all rows instead of {1,-2} and {3,-4}, and the four-state probe prints 000x for each member instead of preserving the source X/Z values. IEEE 1800-2023 7.6 and 10.9.1 require assignment-compatible row values to be copied by element position.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-pattern-rows-xezim.json",
+          "verification/repros/sv_struct_array_pattern_rows.sv",
+          "verification/repros/sv_struct_array_pattern_rows_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "unpacked_structs::four_state_members",

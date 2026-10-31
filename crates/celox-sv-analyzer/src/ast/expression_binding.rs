@@ -5,6 +5,7 @@ mod calls;
 mod chandles;
 mod direct;
 mod element_members;
+pub(in crate::ast) use element_members::element_member as fixed_array_member;
 mod enums;
 mod format_patterns;
 mod lvalues;
@@ -74,6 +75,19 @@ pub(super) fn selected_pattern(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<Expr>> {
+    if matches!(lhs, LValue::Select { .. })
+        && let Some(aggregate) =
+            unpacked_structs::native_struct(left, tree.declarations(), tree, session, dimensions)?
+    {
+        unpacked_structs::check_value(
+            &aggregate,
+            right,
+            tree.declarations(),
+            tree,
+            session,
+            dimensions,
+        )?;
+    }
     let native = tree.declarations();
     if !matches!(lhs, LValue::Select { .. })
         || !matches!(

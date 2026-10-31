@@ -342,6 +342,16 @@ from an assignment pattern (`'{a, b}`, `'{m: v, default: d}`, `T'{...}`, with
 `default` applied to the members of nested structures). Other operators,
 selects and casts of a whole structure are rejected.
 
+Fixed-size arrays of structures are supported for module variables and
+procedural locals when every leaf member is integral, all leaves are 2-state
+or all are 4-state, and no member has a declared initial value. This includes
+nested structures, multidimensional arrays, element and member assignments,
+assignment patterns, and copies of elements and whole arrays. Compatible subarrays
+can be items of list and `default:` assignment patterns. Invalid indices
+read the element's default value and ignore writes (7.4.5). Arrays with string,
+handle, mixed-state or defaulted members, and array ports, class properties and
+subroutine interfaces remain unsupported.
+
 Constant integral member initial values are supported for module variables,
 procedural locals and class properties (7.2.2). They are captured in the type's
 declaration scope, including instance parameter overrides, and apply only when
@@ -384,7 +394,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   `real`, and unpacked structs as ports, nets, parameters, static, `rand` or
-  `const` class properties, fixed-size array elements, or with members that
+  `const` class properties, or with members that
   are arrays (also dynamic arrays, queues and associative arrays) or `real`.
   Restrictions on member initial values are listed [above](#unpacked-structures).
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in

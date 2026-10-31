@@ -1,0 +1,89 @@
+{
+  "schema_version": 3,
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "include_ignored": false,
+  "exclude_stronger_than_sv": false,
+  "scope": "Focused fixed-size unpacked-structure array failures before reviewed exclusions; passing and unsupported cases omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_four_state",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:5: sorry: Overriding the default variable lifetime is not yet supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_local_lifetime",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_members_and_copies",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 1; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_multidimensional_and_bounds",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: sorry: Unpacked structs not supported.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_nested_members",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:1: error: Syntax error in variable list.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_wide_and_nba",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 6,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  }
+}
