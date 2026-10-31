@@ -1,1 +1,6 @@
-Sync after dependency PR #2746 merged and classify benchmark automation as ci so it does not request a simulator feature release.
+Revision history for #2750:
+
+rev 2 (rebase) 2026-10-31 14:45 UTC — Sync after dependency PR #2746 merged and classify benchmark automation as ci so it does not request a simulator feature release.
+rev 1 (initial) 2026-10-31 14:45 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2750,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"abf0ada68a31317e86c374a72d027af3a2ca3add","timestamp_iso":"2026-10-31T14:45:34Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"abf0ada68a31317e86c374a72d027af3a2ca3add","new_sha":"efc331a9361ca16e5154c79aefc9e28f08bab6d9","timestamp_iso":"2026-10-31T14:45:34Z","reason":"Sync after dependency PR #2746 merged and classify benchmark automation as ci so it does not request a simulator feature release.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/abf0ada68a31317e86c374a72d027af3a2ca3add...efc331a9361ca16e5154c79aefc9e28f08bab6d9"}]} -->
