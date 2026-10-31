@@ -13,9 +13,9 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     # The xezim reference simulator for the shared test suite, pinned by
-    # revision so that Renovate proposes updates.
+    # release tag. Updatecli refreshes the tag and both lockfiles together.
     xezim = {
-      url = "github:aionhw/xezim/e8266416d52b0bed45c0b78b8b7db39098221391";
+      url = "github:aionhw/xezim/0.11.4";
       flake = false;
     };
   };

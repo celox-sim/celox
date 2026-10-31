@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Regenerate Cargo.lock for the xezim revision pinned in flake.lock. Run from
+# Regenerate Cargo.lock for the xezim release pinned in flake.lock. Run from
 # the repository root in the development shell after updating that input.
 set -euo pipefail
 here=$(dirname "$0")
