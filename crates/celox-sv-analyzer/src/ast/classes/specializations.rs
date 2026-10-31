@@ -178,27 +178,137 @@ pub(in crate::ast) fn shared_scope(
 ) -> (SharedMap<i128>, SharedMap<Type>) {
     let mut env = env.clone();
     let mut aliases = aliases.clone();
-    let own = generic(tree, name);
-    for specialization in lineage(tree, name) {
-        for base in &specialization.bases {
-            if lookup(tree, base).is_none()
-                && let Some(scope) = tree.state.foreign.declarations(base)
-            {
-                scope.apply(&mut env, &mut aliases);
-            }
-        }
-        if !specialization.env.is_empty() || !specialization.hidden.is_empty() {
-            env.extend(specialization.env.clone());
-            for key in &specialization.hidden {
-                env.remove(key);
-            }
-        }
-        let mut inherited = inherited(&own, &specialization).peekable();
-        if inherited.peek().is_some() {
-            aliases.extend(inherited);
+    let edits = ScopeEdits::of(tree, name);
+    if !edits.env.is_empty() {
+        for (key, value) in edits.env {
+            match value {
+                Some(value) => env.insert(key, value),
+                None => env.remove(&key),
+            };
         }
     }
+    if !edits.aliases.is_empty() {
+        aliases.extend(edits.aliases);
+    }
     (env, aliases)
+}
+
+/// What class `name` adds to the scope around it, in order: its parameters
+/// and those it inherits, which may also hide a constant, and the types it
+/// inherits.
+struct ScopeEdits {
+    env: Vec<(String, Option<i128>)>,
+    aliases: Vec<(String, Type)>,
+}
+
+impl ScopeEdits {
+    fn of(tree: &AnalysisContext<'_>, name: &str) -> Self {
+        let mut edits = Self {
+            env: Vec::new(),
+            aliases: Vec::new(),
+        };
+        let own = generic(tree, name);
+        for specialization in lineage(tree, name) {
+            for base in &specialization.bases {
+                if lookup(tree, base).is_none()
+                    && let Some(scope) = tree.state.foreign.declarations(base)
+                {
+                    edits
+                        .env
+                        .extend(scope.env.iter().map(|(key, value)| (key.clone(), *value)));
+                    edits.aliases.extend(
+                        scope
+                            .types
+                            .iter()
+                            .map(|(key, ty)| (key.clone(), ty.clone())),
+                    );
+                }
+            }
+            edits.env.extend(
+                specialization
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), Some(*value))),
+            );
+            edits
+                .env
+                .extend(specialization.hidden.iter().map(|key| (key.clone(), None)));
+            edits.aliases.extend(inherited(&own, &specialization));
+        }
+        edits
+    }
+}
+
+/// One copy of a scope's tables that the scopes of its classes are made
+/// in, each from what its class adds, which is taken back afterwards:
+/// making the scope of each specialization costs what the class adds, not
+/// a copy of the tables around it.
+pub(in crate::ast) struct ClassScopes {
+    base: (SharedMap<i128>, SharedMap<Type>),
+    env: SharedMap<i128>,
+    aliases: SharedMap<Type>,
+}
+
+impl ClassScopes {
+    pub(in crate::ast) fn new(env: &SharedMap<i128>, aliases: &SharedMap<Type>) -> Self {
+        Self {
+            base: (env.clone(), aliases.clone()),
+            env: env.clone(),
+            aliases: aliases.clone(),
+        }
+    }
+
+    /// Call `f` with the scope of class `name` in the tables `env` and
+    /// `aliases`, the same as [`shared_scope`] gives.
+    pub(in crate::ast) fn with<R>(
+        &mut self,
+        tree: &AnalysisContext<'_>,
+        name: &str,
+        env: &SharedMap<i128>,
+        aliases: &SharedMap<Type>,
+        f: impl FnOnce(&SharedMap<i128>, &SharedMap<Type>) -> R,
+    ) -> R {
+        // The copy follows the tables it was made from.
+        if self.base.0.identity() != env.identity() || self.base.1.identity() != aliases.identity()
+        {
+            *self = Self::new(env, aliases);
+        }
+        let edits = ScopeEdits::of(tree, name);
+        #[cfg(test)]
+        if !edits.env.is_empty() && self.env.is_shared()
+            || !edits.aliases.is_empty() && self.aliases.is_shared()
+        {
+            super::super::dimensions::CLASS_SCOPE_COPIES.with(|count| count.set(count.get() + 1));
+        }
+        // The entries before each edit, restored in reverse.
+        let mut env_undo = Vec::with_capacity(edits.env.len());
+        for (key, value) in edits.env {
+            let old = match value {
+                Some(value) => self.env.insert(key.clone(), value),
+                None => self.env.remove(&key),
+            };
+            env_undo.push((key, old));
+        }
+        let mut aliases_undo = Vec::with_capacity(edits.aliases.len());
+        for (key, ty) in edits.aliases {
+            let old = self.aliases.insert(key.clone(), ty);
+            aliases_undo.push((key, old));
+        }
+        let result = f(&self.env, &self.aliases);
+        for (key, old) in env_undo.into_iter().rev() {
+            match old {
+                Some(old) => self.env.insert(key, old),
+                None => self.env.remove(&key),
+            };
+        }
+        for (key, old) in aliases_undo.into_iter().rev() {
+            match old {
+                Some(old) => self.aliases.insert(key, old),
+                None => self.aliases.remove(&key),
+            };
+        }
+        result
+    }
 }
 
 /// `env` and `aliases` with what class `name` and its bases declare added,
@@ -496,6 +606,29 @@ enum Preparation {
     Pending(Box<PendingSpecialization>),
 }
 
+/// The specialization that `arguments` named in the tables `env` and
+/// `aliases`. The entry keeps their identities from being reused, not their
+/// entries.
+#[derive(Debug)]
+pub(in crate::ast) struct Named {
+    arguments: BoundArguments,
+    env: std::sync::Weak<HashMap<String, i128>>,
+    aliases: std::sync::Weak<HashMap<String, Type>>,
+    name: String,
+}
+
+impl Named {
+    fn of(&self, env: &SharedMap<i128>, aliases: &SharedMap<Type>) -> bool {
+        self.env.as_ptr() as usize == env.identity()
+            && self.aliases.as_ptr() as usize == aliases.identity()
+    }
+
+    /// Whether the tables have been dropped, so that no lookup finds it.
+    fn stale(&self) -> bool {
+        self.env.strong_count() == 0 || self.aliases.strong_count() == 0
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(in crate::ast) struct BoundArguments {
     pub values: HashMap<String, ConstExpr>,
@@ -630,15 +763,42 @@ fn prepare_bound(
 ) -> Converted<Preparation> {
     let declaration = super::declaration(tree, generic)
         .ok_or_else(|| unsupported(format!("class `{generic}`")))?;
-    let BoundArguments { values, types } = arguments;
     // The declarations of the class are bound in the scope that declares it,
     // the actuals in the scope that names the specialization.
-    let (mut env, mut aliases) = declaration_scope(tree, generic).unwrap_or_else(|| {
-        (
-            (*context.const_env).clone(),
-            (*context.type_aliases).clone(),
-        )
-    });
+    let (base_env, base_aliases) = declaration_scope(tree, generic)
+        .unwrap_or_else(|| (context.const_env.clone(), context.type_aliases.clone()));
+    // The same arguments in the same tables name the same specialization:
+    // a made one needs neither a copy of the tables nor its parameters bound
+    // again.
+    let named = |name: &String| {
+        lookup(tree, name).is_some()
+            || tree
+                .state
+                .class_specializations_building
+                .borrow()
+                .contains(name)
+    };
+    if let Some(name) = tree
+        .state
+        .class_specialization_names
+        .borrow()
+        .get(generic)
+        .and_then(|known| {
+            known
+                .iter()
+                .find(|known| known.of(&base_env, &base_aliases) && known.arguments == arguments)
+        })
+        .map(|known| known.name.clone())
+        .filter(named)
+    {
+        return Ok(Preparation::Existing(name));
+    }
+    #[cfg(test)]
+    super::super::dimensions::SPECIALIZATION_PREPARATIONS.with(|count| count.set(count.get() + 1));
+    let bound = arguments.clone();
+    let BoundArguments { values, types } = arguments;
+    let mut env = (*base_env).clone();
+    let mut aliases = (*base_aliases).clone();
     let mut parameters = Parameters {
         values,
         types,
@@ -669,15 +829,20 @@ fn prepare_bound(
     } else {
         generic.to_owned()
     };
+    {
+        let mut names = tree.state.class_specialization_names.borrow_mut();
+        let known = names.entry(generic.to_owned()).or_default();
+        known.retain(|known| !known.stale());
+        known.push(Named {
+            arguments: bound,
+            env: base_env.downgrade(),
+            aliases: base_aliases.downgrade(),
+            name: name.clone(),
+        });
+    }
     // A declaration of the class may name the specialization being made,
     // as the type `C` of the default specialization does (8.25).
-    if lookup(tree, &name).is_some()
-        || tree
-            .state
-            .class_specializations_building
-            .borrow()
-            .contains(&name)
-    {
+    if named(&name) {
         return Ok(Preparation::Existing(name));
     }
     if tree.state.class_specializations_frozen.get() {
@@ -1065,12 +1230,14 @@ pub(in crate::ast) fn declare_scopes(
     let native = tree.declarations();
     let scope = tree.root_unit().ok().map(|unit| unit.tokens);
     let mut scopes = tree.state.class_declaration_scopes.borrow_mut();
+    // The classes of the scope share its tables.
+    let tables = (
+        SharedMap::from(env.clone()),
+        SharedMap::from(aliases.clone()),
+    );
     for class in &native.classes {
         if super::enclosing_unit(native, class.tokens).map(|unit| unit.tokens) == scope {
-            scopes.insert(
-                super::declared_name(tree, class),
-                (env.clone(), aliases.clone()),
-            );
+            scopes.insert(super::declared_name(tree, class), tables.clone());
         }
     }
 }
@@ -1080,7 +1247,7 @@ pub(in crate::ast) fn declare_scopes(
 fn declaration_scope(
     tree: &AnalysisContext<'_>,
     generic: &str,
-) -> Option<(HashMap<String, i128>, HashMap<String, Type>)> {
+) -> Option<(SharedMap<i128>, SharedMap<Type>)> {
     tree.state
         .class_declaration_scopes
         .borrow()
@@ -1602,13 +1769,10 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
             });
         let scope = match item {
             Some(item) => (
-                (*item.env).clone(),
-                item.type_aliases(&context.type_aliases).into_owned(),
+                SharedMap::from((*item.env).clone()),
+                SharedMap::from(item.type_aliases(&context.type_aliases).into_owned()),
             ),
-            None => (
-                (*context.const_env).clone(),
-                (*context.type_aliases).clone(),
-            ),
+            None => (context.const_env.clone(), context.type_aliases.clone()),
         };
         let name = super::declared_name(tree, class);
         if item.is_some_and(|item| items.iter().filter(|other| other.id == item.id).count() > 1) {
@@ -1702,9 +1866,9 @@ pub(in crate::ast) fn collect(tree: &AnalysisContext<'_>, context: &PackedDimens
                 let context = contexts.entry(scope.clone()).or_insert_with(|| {
                     let mut context = context.clone();
                     let (env, aliases) =
-                        self::scope(tree, &scope, &context.const_env, &context.type_aliases);
-                    context.const_env = env.into();
-                    context.type_aliases = aliases.into();
+                        shared_scope(tree, &scope, &context.const_env, &context.type_aliases);
+                    context.const_env = env;
+                    context.type_aliases = aliases;
                     context
                 });
                 let _ = specialize(tree, name, arguments, context);
