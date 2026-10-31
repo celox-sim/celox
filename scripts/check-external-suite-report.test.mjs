@@ -285,8 +285,10 @@ test("every retained baseline accepts only its existing failures", () => {
           result.accepted_failures,
           tool === "icarus"
             ? [
+                "class::casts_to_class_properties",
                 "class::container_type_aliases_of_classes",
                 "class::enumeration_constants_of_classes",
+                "class::failing_casts_evaluate_their_sources",
                 "class::foreign_generic_constructor_lexical_scope",
                 "class::foreign_generic_declaration_scope_and_equivalent_defaults",
                 "class::foreign_generic_in_a_module_with_interface_instances",
@@ -316,6 +318,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::type_alias_members",
                 "class::type_parameter_imports",
                 "class::type_parameter_shadowing",
+                "class::void_casts_of_class_handles",
                 "container_formals::selects_of_four_state_container_elements",
                 "container_formals::selects_of_reference_container_elements",
                 "containers::array_items_in_concatenations",
@@ -417,6 +420,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "unions::soft_wide_four_state",
               ]
             : [
+                "class::failing_casts_evaluate_their_sources",
                 "class::foreign_generic_constructor_lexical_scope",
                 "class::foreign_generic_declaration_scope_and_equivalent_defaults",
                 "class::foreign_generic_inherited_constants",

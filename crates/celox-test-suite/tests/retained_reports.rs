@@ -711,6 +711,24 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Type names are not valid expressions here.",
                         ),
+                        ("icarus", "class::casts_to_class_properties") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
+                        ("icarus", "class::void_casts_of_class_handles") => (
+                            "runtime_error",
+                            "execute",
+                            "System task/function $cast() is not defined by any module.",
+                        ),
+                        ("icarus", "class::failing_casts_evaluate_their_sources") => {
+                            ("compile_error", "compile", "source_0.sv:23: syntax error")
+                        }
+                        ("verilator", "class::failing_casts_evaluate_their_sources") => (
+                            "mismatch",
+                            "execute",
+                            "expect_output: expected [49, 10, 50, 10, 51, 10, 49, 32, 49, 10], got [48, 10, 48, 10, 48, 10, 49, 32, 49, 10]",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

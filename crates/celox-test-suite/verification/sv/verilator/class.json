@@ -306,6 +306,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::failing_casts_evaluate_their_sources at 804:3: expect_output: expected [49, 10, 50, 10, 51, 10, 49, 32, 49, 10], got [48, 10, 48, 10, 48, 10, 49, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "class::failing_casts_evaluate_their_sources",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:14:11: ../V3Task.cpp:2179: FuncRef without fvar\n                                                : ... note: In instance 'celox_suite_tb'\n   14 |  function new(int n=initial_value()); value=n; endfunction\n      |           ^~~\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
       "expectation": "Simulation",
       "name": "class::foreign_generic_constructor_lexical_scope",

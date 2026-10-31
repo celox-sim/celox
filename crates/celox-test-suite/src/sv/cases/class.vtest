@@ -668,6 +668,141 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "1 4\n0 4\n1 1\n1 4\nrock\n1 1\n4\n"))
 
+; `$cast` to a class property, through `this`, through another handle, or
+; to an element of an associative array property, in the function, task and
+; void-cast forms; a failed cast leaves the destination unchanged (8.16).
+(case casts_to_class_properties
+  (source "class.sv" #"
+module Top(output bit done);
+    class Animal;
+        virtual function int legs();
+            return 0;
+        endfunction
+    endclass
+    class Dog extends Animal;
+        virtual function int legs();
+            return 4;
+        endfunction
+    endclass
+    class Bird extends Animal;
+        virtual function int legs();
+            return 2;
+        endfunction
+    endclass
+    class Kennel;
+        Dog dog;
+        Dog named[string];
+        Kennel peer;
+        function int admit(Animal animal);
+            if (!$cast(dog, animal))
+                return 10;
+            return dog.legs();
+        endfunction
+        function int admit_this(Animal animal);
+            void'($cast(this.dog, animal));
+            return dog == null ? 0 : dog.legs();
+        endfunction
+        function int name(Animal animal, string key);
+            $cast(named[key], animal);
+            return named.exists(key) ? named[key].legs() : -1;
+        endfunction
+        function int lend(Animal animal);
+            return $cast(peer.dog, animal) + 10 * (peer.dog == null ? 0 : peer.dog.legs());
+        endfunction
+    endclass
+    Kennel kennel;
+    Dog dog;
+    Bird bird;
+    initial begin
+        kennel = new;
+        dog = new;
+        bird = new;
+        kennel.peer = new;
+        $display("%0d", kennel.admit(dog));
+        $display("%0d %0d", kennel.admit(bird), kennel.dog.legs());
+        $display("%0d", kennel.admit_this(bird));
+        $display("%0d", kennel.name(dog, "rex"));
+        $display("%0d", kennel.lend(dog));
+        $display("%0d", kennel.lend(bird));
+        $display("%0d", kennel.lend(null));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "4\n10 4\n4\n4\n41\n40\n1\n"))
+
+; The result of a `void'($cast(...))` is discarded; a failed cast leaves the
+; destination unchanged and reports no error (6.24.2, 8.16).
+(case void_casts_of_class_handles
+  (source "class.sv" #"
+module Top(output bit done);
+    class Animal;
+    endclass
+    class Dog extends Animal;
+        int legs = 4;
+    endclass
+    class Rock;
+    endclass
+    Animal animal;
+    Dog dog;
+    Rock rock;
+    Dog kept;
+    initial begin
+        kept = new;
+        animal = kept;
+        kept = null;
+        void'($cast(dog, animal));
+        $display("%0d", dog.legs);
+        kept = dog;
+        animal = new;
+        void'($cast(kept, animal));
+        $display("%0d", kept != null);
+        void'($cast(rock, dog));
+        $display("%0d", rock == null);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "4\n1\n1\n"))
+
+(case failing_casts_evaluate_their_sources
+  (source "class.sv" #"
+module Top(output bit done);
+    class Dog;
+    endclass
+    class Rock;
+    endclass
+    class Kennel;
+        Dog dog;
+    endclass
+    class Quarry;
+        static int made = 0;
+        static function Rock make_rock();
+            Rock rock;
+            rock = new;
+            made++;
+            return rock;
+        endfunction
+    endclass
+    Dog dog;
+    Kennel kennel;
+    initial begin
+        kennel = new;
+        void'($cast(dog, Quarry::make_rock()));
+        $display("%0d", Quarry::made);
+        if (!$cast(dog, Quarry::make_rock()))
+            $display("%0d", Quarry::made);
+        $display("%0d", $cast(kennel.dog, Quarry::make_rock()) + Quarry::made);
+        $display("%0d %0d", dog == null, kennel.dog == null);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1\n2\n3\n1 1\n"))
+
 (case casts_from_interface_class_handles
   (source "class.sv" #"
 module Top(output bit done);

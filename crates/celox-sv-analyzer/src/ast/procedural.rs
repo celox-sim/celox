@@ -2509,17 +2509,30 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let args = (!arguments.iter().any(|arg| arg.name.is_some())).then_some(presence);
         let name = name.spelling.as_str();
         // `$cast` as a task reports a run-time error when the cast fails
-        // (IEEE 1800-2023 6.24.2).
+        // (IEEE 1800-2023 6.24.2); the result of a `void'` cast is discarded.
         if name == "$cast"
-            && !discarded
-            && let Some(cast) = expression_binding::object_cast(
+            && let [destination, source] = arguments
+            && let (Some(destination), Some(source), None, None) = (
+                destination.value,
+                source.value,
+                &destination.name,
+                &source.name,
+            )
+            && let Some(cast) = expression_binding::object_cast_to(
                 self.tree,
                 self.session,
-                arguments,
+                destination,
+                source,
                 declarations,
                 &self.dims,
             )?
         {
+            if discarded {
+                if let expression_binding::ObjectCast::Fails = cast {
+                    return Ok(Vec::new());
+                }
+                return Ok(vec![Stmt::Eval(self.native_value(root)?)]);
+            }
             let error = Stmt::SystemTask {
                 task: SystemTask::Severity(system_functions::Severity::Error),
                 site: source_span(declarations.expression(root).tokens, self.tree),
