@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.release-token.outputs.token }}
 
-      - uses: $/.github/actions/setup-rust
+      - uses: ./.github/actions/setup-rust
 
       - name: Keep an actionable failed roll intact
         id: existing
@@ -83,6 +83,8 @@ jobs:
             # Updating one changed Veryl root resolves the complete shared git
             # dependency graph without also refreshing unrelated unlocked crates.
             cargo update -p veryl-analyzer
+            # Restore the exact versions resolved at the new revision.
+            node scripts/use-veryl-head.mjs "$veryl_revision"
           fi
           echo "VERYL_REVISION=$veryl_revision" >> "$GITHUB_ENV"
 
