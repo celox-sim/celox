@@ -461,7 +461,7 @@ fn run_regalloc_in_place(
             is_cancelled,
         )?,
     };
-    let tick_loop = label == "eval_comb_apply_ff" && native_tick_loop;
+    let tick_loop = celox_backend_common::loops_ticks(label) && native_tick_loop;
     let vector_allocation = super::x86_slp::allocate(func, spill_frame_size, tick_loop);
     for (value, location) in vector_allocation.assignments {
         assignment.set_x86_vector(value, location);
