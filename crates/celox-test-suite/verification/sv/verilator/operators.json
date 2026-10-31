@@ -13,6 +13,78 @@
     },
     {
       "category": "Operators",
+      "detail": "Verilator 5.052 rejects b=({hi,lo}=8'h12) with a syntax error at the assignment operator, reproduced with CONCAT. IEEE 1800-2023 11.3.6 explicitly defines the unsigned integral result type of a concatenated assignment-expression target.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "language_limitation",
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ],
+        "id": "sv_verilator_assignment_expression_concat",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects b=({hi,lo}=8'h12) with a syntax error at the assignment operator, reproduced with CONCAT. IEEE 1800-2023 11.3.6 explicitly defines the unsigned integral result type of a concatenated assignment-expression target.",
+        "upstream": []
+      },
+      "name": "operators::assignment_expression_concat_value",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Verilator 5.052 stops in V3Width.cpp:10272 with \"No dtype expected at statement ASSIGN\" for b=(mem[i++]=9), reproduced with SELECTED. IEEE 1800-2023 11.3.6 permits the blocking assignment and 11.4.2 defines the postfix index increment.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_internal_error",
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ],
+        "id": "sv_verilator_assignment_expression_selected_index",
+        "observed_version": "Verilator 5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 stops in V3Width.cpp:10272 with \"No dtype expected at statement ASSIGN\" for b=(mem[i++]=9), reproduced with SELECTED. IEEE 1800-2023 11.3.6 permits the blocking assignment and 11.4.2 defines the postfix index increment.",
+        "upstream": []
+      },
+      "name": "operators::assignment_expression_selected_index_once",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Verilator 5.052 returns 14 for (a=5)+(a=7), both standalone and through the adapter. IEEE 1800-2023 11.3.6 requires each assignment expression to cast and stack its RHS before updating the target, then return that stacked value, so the sum is 12 for either operand evaluation order.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/sv_assignment_expressions.sv",
+          "src/sv/cases/operators.vtest",
+          "LIMITATIONS.md#assignment-expressions"
+        ],
+        "id": "sv_verilator_assignment_expression_stacked_results",
+        "observed_version": "Verilator 5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 returns 14 for (a=5)+(a=7), both standalone and through the adapter. IEEE 1800-2023 11.3.6 requires each assignment expression to cast and stack its RHS before updating the target, then return that stacked value, so the sum is 12 for either operand evaluation order.",
+        "upstream": []
+      },
+      "name": "operators::assignment_expression_stacked_results",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
       "detail": "",
       "expectation": "Simulation",
       "name": "operators::converts_function_arguments_using_actual_signedness",
