@@ -252,6 +252,22 @@ cocotbからの書き込みは現在時刻のブロッキング代入です。�
 一時停止への対応は[#1886](https://github.com/celox-sim/celox/issues/1886)で
 扱っています。
 
+## SystemVerilogのコンパイル単位
+
+既定では、指定順のソース群を一つのコンパイル単位として処理します。
+ソースやヘッダーのマクロ定義、`undef、コンパイラ指令、コンパイル単位の宣言が
+後続ファイルに引き継がれます。`--separate-units`、または `celox.toml` の
+ルート・ターゲットに `single_unit = false` を指定すると、ファイルごとに分離します。
+`--single-unit` はプロジェクトの分離設定を上書きします。
+両方式は IEEE 1800-2023 3.12.1 に従いますが、仕様は既定方式を定めていません。
+この設定は `run` と `vpi build` で使えます。Rust のソース一覧 API はファイル単位の
+スコープを維持し、`celox_sv_analyzer::syntax::preprocess_sources` で単一単位の
+前処理を明示できます。
+
+```sh
+celox run -f rtlmeter.f --top tb --four-state
+```
+
 ## cocotbを実行する
 
 たとえば`test/test_top.py`にcocotbテストがある場合、そのモジュールをimportできる
