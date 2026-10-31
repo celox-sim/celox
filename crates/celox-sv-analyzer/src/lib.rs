@@ -2,7 +2,8 @@
     test,
     allow(
         clippy::disallowed_macros,
-        reason = "thread-local counters exist only in unit tests; non-test library builds enforce the ban"
+        clippy::disallowed_types,
+        reason = "thread-local counters and their cells exist only in unit tests; non-test library builds enforce the bans"
     )
 )]
 //! SystemVerilog analyzer for Celox.

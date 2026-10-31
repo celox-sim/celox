@@ -13,4 +13,6 @@ disallowed-methods = [
 disallowed-types = [
     { path = "std::collections::HashMap", reason = "compiler data is trusted; use fxhash::FxHashMap (or the crate HashMap alias) to avoid RandomState overhead" },
     { path = "std::collections::HashSet", reason = "compiler data is trusted; use fxhash::FxHashSet (or the crate HashSet alias) to avoid RandomState overhead" },
+    { path = "std::cell::RefCell", reason = "state is owned and passed explicitly: take &mut, return results, or key caches by all their inputs instead of mutating shared state behind shared references" },
+    { path = "std::cell::Cell", reason = "state is owned and passed explicitly: take &mut, return results, or key caches by all their inputs instead of mutating shared state behind shared references" },
 ]

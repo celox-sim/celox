@@ -9,6 +9,10 @@
     not(any(target_arch = "x86_64", target_arch = "aarch64")),
     allow(dead_code)
 )]
+#![allow(
+    clippy::disallowed_types,
+    reason = "VPI callbacks re-enter the layer from C while it holds the simulation, so its state is shared behind the C boundary"
+)]
 
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("celox-vpi currently supports only x86-64 and AArch64");
