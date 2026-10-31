@@ -12,6 +12,7 @@ mod control;
 mod effects;
 mod final_procedures;
 mod foreach;
+mod intra_assignment;
 use foreach::ForeachLoop;
 pub(super) mod randomization;
 pub(super) mod references;
@@ -733,6 +734,19 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         nonblocking: bool,
         native: (celox_sv_syntax::ExprId, celox_sv_syntax::ExprId),
     ) -> Result<Stmt, AnalyzerError> {
+        self.assignment_value_with_deferred_checks(op, nonblocking, native, None)
+    }
+
+    /// Separate destination access checks when an intra-assignment control
+    /// delays evaluation of the LHS. RHS access checks and conversion stay
+    /// attached to the value evaluated before suspension.
+    fn assignment_value_with_deferred_checks(
+        &mut self,
+        op: &str,
+        nonblocking: bool,
+        native: (celox_sv_syntax::ExprId, celox_sv_syntax::ExprId),
+        deferred_destination_checks: Option<&mut Vec<Expr>>,
+    ) -> Result<Stmt, AnalyzerError> {
         let (left, right) = native;
         if containers::element_member(
             left,
@@ -964,7 +978,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             rhs = coerce_procedural_assignment_rhs(self.tree, rhs, &written, &self.dims);
         }
         if let Some((guards, _)) = member_context {
-            rhs = packed_structs::checked_value(guards, rhs, self.tree, &self.dims)?;
+            if let Some(deferred) = deferred_destination_checks {
+                *deferred = guards;
+            } else {
+                rhs = packed_structs::checked_value(guards, rhs, self.tree, &self.dims)?;
+            }
         }
         self.rename_expr(&mut rhs);
         Ok(Stmt::Assign {
@@ -1839,10 +1857,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 right,
                 nonblocking,
                 timing,
-                ..
+                timing_control,
+                repeat_count,
             } => {
                 if timing.is_some() {
-                    return Err(unsupported("intra-assignment timing control"));
+                    return self.intra_assignment(
+                        operator,
+                        *nonblocking,
+                        *left,
+                        *right,
+                        *timing_control,
+                        *repeat_count,
+                    );
                 }
                 if (operator == "<=") != *nonblocking {
                     return Err(AnalyzerError::Parse(

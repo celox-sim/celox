@@ -78,6 +78,9 @@ pub enum AnalyzerError {
     Parse(String),
     #[error("Unsupported SystemVerilog construct: {0}")]
     Unsupported(String),
+    /// IEEE 1800-2023 Table 10-1: a procedural assignment needs a variable.
+    #[error("procedural assignment to net `{name}`")]
+    ProceduralNetAssignment { name: String },
     /// A class member is inaccessible from the lexical scope (IEEE 1800-2023 8.18).
     #[error("{visibility} class member `{owner}::{name}` is not accessible from this scope")]
     InaccessibleClassMember {
