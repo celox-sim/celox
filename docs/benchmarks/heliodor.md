@@ -116,7 +116,7 @@ Use cached runs to study execution, and disable caching when comparing build or
 end-to-end performance. The fixed CI `gate` always disables this cache.
 
 The fixed CI `gate` runs `veryl-cc-sync`, `celox`, `celox-tiered`, and
-`veryl-cc-tiered` on x86-64 for develop's daily pinned Linux boot compatibility
+`veryl-cc-tiered` on x86-64 for develop's manual pinned Linux boot compatibility
 check. The daily master suite measures the same four backends on both
 architectures. All pinned jobs use `scripts/heliodor-revision`. Each successful
 suite backend publishes immediately, without waiting for other backends,
