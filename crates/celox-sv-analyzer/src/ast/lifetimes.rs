@@ -1097,6 +1097,40 @@ pub(super) fn expr_reads(expr: &Expr, name: &str) -> bool {
     }
 }
 
+/// Whether any statement of `stmts` reads `name`, including through the
+/// indices of an assignment target.
+pub(super) fn stmts_read(stmts: &[Stmt], name: &str) -> bool {
+    let lvalue_reads = |lvalue: &LValue| match lvalue {
+        LValue::Ident(_) => false,
+        LValue::Select {
+            msb,
+            lsb,
+            array_slice_width,
+            ..
+        } => {
+            const_expr_reads(msb, name)
+                || const_expr_reads(lsb, name)
+                || array_slice_width
+                    .as_ref()
+                    .is_some_and(|width| const_expr_reads(width, name))
+        }
+    };
+    let mut found = false;
+    for stmt in stmts {
+        stmt.walk(&mut |stmt| {
+            found |= stmt_exprs(stmt)
+                .into_iter()
+                .any(|expr| expr_reads(expr, name))
+                || match stmt {
+                    Stmt::Assign { lhs, .. } => lvalue_reads(lhs),
+                    Stmt::AssignConcat { parts, .. } => parts.iter().any(&lvalue_reads),
+                    _ => false,
+                };
+        });
+    }
+    found
+}
+
 fn const_expr_reads(expr: &ConstExpr, name: &str) -> bool {
     match expr {
         ConstExpr::Ident(ident) => ident == name,

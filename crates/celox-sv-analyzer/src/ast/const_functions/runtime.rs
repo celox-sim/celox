@@ -22,6 +22,27 @@ fn lvalue(value: crate::ir::LValue) -> LValue {
     }
 }
 
+/// Whether no call of `subroutine` can observe a value stored by an earlier
+/// call. A static function keeps its result between calls when the analyzer
+/// cannot prove that every call assigns all of it (IEEE 1800-2023 13.4.2).
+/// Without arguments and without reading that result, every call performs the
+/// same assignments, so the bits no call assigns keep their initial value and
+/// each call returns what the first one does.
+fn persistent_state_is_unobservable(subroutine: &Subroutine) -> bool {
+    match subroutine.persistent_locals.as_slice() {
+        [] => true,
+        [result] => {
+            subroutine.params.is_empty()
+                && subroutine
+                    .return_var
+                    .as_ref()
+                    .is_some_and(|name| name == result)
+                && !lifetimes::stmts_read(&subroutine.body, result)
+        }
+        _ => false,
+    }
+}
+
 /// A module's stateless zero-argument functions, evaluated at most once each.
 /// This reuses the constant interpreter only after runtime lifetime and effect
 /// checks; functions with persistent storage or observable effects stay calls.
@@ -50,7 +71,7 @@ impl<'a> RuntimeConstantFunctions<'a> {
         let mut functions = ConstantFunctionTable::default();
         for subroutine in &subroutines {
             if subroutine.is_task
-                || !subroutine.persistent_locals.is_empty()
+                || !persistent_state_is_unobservable(subroutine)
                 || readers.contains_key(&subroutine.name)
                 || subroutine
                     .params
@@ -242,6 +263,56 @@ mod tests {
         for four_state in [false, true] {
             let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
             assert_eq!(evaluator.value("mixed").unwrap().value, BigUint::default());
+        }
+    }
+
+    #[test]
+    fn unread_static_result_keeps_its_initial_value() {
+        let module = module(
+            r#"module Top(output logic [3:0] q);
+            function [3:0] partial();
+                for (int i = 0; i < 2; i++) partial[i] = 1'b1;
+            endfunction
+            assign q = partial();
+        endmodule"#,
+        );
+        // The bits the loop leaves alone keep their value between calls.
+        assert!(!module.subroutines()[0].persistent_locals.is_empty());
+        let constants = HashMap::default();
+        let value = RuntimeConstantFunctions::new(&module, &constants, false)
+            .value("partial")
+            .unwrap();
+        assert_eq!(value.value, BigUint::from(0b0011u8));
+        assert_eq!(value.mask, BigUint::default());
+        let value = RuntimeConstantFunctions::new(&module, &constants, true)
+            .value("partial")
+            .unwrap();
+        assert_eq!(value.mask, BigUint::from(0b1100u8));
+        assert_eq!(
+            &value.value & BigUint::from(0b0011u8),
+            BigUint::from(0b0011u8)
+        );
+    }
+
+    #[test]
+    fn read_static_result_stays_a_call() {
+        let module = module(
+            r#"module Top(output logic [3:0] q, output logic [3:0] r);
+            function [3:0] toggle();
+                toggle[0] = !toggle[0];
+            endfunction
+            function [3:0] indexed();
+                indexed[indexed[1:0]] = 1'b1;
+            endfunction
+            assign q = toggle();
+            assign r = indexed();
+        endmodule"#,
+        );
+        let constants = HashMap::default();
+        for four_state in [false, true] {
+            let mut evaluator = RuntimeConstantFunctions::new(&module, &constants, four_state);
+            assert!(evaluator.value("toggle").is_none());
+            assert!(evaluator.value("indexed").is_none());
         }
     }
 
