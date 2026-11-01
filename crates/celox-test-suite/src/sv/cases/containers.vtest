@@ -1,5 +1,90 @@
 (group containers (category types))
 
+(case associative_default_strings
+  (source "assoc_defaults.sv" #"
+module Top(output bit same);
+  string seed = "hello";
+  string words[int] = '{default: seed}, copy[int];
+  int index = 99;
+  initial begin
+    same = words[1] == "hello" && words.num() == 0 && !words.exists(1)
+      && words.first(index) == 0 && index == 99;
+    copy = words;
+    seed = "changed";
+    words[1] = "world";
+    same = same && words[0] == "hello" && words[1] == "world"
+      && copy[1] == "hello" && copy.num() == 0;
+    copy = words;
+    words.delete(1);
+    same = same && words[1] == "hello" && words.num() == 0
+      && copy[1] == "world" && copy[2] == "hello";
+    copy.delete();
+    words = '{default: "other"};
+    #1;
+    same = same && copy[7] == "hello" && copy.num() == 0
+      && words[7] == "other" && words.num() == 0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case associative_default_copy
+  (source "assoc_defaults.sv" #"
+module Top(output bit same);
+  int values[string], copy[string], plain[string];
+  function automatic int make_default(); return -17; endfunction
+  initial begin
+    values = '{default: make_default()};
+    values["known"] = 5;
+    copy = values;
+    values = plain;
+    same = values["missing"] == 0 && values.num() == 0
+      && copy["known"] == 5 && copy["missing"] == -17;
+    copy.delete();
+    same = same && copy["missing"] == -17 && copy.num() == 0 && !copy.exists("missing");
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case associative_default_four_state
+  (source "assoc_defaults.sv" #"
+module Top(output bit same);
+  logic [3:0] values[logic [7:0]] = '{default: 4'b10xz}, copy[logic [7:0]];
+  logic [7:0] unknown_index = 'x;
+  initial begin
+    values[unknown_index] = 0;
+    same = values[unknown_index] === 4'b10xz && values[2] === 4'b10xz
+      && values.num() == 0;
+    values[1] = 4'bz001;
+    copy = values;
+    values.delete();
+    same = same && values[1] === 4'b10xz && copy[1] === 4'bz001
+      && copy[2] === 4'b10xz && values.num() == 0;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case associative_default_wide
+  (source "assoc_defaults.sv" #"
+module Top(output bit same);
+  bit [128:0] values[string] = '{default: 129'h100000000000000000000000000000001}, copy[string];
+  initial begin
+    copy = values;
+    values["known"] = 7;
+    #1;
+    same = values["missing"] == 129'h100000000000000000000000000000001
+      && copy["known"] == 129'h100000000000000000000000000000001
+      && values["known"] == 7 && copy.num() == 0;
+    values.delete();
+    same = same && values["known"] == 129'h100000000000000000000000000000001;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+
 (case class_container_inheritance_static
   (source "class_containers.sv" #"
 module Top(output bit [3:0] flags);

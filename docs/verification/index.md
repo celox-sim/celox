@@ -4,26 +4,41 @@
 import VerificationResults from '../.vitepress/components/VerificationResults.vue'
 </script>
 
-## SystemVerilog: sv-tests
+Celox results for the pinned [sv-tests](https://github.com/chipsalliance/sv-tests)
+corpus. Switch between **Main tests**, **Cores**, and **Imported**, then search
+by language feature or test-suite tag. Only Celox results are displayed.
+The layout follows the [upstream dashboard](https://chipsalliance.github.io/sv-tests-results/).
 
 <VerificationResults />
 
-The daily extended verification run measures the pinned upstream **imported** corpus in both two-state and four-state modes. It runs separately
-from PR CI. Main tests remain in the existing CI; core-design generators are outside this measurement.
-The official upstream runner determines pass, fail and skip verdicts.
+## Reading the results
 
-Skipped cases are excluded from the executed denominator. Groups and state modes
-are reported separately. Parsing and elaboration passes do not establish simulation
-correctness, and negative tests can pass because of an unsupported construct.
-These percentages measure test outcomes, not language-standard coverage.
+**Main tests** come from the current checkout's reviewed `expected.tsv` on master.
+They are a baseline assembled from reviewed verdicts, rather than a fresh full run.
+The source link identifies a commit containing that baseline; it is not a single
+simulator build or measurement date.
+Main baseline changes appear on the next website deployment.
 
-The page starts with a checked-in local measurement and loads newer complete daily
-results when available. Collection failures retain artifacts but do not replace the
-last complete public result. Daily artifacts contain per-case verdicts, execution
-modes, diagnostic classifications and official logs; they are retained for 14 days.
+**Cores** and **Imported** are measured by the official upstream runner in a
+separate daily/manual workflow, outside PR gates. The page starts with checked-in
+measurements and loads newer complete daily results when available. Each group
+retains its own source revision and measurement time. Collection failures do not
+replace the last complete public result. Raw results and logs are retained as
+workflow artifacts for 14 days.
 
-Expand each group to see selected execution modes and failure categories.
-Diagnostic categories describe observed errors, rather than proven root causes.
-The initial local snapshot uses the `heliodor-dev` optimized build; scheduled CI
-uses `release`. Upstream timeouts apply in both configurations, so build settings
-and machine load can affect timeout results.
+Skipped cases are excluded from the executed denominator. A dash means there
+are no executed cases, not a zero-percent score. Some core fixtures exclude Celox
+through upstream's `compatible-runners` metadata; those remain skipped and visible.
+The pinned CVA6 testbench has two unavailable include paths. Its failure is
+reported as an upstream input issue, not language support.
+
+Tags overlap: a case can contribute to several tag rows but counts only once in
+the overall totals. Two-state and four-state results remain separate. Parsing
+and elaboration passes do not establish simulation correctness. Negative tests
+can pass because of an unsupported construct. Some imported cases check process
+success without validating their printed checks, so an official pass can still
+contain `Failed` output. These scores measure official test outcomes, not coverage
+of the language standard. Expand the execution details to inspect modes and diagnostics.
+
+Local measurements use `heliodor-dev`; daily CI uses `release`. Upstream timeouts
+apply in both configurations, so build settings and machine load can affect results.

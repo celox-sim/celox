@@ -35,6 +35,7 @@ class AggregateTests(unittest.TestCase):
         main = summary["main"]["2state"]
         self.assertEqual((main["passed"], main["executed"], main["skipped"]), (1, 2, 1))
         self.assertEqual(main["pass_percent"], 50)
+        self.assertEqual(main["skipped_by_tag"], {"c": 1})
         self.assertEqual((main["tags_passed"], main["tags_tested"]), (1, 2))
         self.assertEqual(main["by_tag"], {"a": {"passed": 1, "executed": 1},
                                          "b": {"passed": 1, "executed": 2}})
@@ -142,6 +143,8 @@ sys.exit(code)
         self.assertEqual(self.case(":compatible-runners: other\n")["result"], "skip")
         row = self.case(":compatible-runners: other\n:results_group: imported\n")
         self.assertEqual((row["result"], row["group"]), ("skip", "imported"))
+        row = self.case(":compatible-runners: other\n:defines: \n:tags: core-fixture\n:results_group: cores\n")
+        self.assertEqual((row["result"], row["tags"], row["group"]), ("skip", "core-fixture", "cores"))
         # The source has no module. Its diagnostic still reaches official judgement.
         row = self.case(body="// OUTPUT: no module diagnostic\n// EXIT: 1")
         self.assertEqual((row["result"], row["rc"]), ("fail", "1"))

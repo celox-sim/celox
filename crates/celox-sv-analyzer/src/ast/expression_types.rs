@@ -241,6 +241,18 @@ fn select(
     dims: &PackedDimensions,
 ) -> Option<TyId> {
     let data = session.types.data(base).clone();
+    // The parser represents a bare `$` index as a queue dimension. It
+    // selects one element just like an ordinary index (7.10, 7.10.1),
+    // without needing the queue's runtime length, even when it is empty.
+    if matches!(selection, DimensionKind::Queue(None)) {
+        return match data {
+            TyData::Array {
+                kind: ArrayKind::Queue { .. },
+                element,
+            } => Some(element),
+            _ => None,
+        };
+    }
     if matches!(selection, DimensionKind::Index(_)) {
         return match data {
             TyData::Array { element, .. } => Some(element),

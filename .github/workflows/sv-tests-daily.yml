@@ -9,60 +9,102 @@ concurrency:
   group: sv-tests-extended
   cancel-in-progress: false
 jobs:
-  verify:
+  driver:
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: $/.github/actions/setup-rust
       - uses: Swatinem/rust-cache@v2
+      - run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+      - uses: actions/upload-artifact@v7
+        with:
+          name: extended-sv-tests-driver
+          path: target/release/examples/sv_tests
+          if-no-files-found: error
+          retention-days: 1
+  verify:
+    needs: driver
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        group: [imported, cores]
+    steps:
+      - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
           python-version: '3.14'
-      - run: pip install -r conformance/sv-tests/requirements.txt
-      - name: Fetch pinned corpus and imported dependencies
+      - name: Install official runner and generator dependencies
+        run: |
+          if [ "${{ matrix.group }}" = cores ]; then
+            pip install -r conformance/sv-tests/requirements-cores.txt
+          else
+            pip install -r conformance/sv-tests/requirements.txt
+          fi
+      - name: Fetch the pinned sv-tests corpus and libraries
         run: |
           git init -q work/upstream
           git -C work/upstream fetch --depth 1 https://github.com/chipsalliance/sv-tests.git "$(cat conformance/sv-tests/revision)"
           git -C work/upstream checkout -q FETCH_HEAD
           git -C work/upstream submodule update --init --depth 1 \
-            third_party/tests/uvm third_party/tests/uvm-1.2 \
+            third_party/tests/uvm third_party/tests/uvm-1.2
+      - name: Prepare imported cases
+        if: matrix.group == 'imported'
+        run: |
+          git -C work/upstream submodule update --init --depth 1 \
             third_party/tests/easyUVM third_party/tests/uvm-examples \
             third_party/tests/hdlconvertor third_party/tests/utd-sv \
             third_party/tests/projf-explore third_party/cores/basejump_stl \
             third_party/tools/yosys third_party/tools/icarus
           git -C work/upstream/third_party/tools/icarus submodule update --init --depth 1 ivtest
-      - run: |
           python conformance/sv-tests/prepare.py work/upstream
           python conformance/sv-tests/prepare_imported.py work/upstream
+      - name: Prepare cores
+        if: matrix.group == 'cores'
+        run: |
+          git -C work/upstream submodule update --init --depth 1 \
+            third_party/cores/ariane third_party/cores/black-parrot \
+            third_party/cores/fx68k third_party/cores/ibex \
+            third_party/cores/rggen-sample third_party/cores/rggen-sv-rtl \
+            third_party/cores/rsd third_party/cores/scr1 third_party/cores/tnoc \
+            third_party/cores/veer-eh1 third_party/cores/veer-el2
+          python conformance/sv-tests/prepare_cores.py work/upstream
       - name: Validate official runner contracts
         env:
           SV_TESTS_ROOT: ${{ github.workspace }}/work/upstream
           PYTHONDONTWRITEBYTECODE: '1'
         run: python -m unittest discover -s conformance/sv-tests -p 'test_*.py' -v
-      - run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+      - uses: actions/download-artifact@v8
+        with:
+          name: extended-sv-tests-driver
+          path: work/driver
       - name: Collect official verdicts (failures are measurements)
-        run: >-
-          python conformance/sv-tests/run.py work/upstream
-          --driver target/release/examples/sv_tests --jobs 4 --group imported
-          --out-dir work/results --report work/report.tsv
-      - name: Prepare website data
+        run: |
+          chmod +x work/driver/sv_tests
+          python conformance/sv-tests/run.py work/upstream \
+            --driver work/driver/sv_tests --jobs 4 --group "${{ matrix.group }}" \
+            --out-dir work/results --report work/report.tsv
+      - name: Prepare complete website data
         env:
           CELOX_SV_DRIVER_PROFILE: release
         run: |
-          python conformance/sv-tests/website_report.py work/report.summary.json work/public/latest.json
+          name=latest
+          if [ "${{ matrix.group }}" = cores ]; then name=cores; fi
+          python conformance/sv-tests/website_report.py work/report.summary.json "work/public/$name.json"
           cat work/report.summary.md >> "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: sv-tests-extended
+          name: sv-tests-${{ matrix.group }}
           path: |
             work/report.*
             work/results
           retention-days: 14
       - uses: actions/upload-artifact@v7
         with:
-          name: verification-website
+          name: verification-website-${{ matrix.group }}
           path: work/public
   publish:
     if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
@@ -76,7 +118,8 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: verification-website
+          pattern: verification-website-*
+          merge-multiple: true
           path: public
       - uses: peaceiris/actions-gh-pages@v4
         with:

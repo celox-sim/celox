@@ -19,6 +19,71 @@ cases. CI prepares this corpus before collecting results. The dashboard's
 `cores` and `imported` groups are separate corpora and are not included in the
 PR corpus. Imported tests run in the daily extended workflow described below.
 
+## Daily extended verification and website
+
+`sv-tests-daily.yml` runs daily and on manual dispatch, outside PR gates. It
+measures the **imported** (3,442 cases) and **cores** (21 cases) groups separately
+at the pinned revision, in both state modes. A shared release driver is built once;
+the two matrix jobs fetch only their own dependencies. Case failures are
+measurements, while infrastructure failures fail collection. Neither group
+changes the PR expectation contract.
+
+The Verification page also reads the main group's current `expected.tsv` at docs
+build time. That is a reviewed baseline assembled from multiple runs, not a fresh
+full-corpus measurement. `docs/verification/main-tags.json` captures tag metadata
+from the matching pinned corpus; regenerate it when the corpus revision changes:
+
+```sh
+python conformance/sv-tests/snapshot_metadata.py ../sv-tests docs/verification/main-tags.json
+```
+
+For imported tests, initialize the main dependencies above and:
+
+```sh
+git -C ../sv-tests submodule update --init --depth 1 \
+  third_party/tests/hdlconvertor third_party/tests/utd-sv \
+  third_party/tests/projf-explore third_party/cores/basejump_stl \
+  third_party/tools/yosys third_party/tools/icarus
+git -C ../sv-tests/third_party/tools/icarus submodule update --init --depth 1 ivtest
+python conformance/sv-tests/prepare.py ../sv-tests
+python conformance/sv-tests/prepare_imported.py ../sv-tests
+python conformance/sv-tests/run.py ../sv-tests \
+  --driver target/debug/examples/sv_tests --jobs 4 --group imported \
+  --out-dir work/sv-tests-imported --report work/sv-tests-imported.tsv
+```
+
+Use a clean checkout and prepare main before adding imported cases. For cores,
+install `requirements-cores.txt` into the same Python environment and initialize
+`third_party/cores/{ariane,black-parrot,fx68k,ibex,rggen-sample,rggen-sv-rtl,rsd,scr1,tnoc,veer-eh1,veer-el2}`
+at the pinned submodule commits. Then run:
+
+```sh
+python conformance/sv-tests/prepare_cores.py ../sv-tests
+python conformance/sv-tests/run.py ../sv-tests \
+  --driver target/debug/examples/sv_tests --jobs 4 --group cores \
+  --out-dir work/sv-tests-cores --report work/sv-tests-cores.tsv
+```
+
+The unmodified upstream generators produce the core wrappers and file lists.
+The preparer initializes required nested RTL/testbench dependencies and rejects
+missing sources or unreviewed missing includes. CVA6's testbench retains two
+upstream include defects: the uninstalled Spike include and an `axi_node` path
+resolved against `tests/`. Exact paths, case and revision are recorded in
+`input-issues.json`; only this positive fixture may forward them to the driver.
+It remains an official failure and is classified as an upstream input issue.
+No source or metadata is repaired. Upstream compatible-runner restrictions remain
+in force; skipped core tags stay visible without entering the executed denominator.
+
+Complete imported summaries publish to `verification-data/latest.json`; cores
+publish to `verification-data/cores.json`. The page keeps independent provenance
+for each group, retains snapshots offline, and loads newer complete results.
+Raw reports/logs are retained as workflow artifacts for 14 days. An incomplete
+collection cannot replace public results. Tag rows overlap, and the UI keeps
+2state/4state totals separate. See the page's methodology notes for parsing,
+elaboration, negative tests and imported output-validation limitations.
+
+## Main corpus reporting
+
 The TSV report has a companion `.summary.json` containing the tested revision,
 per-group/per-state pass totals, per-tag results, fully passing tag totals, and execution-mode
 counts. As in the upstream dashboard, skipped cases are excluded from the
@@ -624,31 +689,10 @@ member-array and subarray copies, wide elements and local lifetime. Variable-siz
 and non-integral array members and array-member structure interfaces remain
 unsupported; see the language reference for the exact boundaries.
 
-## Daily extended verification and website
-
-`sv-tests-daily.yml` runs on a daily schedule and manual dispatch only. It adds
-upstream's `path_generator`, `ivtest`, and `yosys_hana` imported cases to the main
-corpus (3,442 imported cases at the pinned revision). It does not run core-design
-generators or change the PR expectation contract. Initialize the main dependencies
-above and these additional pinned submodules:
-
-```sh
-git -C ../sv-tests submodule update --init --depth 1 \
-  third_party/tests/hdlconvertor third_party/tests/utd-sv \
-  third_party/tests/projf-explore third_party/cores/basejump_stl \
-  third_party/tools/yosys third_party/tools/icarus
-git -C ../sv-tests/third_party/tools/icarus submodule update --init --depth 1 ivtest
-python conformance/sv-tests/prepare.py ../sv-tests
-python conformance/sv-tests/prepare_imported.py ../sv-tests
-python conformance/sv-tests/run.py ../sv-tests \
-  --driver target/debug/examples/sv_tests --jobs 4 --group imported \
-  --out-dir work/sv-tests-extended --report work/sv-tests-extended.tsv
-```
-
-Use a clean checkout; prepare the main corpus before adding imported tests.
-The extended run selects `--group imported` and deliberately has no `--expected`: official case failures are
-measurements, while infrastructure failures fail the workflow. Complete summaries
-are published under `verification-data/latest.json` on the existing Pages branch;
-the website's Verification page displays them with source revisions and run link.
-Raw reports and logs are retained as workflow artifacts for 14 days. The committed
-website snapshot provides an initial/offline measurement and is not a PR baseline.
+Default-only associative array literals update two reviewed expectation rows:
+`chapter-7/arrays/associative/literals.sv` passes in both state modes in a
+focused official-runner invocation. This is not a new full-corpus measurement.
+Shared cases check assignment-time string defaults, replacing defaults on
+copies, entry deletion and clearing, unknown-index reads with X/Z defaults,
+wide elements and heap lifetime. Explicit index entries in associative array
+literals remain unsupported.

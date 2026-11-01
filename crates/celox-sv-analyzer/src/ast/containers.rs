@@ -311,6 +311,25 @@ pub(super) fn assignment(
         };
         return Ok(call(ContainerOp::New, target.layout, vec![size, init]));
     }
+    if matches!(target.layout.kind, ContainerKind::Associative { .. })
+        && let ExprKind::Pattern {
+            target: None,
+            items,
+        } = &native.expression(root).kind
+        && items.len() == 1
+        && items[0].key.is_some_and(|key| {
+            matches!(
+                &native.expression(expression_binding::ungroup(key, native)).kind,
+                ExprKind::Literal(text) if text == "default"
+            )
+        })
+    {
+        return Ok(call(
+            ContainerOp::WithDefault,
+            target.layout,
+            vec![element_value(items[0].value, tree, session, dims, target)?],
+        ));
+    }
     let items = match &native.expression(root).kind {
         ExprKind::Concatenation(items) => Some(items.clone()),
         ExprKind::Pattern {

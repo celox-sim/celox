@@ -10,17 +10,18 @@
   "groups": {
     "imported": {
       "2state": {
-        "passed": 2227,
-        "failed": 1215,
+        "passed": 2594,
+        "failed": 848,
         "skipped": 0,
         "executed": 3442,
         "upstream_input_issues": 0,
-        "pass_percent": 64.7,
+        "pass_percent": 75.36,
         "tags_passed": 3,
         "tags_tested": 8,
+        "skipped_by_tag": {},
         "by_tag": {
           "basejump": {
-            "passed": 0,
+            "passed": 350,
             "executed": 360
           },
           "hdlconv": {
@@ -36,7 +37,7 @@
             "executed": 144
           },
           "ivtest": {
-            "passed": 1775,
+            "passed": 1789,
             "executed": 2546
           },
           "projf-explore": {
@@ -48,44 +49,45 @@
             "executed": 127
           },
           "yosys": {
-            "passed": 141,
+            "passed": 144,
             "executed": 216
           }
         },
         "by_execution_mode": {
           "elaboration": {
-            "fail": 435,
-            "pass": 141
+            "pass": 494,
+            "fail": 82
           },
           "parsing": {
             "pass": 311,
             "fail": 9
           },
           "simulation": {
-            "fail": 771,
-            "pass": 1775
+            "fail": 757,
+            "pass": 1789
           }
         },
         "by_failure_category": {
-          "compile_error": 102,
+          "compile_error": 100,
           "timeout": 1,
-          "unclassified": 41,
+          "unclassified": 39,
           "unexpected_success": 83,
-          "unsupported": 988
+          "unsupported": 625
         }
       },
       "4state": {
-        "passed": 2227,
-        "failed": 1215,
+        "passed": 2594,
+        "failed": 848,
         "skipped": 0,
         "executed": 3442,
         "upstream_input_issues": 0,
-        "pass_percent": 64.7,
+        "pass_percent": 75.36,
         "tags_passed": 3,
         "tags_tested": 8,
+        "skipped_by_tag": {},
         "by_tag": {
           "basejump": {
-            "passed": 0,
+            "passed": 350,
             "executed": 360
           },
           "hdlconv": {
@@ -101,7 +103,7 @@
             "executed": 144
           },
           "ivtest": {
-            "passed": 1775,
+            "passed": 1789,
             "executed": 2546
           },
           "projf-explore": {
@@ -113,36 +115,37 @@
             "executed": 127
           },
           "yosys": {
-            "passed": 141,
+            "passed": 144,
             "executed": 216
           }
         },
         "by_execution_mode": {
           "elaboration": {
-            "fail": 435,
-            "pass": 141
+            "pass": 494,
+            "fail": 82
           },
           "parsing": {
             "pass": 311,
             "fail": 9
           },
           "simulation": {
-            "fail": 771,
-            "pass": 1775
+            "fail": 757,
+            "pass": 1789
           }
         },
         "by_failure_category": {
-          "compile_error": 102,
+          "compile_error": 100,
           "timeout": 1,
-          "unclassified": 41,
+          "unclassified": 39,
           "unexpected_success": 83,
-          "unsupported": 988
+          "unsupported": 625
         }
       }
     }
   },
+  "cases": [],
   "driver_profile": "heliodor-dev",
-  "measured_at": "2026-11-01T10:12:25.421746+00:00",
-  "celox_revision": "6ff90c4af93829caca820fa0bcae83a59ffd9014",
+  "measured_at": "2026-11-01T12:12:52.400885+00:00",
+  "celox_revision": "5a6e42ebaf3348c374c5a83ea4dd06828d4fdaf6",
   "run_url": null
 }
