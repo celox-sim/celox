@@ -1,0 +1,23 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "file_io::ferror_success_clears_description at 68:27: assert_eq ok: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "file_io::ferror_success_clears_description",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": true,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "scope": "Focused ferror success-description run; only the observed failing case is retained."
+}

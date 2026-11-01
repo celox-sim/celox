@@ -50,3 +50,19 @@ module Top(output bit ok);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq ok 1))
+
+(case ferror_success_clears_description
+  (source "ferror_success.sv" #"
+module Top(output bit ok);
+  int code;
+  string text="old";
+  logic [639:0] packed_text='1;
+  initial begin
+    code=$ferror(32'h80000001,text);
+    ok=code==0 && text=="" && $bits($ferror(32'h80000001,text))==32;
+    code=$ferror(32'h80000001,packed_text);
+    ok &= code==0 && packed_text==0;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq ok 1))

@@ -298,3 +298,6 @@ mod unpacked_structs;
 
 #[path = "frontends/systemverilog/logic_gates.rs"]
 mod logic_gates;
+
+#[path = "frontends/systemverilog/file_errors.rs"]
+mod file_errors;

@@ -753,3 +753,12 @@ automatic reference arguments. Packed buffers remain unsupported. Native image
 and interpreter/tiered/Cranelift/Wasm tests replay file-handler and core snapshots.
 EOF destination policy and NUL-input tool differences are documented in the
 shared suite's limitations, without changing retained failure exclusions.
+
+File error queries update two reviewed expectations: `chapter-21/21.3--ferror.sv`
+passes in 2-state and 4-state modes in a focused official invocation. The
+upstream case only queries a newly opened file and prints the result; Celox's
+regressions additionally check error recording, per-FD independence, successful
+reset, EOF, packed/string outputs, selected destination side effects and replay.
+The shared success-description case enforces 21.3.7's explicit empty-output rule;
+Icarus passes, while the observed Verilator/xezim wording disagreements have
+focused retained evidence and exclusions. This is not a full-corpus measurement.
