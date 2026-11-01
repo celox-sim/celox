@@ -8273,3 +8273,20 @@ fn scalar_logic_gates_keep_unsupported_modifiers_explicit() {
         );
     }
 }
+
+#[test]
+fn preserves_package_enum_unknown_values() {
+    let source = r#"
+        package p;
+            typedef enum logic [3:0] {
+                READ = 4'b0101, DESELECT = 4'b1xxx, HIGHZ = 4'bzzzz,
+                COPY = DESELECT | 4'b0010, ZERO = DESELECT & 4'b0000,
+                NEXT
+            } cmd_t;
+        endpackage
+        module Top(output logic [3:0] command);
+            assign command = p::DESELECT;
+        endmodule
+    "#;
+    analyze_source(source, Path::new("package_enum_unknown.sv")).unwrap();
+}

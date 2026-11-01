@@ -1188,6 +1188,40 @@ pub(super) fn enum_members_of(
             ),
             value => value,
         };
+        // The numeric environment cannot represent X/Z. Substitute earlier
+        // enumerators from their literal expressions before evaluating this one.
+        let substituted = substitute_expr_constants_with_parameter_literals(
+            syntax_tree,
+            session,
+            const_expr_to_expr(value.clone()),
+            eval_env,
+            &constants.exprs,
+        );
+        let value = expr_to_const(session, substituted).unwrap_or(value);
+        if let Some(literal) = typecheck::eval_const_integral_literal_with_lookup(
+            &value.clone().into(),
+            eval_env,
+            &|name| {
+                dimensions::parameter_type_from_const_env(eval_env, name)
+                    .map(|ty| (ty.width, ty.signed))
+            },
+        ) && literal.mask != Default::default()
+        {
+            // validate_enum_initializers has checked the explicit four-state
+            // base and forbids implicit increments following an X/Z member.
+            eval_env.remove(&name);
+            insert_parameter_type_markers(eval_env, &name, member_type);
+            constants.types.insert(name.clone(), member_type);
+            constants.exprs.insert(
+                name,
+                Expr::Literal(resize_integral_literal_for_cast(
+                    literal,
+                    member_type.width,
+                    member_type.signed,
+                )),
+            );
+            continue;
+        }
         let value_type = infer_const_expr_type(&value, &parameter_types_from_const_env(eval_env))
             .ok_or_else(|| {
             AnalyzerError::Unsupported(format!("enum member `{name}` value type"))
