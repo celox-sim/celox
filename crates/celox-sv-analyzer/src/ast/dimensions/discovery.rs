@@ -349,6 +349,9 @@ fn formal_types(
     let mut local = context.clone();
     let mut direction = ParamDirection::Input;
     let mut previous: Option<Type> = None;
+    // A formal is declared in `local` only once a later formal is bound:
+    // declaring it copies the tables `local` shares with `context`.
+    let mut declared: Option<(String, Type)> = None;
     let groups = subroutine.ports.as_deref().into_iter().chain(
         subroutine
             .port_declarations
@@ -357,6 +360,9 @@ fn formal_types(
     );
     for ports in groups {
         for port in ports {
+            if let Some((name, ty)) = declared.take() {
+                shape(&mut local, name, &ty, true);
+            }
             if let Some(d) = port.direction {
                 if port.static_reference {
                     return Err(unsupported("ref static subroutine argument"));
@@ -386,7 +392,7 @@ fn formal_types(
                 .as_ref()
                 .map(name)
                 .ok_or_else(|| unsupported("subroutine argument without a name"))?;
-            shape(&mut local, n.clone(), &base, true);
+            declared = Some((n.clone(), base.clone()));
             result.push((
                 FunctionArgumentMetadata {
                     name: n,
@@ -470,10 +476,13 @@ fn signature(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     context: &mut PackedDimensions,
+    key: &Key,
 ) -> Converted<()> {
     let subroutine = tree.declarations().subroutine(id);
     let formals = formal_types(subroutine, tree, session, context)?;
     let result = return_type(subroutine, tree, session, context)?;
+    // As in `publish_shape`, the table edits perform no queries.
+    session.dimensions.partial.remove(key);
     publish_signature(name(&subroutine.name), formals, result, tree, context);
     Ok(())
 }
@@ -951,12 +960,13 @@ fn subroutine_signatures(
             if let BodyItemKind::Subroutine(id) = native.body_item(*id).kind
                 && native.subroutine(id).scope.is_empty()
             {
-                let _ = signature(id, tree, session, context);
+                let _ = signature(id, tree, session, context, key);
                 publish(&mut session.dimensions, key, context);
             } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
                 && let Ok(import) = dpi::import(id, native)
                 && let Some(ty) = import.return_type()
             {
+                session.dimensions.partial.remove(key);
                 context.function_return_types.insert(
                     import.name().to_string(),
                     FunctionReturnMetadata {
@@ -1443,7 +1453,9 @@ mod tests {
         let tree = AnalysisContext::unspecialized(&tree);
         let input = PackedDimensions::new(
             HashMap::default(),
-            &[("N".to_string(), 16)].into_iter().collect(),
+            &[("N".to_string(), 16)]
+                .into_iter()
+                .collect::<HashMap<_, _>>(),
             &HashMap::default(),
         );
         let context = query_operand_dimensions_id(argument(&tree), &tree, session, &input).unwrap();
