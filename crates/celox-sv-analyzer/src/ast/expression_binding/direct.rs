@@ -658,6 +658,10 @@ fn bind_value_in(
                     ExprKind::Literal(text) => {
                         if let Some(packed) = packed_string_literal(text) {
                             values.push(Expr::Literal(packed));
+                        } else if typecheck::integral_literal_type_metadata(text).is_none()
+                            && let Some(real) = timescales::real_literal(id, text, tree)?
+                        {
+                            values.push(Expr::Literal(real));
                         } else {
                             if typecheck::integral_literal_type_metadata(text).is_none()
                                 && !(text.contains(['.', 'e', 'E'])
