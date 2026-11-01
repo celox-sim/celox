@@ -797,6 +797,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq independent: expected 0x1, got 0x0",
                         ),
+                        ("icarus", "string::foreach_iterates_the_characters") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("xezim", "string::foreach_iterates_the_characters") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq before_b: expected 0x2, got 0x1",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

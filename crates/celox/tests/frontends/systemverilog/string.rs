@@ -32,6 +32,30 @@ sv_backends! {
 
 sv_backends! {
     fn string_parameters_keep_their_text(sim) { @case "string::string_parameters_keep_their_text"; }
+    fn string_foreach_iterates_the_characters(sim) { @case "string::foreach_iterates_the_characters"; }
+    // An omitted index skips the string's only dimension, so the body runs
+    // once whatever the string's length (12.7.3).
+    fn string_foreach_omitted_index_runs_once(sim) {
+        @setup {
+            let source = r#"
+                module Top;
+                    string s = "abc";
+                    string empty;
+                    int n, m;
+                    initial begin
+                        foreach (s[]) n++;
+                        foreach (empty[]) m++;
+                        $display("%0d %0d", n, m);
+                    end
+                endmodule
+            "#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("omitted.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        assert_eq!(sim.drain_runtime_events(), vec![
+            celox::RuntimeEvent::Display { message: b"1 1".to_vec() },
+        ]);
+    }
 }
 
 #[test]
