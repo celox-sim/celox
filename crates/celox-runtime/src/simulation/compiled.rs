@@ -72,6 +72,17 @@ impl<B: SimBackend> SimulationState<B> {
             || self.suspended.is_some()
             || self.declarations_pending
             || self.host_pending
+            // Non-event data has no per-writer event mask. Keep its wave
+            // boundary visible before a compiled waiter can resume.
+            || (self.observed_data
+                && scheduler.waits.iter().enumerate().any(|(index, wait)| {
+                    wait.is_some()
+                        && self.model.processes[index]
+                            .wait_sites
+                            .iter()
+                            .flatten()
+                            .any(|term| term.driven)
+                }))
             || !pending.observed.is_empty()
             || !pending.ready.is_empty()
             || !pending.deferred_ready.is_empty()
