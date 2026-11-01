@@ -1267,6 +1267,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "timing::static_formals_of_package_tasks at 3771:47: assert_eq first: expected 0x3, got 0x2",
+      "expectation": "Simulation",
+      "name": "timing::static_formals_of_package_tasks",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::static_function_readonly_initializer_calls_execute_once",

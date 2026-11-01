@@ -3897,3 +3897,36 @@ module Top(output bit value);
 endmodule
 "#)
   (top Top) (run_until 1) (assert_eq value 1))
+
+; Overlapping calls of a static task share its formals (IEEE 1800-2023
+; 13.3.2), also those of a package task called from two modules: Other's call
+; at time 1, while Top's call of time 0 waits, sets the `n` that Top's call
+; reads after its delay.
+(case static_formals_of_package_tasks
+  (source "timing.sv" #"
+package p;
+    int log[$];
+    task wait_for(int n, output int done_at);
+        #(n);
+        log.push_back(n);
+        done_at = $time;
+    endtask
+endpackage
+module Other(output int at);
+    initial begin
+        #1;
+        p::wait_for(3, at);
+    end
+endmodule
+module Top(output int top_at, output int other_at, output int first, output int second);
+    Other other(.at(other_at));
+    initial begin
+        p::wait_for(2, top_at);
+        #5;
+        first = p::log[0];
+        second = p::log[1];
+    end
+endmodule
+"#)
+  (top Top) (run_until 10)
+  (assert_eq top_at 2) (assert_eq other_at 4) (assert_eq first 3) (assert_eq second 3))

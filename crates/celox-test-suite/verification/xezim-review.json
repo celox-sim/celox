@@ -959,6 +959,10 @@
       "title": "Under the suite testbench, an initial block that calls a class method reading rand_mode() has not assigned its later outputs when the testbench samples them at time 0; run alone, the same source assigns them",
       "standard": "IEEE 1800-2023 18.8, 9.2.1"
     },
+    "sv_static_task_formals_per_call": {
+      "title": "Overlapping calls of a static task do not share its formals: each call keeps the value it passed, also for a package task called from two modules",
+      "standard": "IEEE 1800-2023 13.3.2, 6.21"
+    },
     "sv_parenless_method_chain": {
       "title": "A method called without parentheses on the handle that another parenless method call returns (n.get_peer.get_id) reads unknown bits",
       "standard": "IEEE 1800-2023 13.5.5"
@@ -5387,6 +5391,14 @@
       "classification": "xezim_bug",
       "bug": "sv_rand_mode_method_settle",
       "note": "was_rand = f.is_rand(), which returns bit'(value.rand_mode()) of a rand property, reads 0 at time 0: low, odd and picked, assigned before the call, pass. Run alone, xezim prints was_rand = 1 and now_fixed = 1."
+    },
+    {
+      "suite": "sv",
+      "name": "timing::static_formals_of_package_tasks",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_static_task_formals_per_call",
+      "note": "Top calls p::wait_for(2, ...) at time 0 and Other calls p::wait_for(3, ...) at time 1, while Top's call waits; the formal n is static, so after its delay Top's call logs 3. xezim logs 2, the value Top passed. Verilator 5.052 and Celox log 3 and 3."
     }
   ]
 }
