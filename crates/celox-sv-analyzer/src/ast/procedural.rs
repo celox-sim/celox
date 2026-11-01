@@ -5844,7 +5844,7 @@ pub(super) fn substitute_stmt_constants(
             );
         },
         &mut |lvalue| {
-            *lvalue = substitute_lvalue_constants(lvalue.clone(), const_env);
+            *lvalue = substitute_lvalue_constants(lvalue.clone(), const_env, literals);
         },
         &mut |_| {},
     );
