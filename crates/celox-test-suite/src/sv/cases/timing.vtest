@@ -1,5 +1,53 @@
 (group timing (category sequential))
 
+(case continuous_delay_net_initializer
+  (source "net_initializer.sv" #"
+module Top(input bit a, b, output y, other);
+  wire #5 delayed = a | b, other_delayed = a;
+  assign y=delayed;
+  assign other=other_delayed;
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq y 0) (assert_eq other 0)
+  (set a 1) (run_until 7) (set b 1)
+  (run_until 10) (assert_eq y 1) (assert_eq other 1)
+  (set a 0) (set b 0) (run_until 12) (set a 1)
+  (run_until 17) (assert_eq y 1) (assert_eq other 1)
+  (set a 0) (run_until 22) (assert_eq y 0) (assert_eq other 0))
+
+(case continuous_delay_net_initializer_generate
+  (source "net_initializer_generate.sv" #"
+module Top(input bit [7:0] a, output wire [7:0] y);
+  for (genvar i=0; i<2; i++) begin : g
+    localparam int D=i+2;
+    wire [3:0] #(D) delayed = a;
+    assign y[i*4 +: 4] = delayed;
+  end
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq y 0)
+  (set a 0x11) (run_until 4) (set a 0x21)
+  (run_until 5) (assert_eq y 1)
+  (run_until 6) (assert_eq y 0x11)
+  (set a 2) (run_until 8) (assert_eq y 0x12)
+  (run_until 9) (assert_eq y 0x22))
+
+(case continuous_delay_net_initializer_four_state
+  (source "net_initializer_four_state.sv" #"
+module Top(output bit same);
+  logic a=1'bz;
+  wire #3 y=a;
+  initial begin
+    #2; same=y === 1'bx;
+    #2; same=same && y === 1'bz;
+    a=1;
+    #1 a=1'bx;
+    #4; same=same && y === 1'bx;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 9) (assert_eq same 1))
+
 (case continuous_delay_selected_drivers
   (source "continuous_delay.sv" #"
 module Top(input bit [3:0] a, output wire [3:0] y);
