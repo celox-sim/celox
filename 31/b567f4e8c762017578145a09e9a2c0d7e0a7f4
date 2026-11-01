@@ -1,0 +1,6 @@
+Revision history for #2830:
+
+rev 2 (content) 2026-11-01 01:15 UTC — Substitute the receiver in select positions and check their effects, as Codex found
+rev 1 (initial) 2026-11-01 01:15 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2830,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5268e3f4942e3c8e6fd391e1732a9dbb5e2390dd","timestamp_iso":"2026-11-01T01:15:13Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5268e3f4942e3c8e6fd391e1732a9dbb5e2390dd","new_sha":"b9c28ebb23e12dc7eba4cc987362aa568e645c17","timestamp_iso":"2026-11-01T01:15:13Z","reason":"Substitute the receiver in select positions and check their effects, as Codex found","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5268e3f4942e3c8e6fd391e1732a9dbb5e2390dd...b9c28ebb23e12dc7eba4cc987362aa568e645c17"}]} -->
