@@ -1302,16 +1302,46 @@ fn signature(
         .ports
         .iter()
         .flatten()
-        .map(|port| {
-            port.name
-                .as_ref()
-                .map(|name| instances::normalize_identifier(&name.spelling))
+        .map(|port| match &port.name {
+            Some(name) => Some(instances::normalize_identifier(&name.spelling)),
+            None => prototype_formal_name(port, tree, session, context),
         })
         .collect();
     let result = return_type(tree, session, id, context).ok().map(|ty| {
         ty.and_then(|ty| type_parameters::resolve(&tree.functions, ty, &context.const_env))
     });
     (formals, result)
+}
+
+/// The name of formal `port` of a prototype that the parser read as an
+/// unnamed formal of a named type: a lone identifier there is a type when
+/// one of its name is visible, and otherwise the formal's name, of the type
+/// of the formal before it, as in `bit is_int, is_bitstream` (IEEE 1800-2023
+/// 13.4, A.2.7). `None` for a formal that names a type or its formal.
+pub(super) fn prototype_formal_name(
+    port: &celox_sv_syntax::SubroutinePort,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Option<String> {
+    if port.name.is_some() {
+        return None;
+    }
+    let native = tree.declarations();
+    let data = native.data_type(port.data_type);
+    let celox_sv_syntax::DataTypeKind::Named(segments) = &data.kind else {
+        return None;
+    };
+    let [segment] = segments.as_slice() else {
+        return None;
+    };
+    if segment.arguments.is_some() || data.signed.is_some() || !data.packed_dimensions.is_empty() {
+        return None;
+    }
+    match type_binding::binding::bind_in(port.data_type, native, tree, session, context) {
+        Ok(Some(_)) => None,
+        _ => Some(instances::normalize_identifier(&segment.name.spelling)),
+    }
 }
 
 /// The return type of subroutine `id`, `None` for a task or `void`.
