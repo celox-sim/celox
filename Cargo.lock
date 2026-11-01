@@ -501,7 +501,7 @@ dependencies = [
  "celox-design",
  "celox-sir",
  "celox-state-layout",
- "cranelift 0.137.0",
+ "cranelift 0.137.1",
  "cranelift-frontend 0.137.1",
  "cranelift-jit",
  "cranelift-module 0.137.1",
@@ -1180,9 +1180,9 @@ dependencies = [
 
 [[package]]
 name = "cranelift"
-version = "0.137.0"
+version = "0.137.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d3c50806b2e967d9fa18eee426c80628cec67b99f75ca459107375f1ba155e0"
+checksum = "34915124e6d716c40c317c86a3fb97b8484da096f937fc5b8c6ebf0df6ba14cd"
 dependencies = [
  "cranelift-codegen 0.137.1",
  "cranelift-frontend 0.137.1",
