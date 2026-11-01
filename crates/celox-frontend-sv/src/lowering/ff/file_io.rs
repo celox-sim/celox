@@ -114,6 +114,97 @@ impl Ff<'_, '_> {
         Ok(sv::ir::Expr::Ident(name))
     }
 
+    /// Capture the destination once, then copy out a successfully read line.
+    pub(super) fn fgets(
+        &mut self,
+        args: &[Option<sv::ir::Expr>],
+    ) -> Result<sv::ir::Expr, sv::AnalyzerError> {
+        use celox_design::ValueKind;
+        use sv::ir::{BinaryOp, Expr};
+        if self.kernel.is_none() {
+            return Err(unsupported("$fgets outside a scheduled process"));
+        }
+        let destination = args[0]
+            .as_ref()
+            .ok_or_else(|| unsupported("omitted $fgets destination"))?;
+        let parts = lvalue_from_expr(destination)
+            .ok_or_else(|| unsupported("$fgets requires a writable string destination"))?;
+        let [target] = parts.as_slice() else {
+            return Err(unsupported("$fgets requires a single string destination"));
+        };
+        let string_target = self.m.id(target.name()).is_some_and(|id| {
+            let variable = self.m.var(id);
+            variable.value_kind == ValueKind::StrRef
+                && (!matches!(target, sv::ir::LValue::Ident(_)) || variable.array_dims.is_empty())
+        });
+        if !string_target || self.lvalue_width(target)? != celox_design::HANDLE_WIDTH {
+            return Err(unsupported(
+                "$fgets requires a writable string destination; packed buffers are not supported",
+            ));
+        }
+        let (lvalues, _, guards) = self.capture_system_actual(destination)?;
+        let descriptor = args[1]
+            .as_ref()
+            .ok_or_else(|| unsupported("omitted $fgets descriptor"))?;
+        let descriptor =
+            self.file_descriptor_arg(&sv::ir::SystemTaskArg::Expr(descriptor.clone()))?;
+        let (count, count_name) = self.m.temp("fgets_count", 32, true, false);
+        let (line, line_name) = self
+            .m
+            .temp("fgets_line", celox_design::HANDLE_WIDTH, false, false);
+        self.m
+            .variables
+            .get_mut(&line)
+            .expect("fgets string result")
+            .value_kind = ValueKind::StrRef;
+        self.file_io_request(
+            14,
+            vec![descriptor],
+            vec![
+                HostRequestValue {
+                    value_kind: ValueKind::Bits,
+                    id: count,
+                    width: 32,
+                    signed: true,
+                    is_string: false,
+                    float_precision: None,
+                },
+                HostRequestValue {
+                    value_kind: ValueKind::StrRef,
+                    id: line,
+                    width: celox_design::HANDLE_WIDTH,
+                    signed: false,
+                    is_string: false,
+                    float_precision: None,
+                },
+            ],
+            Vec::new(),
+        )?;
+        let condition = Expr::Binary {
+            left: Box::new(Expr::Ident(count_name.clone())),
+            op: BinaryOp::Gt,
+            right: Box::new(Expr::Literal("0".into())),
+        };
+        let (condition, _) = self.eval_truth(&condition)?;
+        let write = self.b.new_block();
+        let join = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: condition,
+            true_block: (write, Vec::new()),
+            false_block: (join, Vec::new()),
+        });
+        self.b.switch_to_block(write);
+        self.check_tagged_guards(&guards)?;
+        let value = Expr::Ident(line_name);
+        match lvalues.as_slice() {
+            [one] => self.assign(one, &value)?,
+            _ => return Err(unsupported("$fgets string destination")),
+        }
+        self.jump(join);
+        self.b.switch_to_block(join);
+        Ok(Expr::Ident(count_name))
+    }
+
     pub(super) fn file_function(
         &mut self,
         function: sv::ir::SystemFunction,

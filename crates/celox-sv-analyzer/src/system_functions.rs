@@ -129,6 +129,8 @@ pub enum SystemFunction {
     System,
     /// Binary input into packed integers or a static memory (21.3.4.4).
     Fread,
+    /// Line input into a string variable (21.3.4.2).
+    Fgets,
     /// File position and byte input functions (21.3.4–8).
     Ftell,
     Fseek,
@@ -215,6 +217,7 @@ impl SystemFunction {
             Self::Fopen
                 | Self::System
                 | Self::Fread
+                | Self::Fgets
                 | Self::Ftell
                 | Self::Fseek
                 | Self::Rewind
@@ -343,6 +346,7 @@ impl SystemFunction {
             Self::Fopen => "$fopen",
             Self::System => "$system",
             Self::Fread => "$fread",
+            Self::Fgets => "$fgets",
             Self::Ftell => "$ftell",
             Self::Fseek => "$fseek",
             Self::Rewind => "$rewind",
@@ -401,6 +405,7 @@ impl SystemFunction {
                     | Self::Fopen
                     | Self::System
                     | Self::Fread
+                    | Self::Fgets
                     | Self::Ftell
                     | Self::Fseek
                     | Self::Rewind
@@ -460,7 +465,7 @@ impl SystemFunction {
                     | Self::DistErlang
             ) && position == 0)
             || (self == Self::ValuePlusargs && position == 1)
-            || (self == Self::Fread && position == 0)
+            || (matches!(self, Self::Fread | Self::Fgets) && position == 0)
             || (matches!(self, Self::Sscanf | Self::Fscanf) && position >= 2)
             || (matches!(
                 self,
@@ -538,6 +543,7 @@ impl SystemFunction {
             | Self::TestPlusargs
             | Self::ValuePlusargs
             | Self::Fread
+            | Self::Fgets
             | Self::Ftell
             | Self::Fseek
             | Self::Rewind
@@ -2066,7 +2072,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$sformatf", Function),
     function(SystemFunction::Fgetc, 1, Some(1)),
     function(SystemFunction::Ungetc, 2, Some(2)),
-    unsupported("$fgets", Function),
+    function(SystemFunction::Fgets, 2, Some(2)),
     function(SystemFunction::Fscanf, 2, None),
     function(SystemFunction::Sscanf, 2, None),
     function(SystemFunction::Fread, 2, Some(4)),

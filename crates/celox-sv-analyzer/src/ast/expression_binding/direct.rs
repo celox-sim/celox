@@ -1889,6 +1889,41 @@ fn bind_value_in(
                         system,
                     } => {
                         if let Some(function) = system {
+                            let mut operands = operands;
+                            // Bind selected string outputs as targets: the read path
+                            // wraps handles and folds invalid indices to empty strings.
+                            if function == SystemFunction::Fgets
+                                && let Some(Some(destination)) = args.first()
+                                && strings::fixed_array_element(
+                                    tree,
+                                    *destination,
+                                    native,
+                                    dimensions,
+                                )
+                            {
+                                operands[0] = match lvalues::variable_lvalue(
+                                    *destination,
+                                    native,
+                                    tree,
+                                    session,
+                                    dimensions,
+                                    false,
+                                )? {
+                                    LValue::Ident(name) => Expr::Ident(name),
+                                    LValue::Select {
+                                        name,
+                                        msb,
+                                        lsb,
+                                        signed,
+                                        ..
+                                    } => Expr::Select {
+                                        expr: Box::new(Expr::Ident(name)),
+                                        msb,
+                                        lsb,
+                                        signed,
+                                    },
+                                };
+                            }
                             if function == SystemFunction::Fread {
                                 let mut operands = operands.into_iter();
                                 let mut values = Vec::new();
@@ -1940,6 +1975,7 @@ fn bind_value_in(
                                     | SystemFunction::ValuePlusargs
                                     | SystemFunction::System
                                     | SystemFunction::Fopen
+                                    | SystemFunction::Fgets
                                     | SystemFunction::Ftell
                                     | SystemFunction::Fseek
                                     | SystemFunction::Rewind
@@ -1979,7 +2015,10 @@ fn bind_value_in(
                                     {
                                         return Err(AnalyzerError::InvalidSystemTfCall {
                                             name: name.clone(),
-                                            detail: if matches!(
+                                            detail: if function == SystemFunction::Fgets {
+                                                "output argument must be a writable string variable"
+                                                    .into()
+                                            } else if matches!(
                                                 function,
                                                 SystemFunction::Sscanf | SystemFunction::Fscanf
                                             ) {
