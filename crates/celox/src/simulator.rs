@@ -162,6 +162,7 @@ mod host {
         /// Whether a runtime-event site records heap handles
         /// (`sites_record_handles`).
         runtime_event_handles: bool,
+        runtime_event_pacing: Arc<DrainPacing>,
         pub(super) comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
         /// Storage reused for the next snapshot.
         comb_observer_scratch: Vec<crate::comb_activation::ObserverSnapshot>,
@@ -334,6 +335,35 @@ mod host {
         backpressure: Arc<AtomicBool>,
         /// Whether a site records heap handles (`sites_record_handles`).
         handles: bool,
+        pacing: Arc<DrainPacing>,
+    }
+
+    /// The threads of a simulation and of the drain that paces it, which
+    /// wake each other instead of spinning while one waits for the other.
+    #[derive(Default)]
+    pub(crate) struct DrainPacing {
+        simulation: std::sync::Mutex<Option<std::thread::Thread>>,
+        drain: std::sync::Mutex<Option<std::thread::Thread>>,
+    }
+
+    impl DrainPacing {
+        /// Make the calling thread the one `slot` wakes.
+        fn register(slot: &std::sync::Mutex<Option<std::thread::Thread>>) {
+            let current = std::thread::current();
+            let mut thread = slot.lock().unwrap();
+            if thread
+                .as_ref()
+                .is_none_or(|thread| thread.id() != current.id())
+            {
+                *thread = Some(current);
+            }
+        }
+
+        fn wake(slot: &std::sync::Mutex<Option<std::thread::Thread>>) {
+            if let Some(thread) = slot.lock().unwrap().as_ref() {
+                thread.unpark();
+            }
+        }
     }
 
     /// Whether a site of `sites` records heap handles, which only the
@@ -356,10 +386,34 @@ mod host {
         /// and the drain takes only those.
         pub fn set_backpressure(&self, enabled: bool) {
             self.backpressure.store(enabled, Ordering::Release);
+            // A simulation waiting for room goes on when no longer paced.
+            if !enabled {
+                DrainPacing::wake(&self.pacing.simulation);
+            }
         }
 
         pub fn drain(&mut self) -> Vec<RuntimeEvent> {
             self.drain_with_context(RuntimeFormatContext::default())
+        }
+
+        /// Block the calling thread until the simulation waits for this
+        /// drain to take events (see [`Self::set_backpressure`]), or until
+        /// `timeout` passes or the thread is unparked. Returns at once when
+        /// events are waiting to be taken.
+        pub fn wait(&self, timeout: std::time::Duration) {
+            DrainPacing::register(&self.pacing.drain);
+            // Check after registering: a simulation waiting from then on
+            // wakes this thread.
+            if !self.pending_host_events.lock().unwrap().events.is_empty()
+                // Records with handles wait in the ring for the simulation.
+                || (!self.sites.is_empty()
+                    && !(self.handles && self.backpressure.load(Ordering::Acquire))
+                    && self.buffer.load_atomic_u64(0, Ordering::Acquire)
+                        > self.shared_read_seq.load(Ordering::Acquire))
+            {
+                return;
+            }
+            std::thread::park_timeout(timeout);
         }
 
         pub fn drain_with_context(&mut self, ctx: RuntimeFormatContext<'_>) -> Vec<RuntimeEvent> {
@@ -378,6 +432,8 @@ mod host {
             }
             let events = pending.drain();
             drop(pending);
+            // A simulation waiting for room goes on.
+            DrainPacing::wake(&self.pacing.simulation);
             events
                 .into_iter()
                 .filter_map(|raw| render_raw_runtime_event(raw, &self.sites, ctx))
@@ -390,6 +446,7 @@ mod host {
         fn drop(&mut self) {
             self.backpressure.store(false, Ordering::Release);
             self.active.store(false, Ordering::Release);
+            DrainPacing::wake(&self.pacing.simulation);
         }
     }
 
@@ -1332,6 +1389,7 @@ mod host {
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
                 runtime_event_backpressure: Arc::new(AtomicBool::new(false)),
                 runtime_event_handles,
+                runtime_event_pacing: Arc::default(),
                 comb_observer_snapshots: Vec::new(),
                 comb_observer_scratch: Vec::new(),
                 comb_observer_reads,
@@ -2155,6 +2213,7 @@ mod host {
                 active: Arc::clone(&self.runtime_event_drain_active),
                 backpressure: Arc::clone(&self.runtime_event_backpressure),
                 handles: self.runtime_event_handles,
+                pacing: Arc::clone(&self.runtime_event_pacing),
             })
         }
 
@@ -2163,6 +2222,8 @@ mod host {
         /// ring buffer and those the host moved into its bounded queue, so
         /// that the step keeps every record up to the buffer's capacity.
         pub(crate) fn await_runtime_event_room(&mut self) {
+            let pacing = Arc::clone(&self.runtime_event_pacing);
+            let mut registered = false;
             while self.runtime_event_backpressure.load(Ordering::Acquire)
                 && self.runtime_event_drain_active.load(Ordering::Acquire)
             {
@@ -2176,7 +2237,15 @@ mod host {
                 if queued == 0 && self.runtime_event_write_seq() <= read {
                     break;
                 }
-                std::thread::yield_now();
+                // The drain wakes this thread once it took events or ended;
+                // check again after registering, so that no wakeup is missed.
+                if !registered {
+                    DrainPacing::register(&pacing.simulation);
+                    registered = true;
+                    continue;
+                }
+                DrainPacing::wake(&pacing.drain);
+                std::thread::park();
             }
         }
 
