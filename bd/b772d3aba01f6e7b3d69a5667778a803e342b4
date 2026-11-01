@@ -1,1 +1,1 @@
-Rebase #2936 and #2937 onto latest master and retry SCR1 after the new $system implementation
+Refresh SCR1 validation after rebasing onto master with $system support: both modes now stop at hierarchical string assignment
