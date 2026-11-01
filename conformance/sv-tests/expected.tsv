@@ -1075,8 +1075,8 @@ chapter-5/5.7.2-real-constants.sv	2state	pass
 chapter-5/5.7.2-real-constants.sv	4state	pass
 chapter-5/5.7.2-real-token.sv	2state	pass
 chapter-5/5.7.2-real-token.sv	4state	pass
-chapter-5/5.8-time-literals.sv	2state	fail
-chapter-5/5.8-time-literals.sv	4state	fail
+chapter-5/5.8-time-literals.sv	2state	pass
+chapter-5/5.8-time-literals.sv	4state	pass
 chapter-5/5.9-string-assignment.sv	2state	pass
 chapter-5/5.9-string-assignment.sv	4state	pass
 chapter-5/5.9-string-basics.sv	2state	pass

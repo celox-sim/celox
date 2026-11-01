@@ -43,4 +43,8 @@ sv_backends! {
     fn simulates_systemverilog_four_state_literal_operator_masks(sim) {
         @case "literals::simulates_systemverilog_four_state_literal_operator_masks";
     }
+
+    fn time_literals_scale_to_the_time_unit(sim) {
+        @case "literals::time_literals_scale_to_the_time_unit";
+    }
 }
