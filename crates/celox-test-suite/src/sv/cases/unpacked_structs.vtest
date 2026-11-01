@@ -1,5 +1,229 @@
 (group unpacked_structs (category types))
 
+(case integral_array_member_defaults
+  (source "array_member_defaults.sv" #"
+    module Top(output bit same);
+      typedef bit signed [31:0] element_t;
+      typedef struct { element_t a[2]; } row_t;
+      typedef struct { row_t inner; } nested_t;
+      typedef struct { element_t a[3:2][5:4]; } source_t;
+      typedef struct { element_t a[2][2]; } matrix_t;
+      row_t src = '{'{11, 22}}, dst, selected, scalar;
+      nested_t nested;
+      source_t source_rows = '{'{'{31, 32}, '{41, 42}}};
+      matrix_t matrix;
+      element_t values[2][2];
+      initial begin
+        dst = '{default: src.a};
+        nested = '{default: (src.a)};
+        values = '{default: src.a};
+        selected = '{default: source_rows.a[3]};
+        matrix = '{default: source_rows.a[3:2]};
+        scalar = '{default: 7};
+        src.a[0] = 99;
+        same = dst.a[0] == 11 && dst.a[1] == 22
+          && nested.inner.a[0] == 11 && nested.inner.a[1] == 22
+          && values[0][0] == 11 && values[1][1] == 22
+          && selected.a[0] == 31 && selected.a[1] == 32
+          && matrix.a[0][0] == 31 && matrix.a[0][1] == 32
+          && matrix.a[1][0] == 41 && matrix.a[1][1] == 42
+          && scalar.a[0] == 7 && scalar.a[1] == 7;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case integral_array_member_defaults_four_state
+  (source "array_member_defaults.sv" #"
+    module Top(output bit same);
+      typedef struct { logic [3:0] a[2]; } row_t;
+      row_t src = '{'{4'b10xz, 4'bz001}}, dst;
+      initial begin
+        dst = '{default: src.a};
+        src.a[0] = 0;
+        same = dst.a[0] === 4'b10xz && dst.a[1] === 4'bz001;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case integral_array_members
+  (source "array_members.sv" #"
+    module Top(output bit same);
+      typedef struct { int tag; int values[3:2]; bit flag; } row_t;
+      row_t s = '{7, '{11, 22}, 1}, copy;
+      int index = 2;
+      int saved[2];
+      initial begin
+        copy = s;
+        saved = s.values;
+        s.values[index] += 3;
+        s.values[3][7:0] = 8'h35;
+        same = copy.tag == 7 && copy.values[3] == 11 && copy.values[2] == 22
+          && copy.flag && saved[0] == 11 && saved[1] == 22
+          && s.values[3] == 53 && s.values[2] == 25 && s.tag == 7 && s.flag;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case integral_array_members_local
+  (source "array_members.sv" #"
+    module Top(output bit same);
+      typedef struct { int tag; int values[2]; } row_t;
+      initial begin
+        automatic row_t local_row = '{3, '{4, 5}};
+        #1;
+        local_row.values[1] = 9;
+        same = local_row.tag == 3 && local_row.values[0] == 4 && local_row.values[1] == 9;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case integral_array_members_four_state
+  (source "array_members.sv" #"
+    module Top(output bit same);
+      typedef struct { logic [3:0] values[2]; logic flag; } row_t;
+      row_t s, copy;
+      logic index;
+      initial begin
+        s = '{'{4'b10xz, 4'bz001}, 1'bz};
+        copy = s;
+        index = 1'bx;
+        s.values[index] = 0;
+        same = s.values[0] === 4'b10xz && s.values[1] === 4'bz001
+          && s.values[index] === 4'bxxxx && s.values[4] === 4'bxxxx
+          && copy.values[0] === 4'b10xz && copy.values[1] === 4'bz001 && copy.flag === 1'bz;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case integral_array_members_of_arrays
+  (source "array_members.sv" #"
+    module Top(output bit same, output int outer_index, inner_index);
+      typedef struct { bit signed [31:0] tag; bit signed [31:0] values[3:2]; } row_t;
+      row_t rows[2] = '{'{7, '{11, 22}}, '{8, '{33, 44}}}, copy;
+      bit signed [31:0] saved[2];
+      int bad = 9;
+      initial begin
+        inner_index = 2;
+        rows[outer_index++].values[inner_index++] = 55;
+        copy = rows[0];
+        saved = rows[1].values;
+        rows[1].values = '{101, 102};
+        rows[1].values[3][7:4] = 4'hf;
+        rows[1].values[bad] = 777;
+        rows[bad].values[2] = 999;
+        rows[0].values[3:2] = saved;
+        same = copy.tag == 7 && copy.values[3] == 11 && copy.values[2] == 55
+          && saved[0] == 33 && saved[1] == 44
+          && rows[0].values[3] == 33 && rows[0].values[2] == 44 && rows[0].tag == 7
+          && rows[1].values[3] == 245 && rows[1].values[2] == 102 && rows[1].tag == 8
+          && rows[0].values[bad] == 0 && rows[bad].values[2] == 0;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1) (assert_eq outer_index 1) (assert_eq inner_index 3))
+
+(case integral_array_members_of_arrays_four_state
+  (source "array_members.sv" #"
+    module Top(output bit same);
+      typedef struct { logic [3:0] values[2]; logic flag; } row_t;
+      row_t rows[2], copy;
+      logic index;
+      initial begin
+        rows[0] = '{'{4'b10xz, 4'bz001}, 1'bz};
+        index = 1'bx;
+        rows[0].values[index] = 0;
+        rows[index].values[0] = 0;
+        copy = rows[index];
+        same = rows[0].values[0] === 4'b10xz && rows[0].values[1] === 4'bz001
+          && rows[0].values[index] === 4'bxxxx && rows[index].values[0] === 4'bxxxx
+          && copy.values[0] === 4'bxxxx && copy.values[1] === 4'bxxxx && copy.flag === 1'bx;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case integral_array_members_parameters
+  (source "array_members.sv" #"
+    module Box #(parameter int W = 3, N = 2)(output bit good);
+      localparam int START = 7;
+      typedef logic [W-1:0] vector_t;
+      typedef struct { vector_t values[START:START+N-1]; } row_t;
+      row_t value;
+      initial begin
+        value = '{default: 0};
+        value.values[START+N-1] = 1;
+        begin
+          localparam int START = 0;
+          good = $left(value.values) == 7 && $size(value.values) == N
+            && $bits(value.values) == W*N && value.values[7] == 0
+            && value.values[7+N-1] == 1;
+        end
+      end
+    endmodule
+    module Top(output bit [1:0] good);
+      Box base_box(good[0]);
+      Box #(.W(9), .N(4)) wide_box(good[1]);
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq good 3))
+
+(case integral_array_members_replication
+  (source "array_members.sv" #"
+    module Top(output bit same);
+      typedef struct { int a; int b[4]; } row_t;
+      struct { int x, y, z; } triple = '{3{1}};
+      row_t rows[1:0][2:0];
+      initial begin
+        rows = '{2{'{3{'{7, '{2{11, 22}}}}}}};
+        same = triple.x == 1 && triple.y == 1 && triple.z == 1
+          && rows[1][2].a == 7 && rows[0][0].b[0] == 11
+          && rows[0][0].b[1] == 22 && rows[1][1].b[2] == 11 && rows[1][0].b[3] == 22;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case integral_array_members_wide
+  (source "array_members.sv" #"
+    module Top(output bit same);
+      typedef struct { bit [2:0] tag; bit [128:0] values[2]; } row_t;
+      row_t rows[2] = '{default: '{default: 0}}, copy;
+      int outer_index = 1, inner_index = 0;
+      initial begin
+        rows[outer_index].values[inner_index] = 129'h100000000000000000000000000000001;
+        copy = rows[1];
+        same = rows[1].values[0][128] && rows[1].values[0][0]
+          && rows[0].values[0] == 0 && rows[1].values[1] == 0
+          && copy.values[0][128] && copy.values[0][0] && copy.tag == 0;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case integral_array_members_nested
+  (source "array_members.sv" #"
+    module Top(output bit same);
+      typedef struct { bit [7:0] values[2:1][4:5]; } inner_t;
+      typedef struct { bit [3:0] tag; inner_t inner; } row_t;
+      row_t rows[2], copy;
+      int a = 1, b = 2, c = 5;
+      initial begin
+        rows = '{default: '{default: 0}};
+        rows[a].inner.values[b][c] = 8'hab;
+        copy = rows[1];
+        same = rows[1].inner.values[2][5] == 8'hab
+          && rows[0].inner.values[2][5] == 0 && rows[1].inner.values[1][4] == 0
+          && copy.inner.values[2][5] == 8'hab && copy.tag == 0;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
 (case fixed_array_pattern_rows
   (source "struct_pattern_rows.sv" #"
     module Top(output bit same);

@@ -3,6 +3,22 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_struct_integral_array_member_defaults(sim) { @case "unpacked_structs::integral_array_member_defaults"; }
+    fn unpacked_struct_integral_array_member_defaults_four_state(sim) { @case "unpacked_structs::integral_array_member_defaults_four_state"; }
+
+    fn unpacked_struct_integral_array_members_wide(sim) { @case "unpacked_structs::integral_array_members_wide"; }
+    fn unpacked_struct_integral_array_members_nested(sim) { @case "unpacked_structs::integral_array_members_nested"; }
+
+    fn unpacked_struct_integral_array_members_parameters(sim) { @case "unpacked_structs::integral_array_members_parameters"; }
+    fn unpacked_struct_integral_array_members_replication(sim) { @case "unpacked_structs::integral_array_members_replication"; }
+
+    fn unpacked_struct_integral_array_members_of_arrays(sim) { @case "unpacked_structs::integral_array_members_of_arrays"; }
+    fn unpacked_struct_integral_array_members_of_arrays_four_state(sim) { @case "unpacked_structs::integral_array_members_of_arrays_four_state"; }
+
+    fn unpacked_struct_integral_array_members(sim) { @case "unpacked_structs::integral_array_members"; }
+    fn unpacked_struct_integral_array_members_local(sim) { @case "unpacked_structs::integral_array_members_local"; }
+    fn unpacked_struct_integral_array_members_four_state(sim) { @case "unpacked_structs::integral_array_members_four_state"; }
+
     fn unpacked_struct_fixed_array_pattern_rows(sim) { @case "unpacked_structs::fixed_array_pattern_rows"; }
     fn unpacked_struct_fixed_array_pattern_rows_four_state(sim) { @case "unpacked_structs::fixed_array_pattern_rows_four_state"; }
 
@@ -841,5 +857,94 @@ fn fixed_array_pattern_rows_require_compatible_arrays() {
         };
         let error = error.to_string();
         assert!(error.contains("unpacked array"), "{body}: {error}");
+    }
+}
+
+#[test]
+fn integral_array_member_boundaries_are_explicit() {
+    for (body, expected) in [
+        (
+            "module Top(input t value); endmodule",
+            "array members on a port",
+        ),
+        (
+            "module Top; function void f(t value); endfunction endmodule",
+            "array members in subroutine interfaces",
+        ),
+        (
+            "module Top; t q[$]; endmodule",
+            "dynamic container of an unpacked structure with array members",
+        ),
+        (
+            "module Top; class C; t value; endclass C c; endmodule",
+            "class property type",
+        ),
+    ] {
+        let source = format!("typedef struct {{ int values[2]; }} t; {body}");
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(&source, Path::new("array_members.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("unsupported interface accepted: {source}")
+        };
+        assert!(error.to_string().contains(expected), "{source}: {error}");
+    }
+    for fields in [
+        "string values[2];",
+        "int values[];",
+        "int values[0];",
+        "int values[2] = '{1, 2};",
+    ] {
+        let source = format!("module Top; typedef struct {{ {fields} }} t; t value; endmodule");
+        assert!(
+            Simulator::from_sv_sources(vec![(&source, Path::new("array_members.sv"))], "Top")
+                .build_cranelift()
+                .is_err(),
+            "unsupported member accepted: {source}"
+        );
+    }
+}
+
+#[test]
+fn integral_array_members_require_compatible_array_values() {
+    for body in [
+        "bit [7:0] bad[3]; initial rows[0].values = bad;",
+        "bit [6:0] bad[2]; initial rows[0].values = bad;",
+        "typedef struct { bit [7:0] values[3]; } other_t; other_t other[2]; initial rows[0].values = other[1].values;",
+    ] {
+        let source = format!(
+            "module Top; typedef struct {{ bit [7:0] values[2]; }} t; t rows[2]; {body} endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(&source, Path::new("array_members.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("incompatible member array accepted: {source}")
+        };
+        assert!(
+            error.to_string().contains("unpacked array"),
+            "{source}: {error}"
+        );
+    }
+}
+
+#[test]
+fn integral_array_member_defaults_require_compatible_values() {
+    for member in ["bit [7:0] a[3];", "bit [6:0] a[2];"] {
+        let source = format!(
+            "module Top; typedef struct {{ bit [7:0] a[2]; }} target_t; \
+             typedef struct {{ {member} }} source_t; target_t dst; source_t src; \
+             initial dst = '{{default: src.a}}; endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(&source, Path::new("array_defaults.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("incompatible array-valued default accepted: {source}")
+        };
+        assert!(
+            error.to_string().contains("unpacked array"),
+            "{source}: {error}"
+        );
     }
 }

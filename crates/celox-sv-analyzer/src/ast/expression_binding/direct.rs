@@ -2863,6 +2863,7 @@ pub(in crate::ast) fn member_context(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<(Vec<Expr>, Type)>> {
+    let authored = root;
     while let ExprKind::Select { expression, .. } = native.expression(root).kind {
         root = expression;
     }
@@ -2871,7 +2872,14 @@ pub(in crate::ast) fn member_context(
     }
     if let Some(element) = element_members::element_member(root, native, tree, session, dims) {
         let (_, ty) = packed_structs::element_member(&element.name, &element.members, dims)?;
-        return Ok(Some((Vec::new(), ty.clone())));
+        let ty = if ty.unpacked_ranges.is_empty() {
+            ty.clone()
+        } else {
+            dimensions::operand_shape(authored, tree, session, dims)?
+                .and_then(|shape| shape.pattern_type(&tree.functions, dims))
+                .ok_or_else(|| unsupported("structure array member type"))?
+        };
+        return Ok(Some((Vec::new(), ty)));
     }
     let (mut parts, qualified) = path(root, native, tree, session, dims)?;
     if let Some(name) = qualified {

@@ -85,6 +85,12 @@ impl UnpackedStruct {
         self.members.iter().find(|member| member.name == name)
     }
 
+    pub(in crate::ast) fn has_array_members(&self) -> bool {
+        self.leaves()
+            .iter()
+            .any(|leaf| !leaf.r#type.unpacked_ranges.is_empty())
+    }
+
     /// Bits of a flat value.
     pub(in crate::ast) fn width(&self) -> usize {
         self.members.iter().map(|member| member.width).sum()
@@ -203,8 +209,7 @@ pub(in crate::ast) fn native_type(
         .into_iter()
         .map(|(name, ty, default)| {
             // A chandle is no packed array element (IEEE 1800-2023 6.14).
-            if !ty.unpacked_ranges.is_empty()
-                || ty.container.is_some()
+            if ty.container.is_some()
                 || (ty.chandle && ty.packed_ranges.len() > 1)
                 // Each event member would need its own synchronization
                 // object (IEEE 1800-2023 15.5).
@@ -215,13 +220,49 @@ pub(in crate::ast) fn native_type(
             {
                 return None;
             }
-            let ty = match ty.unpacked_struct() {
-                Some(_) => ty,
-                None => packed_structs::capture_member_type(functions, ty, env)?,
-            };
-            let width = match ty.unpacked_struct() {
-                Some(inner) => inner.width(),
-                None => casts::expr_type_from_type(functions, &ty, env)?.width,
+            let (ty, width) = if ty.unpacked_ranges.is_empty() {
+                let ty = match ty.unpacked_struct() {
+                    Some(_) => ty,
+                    None => packed_structs::capture_member_type(functions, ty, env)?,
+                };
+                let width = match ty.unpacked_struct() {
+                    Some(inner) => inner.width(),
+                    None => casts::expr_type_from_type(functions, &ty, env)?.width,
+                };
+                (ty, width)
+            } else {
+                if ty.unpacked_struct().is_some()
+                    || !ty.members.is_empty()
+                    || ty.chandle
+                    || ty.is_enum
+                    || ty.packed_enum
+                    || !matches!(
+                        ty.kind,
+                        TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+                    )
+                    || default.is_some()
+                {
+                    return None;
+                }
+                types::validate_unpacked_dimension_sizes(functions, &ty.unpacked_ranges, env)
+                    .ok()?;
+                let ty = ty.pattern_target(&const_functions::Environment {
+                    constants: env,
+                    functions,
+                })?;
+                let mut element = ty.clone();
+                element.unpacked_ranges.clear();
+                let width = ty.unpacked_ranges.iter().try_fold(
+                    casts::expr_type_from_type(functions, &element, env)?.width,
+                    |width, range| {
+                        let left = eval_ast_const_expr(functions, range.left(), env)?;
+                        let right = eval_ast_const_expr(functions, range.right(), env)?;
+                        width.checked_mul(
+                            usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?,
+                        )
+                    },
+                )?;
+                (ty, width)
             };
             Some(Member {
                 name,
@@ -231,6 +272,9 @@ pub(in crate::ast) fn native_type(
             })
         })
         .collect::<Option<Vec<_>>>()?;
+    let width = members
+        .iter()
+        .try_fold(0usize, |width, member| width.checked_add(member.width))?;
     let aggregate = UnpackedStruct { owner, members };
     let four_state = aggregate.leaves().iter().any(|leaf| {
         matches!(
@@ -238,7 +282,6 @@ pub(in crate::ast) fn native_type(
             TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
         )
     });
-    let width = aggregate.width();
     let mut r#type = Type::new(if four_state {
         TypeKind::Logic
     } else {
@@ -267,7 +310,6 @@ pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
                 TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
             )
             || leaf.r#type.chandle
-            || !leaf.r#type.unpacked_ranges.is_empty()
             || (leaf.r#type.kind == TypeKind::Bit) != two_state
     }) {
         return Err(unsupported(
@@ -689,6 +731,11 @@ pub(in crate::ast) fn record(
     aggregate: &UnpackedStruct,
     env: &HashMap<String, i128>,
 ) -> Converted<Option<crate::system_functions::Record>> {
+    if aggregate.has_array_members() {
+        return Err(unsupported(
+            "dynamic container of an unpacked structure with array members",
+        ));
+    }
     if aggregate.leaves().iter().any(|leaf| leaf.default.is_some()) {
         return Err(unsupported(
             "dynamic container of an unpacked structure with member initial values",

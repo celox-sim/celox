@@ -219,6 +219,78 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator 5.052 reports an internal error in V3Ast.cpp:665 (Node has no back, already unlinked?) when a multidimensional array assignment pattern uses src.a as its default. The adapter-free probe reproduces the error at values = default src.a. IEEE 1800-2023 10.9.1 and 10.9.2 permit matching array-valued defaults; scalar defaults still apply recursively.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_member_defaults",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_struct_array_member_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 reports an internal error in V3Ast.cpp:665 (Node has no back, already unlinked?) when a multidimensional array assignment pattern uses src.a as its default. The adapter-free probe reproduces the error at values = default src.a. IEEE 1800-2023 10.9.1 and 10.9.2 permit matching array-valued defaults; scalar defaults still apply recursively.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-verilator.json",
+          "verification/repros/sv_struct_array_member_defaults.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 aliases rows[9].values[2] to rows[1].values[2] in a two-element structure array: the invalid write stores 999 in the valid element, and the invalid read returns 999. IEEE 1800-2023 7.4.5 requires invalid writes to be ignored and invalid reads to return the element default. The standalone probe also confirms normal member-array copies before the invalid write.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_of_arrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_struct_array_members_invalid_index",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 aliases rows[9].values[2] to rows[1].values[2] in a two-element structure array: the invalid write stores 999 in the valid element, and the invalid read returns 999. IEEE 1800-2023 7.4.5 requires invalid writes to be ignored and invalid reads to return the element default. The standalone probe also confirms normal member-array copies before the invalid write.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-verilator.json",
+          "verification/repros/sv_struct_array_members_bounds.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 emits uncompilable C++ for a structure containing a two-element array of 129-bit integral values: VL_CONST_W_1X receives VlUnpacked<VlWide<5>, 2> where WDataOutP is required. The standalone probe reproduces the build failure; Celox and xezim pass the shared case.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_wide",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_struct_array_members_wide",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 emits uncompilable C++ for a structure containing a two-element array of 129-bit integral values: VL_CONST_W_1X receives VlUnpacked<VlWide<5>, 2> where WDataOutP is required. The standalone probe reproduces the build failure; Celox and xezim pass the shared case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-verilator.json",
+          "verification/repros/sv_struct_array_members_wide.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Verilator 5.052 evaluates a 32-bit shift before converting it to the 64-bit member type, yielding 0 for 32'd1 << 40, and zero-extends -32'sd1 to 0x00000000ffffffff. IEEE 1800-2023 7.2.2 and 11.8.2 require assignment-context sizing; the expected values are 0x10000000000 and 0xffffffffffffffff.",
       "expectation": "Simulation",
       "name": "unpacked_structs::member_initial_values_assignment_context",
