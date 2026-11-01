@@ -51,7 +51,7 @@ pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) ->
         && Arc::ptr_eq(&a.subroutine_param_shapes, &b.subroutine_param_shapes)
         && Arc::ptr_eq(&a.subroutine_directions, &b.subroutine_directions)
         && Arc::ptr_eq(&a.subroutine_param_names, &b.subroutine_param_names)
-        && Arc::ptr_eq(&a.enum_constants, &b.enum_constants)
+        && Arc::ptr_eq(&a.constant_types, &b.constant_types)
         && a.class_scope == b.class_scope
 }
 
@@ -193,8 +193,8 @@ fn shape(
     ty: &Type,
     local: bool,
 ) {
-    if context.enum_constants.contains_key(&name) {
-        Arc::make_mut(&mut context.enum_constants).remove(&name);
+    if context.constant_types.contains_key(&name) {
+        Arc::make_mut(&mut context.constant_types).remove(&name);
     }
     let value = procedural::bound_dimensions_from_type(
         ty,
@@ -262,8 +262,9 @@ fn parameter(
     local: bool,
 ) -> Converted<()> {
     let n = name(&parameter.name);
-    if context.enum_constants.contains_key(&n) {
-        Arc::make_mut(&mut context.enum_constants).remove(&n);
+    let retained = context.constant_types.get(&n).cloned();
+    if retained.is_some() {
+        Arc::make_mut(&mut context.constant_types).remove(&n);
     }
     match &parameter.kind {
         ParameterKind::Type { default: Some(id) } => {
@@ -304,8 +305,25 @@ fn parameter(
             {
                 let ty = type_with_dimensions(base, dimensions, tree, session, context)?;
                 if !dimensions.is_empty() || !ty.packed_ranges().is_empty() {
-                    publish_shape(tree, session, key, context, n, &ty, local);
+                    publish_shape(tree, session, key, context, n.clone(), &ty, local);
                 }
+            }
+            // Retain only this declaration's final binding. An imported
+            // parameter or enumerator with the same name belongs to another
+            // declaration; an implicit genvar binding has no retained type.
+            let binding = retained
+                .filter(|ty| !local && ty.declares_parameter(tree, parameter))
+                .or_else(|| {
+                    parameters::native_constant_type(
+                        parameter,
+                        tree,
+                        session,
+                        context,
+                        scalar_binding,
+                    )
+                });
+            if let Some(binding) = binding {
+                Arc::make_mut(&mut context.constant_types).insert(n, binding);
             }
         }
         _ => {}
@@ -372,8 +390,8 @@ fn declaration(
                 if top {
                     ty.name_declaration(|| types::declaration_name(tree, alias, None));
                 }
-                if context.enum_constants.contains_key(&name(&alias.name)) {
-                    Arc::make_mut(&mut context.enum_constants).remove(&name(&alias.name));
+                if context.constant_types.contains_key(&name(&alias.name)) {
+                    Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
                 }
                 publish_enum_constants(id, &ty, tree, session, context)?;
                 context.type_aliases.insert(name(&alias.name), ty);
@@ -1106,8 +1124,8 @@ fn local_declaration(
                         typename,
                     )
                 });
-                if context.enum_constants.contains_key(&name(&alias.name)) {
-                    Arc::make_mut(&mut context.enum_constants).remove(&name(&alias.name));
+                if context.constant_types.contains_key(&name(&alias.name)) {
+                    Arc::make_mut(&mut context.constant_types).remove(&name(&alias.name));
                 }
                 publish_enum_constants(id, &ty, tree, session, context)?;
                 context.type_aliases.insert(name(&alias.name), ty);
@@ -1227,10 +1245,10 @@ fn overlay(context: &mut PackedDimensions, input: &PackedDimensions) {
         .function_return_types
         .extend(input.function_return_types.clone());
     context.parameter_values = input.parameter_values.clone();
-    if !input.enum_constants.is_empty() {
-        for (name, binding) in input.enum_constants.iter() {
-            if !context.enum_constants.contains_key(name) {
-                Arc::make_mut(&mut context.enum_constants).insert(name.clone(), binding.clone());
+    if !input.constant_types.is_empty() {
+        for (name, binding) in input.constant_types.iter() {
+            if !context.constant_types.contains_key(name) {
+                Arc::make_mut(&mut context.constant_types).insert(name.clone(), binding.clone());
             }
         }
     }
@@ -1258,7 +1276,7 @@ fn settle_scope(
     super::SCOPE_SETTLES.with(|count| count.set(count.get() + 1));
     let mut context = input.clone();
     for (name, binding) in &scope::imported(tree).enum_constants.declarations {
-        Arc::make_mut(&mut context.enum_constants)
+        Arc::make_mut(&mut context.constant_types)
             .entry(name.clone())
             .or_insert_with(|| binding.clone());
     }
@@ -1267,6 +1285,13 @@ fn settle_scope(
             .function_return_types
             .entry(name.clone())
             .or_insert_with(|| metadata.clone());
+    }
+    for parameter in &scope::imported(tree).parameters {
+        if let Some(ty) = &parameter.semantic_type {
+            Arc::make_mut(&mut context.constant_types)
+                .entry(parameter.name().into())
+                .or_insert_with(|| ty.clone());
+        }
     }
     extend_interface_dimensions(tree, &mut context);
     extend_variable_dimensions_from_const_env(&mut context, &input.const_env);
@@ -1471,7 +1496,7 @@ fn publish_enum_constants(
     )? && let DataTypeKind::Enum { items, .. } = &tree.declarations().data_type(id).kind
     {
         for member in items {
-            Arc::make_mut(&mut context.enum_constants).insert(name(&member.name), binding.clone());
+            Arc::make_mut(&mut context.constant_types).insert(name(&member.name), binding.clone());
         }
     }
     Ok(())

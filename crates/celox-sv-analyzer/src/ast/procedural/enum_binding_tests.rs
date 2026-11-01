@@ -18,7 +18,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
         &PackedDimensions::default(),
     )
     .unwrap();
-    let original = dims.enum_constants["A"].clone();
+    let original = dims.constant_types["A"].clone();
     let mut locals = Vec::new();
     let mut counter = 0;
     let mut state = BodyState {
@@ -41,7 +41,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
     );
     builder.push_scope();
     builder.declare("A", int_type());
-    assert!(!builder.dims.enum_constants.contains_key("A"));
+    assert!(!builder.dims.constant_types.contains_key("A"));
     assert!(
         enums::constant_binding(
             &tree,
@@ -54,7 +54,7 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
         .is_none()
     );
     builder.pop_scope();
-    assert_eq!(builder.dims.enum_constants["A"], original);
+    assert_eq!(builder.dims.constant_types["A"], original);
     // A localparam/typedef uses the same binding save/restore entry.
     builder.push_scope();
     let entry = builder.take_binding("A", None, 0);
@@ -75,5 +75,5 @@ fn local_values_hide_enum_bindings_and_scope_exit_restores_them() {
         .is_none()
     );
     builder.pop_scope();
-    assert_eq!(builder.dims.enum_constants["A"], original);
+    assert_eq!(builder.dims.constant_types["A"], original);
 }

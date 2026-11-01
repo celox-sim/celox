@@ -1,6 +1,6 @@
 use super::*;
 
-fn pair(declarations: &str, left: &str, right: &str) -> (Session, TyId, TyId) {
+pub(super) fn pair(declarations: &str, left: &str, right: &str) -> (Session, TyId, TyId) {
     let source =
         format!("module M; {declarations} assign out1={left}; assign out2={right}; endmodule");
     let syntax =
@@ -118,7 +118,7 @@ fn enum_methods_use_the_receivers_semantic_declaration_type() {
     );
 }
 
-fn lexical_query(source: &str, wanted: &str) -> (Session, TyId) {
+pub(super) fn lexical_query(source: &str, wanted: &str) -> (Session, TyId) {
     let syntax =
         crate::source_tree::parse_scope_fixture(source, Path::new("lexical-enum-type.sv")).unwrap();
     let tree = AnalysisContext::unspecialized(&syntax);
@@ -198,7 +198,7 @@ fn frozen_constant_bindings_work_in_independent_tables_without_caller_names() {
         &PackedDimensions::default(),
     )
     .unwrap();
-    let binding = dims.enum_constants["A"].clone();
+    let binding = dims.constant_types["A"].clone();
     let mut unrelated = semantic_types::TyTable::default();
     unrelated.intern(TyData::String);
     let ty = binding.type_id(&mut unrelated).unwrap();
@@ -225,8 +225,8 @@ fn changed_constant_bindings_invalidate_expression_memos_and_values_do_not_choos
     dims.const_env.insert("A".into(), 12345);
     let same = type_of(&tree, &mut session, id, tree.declarations(), &dims).unwrap();
     assert!(session.types.matches(first, same));
-    let changed = dims.enum_constants["C"].clone();
-    Arc::make_mut(&mut dims.enum_constants).insert("A".into(), changed);
+    let changed = dims.constant_types["C"].clone();
+    Arc::make_mut(&mut dims.constant_types).insert("A".into(), changed);
     let second = type_of(&tree, &mut session, id, tree.declarations(), &dims).unwrap();
     enum_type(&session.types, second, 8, false, false);
     assert!(!session.types.matches(first, second));
@@ -290,7 +290,7 @@ fn generate_member_shadows_keep_definition_site_base_bounds() {
     let items = generate::items(&tree, &mut session, &env, &HashMap::default()).unwrap();
     let base = PackedDimensions::new(HashMap::default(), &env, &HashMap::default());
     let dims = items.last().unwrap().dimensions(&base);
-    let ty = dims.enum_constants["W"]
+    let ty = dims.constant_types["W"]
         .type_id(&mut session.types)
         .unwrap();
     enum_type(&session.types, ty, 5, false, false);
@@ -361,7 +361,7 @@ fn ranged_inline_enum_names_are_not_fabricated_as_scalar_constants() {
         &mut session,
         &PackedDimensions::default(),
     ) {
-        assert!(!dims.enum_constants.contains_key("A"));
+        assert!(!dims.constant_types.contains_key("A"));
         assert!(type_of(&tree, &mut session, id, tree.declarations(), &dims).is_err());
     }
 }

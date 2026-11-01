@@ -114,6 +114,13 @@ fn resolve(
         }
         return function_result(tree, session, expression, native, dims);
     }
+    // A parameter may also have a legacy packed layout for selects. Its
+    // frozen declaration type owns nominal identity and the scalar kind.
+    if let Some(name) = expression_binding::callable_name(tree, id, native)
+        && let Some(binding) = dims.constant_types.get(&name)
+    {
+        return binding.type_id(&mut session.types);
+    }
     // A member of an unpacked structure variable.
     if let Some(name) = unpacked_structs::native_member(id, native, dims) {
         return of_shape(session, dims.get(&name)?);

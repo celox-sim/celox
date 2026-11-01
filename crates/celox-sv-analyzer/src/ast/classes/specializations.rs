@@ -28,7 +28,7 @@ pub(in crate::ast) struct Specialization {
     /// extending it inherits without the scope around the declaration.
     pub declared_env: HashMap<String, Option<i128>>,
     pub declared_aliases: HashMap<String, Type>,
-    pub enum_constants: HashMap<String, enums::ConstantType>,
+    pub enum_constants: HashMap<String, semantic_types::ConstantType>,
     /// The literals that replace the value parameters.
     pub literals: HashMap<String, Expr>,
     /// The type parameters and typedefs, and the class name itself.
@@ -1944,7 +1944,7 @@ pub(in crate::ast) fn enum_constants(
     tree: &AnalysisContext<'_>,
     session: &Session,
     class: &str,
-) -> HashMap<String, enums::ConstantType> {
+) -> HashMap<String, semantic_types::ConstantType> {
     let imported = scope::imported(tree);
     let mut result = HashMap::default();
     let prefix = format!("{class}::");
@@ -1987,7 +1987,7 @@ pub(in crate::ast) fn enum_constants(
 pub(in crate::ast) fn export_enum_constants(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-) -> HashMap<String, enums::ConstantType> {
+) -> HashMap<String, semantic_types::ConstantType> {
     let mut result = HashMap::default();
     for declaration in super::scope_declarations(tree) {
         for class in super::specializations_of(tree, session, declaration) {
