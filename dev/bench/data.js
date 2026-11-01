@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793557036535,
+  "lastUpdate": 1793557504111,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -427159,6 +427159,32 @@ window.BENCHMARK_DATA = {
             "name": "heliodor-celox-jit/heliodor_suite_66_linux_boot_execution",
             "unit": "ms",
             "value": 311778.03959
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "GitHub",
+            "email": "noreply@github.com"
+          },
+          "id": "292597a8726aeecc47476dab390aa1da5875cff2",
+          "message": "refactor(sv): carry interface instances and time scopes in the context (#2675)",
+          "timestamp": "2026-10-31T07:55:15Z",
+          "url": "https://github.com/celox-sim/celox/commit/292597a8726aeecc47476dab390aa1da5875cff2"
+        },
+        "date": 1793557504111,
+        "cpu": "AMD EPYC 9V74",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "heliodor-celox-tiered/heliodor_suite_66_linux_boot_end_to_end",
+            "unit": "ms",
+            "value": 451999.528401
           }
         ]
       }
