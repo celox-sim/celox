@@ -423,6 +423,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "unions::soft_overlay",
                 "unions::soft_signed_ports",
                 "unions::soft_wide_four_state",
+                "virtual_interfaces::unit_import_package_variables",
               ]
             : [
                 "class::failing_casts_evaluate_their_sources",
