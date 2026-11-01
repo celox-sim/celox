@@ -1,0 +1,1 @@
+Option A: class properties and container elements are places of the ordinary target (LValue::Object), lowered once per statement in assignment_value
