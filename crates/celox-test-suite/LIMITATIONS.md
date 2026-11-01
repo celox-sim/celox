@@ -1910,3 +1910,34 @@ expected values, and Verilator passes the shared cases. Only
 `continuous_delay_selected_drivers` and `continuous_delay_generate_parameters`
 are excluded for xezim. Their [focused failure report](verification/sv/limitations/continuous-delays-xezim.json)
 is retained; passing cases add no historical baseline rows.
+
+### Independent net delays
+
+Seven new `timing::continuous_delay_net_*` cases distinguish `wire #5 w;`
+from `wire #5 w = expr;` (IEEE 1800-2023 10.3.3, 28.16). They check adding
+net delay after an assignment delay, per-bit deadlines, ascending and nonzero
+packed bounds, selected drivers, mixed initialized/uninitialized generate
+variables, primitive gate drivers, X/Z cancellation and undriven Z defaults.
+Celox API cases check independent pending bits across checkpoint restore and
+explicit rejection of unsupported port/instance-connection boundaries.
+
+Xezim 0.11.4 passes six cases. Icarus 13.0 rejects all seven independent
+net-delay declarations with `Net delays not supported`; the three initialized
+net-declaration cases continue to pass. Verilator 5.052 passes three, skips the
+two four-state cases and fails the two per-bit deadline cases. It postpones the first
+bit's update when the second bit changes, for both whole-vector and selected
+sources. The [standalone probe](verification/repros/sv_independent_net_delay.sv)
+prints `w=00 selected=00` at 10.1 ns with Verilator, while xezim prints the
+required `w=01 selected=01`. The declaration initializer correctly retains
+whole-vector inertial semantics and is still 00 in both tools at that time.
+
+Xezim initializes the undriven upper bits of a partially driven delayed vector
+to X until the delay elapses. Its [partial-driver probe](verification/repros/sv_independent_net_delay_partial.sv)
+prints `xxxx` at 1 ns instead of `zzxx`, then correctly prints `zz00` at 4 ns.
+Only this [four-state disagreement](verification/sv/limitations/independent-net-delays-xezim.json)
+is excluded for xezim; Celox preserves Z from time zero on the undriven bits.
+
+The exact [Icarus](verification/sv/limitations/independent-net-delays-icarus.json)
+and [Verilator](verification/sv/limitations/independent-net-delays-verilator.json)
+failures are retained with exclusions limited to the observed cases. No
+passing case adds a historical baseline row.

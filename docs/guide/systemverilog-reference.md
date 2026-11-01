@@ -335,8 +335,22 @@ cancellation are supported. `#0` uses ordinary continuous-assignment evaluation.
 Rise/fall/turn-off delay lists, variable or negative amounts, unitless fractional
 real amounts, concatenated or aggregate destinations and dynamic destination
 selects remain unsupported ([#444](https://github.com/celox-sim/celox/issues/444)).
-Independent net delays (`wire #5 w;` followed by a separate driver) are outside
-this supported subset; their parsed delay is currently not applied.
+Independent net delays such as `wire #5 w; assign w = a;` also accept one
+constant delay on scalar and packed integral nets. They delay each bit of the
+resolved driving value independently (10.3.3, 28.16), after any delay on its
+driving assignment. A change to another bit preserves the first bit's pending
+update, unlike a vector assignment delay. Continuous assignments to static destinations and supported
+logic gates may drive the net; undriven nets and statically undriven bits remain
+Z from time zero (6.7.1).
+Mixed declarations such as `wire #5 a = expr, b;` keep assignment delay on `a`
+and independent net delay on `b`.
+
+Independent delayed nets used in instance port connections and delayed
+input/inout ports remain unsupported, as do unpacked/nonintegral delayed nets
+and drivers with dynamic destination selects.
+Connect the delayed value through an ordinary continuous assignment when
+exporting a local delayed net. Existing restrictions on overlapping drivers
+still apply.
 
 ### Built-in functions and tasks
 

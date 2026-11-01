@@ -216,6 +216,7 @@ mod comb_process;
 mod continuous_delays;
 mod events;
 mod mailboxes;
+mod net_delays;
 mod processes;
 mod semaphores;
 pub use bound_patterns::BoundPattern;
@@ -1604,6 +1605,14 @@ impl Module {
                     )?);
                     (subroutines, comb_processes, ff_processes, initial_processes)
                 };
+            net_delays::lower(
+                syntax_tree,
+                &mut packed_dimensions,
+                &ports,
+                &instances,
+                &mut signals,
+                &mut comb_processes,
+            )?;
             continuous_delays::lower(
                 syntax_tree,
                 &packed_dimensions,
@@ -2938,6 +2947,8 @@ impl LValue {
 pub struct CombProcess {
     /// Elaborated ticks, consumed by continuous_delays before IR publication.
     delay: Option<u64>,
+    /// A declaration's independent net delay, consumed before IR publication.
+    net_delay: bool,
     creation_order: usize,
     site: Option<crate::procedural::SourceSpan>,
     /// Where the procedure is written, for an `always @*` that becomes a
@@ -2986,6 +2997,7 @@ impl CombProcess {
             .collect();
         Self {
             delay: None,
+            net_delay: false,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -3000,6 +3012,7 @@ impl CombProcess {
     fn procedural(kind: CombProcessKind, condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
         Self {
             delay: None,
+            net_delay: false,
             creation_order: 0,
             site: None,
             process_site: None,

@@ -126,21 +126,13 @@ fn comb_processes_from_item(
         celox_sv_syntax::BodyItemKind::Net(id) => {
             // `wire [7:0] w = expr;` declares a net and drives it continuously.
             let declaration = syntax_tree.declarations().net_declaration(*id);
-            let delay = if declaration
-                .variables
-                .iter()
-                .any(|variable| variable.value.is_some())
-            {
-                declaration
-                    .delay
-                    .as_ref()
-                    .map(|delay| {
-                        continuous_delays::ticks(delay, syntax_tree, session, packed_dimensions)
-                    })
-                    .transpose()?
-            } else {
-                None
-            };
+            let delay = declaration
+                .delay
+                .as_ref()
+                .map(|delay| {
+                    continuous_delays::ticks(delay, syntax_tree, session, packed_dimensions)
+                })
+                .transpose()?;
             for assignment in
                 net_declaration_assignments(declaration, syntax_tree, session, packed_dimensions)?
             {
@@ -160,6 +152,31 @@ fn comb_processes_from_item(
                 );
                 process.delay = delay;
                 processes.push(process);
+            }
+            if delay.is_some_and(|ticks| ticks != 0) {
+                // An uninitialized declarator delays the net, rather than
+                // declaring a driver. Resolve this private marker once the
+                // module's complete set of local drivers has been collected.
+                for variable in declaration
+                    .variables
+                    .iter()
+                    .filter(|variable| variable.value.is_none())
+                {
+                    let name = instances::normalize_identifier(&variable.name.spelling);
+                    let mut process = CombProcess::new(
+                        CombProcessKind::ContinuousAssign,
+                        condition
+                            .clone()
+                            .map(|value| substitute_const_expr_constants(value, const_env)),
+                        vec![Assignment::new(
+                            LValue::Ident(name.clone()),
+                            Expr::Ident(name),
+                        )],
+                    );
+                    process.delay = delay;
+                    process.net_delay = true;
+                    processes.push(process);
+                }
             }
         }
         celox_sv_syntax::BodyItemKind::Unconverted { category, .. } if category == "alias" => {

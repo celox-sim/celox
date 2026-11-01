@@ -1,5 +1,118 @@
 (group timing (category sequential))
 
+(case continuous_delay_net_independent
+  (source "net_delay.sv" #"
+module Child(input wire w);
+endmodule
+module Top(input bit a,b, output wire y);
+  wire #4 w;
+  assign #2 w=a|b;
+  assign y=w;
+  // These formal names are unrelated to the parent's delayed net.
+  Child empty_connection(.w());
+  Child constant_connection(.w(1'b0));
+  Child expression_connection(.w(a & b));
+endmodule
+"#)
+  (top Top) (run_until 6) (assert_eq y 0)
+  (set a 1) (run_until 9) (assert_eq y 0) (set b 1)
+  (run_until 12) (assert_eq y 1)
+  (set a 0) (set b 0) (run_until 13) (set a 1)
+  (run_until 19) (assert_eq y 1)
+  (set a 0) (run_until 24) (assert_eq y 1)
+  (run_until 25) (assert_eq y 0))
+
+(case continuous_delay_net_per_bit
+  (source "net_delay_bits.sv" #"
+module Top(input bit [1:0] a, output wire [1:0] y);
+  wire [2:3] #5 w;
+  assign w=a;
+  assign y=w;
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq y 0)
+  (set a 1) (run_until 7) (set a 3)
+  (run_until 10) (assert_eq y 1)
+  (run_until 12) (assert_eq y 3)
+  (set a 2) (run_until 14) (set a 0)
+  (run_until 17) (assert_eq y 2)
+  (run_until 19) (assert_eq y 0))
+
+(case continuous_delay_net_selected_drivers
+  (source "net_delay_selected.sv" #"
+module Top(input bit [1:0] a, output wire [1:0] y);
+  wire [5:4] #3 w;
+  assign w[5]=a[1];
+  assign w[4]=a[0];
+  assign y=w;
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq y 0)
+  (set a 1) (run_until 4) (set a 3)
+  (run_until 6) (assert_eq y 1)
+  (run_until 7) (assert_eq y 3))
+
+(case continuous_delay_net_mixed_generate
+  (source "net_delay_generate.sv" #"
+module Top(input bit a, output wire [3:0] y);
+  for (genvar i=0; i<2; i++) begin : g
+    wire #(i+2) declared=a, independent;
+    assign independent=a;
+    assign y[i*2 +: 2]={independent,declared};
+  end
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq y 0)
+  (set a 1) (run_until 5) (assert_eq y 3)
+  (run_until 6) (assert_eq y 15))
+
+(case continuous_delay_net_four_state
+  (source "net_delay_four_state.sv" #"
+module Top(output bit same);
+  logic a=1'bz;
+  wire #3 w, idle;
+  assign w=a;
+  initial begin
+    #1; same=w === 1'bx && idle === 1'bz;
+    #3; same=same && w === 1'bz;
+    a=1;
+    #1 a=1'bz;
+    #4; same=same && w === 1'bz;
+    a=1'bx;
+    #4; same=same && w === 1'bx;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 13) (assert_eq same 1))
+
+(case continuous_delay_net_partially_undriven
+  (source "net_delay_partial.sv" #"
+module Top(output bit same);
+  wire [3:0] #3 w;
+  bit a;
+  assign w[1:0]={a,a};
+  initial begin
+    #1; same=w[3:2] === 2'bzz && w[1:0] === 2'bxx;
+    #3; same=same && w === 4'bzz00;
+    a=1;
+    #4; same=same && w === 4'bzz11;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 8) (assert_eq same 1))
+
+(case continuous_delay_net_gate_driver
+  (source "net_delay_gate.sv" #"
+module Top(input bit a,b, output wire y);
+  wire #3 w;
+  and g(w,a,b);
+  assign y=w;
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq y 0)
+  (set a 1) (set b 1) (run_until 5) (assert_eq y 0)
+  (run_until 6) (assert_eq y 1))
+
 (case continuous_delay_net_initializer
   (source "net_initializer.sv" #"
 module Top(input bit a, b, output y, other);
