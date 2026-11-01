@@ -28,6 +28,7 @@ pub(super) struct ScopeSymbols {
     pub type_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, Type>,
     pub pattern_parameter_bindings: HashMap<celox_sv_syntax::ParameterId, BoundPattern>,
     pub enum_constants: EnumMemberConstants,
+    pub constant_types: HashMap<String, semantic_types::ConstantType>,
     pub functions: HashMap<String, Function>,
     pub function_return_types: HashMap<String, FunctionReturnMetadata>,
     pub constant_functions: const_functions::ConstantFunctions,
@@ -181,6 +182,7 @@ impl ScopeSymbols {
             &mut self.enum_constants.declarations,
             &other.enum_constants.declarations,
         );
+        extend_missing(&mut self.constant_types, &other.constant_types);
         extend_missing(&mut self.functions, &other.functions);
         extend_missing(
             &mut self.function_return_types,
@@ -277,6 +279,7 @@ impl ScopeSymbols {
         alias_entry(&mut self.enum_constants.exprs, name, target);
         alias_entry(&mut self.enum_constants.types, name, target);
         alias_entry(&mut self.enum_constants.declarations, name, target);
+        alias_entry(&mut self.constant_types, name, target);
         alias_entry(&mut self.functions, name, target);
         alias_entry(&mut self.function_return_types, name, target);
         self.constant_functions.alias(name, target);
@@ -349,6 +352,7 @@ impl ScopeSymbols {
         self.enum_constants
             .declarations
             .retain(|name, _| kept(name));
+        self.constant_types.retain(|name, _| kept(name));
         self.functions.retain(|name, _| kept(name));
         self.function_return_types.retain(|name, _| kept(name));
         self.constant_functions
@@ -468,6 +472,11 @@ impl ScopeSymbols {
                     .map(|(name, value)| (key(name), *value))
                     .collect(),
             },
+            constant_types: self
+                .constant_types
+                .iter()
+                .map(|(name, ty)| (key(name), ty.clone()))
+                .collect(),
             functions: self
                 .functions
                 .iter()

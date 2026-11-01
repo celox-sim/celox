@@ -23,6 +23,8 @@ pub(in crate::ast) struct DeclarationScope {
     pub env: HashMap<String, Option<i128>>,
     pub types: HashMap<String, Type>,
     pub literals: HashMap<String, Expr>,
+    pub constant_types: HashMap<String, semantic_types::ConstantType>,
+    pub nonconstant_members: HashSet<String>,
 }
 
 impl DeclarationScope {
@@ -376,6 +378,17 @@ fn specialize(
         imports.extend(&ScopeSymbols {
             classes: caller.classes.clone(),
             class_member_types: caller.class_member_types.clone(),
+            // Only bound class members cross the template boundary. Module
+            // constants must not become visible in the package's lexical scope.
+            constant_types: caller
+                .constant_types
+                .iter()
+                .filter(|(name, _)| {
+                    name.rsplit_once("::")
+                        .is_some_and(|(owner, _)| caller.class_member_types.contains_key(owner))
+                })
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect(),
             state_signals: caller
                 .state_signals
                 .iter()

@@ -242,7 +242,7 @@ fn constant(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<Arc<EnumDomain>> {
-    crate::ast::enums::constant_binding(tree, session, id, native, dimensions)
+    crate::ast::expression_types::constant_binding(tree, session, id, native, dimensions)
         .ok()??
         .domain()
 }

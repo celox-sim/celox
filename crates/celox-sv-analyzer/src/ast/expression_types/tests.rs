@@ -1,6 +1,7 @@
 use super::*;
 use std::path::Path;
 
+mod class_parameters;
 mod conversions;
 mod enum_constants;
 mod parameters;
