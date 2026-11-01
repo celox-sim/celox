@@ -444,12 +444,8 @@ fn random_property(
                 nonblocking: false,
             });
         }
-        let literal = |value| {
-            Expr::Literal(format_typed_parameter_literal(
-                value,
-                property.field.width as usize,
-                property.field.signed,
-            ))
+        let literal = |value: crate::ast::enums::MemberValue| {
+            Expr::Literal(value.literal(property.field.width as usize, property.field.signed))
         };
         let mut value = literal(*values.last().unwrap());
         for (index, &member) in values.iter().enumerate().rev().skip(1) {

@@ -1,0 +1,28 @@
+{
+  "case": "system_functions::casts_of_constants_to_enumerated_types",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 8.25, A.1.3: a parameter port of a class may be declared with a data type that is a type parameter declared before it.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "module Top;\n class Holder #(type T = int, T P = 10);\n  function int take();\n   return P;\n  endfunction\n endclass\n initial begin\n  Holder #() h = new;\n  $display(\"[%0d]\", h.take());\n end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "[10]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "t.sv:2: syntax error\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stderr": "t.sv:2:33: error: expected RParen, found Identifier 'P'\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[10]\n"
+    }
+  ]
+}

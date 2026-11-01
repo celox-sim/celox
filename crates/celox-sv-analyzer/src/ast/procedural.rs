@@ -2813,6 +2813,41 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         // (IEEE 1800-2023 6.24.2); the result of a `void'` cast is discarded.
         if name == "$cast"
             && let [destination, source] = arguments
+            && let (Some(destination), Some(_), None, None) = (
+                destination.value,
+                source.value,
+                &destination.name,
+                &source.name,
+            )
+            && expression_binding::enum_domain(
+                self.tree,
+                self.session,
+                destination,
+                declarations,
+                &self.dims,
+            )?
+            .is_some()
+        {
+            // The effects of the statement made the cast; `root` is bound
+            // to whether it was valid.
+            if discarded {
+                return Ok(Vec::new());
+            }
+            return Ok(vec![Stmt::If {
+                condition: self.native_value(root)?,
+                then_body: Vec::new(),
+                else_body: vec![Stmt::SystemTask {
+                    task: SystemTask::Severity(system_functions::Severity::Error),
+                    site: source_span(declarations.expression(root).tokens, self.tree),
+                    assertion: None,
+                    args: vec![SystemTaskArg::Str(
+                        "$cast of a value that is no member of the enumerated type".into(),
+                    )],
+                }],
+            }]);
+        }
+        if name == "$cast"
+            && let [destination, source] = arguments
             && let (Some(destination), Some(source), None, None) = (
                 destination.value,
                 source.value,

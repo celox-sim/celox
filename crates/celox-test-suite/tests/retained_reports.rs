@@ -821,6 +821,157 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq flags: expected 0xf, got 0xd",
                         ),
+                        ("icarus", "system_functions::casts_to_enumerated_types") => (
+                            "compile_error",
+                            "compile",
+                            "Method name nesting is not supported yet.",
+                        ),
+                        ("verilator", "system_functions::casts_to_enumerated_types") => (
+                            "compile_error",
+                            "compile",
+                            "Implicit conversion to enum 'enum{}Top.Colors'",
+                        ),
+                        ("xezim", "system_functions::casts_to_enumerated_types") => (
+                            "mismatch",
+                            "execute",
+                            "52, 32, 51, 10, 49, 32, 72, 73, 71, 72, 10]",
+                        ),
+                        (
+                            "icarus",
+                            "system_functions::casts_to_enumerated_types_check_whole_values",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "\"inside\" expressions not supported yet.",
+                        ),
+                        (
+                            "icarus",
+                            "system_functions::casts_to_enumerated_types_reject_class_handles",
+                        ) => ("compile_error", "compile", "source_0.sv:19: syntax error"),
+                        (
+                            "verilator",
+                            "system_functions::casts_to_enumerated_types_reject_class_handles",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unsupported: $cast to 'enum{}Top.Bit' from 'class{}Item'",
+                        ),
+                        (
+                            "xezim",
+                            "system_functions::casts_to_enumerated_types_check_whole_values",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "48, 32, 72, 73, 71, 72, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10]",
+                        ),
+                        (
+                            "xezim",
+                            "system_functions::casts_to_enumerated_types_reject_class_handles",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "49, 32, 90, 69, 82, 79, 10, 49, 32, 90, 69, 82, 79, 10, 49, 32, 90, 69, 82, 79, 10]",
+                        ),
+                        (
+                            "icarus",
+                            "system_functions::casts_to_enumerated_types_size_sources_by_themselves",
+                        ) => (
+                            "runtime_error",
+                            "execute",
+                            "System task/function $cast() is not defined by any module.",
+                        ),
+                        (
+                            "verilator",
+                            "system_functions::casts_to_enumerated_types_size_sources_by_themselves",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Implicit conversion to enum 'enum{}Top.Wide'",
+                        ),
+                        (
+                            "icarus",
+                            "system_functions::casts_evaluate_destination_operands_once",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
+                        (
+                            "verilator",
+                            "system_functions::casts_evaluate_destination_operands_once",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "got [48, 32, 48, 10, 49, 32, 49, 32, 72",
+                        ),
+                        ("xezim", "system_functions::casts_evaluate_destination_operands_once") => {
+                            (
+                                "mismatch",
+                                "execute",
+                                "got [49, 32, 49, 10, 49, 32, 50, 32, 72",
+                            )
+                        }
+                        (
+                            "xezim",
+                            "system_functions::casts_to_enumerated_types_size_sources_by_themselves",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "got [49, 32, 85, 78, 73, 84, 10, 49, 32, 10]",
+                        ),
+                        ("icarus", "system_functions::casts_of_constants_to_enumerated_types") => {
+                            ("compile_error", "compile", "source_0.sv:11: syntax error")
+                        }
+                        ("xezim", "system_functions::casts_of_constants_to_enumerated_types") => (
+                            "compile_error",
+                            "compile",
+                            "expected RParen, found Identifier 'P'",
+                        ),
+                        ("icarus", "system_functions::casts_of_comparisons_and_cast_results") => (
+                            "runtime_error",
+                            "execute",
+                            "System task/function $cast() is not defined by any module.",
+                        ),
+                        (
+                            "icarus",
+                            "system_functions::casts_through_struct_members_and_string_keys",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unpacked structs not supported.",
+                        ),
+                        (
+                            "xezim",
+                            "system_functions::casts_through_struct_members_and_string_keys",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "49, 32, 50, 10, 51, 32, 49, 32, 78, 73, 78, 69, 10]",
+                        ),
+                        (
+                            "icarus",
+                            "system_functions::casts_address_destinations_as_assignments",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Streaming concatenation not supported.",
+                        ),
+                        (
+                            "icarus",
+                            "system_functions::casts_of_members_of_specialized_structures",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Unpacked structs not supported.",
+                        ),
+                        (
+                            "icarus",
+                            "system_functions::casts_to_enumerated_types_reject_unknown_bits",
+                        ) => ("compile_error", "compile", "draw_eval_vec4: Assertion"),
+                        (
+                            "xezim",
+                            "system_functions::casts_to_enumerated_types_reject_unknown_bits",
+                        ) => ("mismatch", "execute", "49, 32, 79, 70, 70, 10]"),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

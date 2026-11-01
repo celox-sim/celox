@@ -19,7 +19,17 @@ pub(super) fn resolve(
         Cast(Cast),
         Copy,
         Assignment,
+        /// 11.3.1, 11.4.7, 11.4.9: a logical negation or reduction gives
+        /// one bit, whatever its operand's kind.
+        OneBitUnary,
+        /// 11.4.4 to 11.4.7 and 11.4.13: a relational, equality, logical or
+        /// `inside` operation gives one bit, whatever its operands' kinds;
+        /// only a case equality cannot give x, and of `inside` the set is no
+        /// operand of its own.
+        OneBitBinary(&'a str),
     }
+    // Every operand is queried through this worklist, so deep expressions
+    // do not consume the host stack.
     let mut jobs = vec![Job::Visit(root)];
     let mut results = Vec::new();
     let mut constants = None;
@@ -34,7 +44,11 @@ pub(super) fn resolve(
                         expression,
                         ..
                     } => {
-                        jobs.push(Job::Unary(operator));
+                        jobs.push(if is_one_bit_unary(operator) {
+                            Job::OneBitUnary
+                        } else {
+                            Job::Unary(operator)
+                        });
                         jobs.push(Job::Visit(*expression));
                         continue;
                     }
@@ -43,8 +57,15 @@ pub(super) fn resolve(
                         operator,
                         right,
                     } => {
-                        jobs.push(Job::Binary(operator));
-                        jobs.push(Job::Visit(*right));
+                        if is_one_bit_binary(operator) {
+                            jobs.push(Job::OneBitBinary(operator));
+                            if operator != "inside" {
+                                jobs.push(Job::Visit(*right));
+                            }
+                        } else {
+                            jobs.push(Job::Binary(operator));
+                            jobs.push(Job::Visit(*right));
+                        }
                         jobs.push(Job::Visit(*left));
                         continue;
                     }
@@ -62,9 +83,29 @@ pub(super) fn resolve(
                     ExprKind::Cast { target, expression } => {
                         let cast =
                             casting_type(tree, session, *target, native, dims, &mut constants)?;
-                        jobs.push(Job::Cast(cast));
-                        jobs.push(Job::Visit(*expression));
-                        continue;
+                        // 6.24.1: a cast to a declared type has that type,
+                        // also of an operand with no type of its own that the
+                        // cast gives its context: a streaming concatenation or
+                        // its select (11.4.14), an untyped assignment pattern
+                        // (10.9) or a tagged union value (11.9). Any other
+                        // operand must still be a valid value; a size or
+                        // signing cast keeps the rest of its operand's type.
+                        let contextual = matches!(
+                            native.expression(ungroup(*expression, native)).kind,
+                            ExprKind::Streaming { .. }
+                                | ExprKind::StreamSelect { .. }
+                                | ExprKind::Pattern { target: None, .. }
+                                | ExprKind::Tagged { .. }
+                        );
+                        if let Cast::Declared(declared) = cast
+                            && contextual
+                        {
+                            declared
+                        } else {
+                            jobs.push(Job::Cast(cast));
+                            jobs.push(Job::Visit(*expression));
+                            continue;
+                        }
                     }
                     ExprKind::Copy(expression) => {
                         jobs.push(Job::Copy);
@@ -112,13 +153,28 @@ pub(super) fn resolve(
                 // type. Ordinary binding checks the lvalue and compatibility.
                 results.pop()?
             }
+            Job::OneBitUnary => {
+                let four_state = four_state_of(&session.types, results.pop()?);
+                integral(&mut session.types, 1, false, four_state)?
+            }
+            Job::OneBitBinary(operator) => {
+                let four_state = if operator == "inside" {
+                    results.pop()?;
+                    true
+                } else {
+                    let right = four_state_of(&session.types, results.pop()?);
+                    let left = four_state_of(&session.types, results.pop()?);
+                    !matches!(operator, "===" | "!==") && (left || right)
+                };
+                integral(&mut session.types, 1, false, four_state)?
+            }
         };
         results.push(ty);
     }
     results.pop()
 }
 
-fn integral(
+pub(super) fn integral(
     table: &mut semantic_types::TyTable,
     width: u128,
     signed: bool,
@@ -141,7 +197,7 @@ fn integral(
     )
 }
 
-fn literal(table: &mut semantic_types::TyTable, text: &str) -> Option<TyId> {
+pub(super) fn literal(table: &mut semantic_types::TyTable, text: &str) -> Option<TyId> {
     if text == "null" {
         return Some(table.intern(TyData::Null));
     }
@@ -174,12 +230,55 @@ fn literal(table: &mut semantic_types::TyTable, text: &str) -> Option<TyId> {
     None
 }
 
+fn is_one_bit_unary(operator: &str) -> bool {
+    matches!(operator, "!" | "&" | "~&" | "|" | "~|" | "^" | "~^" | "^~")
+}
+
+fn is_one_bit_binary(operator: &str) -> bool {
+    matches!(
+        operator,
+        "&&" | "||"
+            | "->"
+            | "<->"
+            | "=="
+            | "!="
+            | "==="
+            | "!=="
+            | "==?"
+            | "!=?"
+            | "<"
+            | "<="
+            | ">"
+            | ">="
+            | "inside"
+    )
+}
+
 fn numeric(data: &TyData) -> bool {
     matches!(data, TyData::Packed(_) | TyData::Real | TyData::Shortreal)
 }
 
 fn four_state(data: &TyData) -> bool {
     matches!(data, TyData::Packed(packed) if packed.four_state)
+}
+
+/// Whether a value of type `ty` may hold unknown bits, structurally (6.11,
+/// 7.2, 7.4): a 4-state integral type, or an array, container, structure or
+/// union with a 4-state element or member. An equality of such values may
+/// give x (11.4.5).
+pub(super) fn four_state_of(table: &semantic_types::TyTable, ty: TyId) -> bool {
+    let mut pending = vec![ty];
+    while let Some(ty) = pending.pop() {
+        match table.data(ty) {
+            TyData::Packed(packed) if packed.four_state => return true,
+            TyData::Array { element, .. } => pending.push(*element),
+            TyData::UnpackedStruct(Decl::Aggregate { members, .. }) => {
+                pending.extend(members.iter().map(|(_, member)| *member));
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn unary(table: &mut semantic_types::TyTable, operator: &str, operand: TyId) -> Option<TyId> {
@@ -382,6 +481,84 @@ fn conditional(
         // Common class ancestors need the assignment relation (stage 5).
         // Other nonmatching nonintegral branches need contextual checking;
         // this singular-type query must not arbitrarily pick one branch.
+        _ => None,
+    }
+}
+
+/// The type that the target of typed assignment pattern `target'{...}`
+/// names (10.9), as a cast to it would.
+pub(super) fn pattern_type(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    target: ExprId,
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Option<TyId> {
+    match casting_type(tree, session, target, native, dims, &mut None)? {
+        Cast::Declared(id) => Some(id),
+        _ => None,
+    }
+}
+
+/// The type of `{a, b, ...}` (11.4.12): of string items a string, of
+/// integral items an unsigned vector of their widths' sum. An empty
+/// concatenation is no value of a self-determined type.
+pub(super) fn concatenation(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    items: &[ExprId],
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Option<TyId> {
+    let mut width = 0u128;
+    let mut four_state = false;
+    let mut string = false;
+    for item in items {
+        let ty = type_of(tree, session, *item, native, dims).ok()?;
+        match session.types.data(ty) {
+            TyData::String => string = true,
+            TyData::Packed(packed) => {
+                width = width.checked_add(packed.bits())?;
+                four_state |= packed.four_state;
+            }
+            _ => return None,
+        }
+    }
+    if string {
+        return Some(session.types.intern(TyData::String));
+    }
+    integral(&mut session.types, width, false, four_state)
+}
+
+/// The type of `{n{a, b, ...}}` (11.4.12.1): the concatenation's, `n` times
+/// as wide; `n` is constant.
+pub(super) fn replication(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    count: ExprId,
+    items: &[ExprId],
+    native: &Declarations,
+    dims: &PackedDimensions,
+) -> Option<TyId> {
+    // The count is a constant, resolved in an isolated session as cast
+    // sizes are.
+    let mut constants = constant_session(session);
+    let value = constant_binding::bind_in(count, native, tree, &mut constants, dims).ok()??;
+    let count = u128::try_from(eval_ast_const_expr(
+        &tree.functions,
+        &value,
+        &dims.const_env,
+    )?)
+    .ok()?;
+    let inner = concatenation(tree, session, items, native, dims)?;
+    match session.types.data(inner).clone() {
+        TyData::String => Some(inner),
+        TyData::Packed(packed) => integral(
+            &mut session.types,
+            packed.bits().checked_mul(count)?,
+            false,
+            packed.four_state,
+        ),
         _ => None,
     }
 }

@@ -1,0 +1,43 @@
+{
+  "case": "system_functions::casts_to_enumerated_types",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 6.24.2: when called as a function, $cast assigns the source to the destination and returns 1 only if the assignment is valid; a value that is no member of an enumerated destination type is invalid, so the function returns 0 and makes no assignment.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary --top-module Wrapped, iverilog -g2012 -s Wrapped, xezim -s Wrapped and xezim -s Top, and the Celox sv_tests driver in simulation mode with each top).",
+  "reduced_source": "module Top;\n typedef enum logic [3:0] {LOW = 4'd1, MID = 4'd4, HIGH = 4'd9} Level;\n class Holder;\n  function int take(int v);\n   Level l;\n   if ($cast(l, v)) return int'(l);\n   return -1;\n  endfunction\n endclass\n function automatic int take(int v);\n  Level l;\n  if ($cast(l, v)) return int'(l);\n  return -1;\n endfunction\n Level m;\n int v = 3;\n Holder h;\n initial begin\n  h = new;\n  $display(\"[%0d %0d %0d %0d]\", h.take(4), h.take(3), take(3), $cast(m, v));\n end\nendmodule\nmodule Wrapped;\n Top dut();\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "top": "Wrapped",
+      "stdout": "[4 -1 -1 0]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "top": "Wrapped",
+      "stderr": "w.sv:6: Error: System task/function $cast() is not defined by any module.\nw.sv:12: Error: System task/function $cast() is not defined by any module.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "top": "Wrapped",
+      "stdout": "[4 3 3 0]\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "top": "Top",
+      "stdout": "[4 -1 -1 0]\n"
+    },
+    {
+      "tool": "celox",
+      "top": "Wrapped",
+      "stdout": "[4 -1 -1 0]\n"
+    },
+    {
+      "tool": "celox",
+      "top": "Top",
+      "stdout": "[4 -1 -1 0]\n"
+    }
+  ]
+}

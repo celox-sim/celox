@@ -10,6 +10,19 @@ fn chandle_elements() -> AnalyzerError {
     }
 }
 
+/// The reduction that array method `name` performs (7.12.3), the one
+/// definition binding and result typing share.
+pub(super) fn reduction_op(name: &str) -> Option<ContainerOp> {
+    Some(match name {
+        "sum" => ContainerOp::ReduceSum,
+        "product" => ContainerOp::ReduceProduct,
+        "and" => ContainerOp::ReduceAnd,
+        "or" => ContainerOp::ReduceOr,
+        "xor" => ContainerOp::ReduceXor,
+        _ => return None,
+    })
+}
+
 pub(super) fn bind(
     id: ExprId,
     native: &Declarations,
@@ -32,13 +45,8 @@ pub(super) fn bind(
     if separator != "." {
         return Ok(None);
     }
-    let mut op = match name.spelling.as_str() {
-        "sum" => ContainerOp::ReduceSum,
-        "product" => ContainerOp::ReduceProduct,
-        "and" => ContainerOp::ReduceAnd,
-        "or" => ContainerOp::ReduceOr,
-        "xor" => ContainerOp::ReduceXor,
-        _ => return Ok(None),
+    let Some(mut op) = reduction_op(name.spelling.as_str()) else {
+        return Ok(None);
     };
     if timescales::analysis_options(tree).legacy_empty_reductions {
         op = match op {

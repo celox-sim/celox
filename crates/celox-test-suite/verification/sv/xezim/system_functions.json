@@ -1187,6 +1187,94 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::casts_to_enumerated_types at 3250:3: expect_output: expected [98, 108, 97, 99, 107, 10, 105, 110, 118, 97, 108, 105, 100, 32, 98, 108, 97, 99, 107, 10, 49, 32, 77, 73, 68, 10, 49, 48, 32, 77, 73, 68, 32, 103, 114, 101, 101, 110, 10, 72, 73, 71, 72, 10, 52, 32, 45, 49, 10, 49, 32, 72, 73, 71, 72, 10], got [98, 108, 97, 99, 107, 10, 105, 110, 118, 97, 108, 105, 100, 32, 98, 108, 97, 99, 107, 10, 49, 32, 77, 73, 68, 10, 49, 48, 32, 77, 73, 68, 32, 103, 114, 101, 101, 110, 10, 72, 73, 71, 72, 10, 52, 32, 51, 10, 49, 32, 72, 73, 71, 72, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::casts_to_enumerated_types_check_whole_values at 3304:3: expect_output: expected [48, 32, 78, 73, 78, 69, 10, 48, 32, 78, 73, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 78, 73, 78, 69, 10, 49, 32, 76, 79, 87, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10], got [48, 32, 78, 73, 78, 69, 10, 48, 32, 78, 73, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 78, 73, 78, 69, 10, 48, 32, 72, 73, 71, 72, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types_check_whole_values",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::casts_to_enumerated_types_reject_class_handles at 3360:3: expect_output: expected [48, 32, 79, 78, 69, 10, 48, 32, 79, 78, 69, 10, 48, 32, 79, 78, 69, 10, 48, 32, 79, 78, 69, 32, 49, 10, 48, 32, 79, 78, 69, 10, 48, 32, 79, 78, 69, 10, 48, 32, 79, 78, 69, 10, 48, 32, 79, 78, 69, 10, 49, 32, 90, 69, 82, 79, 10], got [49, 32, 90, 69, 82, 79, 10, 49, 32, 79, 78, 69, 10, 49, 32, 90, 69, 82, 79, 10, 48, 32, 90, 69, 82, 79, 32, 49, 10, 49, 32, 90, 69, 82, 79, 10, 49, 32, 90, 69, 82, 79, 10, 49, 32, 90, 69, 82, 79, 10, 49, 32, 90, 69, 82, 79, 10, 49, 32, 90, 69, 82, 79, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types_reject_class_handles",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::casts_evaluate_destination_operands_once at 3409:3: expect_output: expected [48, 32, 49, 10, 49, 32, 50, 32, 72, 73, 71, 72, 10, 49, 32, 51, 32, 49, 10, 49, 32, 49, 10, 48, 32, 50, 10, 49, 10, 49, 32, 49, 32, 72, 73, 71, 72, 10, 48, 32, 50, 32, 10], got [49, 32, 49, 10, 49, 32, 50, 32, 72, 73, 71, 72, 10, 49, 32, 50, 32, 51, 10, 48, 32, 48, 10, 49, 32, 54, 10, 48, 10, 49, 32, 52, 32, 32, 32, 32, 32, 10, 49, 32, 56, 32, 32, 32, 32, 32, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_evaluate_destination_operands_once",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::casts_to_enumerated_types_size_sources_by_themselves at 3320:3: expect_output: expected [49, 32, 85, 78, 73, 84, 10, 49, 32, 85, 78, 73, 84, 10], got [49, 32, 85, 78, 73, 84, 10, 49, 32, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types_size_sources_by_themselves",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "xezim build exit status: 1; see <case>/build.log\n<case>/source_0.sv:11:36: error: expected RParen, found Identifier 'P'\n    11 |     class Holder #(type T = int, T P = 10);\n       |                                    ^\n<case>/source_0.sv:11:36: error: expected Semicolon, found Identifier 'P'\n    11 |     class Holder #(type T = int, T P = 10);\n       |                                    ^\n<case>/source_0.sv:11:38: error: expected identifier, found Assign '='\n    11 |     class Holder #(type T = int, T P = 10);\n       |                                      ^\n<case>/source_0.sv:11:42: error: expected Semicolon, found RParen ')'\n    11 |     class Holder #(type T = int, T P = 10);\n       |                                          ^\n<case>/source_0.sv:11:42: error: unexpected token in class: \")\"\n    11 |     class Holder #(type T = int, T P = 10);\n       |                                          ^\nParsed 3 file(s): 4 descriptions, 5 errors, 0 warnings\n",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_of_constants_to_enumerated_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::casts_through_struct_members_and_string_keys at 3546:3: expect_output: expected [49, 32, 79, 78, 69, 10, 49, 32, 78, 73, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 49, 10, 49, 32, 49, 32, 78, 73, 78, 69, 10], got [49, 32, 79, 78, 69, 10, 49, 32, 78, 73, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 79, 78, 69, 10, 49, 32, 50, 10, 51, 32, 49, 32, 78, 73, 78, 69, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_through_struct_members_and_string_keys",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "system_functions::casts_to_enumerated_types_reject_unknown_bits at 3280:3: expect_output: expected [48, 32, 77, 73, 68, 10, 49, 32, 72, 73, 71, 72, 10, 48, 32, 79, 78, 10], got [48, 32, 77, 73, 68, 10, 49, 32, 72, 73, 71, 72, 10, 49, 32, 79, 70, 70, 10]",
+      "expectation": "Simulation",
+      "name": "system_functions::casts_to_enumerated_types_reject_unknown_bits",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
