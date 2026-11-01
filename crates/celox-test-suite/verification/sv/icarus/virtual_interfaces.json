@@ -646,6 +646,17 @@
     },
     {
       "category": "Hierarchy",
+      "detail": "Icarus build exit status: 6; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid class item.\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::unit_import_package_variables",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
       "detail": "Icarus 13.0 does not parse virtual interface declarations (\"syntax error\", \"Invalid module item\" or \"Invalid class item\" at `virtual bus_if v;`), which IEEE 1800-2023 25.9 defines. Verilator 5.052 and xezim 0.11.3 run the simulation cases.",
       "expectation": "Simulation",
       "known_issue": {
