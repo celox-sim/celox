@@ -1255,18 +1255,6 @@ impl Plan {
                     );
                 }
             }
-            let ends = |unit: &Unit| fails(unit) || emits_finish(unit, &plan.finish_sites);
-            if tracked.iter().any(|&event| {
-                let event = &plan.events[event];
-                event
-                    .eval_apply
-                    .iter()
-                    .chain(event.eval_only.iter().flatten())
-                    .chain(event.apply.iter().flatten())
-                    .any(ends)
-            }) {
-                return Err("a domain of a design with derived clocks may end the run".into());
-            }
         }
         if !plan.active.is_empty()
             && (program.layout().widths[&slots.exit_arg] < event_bits * 2
@@ -2398,8 +2386,25 @@ impl Plan {
         g.b.switch_to_block(alone);
         for &index in tracked {
             g.if_bit(mask, index, |g| {
-                for unit in &self.events[index].eval_apply {
-                    g.inline_writer(unit, finish_exit);
+                let event = &self.events[index];
+                if event
+                    .eval_apply
+                    .iter()
+                    .any(|unit| fails(unit) || emits_finish(unit, &self.finish_sites))
+                {
+                    // The reference stops after an evaluation unit that
+                    // ends the run, before publishing its deferred NBAs.
+                    // A combined unit would publish them before `inline`
+                    // can inspect the finish flag.
+                    for units in [event.eval_only.as_ref(), event.apply.as_ref()] {
+                        for unit in units.expect("derived domains have separate units") {
+                            g.inline_writer(unit, finish_exit);
+                        }
+                    }
+                } else {
+                    for unit in &event.eval_apply {
+                        g.inline_writer(unit, finish_exit);
+                    }
                 }
             });
         }
