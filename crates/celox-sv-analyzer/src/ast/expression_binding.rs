@@ -34,7 +34,7 @@ pub(super) use format_patterns::{
 pub(super) use lvalues::{net_lvalue, variable_lvalue};
 pub(super) use objects::{
     Cast as ObjectCast, Receiver as ObjectReceiver,
-    aggregate_property as object_aggregate_property, cast as object_cast,
+    aggregate_property as object_aggregate_property, cast_to as object_cast_to,
     check_access as check_member_access, check_assignment as check_handle_assignment,
     constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
     method as object_method, method_result as object_method_result, named_class,

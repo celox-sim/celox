@@ -71,6 +71,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:20: error: Type names are not valid expressions here.\n<case>/source_0.sv:20: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:20:               : Expression is: <type>\n<case>/source_0.sv:20:               : Expression type: 10PETypename\n<case>/source_0.sv:20: error: Dimensions must be constant.\n<case>/source_0.sv:20       : This size expression violates the rule: <type>\n<case>/source_0.sv:25: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:25:      : method path: dog.legs\n<case>/source_0.sv:25: error: Object celox_suite_tb.dut.Kennel.this has no method \"dog.legs(...)\".\n<case>/source_0.sv:29: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:29:      : method path: dog.legs\n<case>/source_0.sv:29: error: Object celox_suite_tb.dut.Kennel.this has no method \"dog.legs(...)\".\n<case>/source_0.sv:36: sorry: Nested member path not yet supported for class properties.\n<case>/source_0.sv:36: sorry: Nested member path not yet supported for class properties.\n<case>/source_0.sv:33: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:33:      : method path: named.exists\n<case>/source_0.sv:33: error: Object celox_suite_tb.dut.Kennel.this has no method \"named.exists(...)\".\n<case>/source_0.sv:48: sorry: Method name nesting is not supported yet.\n<case>/source_0.sv:48:      : method path: dog.legs\n<case>/source_0.sv:48: error: Object celox_suite_tb.dut.kennel has no method \"dog.legs(...)\".\n7 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::casts_to_class_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
       "expectation": "Simulation",
       "known_issue": {
@@ -750,6 +761,17 @@
       "name": "class::extern_methods_and_tasks",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:23: syntax error\n<case>/source_0.sv:23: error: Malformed statement\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n<case>/source_0.sv:25: syntax error\n<case>/source_0.sv:25: error: Operand of unary ! is not a primary expression.\n<case>/source_0.sv:26: error: Malformed statement\n<case>/source_0.sv:25: error: Malformed conditional expression.\n<case>/source_0.sv:27: syntax error\n<case>/source_0.sv:27: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::failing_casts_evaluate_their_sources",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1955,6 +1977,17 @@
       "name": "class::virtual_methods_dispatch_on_object_class",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "native testbench failed: exit status: 3; see runtime.log and protocol.log\n<case>/source_0.sv:18: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:22: Error: System task/function $cast() is not defined by any module.\n<case>/source_0.sv:24: Error: System task/function $cast() is not defined by any module.\n",
+      "expectation": "Simulation",
+      "name": "class::void_casts_of_class_handles",
+      "phase": "execute",
+      "status": "runtime_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

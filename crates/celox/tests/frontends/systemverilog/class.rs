@@ -41,6 +41,9 @@ sv_backends! {
     fn class_methods_called_through_interface_class_handles(sim) { @case "class::methods_called_through_interface_class_handles"; }
     fn class_inherited_methods_of_extended_interface_classes(sim) { @case "class::inherited_methods_of_extended_interface_classes"; }
     fn class_casts_of_class_handles(sim) { @case "class::casts_of_class_handles"; }
+    fn class_casts_to_class_properties(sim) { @case "class::casts_to_class_properties"; }
+    fn class_void_casts_of_class_handles(sim) { @case "class::void_casts_of_class_handles"; }
+    fn class_failing_casts_evaluate_their_sources(sim) { @case "class::failing_casts_evaluate_their_sources"; }
     fn class_casts_from_interface_class_handles(sim) { @case "class::casts_from_interface_class_handles"; }
     fn class_specializations_of_parameterized_classes(sim) { @case "class::specializations_of_parameterized_classes"; }
     fn class_specializations_are_named_by_parameter_values(sim) { @case "class::specializations_are_named_by_parameter_values"; }
@@ -510,7 +513,6 @@ fn incompatible_class_handle_assignments_are_rejected() {
         ("d.next = b;", ["handle of class `B`", "class `D`"]),
         ("d = new b;", ["handle of class `B`", "class `D`"]),
         ("u = new d;", ["handle of class `D`", "class `U`"]),
-        ("$cast(d.next, b);", ["`$cast` to a class property", ""]),
     ] {
         let source = format!(
             "module Top;
