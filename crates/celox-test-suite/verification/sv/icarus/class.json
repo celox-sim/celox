@@ -1001,6 +1001,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:35: error: Object f in celox_suite_tb.dut is not a function.\n<case>/source_0.sv:35: error: Object scale in celox_suite_tb.dut is not a function.\n2 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "class::members_hide_module_names",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 14; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Malformed statement\n<case>/source_1.sv:5: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:8: syntax error\n<case>/source_1.sv:8: error: Malformed statement\n<case>/source_1.sv:10: syntax error\n<case>/source_1.sv:11: error: Malformed statement\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
       "expectation": "Simulation",
       "name": "class::members_of_call_results",
