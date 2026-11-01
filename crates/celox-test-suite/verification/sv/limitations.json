@@ -2873,7 +2873,9 @@
         "concurrent_assertions::sampled_history_predicates",
         "concurrent_assertions::sampled_history_gates_and_indices",
         "concurrent_assertions::sampled_history_unknown_transitions",
-        "concurrent_assertions::sampled_history_while_disabled"
+        "concurrent_assertions::sampled_history_while_disabled",
+        "concurrent_assertions::overlapped_boolean_implication",
+        "concurrent_assertions::overlapped_unknown_antecedent"
       ]
     }
   },
