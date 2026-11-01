@@ -1,6 +1,11 @@
 use super::*;
 
 sv_backends! {
+    fn inline_enum_wide_unused(sim) { @case "types::inline_enum_wide_unused"; }
+    fn inline_enum_wide_constants(sim) { @case "types::inline_enum_wide_constants"; }
+    fn inline_enum_state_machine(sim) { @case "types::inline_enum_state_machine"; }
+    fn inline_enum_four_state_constants(sim) { @case "types::inline_enum_four_state_constants"; }
+
     fn package_enum_unknown_constants(sim) {
         @case "types::package_enum_unknown_constants";
     }
