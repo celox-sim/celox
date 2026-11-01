@@ -1,0 +1,1 @@
+Add a nested generate signal shadowing regression for review r4437304648. The reported logic/wire/bit cases already clear inherited constant types in constants_and_signal_types.
