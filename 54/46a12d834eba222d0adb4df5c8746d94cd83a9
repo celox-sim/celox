@@ -1,0 +1,1 @@
+Address review r4435090296: resolve member and subarray ranks for array-valued defaults; add regression coverage and external-tool evidence.
