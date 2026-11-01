@@ -214,7 +214,10 @@ pub(in crate::ast) fn selection_receiver(
     functions: &const_functions::ConstantFunctions,
     dims: &PackedDimensions,
 ) -> Receiver {
+    let (lhs, scope) = statements::variable_view(lhs, dims);
+    let dims = &*scope;
     let element = match lhs {
+        LValue::Object { .. } => None,
         LValue::Select { name, .. } => dims
             .get(name)
             .filter(|shape| !shape.unpacked.is_empty())
@@ -812,6 +815,22 @@ pub(in crate::ast) fn unpack(
                 ));
             }
             pending.extend(inner.into_iter().rev());
+            continue;
+        }
+        // An element of a container is a fixed-size variable of the
+        // element's type, assigned through its container (7.10).
+        if range.is_none()
+            && let Some((element, target, ..)) =
+                containers::selected_element(id, tree, session, dims)?
+            && element == ungroup(id, native)
+        {
+            let shape = procedural::dimensions_from_type(&target.element);
+            check_fixed(&shape)?;
+            let Receiver::Fixed(target) = receiver(&shape, &tree.functions, dims)? else {
+                unreachable!("a fixed-size variable receives fixed-size data");
+            };
+            takes.push(Take::Fixed(target));
+            lvalues.push(variable_lvalue(id, native, tree, session, dims, false)?);
             continue;
         }
         let shape = dimensions::operand_shape(id, tree, session, dims)?

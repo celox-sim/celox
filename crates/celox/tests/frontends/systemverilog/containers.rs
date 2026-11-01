@@ -485,3 +485,50 @@ fn shuffle_shares_the_seeded_process_rng() {
     sim.run_until(0).unwrap();
     assert_eq!(sim.get(sim.signal("same")), BigUint::from(1u8));
 }
+
+/// An assignment operator evaluates the address of its target once, `$`
+/// included, before it reads the target, so a value that changes the
+/// queue's size changes neither the element read nor the one written (IEEE
+/// 1800-2023 7.10.1, 11.4.1). The standard does not say when the address is
+/// evaluated relative to the value, and Verilator 5.052 evaluates `$` after
+/// it, so this is not a shared case.
+#[test]
+fn last_element_compound_updates() {
+    let source = r#"
+    module Top(output bit [7:0] first, output bit [7:0] second, output bit [7:0] owned,
+               output bit [7:0] pushed, output int size);
+        class Box;
+            bit [7:0] q[$];
+        endclass
+        bit [7:0] q[$];
+        Box box;
+        function automatic bit [3:0] grow();
+            q.push_back(8'h20);
+            return 4'h1;
+        endfunction
+        function automatic bit [3:0] grow_box();
+            box.q.push_back(8'h40);
+            return 4'h2;
+        endfunction
+        initial begin
+            q = '{8'h10};
+            q[$][3:0] += grow();
+            first = q[0];
+            second = q[1];
+            size = q.size();
+            box = new;
+            box.q.push_back(8'h30);
+            box.q[$][7:4] += grow_box();
+            owned = box.q[0];
+            pushed = box.q[1];
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("containers.sv"))], "Top")
+            .build()
+            .unwrap();
+    let signals = ["first", "second", "owned", "pushed", "size"].map(|name| sim.signal(name));
+    sim.run_until(0).unwrap();
+    let values = signals.map(|signal| sim.get(signal));
+    assert_eq!(values, [0x11u8, 0x20, 0x50, 0x40, 2].map(BigUint::from));
+}

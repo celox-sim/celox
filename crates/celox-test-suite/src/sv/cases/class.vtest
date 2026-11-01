@@ -4255,3 +4255,119 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq by_property 2) (assert_eq written 0x3f) (assert_eq element 0x41))
+
+(case property_assignment_sites
+  (source "class.sv" #"
+module Top(output bit [7:0] bits, output bit [7:0] chosen);
+    typedef struct packed { bit [3:0] x; bit [3:0] y; } pair_t;
+    class Info;
+        bit [7:0] bits;
+        pair_t pair;
+    endclass
+    Info info;
+    bit pick = 1;
+    initial begin
+        info = new;
+        // A property and a select of one are targets of every assignment:
+        // assignment operators, increments, and assignments whose value
+        // takes the target's type (IEEE 1800-2023 10.9, 11.4.2).
+        info.bits[3:0] = 4'h1;
+        info.bits[3:0] += 4'h2;
+        info.bits[7:4]++;
+        bits = info.bits;
+        info.pair = pick ? '{x: 4'h1, y: 4'h2} : '{x: 4'h3, y: 4'h4};
+        chosen = info.pair;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq bits 0x13) (assert_eq chosen 0x12))
+
+(case property_place_addresses
+  (source "class.sv" #"
+module Top(output bit [7:0] kept, output bit [7:0] rebound, output bit [7:0] swapped,
+           output bit [15:0] split, output bit [7:0] first, output bit [7:0] second,
+           output bit [15:0] streamed, output bit [15:0] extended);
+    class Info;
+        bit [7:0] bits;
+        bit [7:0] a;
+        bit [7:0] b;
+        bit [7:0] q[$];
+    endclass
+    Info info;
+    Info other;
+    Info saved;
+    logic signed [7:0] minus_one = -8'sd1;
+    bit [7:0] bytes[$];
+    function automatic bit [3:0] rebind();
+        info = other;
+        return 4'hb;
+    endfunction
+    initial begin
+        info = new;
+        other = new;
+        // An assignment evaluates its value, and then the target with the
+        // values it has when it is written (IEEE 1800-2023 4.9.3).
+        info.bits = 8'h35;
+        saved = info;
+        other.bits = 8'h0a;
+        info.bits[7:4] = rebind();
+        kept = saved.bits;
+        rebound = other.bits;
+        info = saved;
+        // The parts of a concatenation are written in order, each with
+        // its bits of the value (10.10.1).
+        info.bits = 8'h12;
+        {info.bits[3:0], info.bits[7:4]} = info.bits;
+        swapped = info.bits;
+        {info.a, info.b} = 16'h1234;
+        split = {info.a, info.b};
+        // A streaming concatenation of container elements unpacks into
+        // each, and a signed value is extended as its signedness gives
+        // (11.4.14, 10.7).
+        bytes = '{8'h00, 8'h00};
+        {>>{bytes[0], bytes[1]}} = 16'h5678;
+        streamed = {bytes[0], bytes[1]};
+        {info.a, info.b} = minus_one;
+        extended = {info.a, info.b};
+        // So does an assignment to an element.
+        info.q.push_back(8'h10);
+        other.q.push_back(8'h20);
+        info.q[0][7:4] = rebind();
+        first = saved.q[0];
+        second = other.q[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq kept 0x35) (assert_eq rebound 0xba) (assert_eq swapped 0x21)
+  (assert_eq split 0x1234) (assert_eq first 0x10) (assert_eq second 0xb0)
+  (assert_eq streamed 0x5678) (assert_eq extended 0xffff))
+
+(case formatting_task_place_outputs
+  (source "class.sv" #"
+module Top(output bit [15:0] bits, output bit [7:0] whole, output bit [7:0] element);
+    class Info;
+        bit [15:0] bits;
+        bit [7:0] whole;
+    endclass
+    Info info;
+    bit [7:0] q[$];
+    initial begin
+        info = new;
+        info.bits = 16'hffff;
+        q = '{8'h00};
+        // The output of `$sformat` or `$swrite` takes the string as an
+        // assignment to it does, a select of a class property or a
+        // container element as well (IEEE 1800-2023 21.3.3).
+        $sformat(info.bits[7:0], "%s", "A");
+        $swrite(info.whole, "%0d", 7);
+        $swrite(q[0], "B");
+        bits = info.bits;
+        whole = info.whole;
+        element = q[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq bits 0xff41) (assert_eq whole 0x37) (assert_eq element 0x42))

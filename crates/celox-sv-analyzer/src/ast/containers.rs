@@ -1099,8 +1099,8 @@ fn query(
 }
 
 /// The element `c[k]` of a dynamic array, queue or associative array of
-/// integral elements that native target `left` selects bits of, as in
-/// `c[k][i] = v`: its native expression, the container's type, and the
+/// integral elements that native target `left` is, or selects bits of, as
+/// in `c[k][i] = v`: its native expression, the container's type, and the
 /// values of the container and the index.
 pub(super) fn selected_element(
     left: ExprId,
@@ -1109,9 +1109,9 @@ pub(super) fn selected_element(
     dims: &PackedDimensions,
 ) -> Converted<Option<(ExprId, Arc<ContainerType>, Expr, Expr)>> {
     let native = tree.declarations();
-    let mut current = expression_binding::ungroup(left, native);
-    while let ExprKind::Select { expression, .. } = &native.expression(current).kind {
-        let element = expression_binding::ungroup(*expression, native);
+    // The target itself, `c[k]`, or what one of its selects selects.
+    let mut element = expression_binding::ungroup(left, native);
+    loop {
         if let ExprKind::Select {
             expression: container,
             dimension,
@@ -1150,23 +1150,23 @@ pub(super) fn selected_element(
                 DimensionKind::Index(index) => {
                     index_value(index, *container, tree, session, dims, &target)?
                 }
-                // `q[$]`, the last element of a queue.
-                _ if matches!(target.layout.kind, ContainerKind::Queue { .. }) => Expr::Binary {
-                    left: Box::new(call(
-                        ContainerOp::Size,
-                        target.layout,
-                        vec![container_value.clone()],
-                    )),
-                    op: BinaryOp::Sub,
-                    right: Box::new(Expr::Literal("1".into())),
-                },
+                // `q[$]`, the last element of a queue: its index, which an
+                // assignment may have saved (see `last_index`).
+                _ if matches!(target.layout.kind, ContainerKind::Queue { .. }) => {
+                    match dims.last_indices.get(&element) {
+                        Some(index) => index.clone(),
+                        None => last_index(&target, container_value.clone())?,
+                    }
+                }
                 _ => return Ok(None),
             };
             return Ok(Some((element, target, container_value, index)));
         }
-        current = element;
+        let ExprKind::Select { expression, .. } = &native.expression(element).kind else {
+            return Ok(None);
+        };
+        element = expression_binding::ungroup(*expression, native);
     }
-    Ok(None)
 }
 
 pub(super) fn set(

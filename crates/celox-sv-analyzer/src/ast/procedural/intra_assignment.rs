@@ -43,7 +43,10 @@ impl BodyBuilder<'_, '_, '_> {
                 return Err(unsupported("nonblocking intra-assignment event control"));
             }
             output.extend(target_effects);
-            let assignment = self.assignment_value("=", true, (left, right))?;
+            let [assignment] =
+                <[Stmt; 1]>::try_from(self.assignment_value("=", true, (left, right))?).map_err(
+                    |_| unsupported("delayed assignment to a class property or container element"),
+                )?;
             output.push(Stmt::DelayedNonblocking {
                 control: Box::new(delay),
                 assignment: Box::new(assignment),
@@ -58,12 +61,13 @@ impl BodyBuilder<'_, '_, '_> {
         // destination type happens before suspension, just like the table in
         // 9.4.5; the temporary retains width, signedness and four-state bits.
         let mut destination_checks = Vec::new();
-        let Stmt::Assign { lhs, rhs, .. } = self.assignment_value_with_deferred_checks(
-            "=",
-            false,
-            (left, right),
-            Some(&mut destination_checks),
-        )?
+        let Ok([Stmt::Assign { lhs, rhs, .. }]) =
+            <[Stmt; 1]>::try_from(self.assignment_value_with_deferred_checks(
+                "=",
+                false,
+                (left, right),
+                Some(&mut destination_checks),
+            )?)
         else {
             return Err(unsupported("complex intra-assignment target"));
         };

@@ -23,6 +23,7 @@ pub(super) use chandles::{
     native_chandle, read as check_chandle_read, type_holds_chandle,
 };
 pub(super) use direct::bind_argument;
+pub(super) use direct::object_place;
 pub(super) use direct::{
     arguments, bind_chandle_value, bind_value, call_name as native_name, callable_name,
     cast_target_native, formal_arguments, format_arguments, member_context, real_value,
@@ -39,11 +40,11 @@ pub(super) use objects::{
     Cast as ObjectCast, Receiver as ObjectReceiver,
     aggregate_property as object_aggregate_property, cast_to as object_cast_to,
     check_access as check_member_access, check_assignment as check_handle_assignment,
-    constraint_mode_call as object_constraint_mode_call, constructor as object_constructor,
-    method as object_method, method_result as object_method_result, named_class,
-    native_class as object_native_class, property as object_property,
-    rand_mode_call as object_rand_mode_call, receiver as object_receiver,
-    static_property as object_static_property,
+    check_writable, constraint_mode_call as object_constraint_mode_call,
+    constructor as object_constructor, method as object_method,
+    method_result as object_method_result, named_class, native_class as object_native_class,
+    property as object_property, rand_mode_call as object_rand_mode_call,
+    receiver as object_receiver, static_property as object_static_property,
     static_property_declaration as object_static_property_declaration, this as object_this,
 };
 pub(super) use streams::{
@@ -113,6 +114,9 @@ pub(super) fn expression(
     session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    // A place is assigned as a variable of its value's type.
+    let (lhs, scope) = statements::variable_view(lhs, dimensions);
+    let dimensions = &*scope;
     let shape = match lhs {
         LValue::Ident(name) => dimensions.get(name),
         _ => None,
@@ -141,6 +145,7 @@ pub(super) fn expression(
     // `new` creates an object of the class of the variable or of the
     // element of an array of handles (IEEE 1800-2023 8.7).
     let class = match lhs {
+        LValue::Object { .. } => None,
         LValue::Ident(_) => shape.and_then(|shape| shape.class.as_deref()),
         LValue::Select {
             name,
