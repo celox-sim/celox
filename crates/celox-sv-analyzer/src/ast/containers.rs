@@ -768,29 +768,36 @@ pub(super) fn value(
                 return Err(unsupported("container scoped call"));
             }
             let (op, count) = match name.spelling.as_str() {
-                "reverse" | "sort" | "rsort"
+                "reverse" | "sort" | "rsort" | "shuffle"
                     if !matches!(target.layout.kind, ContainerKind::Associative { .. }) =>
                 {
                     let op = match name.spelling.as_str() {
                         "reverse" => ContainerOp::Reverse,
                         "sort" => ContainerOp::Sort,
+                        "shuffle" => ContainerOp::Shuffle,
                         _ => ContainerOp::Rsort,
                     };
-                    if op != ContainerOp::Reverse && target.element.unpacked_struct().is_some() {
+                    if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
+                        && target.element.unpacked_struct().is_some()
+                    {
                         return Err(unsupported(
                             "sorting unpacked structures requires a with expression",
                         ));
                     }
-                    if op != ContainerOp::Reverse && target.record.is_some() {
+                    if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
+                        && target.record.is_some()
+                    {
                         return Err(unsupported("sorting elements wider than 64 bits"));
                     }
                     // Chandles have no relational operators (6.14, 7.12.2).
-                    if op != ContainerOp::Reverse && target.element.chandle {
+                    if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
+                        && target.element.chandle
+                    {
                         return Err(AnalyzerError::IllegalChandleUse {
                             detail: "sorting chandles".into(),
                         });
                     }
-                    if op != ContainerOp::Reverse
+                    if matches!(op, ContainerOp::Sort | ContainerOp::Rsort)
                         && target.layout.handle == Some(HandleProperty::Object)
                     {
                         return Err(unsupported(
@@ -1402,6 +1409,9 @@ mod method_call_tests {
     #[test]
     fn ordering_methods_reject_unsupported_receivers_arguments_and_void_values() {
         for statement in [
+            "map.shuffle;",
+            "q.shuffle(1);",
+            "value = q.shuffle();",
             "map.sort;",
             "map.rsort();",
             "map.reverse;",
@@ -1434,6 +1444,7 @@ mod method_call_tests {
             "a.sort with (-item)",
             "a.rsort(x) with (x)",
             "a.reverse with (item)",
+            "a.shuffle with (item)",
         ] {
             let source = format!("module Top; int a[]; initial {call}; endmodule");
             assert!(
