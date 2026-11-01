@@ -104,6 +104,9 @@ impl<B: SimBackend> Simulator<B> {
         site: &HostRequestSite<SignalRef>,
         timestamp: u64,
     ) -> Result<(), Halt> {
+        if site.operation == 16 {
+            return self.queue_strobe(site);
+        }
         if site.operation == 13 {
             return self.run_fread_request(site);
         }
@@ -178,10 +181,13 @@ impl<B: SimBackend> Simulator<B> {
                 let descriptor = self.file_io.open(path, mode.as_deref());
                 self.backend.set(site.results[0].id, descriptor);
             }
-            1 => self
-                .file_io
-                .close(number(0)?)
-                .map_err(|err| error(format!("$fclose: {err}")))?,
+            1 => {
+                let descriptor = number(0)?;
+                self.file_io
+                    .close(descriptor)
+                    .map_err(|err| error(format!("$fclose: {err}")))?;
+                self.cancel_file_strobes(descriptor);
+            }
             2 | 3 => {
                 let scope = self.process_scope(site.process);
                 let format = RuntimeEventSite {

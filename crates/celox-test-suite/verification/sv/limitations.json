@@ -4684,5 +4684,23 @@
         "file_io::ferror_success_clears_description"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_strobe_program_output",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 with the suite's VPI/public-signal configuration prints reactive=0 although the program output settles to 9. The standalone probe reproduces reactive=0 and settled=9 with --vpi --public-flat-rw --assert --coverage-user --x-initial 0 --x-assign 0; without those options it prints 9 for both. IEEE 1800-2023 21.2.2 requires strobe to display the time slot's final value, including Reactive program writes (24.3.1). Icarus, xezim and Celox print reactive=9.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/strobe-program-verilator.json",
+      "verification/repros/sv_strobe_program_output.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "file_io::strobe_reads_after_reactive_program"
+      ]
+    }
   }
 ]

@@ -46,7 +46,7 @@ impl Ff<'_, '_> {
         })
     }
 
-    fn file_descriptor_arg(
+    pub(super) fn file_descriptor_arg(
         &mut self,
         arg: &sv::ir::SystemTaskArg<sv::ir::Expr>,
     ) -> Result<HostRequestValue<SourceVarId>, sv::AnalyzerError> {

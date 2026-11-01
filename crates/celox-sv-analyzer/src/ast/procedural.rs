@@ -1218,6 +1218,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         ids: &mut Vec<Option<celox_sv_syntax::ExprId>>,
     ) {
         let (SystemTask::Display(radix)
+        | SystemTask::Strobe(radix)
+        | SystemTask::Fstrobe(radix)
         | SystemTask::Write(radix)
         | SystemTask::Fdisplay(radix)
         | SystemTask::Fwrite(radix)) = task
@@ -3017,6 +3019,19 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             && let Some(memory) = arguments.get(1).and_then(|arg| arg.value)
         {
             expression_binding::check_chandle_memory(memory, self.tree, &self.dims, self.session)?;
+        }
+        if matches!(task, SystemTask::Strobe(_) | SystemTask::Fstrobe(_))
+            && effects::has_updates(
+                declarations,
+                &arguments
+                    .iter()
+                    .filter_map(|arg| arg.value)
+                    .collect::<Vec<_>>(),
+            )
+        {
+            return Err(unsupported(format!(
+                "`{task}` with an assignment, increment or decrement argument"
+            )));
         }
         let args = arguments
             .iter()
@@ -6208,9 +6223,13 @@ pub(super) fn process_site(
 /// severity task, which a leading string literal there is.
 fn template_index(task: SystemTask, args: &[SystemTaskArg<Expr>]) -> Option<usize> {
     Some(match task {
-        SystemTask::Display(_) | SystemTask::Write(_) | SystemTask::Severity(_) => 0,
+        SystemTask::Display(_)
+        | SystemTask::Strobe(_)
+        | SystemTask::Write(_)
+        | SystemTask::Severity(_) => 0,
         SystemTask::Fatal => usize::from(matches!(args.first(), Some(SystemTaskArg::Expr(_)))),
         SystemTask::Fdisplay(_)
+        | SystemTask::Fstrobe(_)
         | SystemTask::Fwrite(_)
         | SystemTask::Assert
         | SystemTask::AssertContinue => 1,

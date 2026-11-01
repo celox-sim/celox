@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 const MAGIC: &[u8; 8] = b"CELOXCP1";
 // Bump whenever a serialized core-state schema or its interpretation changes.
-const VERSION: u32 = 3;
+const VERSION: u32 = 4;
 
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointFileError {
