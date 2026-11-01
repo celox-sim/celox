@@ -3,6 +3,16 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_struct_fixed_array_pattern_rows(sim) { @case "unpacked_structs::fixed_array_pattern_rows"; }
+    fn unpacked_struct_fixed_array_pattern_rows_four_state(sim) { @case "unpacked_structs::fixed_array_pattern_rows_four_state"; }
+
+    fn unpacked_struct_fixed_array_wide_and_nba(sim) { @case "unpacked_structs::fixed_array_wide_and_nba"; }
+    fn unpacked_struct_fixed_array_members_and_copies(sim) { @case "unpacked_structs::fixed_array_members_and_copies"; }
+    fn unpacked_struct_fixed_array_nested_members(sim) { @case "unpacked_structs::fixed_array_nested_members"; }
+    fn unpacked_struct_fixed_array_multidimensional_and_bounds(sim) { @case "unpacked_structs::fixed_array_multidimensional_and_bounds"; }
+    fn unpacked_struct_fixed_array_local_lifetime(sim) { @case "unpacked_structs::fixed_array_local_lifetime"; }
+    fn unpacked_struct_fixed_array_four_state(sim) { @case "unpacked_structs::fixed_array_four_state"; }
+
     fn unpacked_struct_member_initial_values(sim) { @case "unpacked_structs::member_initial_values"; }
     fn unpacked_struct_member_initial_values_local_lifetimes(sim) { @case "unpacked_structs::member_initial_values_local_lifetimes"; }
     fn unpacked_struct_member_initial_values_declaration_scope(sim) { @case "unpacked_structs::member_initial_values_declaration_scope"; }
@@ -678,7 +688,38 @@ fn unsupported_and_illegal_uses_are_rejected() {
             "class B; i_t p; endclass typedef struct { int a; } one_t; class D extends B; one_t p; endclass D d; bit x; initial begin d = new; x = d.p.b; end",
             "structure member `d.p.b`",
         ),
-        ("i_t v[2];", "array of unpacked structures"),
+        (
+            "typedef struct { bit a; logic b; } mixed_t; mixed_t v[2];",
+            "array of unpacked structures with",
+        ),
+        (
+            "typedef struct { int a; int b; } array_t; array_t v[2]; initial v[0] += v[1];",
+            "operator `+=` on an unpacked structure",
+        ),
+        (
+            "typedef struct { int a; int b; } array_t; array_t v[2]; initial v[0]++;",
+            "increment or decrement of an unpacked structure",
+        ),
+        (
+            "typedef struct { int a; int b; } array_t; array_t v[2]; initial v[0][0] = 1;",
+            "operator, select or cast applied to an unpacked structure",
+        ),
+        (
+            "typedef struct { int a; int b; } array_t; array_t v[2]; assign v[0][0] = 1;",
+            "operator, select or cast applied to an unpacked structure",
+        ),
+        (
+            "typedef struct { int a; int b; } array_t; array_t v[2]; typedef struct { int a; int b; } other_t; other_t x; initial v[0] = x;",
+            "unpacked structure",
+        ),
+        (
+            "typedef struct { string s; } text_t; text_t v[2];",
+            "array of unpacked structures with",
+        ),
+        (
+            "typedef struct { int a = 1; } defaults_t; defaults_t v[2];",
+            "array of unpacked structures with",
+        ),
         (
             "typedef struct packed { i_t x; } p_t; p_t v;",
             "unsupported packed struct member",
@@ -777,5 +818,28 @@ fn member_initial_value_boundaries_are_explicit() {
             panic!("expected unsupported: {source}");
         };
         assert!(error.to_string().contains(want), "{source}: {error}");
+    }
+}
+
+#[test]
+fn fixed_array_pattern_rows_require_compatible_arrays() {
+    for body in [
+        "other_t a[2]; row_t b[2][2]; initial b = '{a, a};",
+        "other_t a[2]; row_t b[2][2]; initial b = '{default: a};",
+        "row_t a[3]; row_t b[2][2]; initial b = '{a, a};",
+        "row_t a[3]; row_t b[2][2]; initial b = '{default: a};",
+    ] {
+        let source = format!(
+            "module Top; typedef struct {{ int x; }} row_t; \
+            typedef struct {{ int x; }} other_t; {body} endmodule"
+        );
+        let Err(error) =
+            Simulator::from_sv_sources(vec![(&source, Path::new("struct_rows.sv"))], "Top")
+                .build_cranelift()
+        else {
+            panic!("incompatible array pattern item accepted: {body}")
+        };
+        let error = error.to_string();
+        assert!(error.contains("unpacked array"), "{body}: {error}");
     }
 }

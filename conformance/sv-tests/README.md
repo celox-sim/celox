@@ -603,3 +603,12 @@ measurement. Shared cases additionally check nested types, explicit-initializer
 suppression, declaration scopes, parameter specializations, constant functions,
 assignment sizing, four-state values, local lifetimes and class properties.
 The supported boundaries are documented in the language reference.
+
+Fixed-size unpacked-structure arrays update two reviewed expectation rows:
+`chapter-5/5.10-structure-arrays.sv` passes in both state modes. The focused
+four-verdict official run also confirms `5.10-structure-arrays-illegal.sv`
+continues to reject C-style flattened initialization in both modes. This is
+not a new full-corpus measurement. The shared suite exercises element and
+member writes, whole-array and subarray copies, nested members, local lifetime,
+wide NBA destinations, and invalid-index defaults. Arrays with non-integral,
+mixed-state or defaulted members remain unsupported.

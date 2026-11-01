@@ -219,6 +219,13 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 `T'{...}`。`default` は入れ子の構造体のメンバにも適用）による構築ができます。
 構造体全体へのその他の演算子、選択、キャストは拒否されます。
 
+モジュール変数と手続き内のローカル変数では、構造体の固定長配列に対応します。
+末端メンバがすべて整数型で、すべて 2 値またはすべて 4 値であり、メンバに宣言時の初期値がない型が対象です。
+ネストした構造体、多次元配列、要素・メンバへの代入、assignment pattern、要素と配列全体のコピーに対応します。
+互換性のある部分配列を、リスト形式・`default:` の assignment pattern の要素として使えます。
+無効な添字では要素型の既定値を読み、書き込みを無視します（7.4.5）。文字列・ハンドル・2 値と 4 値の混在・
+メンバ初期値を含む配列と、配列のポート・クラスプロパティ・サブルーチンインターフェースは未対応です。
+
 モジュール変数、手続き内のローカル変数、クラスプロパティでは、整数型メンバの定数初期値に
 対応します（7.2.2）。インスタンスのパラメータ上書きを含め、型を宣言したスコープで値を確定します。
 変数に明示的な初期化子がある場合は、メンバの初期値を使いません。ネストしたメンバには、
@@ -255,7 +262,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
 - `always_comb` の暗黙のラッチ推論はデフォルトで拒否します。`celox.toml` の `[diagnostics]` で `inferred_latch = "warn"` または `"allow"` を指定すると許可できます。通常の `always @*` と明示的な `always_latch` にはこの設定は不要です。
 - ポートとインスタンス：non-ANSI 形式のポート式（`module m({a, b}, c[3:0], .p(d))` など、[#1953](https://github.com/celox-sim/celox/issues/1953)）、`ref` ポート（[#427](https://github.com/celox-sim/celox/issues/427)）、
   ワイルドカード接続 `.*`（[#442](https://github.com/celox-sim/celox/issues/442)）、ゲートの遅延・強度指定・インスタンス配列と、その他のゲート／スイッチプリミティブ（[#457](https://github.com/celox-sim/celox/issues/457)）、`bind`。
-- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティ・固定長配列の要素としての unpacked 構造体、配列（動的配列・キュー・連想配列を含む）・`real` のメンバ。メンバ初期値の制限は[unpacked 構造体](#unpacked-structures)を参照。
+- 宣言：interface 配列のメンバーの変数宣言の初期化子、ANSI ポートの既定値、tagged union、unpacked union、packed union の assignment pattern、ドライバを持たない内部ネット（[#460](https://github.com/celox-sim/celox/issues/460)）、`real`、ポート・ネット・パラメータ・static / `rand` / `const` のクラスプロパティとしての unpacked 構造体、配列（動的配列・キュー・連想配列を含む）・`real` のメンバ。メンバ初期値の制限は[unpacked 構造体](#unpacked-structures)を参照。
 - 順序回路のプロセス：`always_ff` のイベントリストの `iff` 修飾（[#452](https://github.com/celox-sim/celox/issues/452)）、および `always_ff` での
   単純な信号以外のエッジオペランド（[#464](https://github.com/celox-sim/celox/issues/464)）、複数ビットのエッジ信号、
   非同期リセットを持たない複数のエッジ。

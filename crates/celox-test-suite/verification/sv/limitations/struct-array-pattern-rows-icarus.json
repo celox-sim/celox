@@ -1,0 +1,45 @@
+{
+  "schema_version": 3,
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "include_ignored": false,
+  "exclude_stronger_than_sv": false,
+  "scope": "Focused array-valued unpacked-structure pattern-item failures before exclusions; the unsupported Verilator four-state case is omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_pattern_rows",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 3; see <case>/build.log\n<case>/source_0.sv:3: sorry: Unpacked structs not supported.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_pattern_rows_four_state",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 2,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 0,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  }
+}

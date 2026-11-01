@@ -454,14 +454,17 @@ pub(super) fn signals_from_body_item(
         if signal.is_net {
             return Err(unsupported("net of unpacked structure type"));
         }
-        if !signal.r#type.unpacked_ranges.is_empty() {
-            return Err(unsupported("array of unpacked structures"));
-        }
         if signal.is_const {
             return Err(unsupported("const variable of unpacked structure type"));
         }
         if signal.package_variable.is_some() || signal.hierarchical.is_some() {
             return Err(unsupported("shared variable of unpacked structure type"));
+        }
+        if !signal.r#type.unpacked_ranges.is_empty() {
+            let mut signal = signal;
+            signal.r#type = unpacked_structs::array_storage(signal.r#type)?;
+            signals.push(signal);
+            continue;
         }
         // The variable and its structure members only name its leaf
         // variables; they are not storage (see `unpacked_structs`).
