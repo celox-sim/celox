@@ -29,7 +29,10 @@ impl SIROffset {
     pub fn for_each_register_mut(&mut self, mut visit: impl FnMut(&mut RegisterId)) {
         match self {
             SIROffset::Static(_) | SIROffset::PackedElements { .. } => {}
-            SIROffset::Dynamic(register) => visit(register),
+            SIROffset::Dynamic(register)
+            | SIROffset::ElementRun {
+                index: register, ..
+            } => visit(register),
             SIROffset::Element {
                 index,
                 dynamic_bit_offset,

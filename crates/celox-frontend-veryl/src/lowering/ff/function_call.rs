@@ -69,7 +69,7 @@ impl<'a> FfParser<'a> {
             Expression::Term(factor) => match factor.as_ref() {
                 Factor::Variable(id, index, select, _) => {
                     self.module.variables[id].affiliation != Affiliation::Function
-                        || !index.0.is_empty()
+                        || !index.indices.is_empty()
                         || !select.0.is_empty()
                         || select.1.is_some()
                 }
@@ -94,7 +94,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => input_needs_snapshot(input),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.expression_needs_assignment_snapshot_inner(lhs, visiting)
@@ -137,8 +140,7 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         dst.index
-            .0
-            .iter()
+            .expressions()
             .any(|expr| self.expression_needs_assignment_snapshot_inner(expr, visiting))
             || dst
                 .select
@@ -271,8 +273,7 @@ impl<'a> FfParser<'a> {
                 match factor.as_ref() {
                     Factor::Variable(_, index, select, _) => {
                         index
-                            .0
-                            .iter()
+                            .expressions()
                             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
                             || select.0.iter().any(|expr| {
                                 self.expression_has_runtime_effect_inner(expr, visiting)
@@ -284,8 +285,7 @@ impl<'a> FfParser<'a> {
                     Factor::HierVariable(reference) => {
                         reference
                             .index
-                            .0
-                            .iter()
+                            .expressions()
                             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
                             || reference.select.0.iter().any(|expr| {
                                 self.expression_has_runtime_effect_inner(expr, visiting)
@@ -315,7 +315,10 @@ impl<'a> FfParser<'a> {
                         }
                         _ => true,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -383,8 +386,7 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         dst.index
-            .0
-            .iter()
+            .expressions()
             .any(|expr| self.expression_has_runtime_effect_inner(expr, visiting))
             || dst
                 .select
@@ -403,8 +405,7 @@ impl<'a> FfParser<'a> {
         dst: &AssignDestination,
     ) -> bool {
         dst.index
-            .0
-            .iter()
+            .expressions()
             .any(|expr| self.expression_needs_eager_evaluation(expr))
             || dst
                 .select
@@ -593,7 +594,7 @@ impl<'a> FfParser<'a> {
         };
         assign.dst.len() == 1
             && assign.dst[0].id == ret_id
-            && assign.dst[0].index.0.is_empty()
+            && assign.dst[0].index.indices.is_empty()
             && assign.dst[0].select.0.is_empty()
             && assign.dst[0].select.1.is_none()
     }
@@ -667,7 +668,7 @@ impl<'a> FfParser<'a> {
     ) -> Result<Expression, ParserError> {
         let variable = &self.module.variables[&dst.id];
         let is_whole_var =
-            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+            dst.index.indices.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
         // Unpacked arrays are shape-checked and lowered element-wise elsewhere;
         // a scalar `as` cast cannot represent their assignment conversion.
         if !variable.r#type.array.is_empty() && is_whole_var {
@@ -850,7 +851,7 @@ impl<'a> FfParser<'a> {
                 // declared width, signedness, and state kind.
                 Factor::Variable(id, index, select, comptime) => {
                     let mut index = index.clone();
-                    for expr in &mut index.0 {
+                    for expr in index.expressions_mut() {
                         *expr = self.capture_nested_function_outputs_inner(
                             expr,
                             state,
@@ -925,7 +926,7 @@ impl<'a> FfParser<'a> {
                 }
                 Factor::HierVariable(reference) => {
                     let mut reference = reference.as_ref().clone();
-                    for expr in &mut reference.index.0 {
+                    for expr in reference.index.expressions_mut() {
                         *expr = self.capture_nested_function_outputs_inner(
                             expr,
                             state,
@@ -948,7 +949,10 @@ impl<'a> FfParser<'a> {
                     }
                     Expression::Term(Box::new(Factor::HierVariable(Box::new(reference))))
                 }
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => expr.clone(),
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => expr.clone(),
             },
             Expression::Binary(lhs, op, rhs, comptime) => {
                 let lhs =
@@ -1487,7 +1491,7 @@ impl<'a> FfParser<'a> {
         state: &mut HashMap<VarId, Expression>,
     ) -> Result<(), ParserError> {
         let is_whole_var =
-            dst.index.0.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
+            dst.index.indices.is_empty() && dst.select.0.is_empty() && dst.select.1.is_none();
         let value = if is_whole_var {
             rhs
         } else {
@@ -1534,12 +1538,13 @@ impl<'a> FfParser<'a> {
         index: &VarIndex,
         select: &VarSelect,
     ) -> Result<Option<Expression>, ParserError> {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         let geometry = crate::bitaccess::select_geometry(self.module, var_id, index, select)?;
         let token = TokenRange::default();
         let mut condition: Option<Expression> = None;
         for (dimension, index) in index
-            .0
-            .iter()
+            .expressions()
             .chain(select.0.iter())
             .take(geometry.dimension_count)
             .enumerate()
@@ -1593,6 +1598,8 @@ impl<'a> FfParser<'a> {
         select: &VarSelect,
         whole: Expression,
     ) -> Result<Expression, ParserError> {
+        let folded = crate::bitaccess::fold_array_range(index, select)?;
+        let (index, select) = folded.as_ref().map_or((index, select), |(i, s)| (i, s));
         let (offset, geometry) =
             crate::bitaccess::select_offset_expr(self.module, var_id, index, select)?;
         let token = TokenRange::default();
@@ -1830,7 +1837,7 @@ impl<'a> FfParser<'a> {
                     factor.as_ref(),
                     Factor::Variable(id, index, select, _)
                         if *id == var_id
-                            && index.0.is_empty()
+                            && index.indices.is_empty()
                             && select.0.is_empty()
                             && select.1.is_none()
                 )
@@ -2974,7 +2981,7 @@ impl<'a> FfParser<'a> {
         defs: &HashMap<VarId, Expression>,
     ) -> AssignDestination {
         let mut dst = dst.clone();
-        for expr in &mut dst.index.0 {
+        for expr in dst.index.expressions_mut() {
             *expr = self.substitute_function_expr(expr, defs);
         }
         for expr in &mut dst.select.0 {
@@ -3143,8 +3150,7 @@ impl<'a> FfParser<'a> {
                 Factor::Variable(id, index, select, _) => {
                     candidates.contains(id)
                         || index
-                            .0
-                            .iter()
+                            .expressions()
                             .any(|expr| Self::expression_references_any(expr, candidates))
                         || select
                             .0
@@ -3157,8 +3163,7 @@ impl<'a> FfParser<'a> {
                 Factor::HierVariable(reference) => {
                     reference
                         .index
-                        .0
-                        .iter()
+                        .expressions()
                         .any(|expr| Self::expression_references_any(expr, candidates))
                         || reference
                             .select
@@ -3187,7 +3192,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => input_references(input),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => false,
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 Self::expression_references_any(lhs, candidates)
@@ -3229,7 +3237,9 @@ impl<'a> FfParser<'a> {
                 match factor.as_ref() {
                     Factor::FunctionCall(_) => true,
                     Factor::Variable(_, index, select, _) => {
-                        index.0.iter().any(Self::expression_contains_function_call)
+                        index
+                            .expressions()
+                            .any(Self::expression_contains_function_call)
                             || select.0.iter().any(Self::expression_contains_function_call)
                             || select.1.as_ref().is_some_and(|(_, expr)| {
                                 Self::expression_contains_function_call(expr)
@@ -3238,8 +3248,7 @@ impl<'a> FfParser<'a> {
                     Factor::HierVariable(reference) => {
                         reference
                             .index
-                            .0
-                            .iter()
+                            .expressions()
                             .any(Self::expression_contains_function_call)
                             || reference
                                 .select
@@ -3264,7 +3273,10 @@ impl<'a> FfParser<'a> {
                         | SystemFunctionKind::Unsigned(input) => input_contains(input),
                         SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -3320,7 +3332,7 @@ impl<'a> FfParser<'a> {
                     {
                         variables.insert(*id);
                     }
-                    for expr in &index.0 {
+                    for expr in index.expressions() {
                         self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     for expr in &select.0 {
@@ -3331,7 +3343,7 @@ impl<'a> FfParser<'a> {
                     }
                 }
                 Factor::HierVariable(reference) => {
-                    for expr in &reference.index.0 {
+                    for expr in reference.index.expressions() {
                         self.collect_expression_read_variables(expr, variables, arrays_only);
                     }
                     for expr in &reference.select.0 {
@@ -3348,7 +3360,7 @@ impl<'a> FfParser<'a> {
                     for dst in call.outputs.values().flatten() {
                         // An output actual writes its base variable; only its
                         // index/select expressions contribute read dependencies.
-                        for expr in &dst.index.0 {
+                        for expr in dst.index.expressions() {
                             self.collect_expression_read_variables(expr, variables, arrays_only);
                         }
                         for expr in &dst.select.0 {
@@ -3378,7 +3390,10 @@ impl<'a> FfParser<'a> {
                     | SystemFunctionKind::Unsigned(input) => collect_input(input, variables),
                     SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => {}
                 },
-                Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => {}
+                Factor::Value(_)
+                | Factor::ResetValue(..)
+                | Factor::Anonymous(_)
+                | Factor::Unknown(_) => {}
             },
             Expression::Binary(lhs, _, rhs, _) => {
                 self.collect_expression_read_variables(lhs, variables, arrays_only);
@@ -3444,7 +3459,7 @@ impl<'a> FfParser<'a> {
                         self.function_call_writes_any(call, candidates, visiting)
                     }
                     Factor::Variable(_, index, select, _) => {
-                        index.0.iter().any(|expr| {
+                        index.expressions().any(|expr| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
                         }) || select.0.iter().any(|expr| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
@@ -3453,7 +3468,7 @@ impl<'a> FfParser<'a> {
                         })
                     }
                     Factor::HierVariable(reference) => {
-                        reference.index.0.iter().any(|expr| {
+                        reference.index.expressions().any(|expr| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
                         }) || reference.select.0.iter().any(|expr| {
                             self.expression_writes_any_inner(expr, candidates, visiting)
@@ -3482,7 +3497,10 @@ impl<'a> FfParser<'a> {
                         }
                         SystemFunctionKind::Readmemh(_, _) | SystemFunctionKind::Finish => false,
                     },
-                    Factor::Value(_) | Factor::Anonymous(_) | Factor::Unknown(_) => false,
+                    Factor::Value(_)
+                    | Factor::ResetValue(..)
+                    | Factor::Anonymous(_)
+                    | Factor::Unknown(_) => false,
                 }
             }
             Expression::Binary(lhs, _, rhs, _) => {
@@ -3649,8 +3667,7 @@ impl<'a> FfParser<'a> {
         visiting: &mut HashSet<VarId>,
     ) -> bool {
         dst.index
-            .0
-            .iter()
+            .expressions()
             .any(|expr| self.expression_writes_any_inner(expr, candidates, visiting))
             || dst
                 .select
@@ -3945,7 +3962,8 @@ impl<'a> FfParser<'a> {
                     if Self::is_function_state_base(comptime) {
                         return expr.clone();
                     }
-                    let is_whole = index.0.is_empty() && select.0.is_empty() && select.1.is_none();
+                    let is_whole =
+                        index.indices.is_empty() && select.0.is_empty() && select.1.is_none();
                     if let Some(bound) = defs.get(var_id)
                         && expanding.insert(*var_id)
                     {
@@ -3960,7 +3978,7 @@ impl<'a> FfParser<'a> {
                         // A partial read of a variable with symbolic state
                         // selects from that state; its storage is stale.
                         let mut index = index.clone();
-                        for expr in &mut index.0 {
+                        for expr in index.expressions_mut() {
                             *expr = self.substitute_function_expr_inner(expr, defs, expanding);
                         }
                         let mut select = select.clone();
@@ -4251,7 +4269,7 @@ impl<'a> FfParser<'a> {
                 Statement::Assign(assign) => {
                     if let [dst] = assign.dst.as_slice()
                         && dst.id == ret_id
-                        && dst.index.0.is_empty()
+                        && dst.index.indices.is_empty()
                         && dst.select.0.is_empty()
                         && dst.select.1.is_none()
                     {

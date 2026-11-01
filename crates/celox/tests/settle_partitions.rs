@@ -125,6 +125,7 @@ fn partitioned_interpreter_matches_single_pass() {
     );
 }
 
+#[cfg(feature = "cranelift")]
 #[test]
 fn partitioned_cranelift_matches_single_pass() {
     assert_eq!(
@@ -133,6 +134,7 @@ fn partitioned_cranelift_matches_single_pass() {
     );
 }
 
+#[cfg(feature = "wasm-runtime")]
 #[test]
 fn partitioned_wasm_matches_single_pass() {
     assert_eq!(trace!(partitioned().build_wasm().unwrap()), reference());

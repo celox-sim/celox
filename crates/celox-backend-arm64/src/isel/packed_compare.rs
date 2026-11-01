@@ -130,7 +130,7 @@ fn static_lane_load(
                 );
                 usize::try_from(value?).ok()?
             }
-            SIROffset::Element { .. } => return None,
+            SIROffset::Element { .. } | SIROffset::ElementRun { .. } => return None,
         };
         Some(StaticLaneLoad {
             load_index: index,

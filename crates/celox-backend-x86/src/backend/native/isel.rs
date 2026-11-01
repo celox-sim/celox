@@ -241,7 +241,7 @@ fn static_lane_load(
                 );
                 usize::try_from(value?).ok()?
             }
-            SIROffset::Element { .. } => return None,
+            SIROffset::Element { .. } | SIROffset::ElementRun { .. } => return None,
         };
         Some(StaticLaneLoad {
             load_index: index,
@@ -784,7 +784,7 @@ fn resolve_packed_field_source(
                     SIROffset::Dynamic(offset) => {
                         usize::try_from(constants.get(offset)?.value).ok()?
                     }
-                    SIROffset::Element { .. } => return None,
+                    SIROffset::Element { .. } | SIROffset::ElementRun { .. } => return None,
                 };
                 if relative_offset.checked_add(field_width)? > *load_width
                     || register_types.get(&register)?.width() != field_width

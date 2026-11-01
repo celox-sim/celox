@@ -316,6 +316,92 @@ fn wide_dynamic_element_load_retains_its_bit_offset() {
 }
 
 #[test]
+fn element_run_load_scales_its_first_element_by_the_element_width() {
+    let array_abs = AbsoluteAddr {
+        instance_id: InstanceId(0),
+        var_id: VarId::default(),
+    };
+    let array = RegionedAbsoluteAddr::from_absolute_addr(STABLE_REGION, array_abs);
+    let index = RegisterId(0);
+    let loaded = RegisterId(1);
+    let unit = ExecutionUnit {
+        entry_block_id: SirBlockId(0),
+        blocks: [(
+            SirBlockId(0),
+            BasicBlock {
+                id: SirBlockId(0),
+                params: vec![],
+                instructions: vec![
+                    SIRInstruction::Imm(index, SIRValue::new(1u8)),
+                    SIRInstruction::Load(
+                        loaded,
+                        array,
+                        SIROffset::ElementRun {
+                            index,
+                            element_width: 24,
+                        },
+                        72,
+                    ),
+                ],
+                terminator: SIRTerminator::Return,
+            },
+        )]
+        .into_iter()
+        .collect(),
+        register_map: [
+            (
+                index,
+                RegisterType::Bit {
+                    width: 2,
+                    signed: false,
+                },
+            ),
+            (
+                loaded,
+                RegisterType::Bit {
+                    width: 72,
+                    signed: false,
+                },
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    unit.verify();
+
+    // An element run keeps its array packed: no element-strided entry.
+    let mut layout = empty_layout();
+    layout.offsets.insert(array_abs, 0);
+    layout.widths.insert(array_abs, 96);
+    layout.is_4states.insert(array_abs, false);
+    layout.total_size = 16;
+    layout.working_base_offset = 16;
+    layout.sparse_base_offset = 16;
+    layout.merged_total_size = 16;
+    layout.triggered_bits_offset = 16;
+    layout.scratch_base_offset = 16;
+
+    let function = lower_execution_unit(&unit, &layout, false);
+    function.verify();
+    let instructions = function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .collect::<Vec<_>>();
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MInst::LoadImm { value: 24, .. })),
+        "the run's logical bit offset is index * element_width"
+    );
+    assert!(
+        instructions
+            .iter()
+            .any(|instruction| matches!(instruction, MInst::Mul { .. }))
+    );
+}
+
+#[test]
 fn full_dynamic_padded_element_uses_native_indexed_load_and_store() {
     let array_abs = AbsoluteAddr {
         instance_id: InstanceId(0),
