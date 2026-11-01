@@ -774,8 +774,10 @@ fn run_sv_slots<B: celox::SimBackend>(
                 if finished {
                     break;
                 }
+                // Sleep until the simulation waits for room, and look for
+                // events of long runs now and then.
                 if idle {
-                    std::thread::yield_now();
+                    drain.wait(std::time::Duration::from_millis(10));
                 }
             }
             drop(drain);
@@ -788,6 +790,7 @@ fn run_sv_slots<B: celox::SimBackend>(
                 || signal.is_some_and(|signal| signal.pending())
         });
         done.store(true, std::sync::atomic::Ordering::Release);
+        writer.thread().unpark();
         (run, writer.join())
     });
     let drained = drained.map_err(|_| "the simulation output thread panicked".to_string())??;
