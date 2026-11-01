@@ -1,1 +1,6 @@
-Treat real property reads as real in the analyzer (increments) and keep integral operands at their width before a real property store (Codex P2s)
+Revision history for #2895:
+
+rev 2 (content) 2026-11-01 13:08 UTC — Treat real property reads as real in the analyzer (increments) and keep integral operands at their width before a real property store (Codex P2s)
+rev 1 (initial) 2026-11-01 13:08 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2895,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"2665f65441284c7b64cdb801e26a34b521025ffc","timestamp_iso":"2026-11-01T13:08:17Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"2665f65441284c7b64cdb801e26a34b521025ffc","new_sha":"ba5cd241bbeabf6802907762a2d0eb3753a5ff3a","timestamp_iso":"2026-11-01T13:08:17Z","reason":"Treat real property reads as real in the analyzer (increments) and keep integral operands at their width before a real property store (Codex P2s)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/2665f65441284c7b64cdb801e26a34b521025ffc...ba5cd241bbeabf6802907762a2d0eb3753a5ff3a"}]} -->
