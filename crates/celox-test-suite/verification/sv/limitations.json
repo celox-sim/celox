@@ -4525,5 +4525,44 @@
         "string::fixed_array_mutation_indices"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_container_shuffle",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 reports that the shuffle array sorting method is not currently supported in the scalar sequence cases, and additionally rejects queues of class handles and associative arrays of queues in the other cases. IEEE 1800-2023 7.12.2 permits shuffle on non-associative unpacked arrays. The focused report records the exact five compilation failures.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/shuffle-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "containers::shuffle_integral",
+        "containers::shuffle_four_state",
+        "containers::shuffle_handles",
+        "containers::shuffle_wide",
+        "containers::shuffle_nested_receivers"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_container_shuffle",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 misclassifies rows[next_row()].shuffle() on a queue-valued associative array element as a class method and aborts at time 0 with a null class handle diagnostic. IEEE 1800-2023 7.12.2 permits shuffle on this selected queue. The standalone probe reproduces the diagnostic; Verilator 5.052 and all Celox backends pass the shared case.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/shuffle-xezim.json",
+      "verification/repros/sv_shuffle_nested_receiver.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "containers::shuffle_nested_receivers"
+      ]
+    }
   }
 ]

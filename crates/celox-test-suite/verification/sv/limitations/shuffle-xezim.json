@@ -1,0 +1,23 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "xezim testbench failed: exit status: 1; see runtime.log and protocol.log\n",
+      "expectation": "Simulation",
+      "name": "containers::shuffle_nested_receivers",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "xezim",
+  "version": "xezim version 0.11.4",
+  "scope": "Focused dynamic-array and queue shuffle failures before reviewed exclusions; passing and unsupported cases omitted."
+}

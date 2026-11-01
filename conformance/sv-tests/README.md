@@ -696,3 +696,14 @@ Shared cases check assignment-time string defaults, replacing defaults on
 copies, entry deletion and clearing, unknown-index reads with X/Z defaults,
 wide elements and heap lifetime. Explicit index entries in associative array
 literals remain unsupported.
+
+Dynamic-array and queue `shuffle` updates two reviewed expectations:
+`chapter-7/arrays/unpacked/ordering-methods/shuffle.sv` passes in both state
+modes in a focused official-runner invocation. This is not a full-corpus
+measurement. The official case prints the arrays without checking the result;
+shared regressions additionally check element multiplicities, X/Z preservation,
+wide values, string and class-handle lifetime, bounded queues, empty and singleton
+sequences, copies and selected nested receivers. Celox-specific tests check
+process RNG seeding and serialized checkpoint replay without imposing one
+simulator's permutation on the external tools. Fixed-array ordering remains
+unsupported.
