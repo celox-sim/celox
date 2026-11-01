@@ -673,7 +673,7 @@ pub(super) fn value(
                     let bound = index_value(id, *expression, tree, session, dims, &target)?;
                     if expression_binding::real_value(&bound, dims)
                         || expression_binding::native_string(tree, session, id, native, dims)
-                        || expression_types::type_of(tree, session, id, native, dims).is_some_and(
+                        || expression_types::type_of(tree, session, id, native, dims).is_ok_and(
                             |ty| {
                                 !matches!(session.types.data(ty), semantic_types::TyData::Packed(_))
                             },

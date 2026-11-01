@@ -294,22 +294,8 @@ fn returns_string(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> bool {
-    let name = match objects::method(tree, session, id, native, dimensions) {
-        Ok(Some((name, ..))) => name,
-        Ok(None) => match super::direct::callable_name(tree, id, native) {
-            Some(name) => name,
-            None => return false,
-        },
-        Err(_) => return false,
-    };
-    dimensions
-        .functions
-        .get(&name)
-        .is_some_and(|function| function.return_string)
-        || dimensions
-            .function_return_types
-            .get(&name)
-            .is_some_and(|metadata| metadata.string)
+    expression_types::function_result(tree, session, id, native, dimensions)
+        .is_some_and(|ty| matches!(session.types.data(ty), semantic_types::TyData::String))
 }
 
 /// Whether native callee expression `id` names the `name` method of an

@@ -36,7 +36,7 @@ struct Settled {
 }
 
 /// Whether `a` and `b` hold the same tables: one is a clone of the other.
-fn same_tables(a: &PackedDimensions, b: &PackedDimensions) -> bool {
+pub(in crate::ast) fn same_tables(a: &PackedDimensions, b: &PackedDimensions) -> bool {
     a.variables.identity() == b.variables.identity()
         && a.const_env.identity() == b.const_env.identity()
         && a.type_aliases.identity() == b.type_aliases.identity()
@@ -407,6 +407,7 @@ fn formal_types(
 }
 fn return_metadata(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     ty: Option<&Type>,
     arguments: Arc<[FunctionArgumentMetadata]>,
     context: &PackedDimensions,
@@ -430,6 +431,9 @@ fn return_metadata(
         .and_then(|ty| expr_type_from_type(&tree.functions, ty, &context.const_env))
         .map(|ty| ty.width);
     FunctionReturnMetadata {
+        semantic_type: ty.and_then(|ty| {
+            semantic_types::of_type(&mut session.types, functions, ty, &context.const_env)
+        }),
         arguments: Some(arguments),
         width,
         first_packed_dimension_width: widths
@@ -483,7 +487,14 @@ fn signature(
     let result = return_type(subroutine, tree, session, context)?;
     // As in `publish_shape`, the table edits perform no queries.
     session.dimensions.partial.remove(key);
-    publish_signature(name(&subroutine.name), formals, result, tree, context);
+    publish_signature(
+        name(&subroutine.name),
+        formals,
+        result,
+        tree,
+        session,
+        context,
+    );
     Ok(())
 }
 /// The return type of a function, `None` for a task.
@@ -561,7 +572,7 @@ fn class_signatures(
     )?;
     drop((env, aliases));
     for (name, formals, result) in signatures {
-        publish_signature(name, formals, result, tree, context);
+        publish_signature(name, formals, result, tree, session, context);
     }
     class_builtin_signatures(
         class,
@@ -676,6 +687,7 @@ fn class_builtin_signatures(
             formals,
             Some((method == "randomize").then(procedural::int_type)),
             tree,
+            session,
             context,
         );
     }
@@ -693,6 +705,7 @@ fn class_builtin_signatures(
             vec![this],
             Some(Some(handle.clone())),
             tree,
+            session,
             context,
         );
     }
@@ -715,6 +728,7 @@ fn class_builtin_signatures(
         ],
         Some(Some(procedural::int_type())),
         tree,
+        session,
         context,
     );
     Ok(())
@@ -970,6 +984,7 @@ fn subroutine_signatures(
                 context.function_return_types.insert(
                     import.name().to_string(),
                     FunctionReturnMetadata {
+                        semantic_type: None,
                         arguments: Some(dpi_argument_metadata(&import)),
                         width: Some(ty.width()),
                         first_packed_dimension_width: (ty.width() > 1).then_some(ty.width()),
@@ -1048,6 +1063,7 @@ fn publish_signature(
     formals: Vec<(FunctionArgumentMetadata, Type)>,
     result: Option<Option<Type>>,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &mut PackedDimensions,
 ) {
     let arguments = formals
@@ -1071,7 +1087,7 @@ fn publish_signature(
         Arc::make_mut(&mut context.subroutine_param_names).insert(n.clone(), names);
     }
     if let Some(ty) = result {
-        let metadata = return_metadata(tree, ty.as_ref(), arguments, context);
+        let metadata = return_metadata(tree, session, ty.as_ref(), arguments, context);
         if context.function_return_types.get(&n) != Some(&metadata) {
             context.function_return_types.insert(n, metadata);
         }
