@@ -311,6 +311,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::method_ranges_of_scope_declarations",
                 "class::methods_called_without_parentheses",
                 "class::named_aggregate_type_arguments",
+                "class::nested_value_selects",
                 "class::package_constant_class_defaults",
                 "class::package_constant_type_arguments",
                 "class::parameter_literals_hide_module_constants",

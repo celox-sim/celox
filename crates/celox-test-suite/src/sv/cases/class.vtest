@@ -4227,3 +4227,31 @@ endmodule
   (top Top) (run_until 0)
   (assert_eq legal 1) (assert_eq implied 1) (assert_eq both_kinds 1) (assert_eq cycle_ok 1)
   (assert_eq selected 1) (assert_eq mixed_cycle 1) (assert_eq independent 1) (assert_eq kept 1))
+
+(case nested_value_selects
+  (source "class.sv" #"
+module Top(output bit [3:0] by_property, output bit [7:0] written, output bit [7:0] element);
+    class Info;
+        bit [15:0] bits = 16'h1234;
+        bit [7:0] low = 8'h02;
+    endclass
+    Info info, other;
+    bit [7:0] q[$];
+    initial begin
+        info = new;
+        other = new;
+        q.push_back(8'h01);
+        q.push_back(8'h00);
+        // A select of a class property in the index of another select, of
+        // a property or of a container element, is bound on its own (IEEE
+        // 1800-2023 11.5.1).
+        by_property = info.bits[4*other.low[1:0]+:4];
+        info.bits[4*other.low[0]+:4] = 4'hf;
+        written = info.bits[7:0];
+        q[info.low[0]][7:4] = other.bits[3:0];
+        element = q[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq by_property 2) (assert_eq written 0x3f) (assert_eq element 0x41))

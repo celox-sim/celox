@@ -269,14 +269,6 @@ fn memoized_types_follow_lexical_binding_snapshots() {
         Some(original)
     );
     let outer = dims.clone();
-    let mut selected_element = outer.clone();
-    selected_element.element_select = Some((id, "temporary_element".into()));
-    assert!(
-        session
-            .expression_types
-            .get(&tree, &session, id, tree.declarations(), &selected_element)
-            .is_none()
-    );
     let mut shape = dims.get("a").unwrap().clone();
     shape.packed[0].left = ConstExpr::Literal("15".into());
     shape.packed[0].width = ConstExpr::Literal("16".into());

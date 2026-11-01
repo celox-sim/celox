@@ -6,7 +6,8 @@ mod layout;
 mod selects;
 mod tagged;
 pub(in crate::ast) use tagged::{
-    Construction, checked_value, construct, construction_member, member_access,
+    Construction, checked_typed_value, checked_value, construct, construction_member,
+    member_access, member_guards,
 };
 #[cfg(test)]
 mod tests;

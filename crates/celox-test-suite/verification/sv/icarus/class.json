@@ -1182,6 +1182,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:18: error: Index expressions don't apply to this type of property.\n<case>/source_0.sv:20: error: the number of indices (2) is greater than the number of dimensions (1).\n<case>/source_0.sv:20: assert: elab_lval.cc:757: failed assertion rc\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "class::nested_value_selects",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::objects_properties_and_methods",

@@ -985,6 +985,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "90, 69, 82, 79, 10, 48, 32, 48, 32, 49, 10]",
                         ),
+                        ("icarus", "class::nested_value_selects") => (
+                            "compile_error",
+                            "compile",
+                            "Index expressions don't apply to this type of property",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

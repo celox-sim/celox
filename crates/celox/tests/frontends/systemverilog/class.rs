@@ -1609,6 +1609,7 @@ sv_backends! {
     fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
     fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
     fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
+    fn class_nested_value_selects(sim) { @case "class::nested_value_selects"; }
     fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
     fn class_constrained_enumerations_and_randc(sim) { @case "class::constrained_enumerations_and_randc"; }
     fn class_prototype_formals_inherit_types(sim) { @case "class::prototype_formals_inherit_types"; }
