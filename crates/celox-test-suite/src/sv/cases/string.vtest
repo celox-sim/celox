@@ -435,3 +435,39 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "-1 -1 -1 65 1\n"))
+
+; A string is a dynamic array of bytes indexed from 0 to N-1, where N is its
+; length when the loop tests it (IEEE 1800-2023 12.7.3).
+(case foreach_iterates_the_characters
+  (source "string.sv" #"
+module Top(output int words_seen, output int queued, output int empty_seen, output int before_b,
+           output int dots, output int grown);
+    class P;
+        string m_name = "a.b.c";
+        function int depth();
+            depth = 0;
+            foreach (m_name[i]) if (m_name[i] == ".") ++depth;
+        endfunction
+    endclass
+    string words [2] = '{ "hello", "world" };
+    string q[$];
+    string empty;
+    string s = "a.b";
+    P p;
+    initial begin
+        p = new;
+        foreach (words[j]) words_seen++;
+        q.push_back("xy"); q.push_back("z");
+        foreach (q[k]) queued += q[k].len();
+        foreach (empty[i]) empty_seen++;
+        foreach (p.m_name[i]) begin if (p.m_name[i] == "b") break; before_b++; end
+        p.m_name = "x.y";
+        dots = p.depth();
+        s = {s, ".c.d"};
+        foreach (s[i]) grown++;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq words_seen 2) (assert_eq queued 3) (assert_eq empty_seen 0) (assert_eq before_b 2)
+  (assert_eq dots 1) (assert_eq grown 7))

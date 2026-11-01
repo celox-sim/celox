@@ -161,6 +161,17 @@
     },
     {
       "category": "Types",
+      "detail": "string::foreach_iterates_the_characters at 399:74: assert_eq before_b: expected 0x2, got 0x1",
+      "expectation": "Simulation",
+      "name": "string::foreach_iterates_the_characters",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "string::methods",
