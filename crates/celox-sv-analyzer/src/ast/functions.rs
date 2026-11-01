@@ -280,6 +280,7 @@ fn native_signature(
             .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
             .and_then(|ty| ty.class().map(str::to_owned)),
         return_virtual_interface: ty.as_ref().and_then(|ty| ty.virtual_interface.clone()),
+        return_container: ty.as_ref().and_then(|ty| ty.container.clone()),
         return_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()

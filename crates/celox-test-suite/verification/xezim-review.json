@@ -970,6 +970,10 @@
     "sv_nested_container_foreach": {
       "title": "A foreach over a container of containers with a loop variable per dimension leaves the inner variable x and iterates the outer dimension only: foreach (all[k, j]) over int all[int][$] prints j as x once per key, and foreach (d[i, j]) over int d[$][] runs no iteration",
       "standard": "IEEE 1800-2023 12.7.3"
+    },
+    "sv_container_returns_in_instance_functions": {
+      "title": "In a module instantiated below the top, a function that builds a queue, dynamic array or associative array in an automatic local and returns it returns a container that has lost elements: a queue_t of three pushes comes back with one element, an associative array with none, while the same functions with the module as the top return every element",
+      "standard": "IEEE 1800-2023 13.4.1, 7.5, 7.8, 7.10"
     }
   },
   "cases": [
@@ -5363,6 +5367,14 @@
       "classification": "xezim_bug",
       "bug": "sv_conditional_unpacked_arrays",
       "note": "h = s ? c : d with s = 1 and c = '{4, 3} must copy c (11.4.11), so h[0] = 4 and the sum is 18324313; the pinned xezim leaves h = '{0, 0} and returns 18330343. The other assignments of the case (slices, results, defaults, enum arrays, hierarchical names) agree; see verification/repros/sv_conditional_unpacked_arrays_xezim.sv. Verilator 5.052 and Celox print h='{4, 3}."
+    },
+    {
+      "suite": "sv",
+      "name": "containers::functions_returning_containers",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_container_returns_in_instance_functions",
+      "note": "A function returning a container returns its value, so q = make_queue(3) gives three elements and m = make_map() two (13.4.1, 7.10). The pinned xezim, with Top under the suite testbench, returns one queue element and an empty associative array, and a queue built in a method one element short; returning a module-scope queue agrees. The adapter-free source prints [3 20 2] with Top as the top and [1 0 0] with Wrapped; see verification/repros/sv_container_returns_in_instance_functions_xezim.json. Verilator 5.052 passes the shared case, and Celox prints [3 20 2] for both tops."
     }
   ]
 }

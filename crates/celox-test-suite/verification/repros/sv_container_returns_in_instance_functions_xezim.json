@@ -1,0 +1,43 @@
+{
+  "case": "containers::functions_returning_containers",
+  "source": "src/sv/cases/containers.vtest",
+  "standard": "IEEE 1800-2023 13.4.1: a function's result is the value it returns, also for a queue, dynamic array or associative array (7.5, 7.8, 7.10).",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary --top-module Top, iverilog -g2012 -s Top, xezim -s Top and -s Wrapped, and the Celox sv_tests driver in simulation mode with each top).",
+  "reduced_source": "module Top;\n typedef int queue_t[$];\n typedef int map_t[string];\n function automatic queue_t make_queue(int n);\n  queue_t q;\n  for (int i = 0; i < n; i++)\n   q.push_back(i * 10);\n  return q;\n endfunction\n function automatic map_t make_map();\n  map_t m;\n  m[\"one\"] = 1;\n  m[\"two\"] = 2;\n  return m;\n endfunction\n initial begin\n  int q[$];\n  int m[string];\n  q = make_queue(3);\n  m = make_map();\n  $display(\"[%0d %0d %0d]\", q.size(), q[2], m.num());\n end\nendmodule\nmodule Wrapped;\n Top dut();\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "top": "Top",
+      "stdout": "[3 20 2]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "top": "Top",
+      "stderr": "r.sv:3: error: Type names are not valid expressions here.\nr.sv:3: internal error: I do not know how to elaborate this expression. \n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "top": "Top",
+      "stdout": "[3 20 2]\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "top": "Wrapped",
+      "stdout": "[1 0 0]\n"
+    },
+    {
+      "tool": "celox",
+      "top": "Top",
+      "stdout": "[3 20 2]\n"
+    },
+    {
+      "tool": "celox",
+      "top": "Wrapped",
+      "stdout": "[3 20 2]\n"
+    }
+  ]
+}
