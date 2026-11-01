@@ -201,7 +201,7 @@ seedを使って解を探索し、成功時だけ対象プロパティをまと�
 | シミュレーション時刻 | `$time`、`$stime`、`$realtime` はクロックで起動するプロセス、組合せプロセス、継続代入、`initial` とそれらから呼ぶサブルーチンで使用可能 |
 | サンプル値 | `$sampled` はプロセス、組み合わせ回路とそれらから呼ぶサブルーチンで使用可能。`$past`、`$rose`、`$fell`、`$stable`、`$changed` はクロックを推論できるエッジで起動するプロセスと、そこから呼ぶサブルーチンで使用可能。[サンプル値](#sampled-values) を参照 |
 | システムタスク | `always` 系のプロセスとサブルーチンの `$printtimescale`、`$display`、`$write` とその `b` / `o` / `h` 形、`$error`、`$warning`、`$info`、`$fatal`、`$finish`、`$stop`、`$exit`。`initial` ブロックでも使えます。`$readmemh` / `$readmemb` はそれらと `initial` ブロック。Veryl の `$assert` と `$assert_continue` |
-| 実行時 I/O | `$test$plusargs`、`$value$plusargs`、`$fopen`、`$fclose`、`$fdisplay` / `$fwrite` と基数指定形、`$writememh` / `$writememb`、[VCD 制御](./vcd#systemverilog-source-controls)。時間を持つプロセスで実行 |
+| 実行時 I/O | `$system`、`$test$plusargs`、`$value$plusargs`、`$fopen`、`$fclose`、`$fdisplay` / `$fwrite` と基数指定形、`$writememh` / `$writememb`、[VCD 制御](./vcd#systemverilog-source-controls)。時間を持つプロセスで実行 |
 | 状態 | 2 値・4 値シミュレーション |
 
 上記の各構文は、ソフトウェアモデルと結果を比較するテストで確認しています。Veryl が出力する
@@ -784,6 +784,14 @@ offset を使い、先頭（0）、現在位置（1）、末尾（2）を基準�
 文字列出力の `%s`、時間倍率を扱う `%t` は未対応です。
 両関数とも timed `Simulation` で実行します。
 `$sscanf` はチェックポイントに対応し、外部ファイルを使う `$fscanf` は拒否します。
+
+### ホストコマンド
+
+`$system([command])` は実行時にホストのシェルコマンドを実行し、タスク・関数の両方で使えます（IEEE 1800-2023 20.17.1）。
+戻り値は符号付き 32 ビットの C `system()` の値で、終了状態の表現はホストに依存します。
+引数なしではコマンドプロセッサの有無を問い合わせ、空文字列では空のコマンドを実行します。
+時間を持つプロセスで呼び出しに到達したときに実行します。WebAssembly ホストは非対応です
+（ネイティブホスト上の WASM シミュレーションバックエンドでは利用可能です）。
 
 ### 実行時のファイル出力
 
