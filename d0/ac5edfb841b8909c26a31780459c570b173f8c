@@ -1,0 +1,6 @@
+Revision history for #2872:
+
+rev 2 (content) 2026-11-01 12:03 UTC — Rebase PR #2872 onto current master to resolve the merge-queue conflict while retaining string-character semantic typing and upstream expression-type changes.
+rev 1 (initial) 2026-11-01 12:03 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2872,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"df28393907e29f4704ef71fdfa733595cf233ca0","timestamp_iso":"2026-11-01T12:03:07Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"df28393907e29f4704ef71fdfa733595cf233ca0","new_sha":"3b434a2a43661cd9d39c572c8a30ab25222f492e","timestamp_iso":"2026-11-01T12:03:07Z","reason":"Rebase PR #2872 onto current master to resolve the merge-queue conflict while retaining string-character semantic typing and upstream expression-type changes.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/df28393907e29f4704ef71fdfa733595cf233ca0...3b434a2a43661cd9d39c572c8a30ab25222f492e"}]} -->
