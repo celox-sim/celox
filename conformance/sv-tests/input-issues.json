@@ -10,7 +10,7 @@
         "third_party/cores/ariane/tools/spike/include/disasm",
         "tests/corev_apu/axi_node"
       ],
-      "reason": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests root. Preserve the upstream input and report a driver input failure, not a language-support failure."
+      "reason": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests tests directory. Preserve the upstream input and report a driver input failure, not a language-support failure."
     }
   }
 }

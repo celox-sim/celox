@@ -220,7 +220,7 @@
       "tags": "ariane cva6",
       "failure_category": "input_issue",
       "diagnostic": "reviewed_upstream_input",
-      "input_issue": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests root. Preserve the upstream input and report a driver input failure, not a language-support failure."
+      "input_issue": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests tests directory. Preserve the upstream input and report a driver input failure, not a language-support failure."
     },
     {
       "test": "generated/ariane/cva6_tb_cv64a6_imafdc_sv39.sv",
@@ -230,7 +230,7 @@
       "tags": "ariane cva6",
       "failure_category": "input_issue",
       "diagnostic": "reviewed_upstream_input",
-      "input_issue": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests root. Preserve the upstream input and report a driver input failure, not a language-support failure."
+      "input_issue": "The pinned CVA6 testbench generator retains an uninstalled Spike include and resolves its relative axi_node include against the sv-tests tests directory. Preserve the upstream input and report a driver input failure, not a language-support failure."
     },
     {
       "test": "generated/black-parrot/bp_default.sv",
