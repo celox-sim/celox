@@ -13,6 +13,98 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_copy",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_strings",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+      "expectation": "Simulation",
+      "name": "containers::associative_default_wide",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_associative_defaults",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/associative-defaults-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects an associative array whose index type is a type name (\"Type names are not valid expressions here.\"), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays (\"Sorry: Dynamic array of type `dynamic array of ...` is not yet supported.\"), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases.",
       "expectation": "Simulation",
       "known_issue": {

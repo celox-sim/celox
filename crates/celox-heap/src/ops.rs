@@ -164,7 +164,8 @@ impl Heap {
         match code & 0xff {
             op @ (crate::containers::NEW..=crate::containers::RSORT
             | crate::containers::CONCAT
-            | crate::containers::SLICE) => self.container_call(op, parameter, a, b, c),
+            | crate::containers::SLICE
+            | crate::containers::WITH_DEFAULT) => self.container_call(op, parameter, a, b, c),
             op @ crate::streams::NEW..=crate::streams::TRUNCATE => {
                 self.stream_call(op, parameter, a, b, c)
             }

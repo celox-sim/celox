@@ -1265,8 +1265,8 @@ chapter-7/arrays/associative/class.sv	2state	pass
 chapter-7/arrays/associative/class.sv	4state	pass
 chapter-7/arrays/associative/integral.sv	2state	pass
 chapter-7/arrays/associative/integral.sv	4state	pass
-chapter-7/arrays/associative/literals.sv	2state	fail
-chapter-7/arrays/associative/literals.sv	4state	fail
+chapter-7/arrays/associative/literals.sv	2state	pass
+chapter-7/arrays/associative/literals.sv	4state	pass
 chapter-7/arrays/associative/locator-methods/find-first-index.sv	2state	pass
 chapter-7/arrays/associative/locator-methods/find-first-index.sv	4state	pass
 chapter-7/arrays/associative/locator-methods/find-first.sv	2state	pass
