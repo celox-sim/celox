@@ -4711,7 +4711,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             .subroutine(name)
             .cloned()
             .ok_or_else(|| unsupported(format!("call of `{name}`")))?;
+        self.m.record_call(&self.active_calls, name);
         if self.active_calls.iter().any(|active| active == name) {
+            self.m
+                .record_argument_calls(&self.active_calls, &subroutine, args);
             return Err(unsupported(format!("recursive call of `{name}`")));
         }
         if self.active_calls.len() >= MAX_CALL_DEPTH {
@@ -5016,9 +5019,19 @@ impl<'p, 'a> Ff<'p, 'a> {
         for alias in &aliases {
             body = alias.rewrite(body, &constant)?;
         }
+        let built = self.b.built();
         self.active_calls.push(name.to_string());
         let falls = self.exec_block(&body);
         self.active_calls.pop();
+        let after = self.b.built();
+        self.m.expanded_call(
+            name,
+            super::recursion::Expansion {
+                instructions: after.instructions - built.instructions,
+                blocks: after.blocks - built.blocks,
+                nodes: 0,
+            },
+        );
         self.functions.pop();
         for (formal, original, _) in references {
             self.m.name_to_id.insert(formal, original);

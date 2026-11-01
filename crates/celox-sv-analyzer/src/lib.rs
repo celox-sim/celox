@@ -68,6 +68,9 @@ pub struct AnalysisOptions {
     /// The virtual interfaces of the design (IEEE 1800-2023 25.9), which the
     /// frontend provides when the design declares virtual interface types.
     pub virtual_interfaces: Option<std::sync::Arc<ast::virtual_interfaces::VirtualInterfaces>>,
+    /// A file to which the frontend appends the recursive call cycles of
+    /// each module it lowers, a diagnostic that changes no lowering.
+    pub recursion_report: Option<std::sync::Arc<std::path::Path>>,
 }
 
 /// Errors reported by the SystemVerilog analyzer.

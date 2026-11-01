@@ -3417,7 +3417,10 @@ impl<'p, 'a> Comb<'p, 'a> {
         if !subroutine.persistent_locals.is_empty() {
             return Err(unsupported("stateful function call"));
         }
+        self.m.record_call(&self.active_calls, name);
         if self.active_calls.iter().any(|active| active == name) {
+            self.m
+                .record_argument_calls(&self.active_calls, &subroutine, args);
             return Err(unsupported(format!("recursive call of `{name}`")));
         }
         if self.active_calls.len() >= MAX_CALL_DEPTH {
@@ -3576,9 +3579,17 @@ impl<'p, 'a> Comb<'p, 'a> {
             return_flag,
             return_var: subroutine.return_var.clone(),
         });
+        let nodes = self.arena.len();
         self.active_calls.push(name.to_string());
         let result = self.exec_block(store.fork(), &call_frames, &subroutine.body);
         self.active_calls.pop();
+        self.m.expanded_call(
+            name,
+            super::recursion::Expansion {
+                nodes: self.arena.len() - nodes,
+                ..Default::default()
+            },
+        );
         for (formal, original, _) in references {
             self.m.name_to_id.insert(formal, original);
         }
