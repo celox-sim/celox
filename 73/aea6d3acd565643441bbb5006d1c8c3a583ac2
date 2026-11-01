@@ -1,7 +1,1 @@
-Revision history for #2806:
-
-rev 3 (content) 2026-10-31 23:30 UTC — Size the hoisted value to the selection and keep the captured index's width and unknown bits, as Codex found
-rev 2 (content) 2026-10-31 23:04 UTC — Capture the index before a value with effects and hoist mutating container methods too, as Codex found
-rev 1 (initial) 2026-10-31 23:04 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2806,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"5645d931272fc488af5370c7268cd0a030f1aaa1","timestamp_iso":"2026-10-31T23:04:38Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"5645d931272fc488af5370c7268cd0a030f1aaa1","new_sha":"6e85b15be8f4955b2bbdbea7fcdc1de0604503fb","timestamp_iso":"2026-10-31T23:04:38Z","reason":"Capture the index before a value with effects and hoist mutating container methods too, as Codex found","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/5645d931272fc488af5370c7268cd0a030f1aaa1...6e85b15be8f4955b2bbdbea7fcdc1de0604503fb"},{"number":3,"change_type":"content","old_sha":"6e85b15be8f4955b2bbdbea7fcdc1de0604503fb","new_sha":"37b1d6af81b27605f261590b3ecddfa7b62bd2a2","timestamp_iso":"2026-10-31T23:30:05Z","reason":"Size the hoisted value to the selection and keep the captured index's width and unknown bits, as Codex found","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/6e85b15be8f4955b2bbdbea7fcdc1de0604503fb...37b1d6af81b27605f261590b3ecddfa7b62bd2a2"}]} -->
+Reject select positions with effects and recover the width of runtime indexed part-selects, as Codex found
