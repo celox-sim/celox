@@ -1036,6 +1036,77 @@ fn query(
     }))
 }
 
+/// The element `c[k]` of a dynamic array, queue or associative array of
+/// integral elements that native target `left` selects bits of, as in
+/// `c[k][i] = v`: its native expression, the container's type, and the
+/// values of the container and the index.
+pub(super) fn selected_element(
+    left: ExprId,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Converted<Option<(ExprId, Arc<ContainerType>, Expr, Expr)>> {
+    let native = tree.declarations();
+    let mut current = expression_binding::ungroup(left, native);
+    while let ExprKind::Select { expression, .. } = &native.expression(current).kind {
+        let element = expression_binding::ungroup(*expression, native);
+        if let ExprKind::Select {
+            expression: container,
+            dimension,
+        } = &native.expression(element).kind
+            && matches!(
+                dimension.kind,
+                DimensionKind::Index(_) | DimensionKind::Queue(None)
+            )
+            && let Some(target) = native_type(*container, native, tree, session, dims)?
+        {
+            let ty = &target.element;
+            // A select of an element that is a container selects its
+            // elements, see `set`; other elements have no bits to select.
+            if ty.container.is_some()
+                || ty.class.is_some()
+                || ty.chandle
+                || ty.unpacked_struct().is_some()
+                || !ty.unpacked_ranges.is_empty()
+                || target.layout.handle.is_some()
+                || target.record.is_some()
+                || matches!(
+                    ty.kind(),
+                    TypeKind::Real
+                        | TypeKind::Shortreal
+                        | TypeKind::String
+                        | TypeKind::Object
+                        | TypeKind::Event
+                        | TypeKind::Process
+                )
+            {
+                return Ok(None);
+            }
+            let container_value =
+                expression_binding::value(*container, native, tree, session, dims)?;
+            let index = match dimension.kind {
+                DimensionKind::Index(index) => {
+                    index_value(index, *container, tree, session, dims, &target)?
+                }
+                // `q[$]`, the last element of a queue.
+                _ if matches!(target.layout.kind, ContainerKind::Queue { .. }) => Expr::Binary {
+                    left: Box::new(call(
+                        ContainerOp::Size,
+                        target.layout,
+                        vec![container_value.clone()],
+                    )),
+                    op: BinaryOp::Sub,
+                    right: Box::new(Expr::Literal("1".into())),
+                },
+                _ => return Ok(None),
+            };
+            return Ok(Some((element, target, container_value, index)));
+        }
+        current = element;
+    }
+    Ok(None)
+}
+
 pub(super) fn set(
     left: ExprId,
     right: ExprId,

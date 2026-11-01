@@ -2099,6 +2099,15 @@ fn read_index_value(
     Ok(value)
 }
 
+/// Whether native expression `id` is the element of a dynamic container
+/// whose select is being bound against a local.
+fn is_element_select(id: ExprId, native: &Declarations, dimensions: &PackedDimensions) -> bool {
+    dimensions
+        .element_select
+        .as_ref()
+        .is_some_and(|(element, _)| *element == ungroup(id, native))
+}
+
 pub(super) fn path(
     mut root: ExprId,
     native: &Declarations,
@@ -2121,6 +2130,11 @@ pub(super) fn path(
     // A static class property is a variable of the module.
     if let Some(variable) = objects::static_property(tree, session, root, native, dimensions)? {
         return Ok((vec![variable], None));
+    }
+    if let Some((_, local)) = &dimensions.element_select
+        && is_element_select(root, native, dimensions)
+    {
+        return Ok((vec![local.clone()], None));
     }
     // The property whose select is being bound is bound as its template.
     if dimensions.property_select_base == Some(ungroup(root, native))
@@ -2464,6 +2478,10 @@ pub(in crate::ast) fn selected_lvalue(
         dimension,
     } = &native.expression(base).kind
     {
+        // The selected element of a dynamic container is its local.
+        if is_element_select(base, native, dimensions) {
+            break;
+        }
         suffix.push(&dimension.kind);
         base = *expression;
     }

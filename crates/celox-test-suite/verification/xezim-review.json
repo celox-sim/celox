@@ -947,6 +947,10 @@
       "title": "%p prints enum constants, casts, method results, conditionals and associative array keys as their values instead of their names, and a string returned by $sformatf as its packed value",
       "standard": "IEEE 1800-2023 21.2.1.6"
     },
+    "sv_associative_element_selects": {
+      "title": "A bit-select of an associative array element as an assignment target writes nothing",
+      "standard": "IEEE 1800-2023 11.5.1"
+    },
     "sv_pattern_structure_members": {
       "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
       "standard": "IEEE 1800-2023 21.2.1.6"
@@ -4923,6 +4927,14 @@
       "classification": "xezim_bug",
       "bug": "sv_pattern_structure_members",
       "note": "%p prints the bit [7:0] members in hexadecimal ('hff, 'h0), the null handle members of the associative array elements as 0, and m[5].n as 0 instead of '{a:1, b:2}."
+    },
+    {
+      "suite": "sv",
+      "name": "container_formals::selects_of_reference_container_elements",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_associative_element_selects",
+      "note": "m[\"k\"][3] = 1'b1 leaves m[\"k\"] at 'h100 and m[\"n\"][0] = 1'b1 leaves m[\"n\"] at 0, so d is 'h2100 instead of 'h12108; the part-select assignment operator m[\"k\"][15:12] += 4'h2 and the selects of dynamic array and queue elements, also through ref formals, write as expected."
     },
     {
       "suite": "sv",
