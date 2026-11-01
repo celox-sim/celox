@@ -1854,3 +1854,25 @@ Focused raw failures are retained for
 [xezim](verification/sv/limitations/string-array-mutations-xezim.json).
 Only the exact observed failures are excluded; passing cases add no historical
 baseline rows.
+
+### Dynamic-array and queue shuffle
+
+Five `containers::shuffle_*` cases check element multiplicities and preservation
+of X/Z, 129-bit values, strings, class handles, prior copies and queue bounds.
+Empty and singleton sequences and side effects in nested receiver indices are
+covered. IEEE 1800-2023 7.12.2 specifies randomized reordering; these portable
+cases do not require the same permutation from different simulators.
+Celox-specific tests check seeded process-stream use and serialized checkpoint
+replay. `with` clauses and associative receivers are rejected. Fixed-array
+ordering and iterator arguments remain unsupported.
+
+Verilator 5.052 passes all four two-state cases; the four-state case is a
+capability skip. Xezim 0.11.4 passes four cases, including the four-state one,
+but aborts on `rows[next_row()].shuffle()` with a null-class-handle diagnostic.
+The [standalone probe](verification/repros/sv_shuffle_nested_receiver.sv)
+reproduces the diagnostic; the receiver is a queue, which Verilator and Celox
+accept. Icarus 13.0 rejects all five cases, reporting unsupported `shuffle`
+methods and additional class/nested-container limitations. The exact failures
+are retained for [Icarus](verification/sv/limitations/shuffle-icarus.json) and
+[xezim](verification/sv/limitations/shuffle-xezim.json), with exclusions limited
+to those observed cases. Passing cases do not add historical baseline rows.

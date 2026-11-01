@@ -290,6 +290,10 @@ impl Ff<'_, '_> {
                 let mut index_mask = zero;
                 let index = match op {
                     Size | Clear | PushFront | PopFront | PushBack | PopBack | Reverse => zero,
+                    Shuffle => {
+                        let seed = self.randomize_word()?;
+                        self.integer_of_width(&seed, 64, false)?
+                    }
                     Sort | Rsort => self.constant64(u64::from(layout.signed)),
                     _ if string_key => self.handle(&args[1])?,
                     _ if let Some((width, signed)) = wide => {
@@ -468,6 +472,7 @@ impl Ff<'_, '_> {
                                 Set => heap::SET,
                                 Insert | PushFront | PushBack => heap::INSERT,
                                 Clear => heap::CLEAR,
+                                Shuffle => heap::SHUFFLE,
                                 Reverse => heap::REVERSE,
                                 Sort => heap::SORT,
                                 Rsort => heap::RSORT,

@@ -1,6 +1,12 @@
 use super::*;
 
 sv_backends! {
+    fn shuffle_integral(sim) { @case "containers::shuffle_integral"; }
+    fn shuffle_four_state(sim) { @case "containers::shuffle_four_state"; }
+    fn shuffle_handles(sim) { @case "containers::shuffle_handles"; }
+    fn shuffle_wide(sim) { @case "containers::shuffle_wide"; }
+    fn shuffle_nested_receivers(sim) { @case "containers::shuffle_nested_receivers"; }
+
     fn associative_default_strings(sim) { @case "containers::associative_default_strings"; }
     fn associative_default_copy(sim) { @case "containers::associative_default_copy"; }
     fn associative_default_four_state(sim) { @case "containers::associative_default_four_state"; }
@@ -419,4 +425,61 @@ fn empty_reduction_compatibility_reaches_mixed_hierarchies() {
         .unwrap();
         check_empty_reduction_mode(sim, legacy);
     }
+}
+
+sv_backends! {
+    fn shuffle_checkpoint_replays_the_process_stream(sim) {
+        @setup {
+            let source = r#"module Top(output bit [63:0] signature);
+                timeunit 1ps / 1ps;
+                int q[$] = {0,1,2,3,4,5,6,7};
+                initial begin
+                    #10; q.shuffle;
+                    foreach (q[i]) signature = (signature << 8) | q[i];
+                    #10; q.shuffle;
+                    signature = 0;
+                    foreach (q[i]) signature = (signature << 8) | q[i];
+                end
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, Path::new("shuffle_checkpoint.sv"))], "Top");
+        sim.run_until(15).unwrap();
+        let signature = sim.signal("signature");
+        let bytes = sim.checkpoint().unwrap().to_bytes().unwrap();
+        // SAFETY: bytes were serialized by this simulation.
+        let saved = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
+        sim.run_until(25).unwrap();
+        let expected = sim.get(signature);
+        assert_ne!(expected, BigUint::from(0u8));
+        sim.restore(&saved).unwrap();
+        sim.run_until(25).unwrap();
+        assert_eq!(sim.get(signature), expected);
+    }
+}
+
+#[test]
+fn shuffle_shares_the_seeded_process_rng() {
+    let source = r#"module Top(output bit same);
+        int q[$] = {0,1,2,3,4,5,6,7}, saved[$];
+        process current;
+        string before_state, after_state;
+        initial begin
+            current = process::self();
+            current.srandom(123);
+            before_state = current.get_randstate();
+            q.shuffle(); saved = q;
+            after_state = current.get_randstate();
+            same = before_state != after_state;
+            q = {0,1,2,3,4,5,6,7};
+            current.srandom(123);
+            q.shuffle;
+            same = same && q == saved;
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("shuffle_seed.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(sim.signal("same")), BigUint::from(1u8));
 }

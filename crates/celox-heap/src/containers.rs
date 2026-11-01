@@ -59,6 +59,8 @@ pub const CONCAT: u64 = 102;
 pub const SLICE: u64 = 103;
 /// An empty associative array with default payload b and X/Z mask c.
 pub const WITH_DEFAULT: u64 = 104;
+/// Shuffle sequence a with seed b, moving complete payload/mask pairs.
+pub const SHUFFLE: u64 = 105;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -641,6 +643,30 @@ impl Heap {
                 };
                 match op {
                     REVERSE => *v = v.iter().rev().copied().collect(),
+                    SHUFFLE => {
+                        // Fisher-Yates with unbiased bounded draws from SplitMix64.
+                        let mut state = b;
+                        let mut next = || {
+                            state = state.wrapping_add(0x9e3779b97f4a7c15);
+                            let mut word = state;
+                            word = (word ^ (word >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+                            word = (word ^ (word >> 27)).wrapping_mul(0x94d049bb133111eb);
+                            word ^ (word >> 31)
+                        };
+                        let mut values: Vec<_> = v.iter().copied().collect();
+                        for i in (1..values.len()).rev() {
+                            let bound = (i + 1) as u64;
+                            let threshold = bound.wrapping_neg() % bound;
+                            let j = loop {
+                                let word = next();
+                                if word >= threshold {
+                                    break (word % bound) as usize;
+                                }
+                            };
+                            values.swap(i, j);
+                        }
+                        *v = values.into_iter().collect();
+                    }
                     SORT | RSORT => {
                         let strings = (layout.0 >> 8) & 3 == 1;
                         let sign = if b != 0 && !strings {
@@ -752,6 +778,42 @@ mod tests {
         assert_eq!(heap.containers.len(), 2);
         heap.collect([]);
         assert!(heap.containers.is_empty());
+    }
+
+    #[test]
+    fn shuffle_preserves_payload_mask_pairs_and_is_seeded_without_changing_the_source() {
+        let mut heap = Heap::new();
+        let p = parameter(8, false, 0, 1, 0, false, false, false);
+        let mut source = call(&mut heap, NEW, p, 8, 0, 0);
+        let mut expected = Vec::new();
+        for i in 0..8 {
+            source = call(&mut heap, SET, p, source, i, i);
+            source = call(&mut heap, SET_MASK, p, source, i, i % 3);
+            expected.push((i, i % 3));
+        }
+        let mut permutations = fxhash::FxHashSet::default();
+        for seed in 0..32 {
+            let shuffled = call(&mut heap, SHUFFLE, p, source, seed, 0);
+            assert_eq!(call(&mut heap, SHUFFLE, p, source, seed, 0), shuffled);
+            assert_eq!(call(&mut heap, LEN, p, shuffled, 0, 0), 8);
+            let mut values = (0..8)
+                .map(|i| {
+                    (
+                        call(&mut heap, GET, p, shuffled, i, 0),
+                        call(&mut heap, GET_MASK, p, shuffled, i, 0),
+                    )
+                })
+                .collect::<Vec<_>>();
+            permutations.insert(values.clone());
+            values.sort_unstable();
+            assert_eq!(values, expected);
+        }
+        assert!(permutations.len() > 1);
+        for &(value, mask) in &expected {
+            assert_eq!(call(&mut heap, GET, p, source, value, 0), value);
+            assert_eq!(call(&mut heap, GET_MASK, p, source, value, 0), mask);
+        }
+        assert_eq!(call(&mut heap, SHUFFLE, p, 0, 17, 0), 0);
     }
 
     #[test]

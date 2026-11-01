@@ -564,16 +564,20 @@ results may be discarded with `void'(...)`; type queries such as
 Integral pop result queries preserve the element's packed dimensions and
 declared bounds. Queries on string- or class-valued pop results remain unsupported.
 
-Dynamic arrays and queues support `reverse`, `sort` and `rsort`, with or
+Dynamic arrays and queues support `reverse`, `sort`, `rsort` and `shuffle`, with or
 without empty parentheses (IEEE 1800-2023 7.12.2). These void methods reorder
 the receiver in place and preserve its size and queue bound; a prior array
 assignment keeps its own copy. Sorting supports integral elements up to 64 bits,
-using their signedness, and strings in lexicographic order. Reversal also
-supports class handles. Element X/Z bits and class identity are preserved.
+using their signedness, and strings in lexicographic order. Reversal and
+shuffling also support class handles and wide elements. Element X/Z bits and
+class identity are preserved.
+Shuffling draws its seed from the calling process's random stream; process
+seeding and checkpoint restoration apply to later shuffles.
 For module variables, `@(a[i])` observes changes to the selected element,
 including changes caused by ordering methods (9.4.2).
-Associative arrays cannot use ordering methods. Fixed-array ordering, `shuffle`,
-and ordering `with` expressions and iterator arguments remain unsupported.
+Associative arrays cannot use ordering methods. Fixed-array ordering and
+ordering `with` expressions and iterator arguments remain unsupported.
+A `with` clause on `shuffle` is rejected, as 7.12.2 requires.
 
 Elements may be packed integral values of any width, strings, class
 handles or [unpacked structures](#unpacked-structures); a missing
