@@ -2,9 +2,11 @@ mod bit_count;
 mod floating;
 mod memory;
 mod packed;
+mod packed_lanes;
 mod selection;
 mod slice;
 mod sparse;
+mod transpose;
 mod wide;
 
 use super::*;
@@ -88,3 +90,5 @@ fn assert_indexed_state_accesses_have_alias_ranges(function: &MFunction) {
         "ISel emitted an indexed store without a bounded memory effect"
     );
 }
+
+mod packed_muxes;
