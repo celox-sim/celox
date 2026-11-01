@@ -36,9 +36,9 @@ mod testbench;
 use slice::CombSlicer;
 
 use celox_design::{
-    CounterKind, DomainKind, ProcessStatus, RuntimeEventKind, SCHEDULER_CLOCKS,
-    SCHEDULER_FLAG_WIDTH, SCHEDULER_TIME_WIDTH, STABLE_REGION, SchedulerExit, SchedulerSlots,
-    TIME_SLOT_WIDTH, edges::LEVEL_UNKNOWN, schedule::ScheduleModel,
+    BASELINE_TERM_SHIFT, CounterKind, DomainKind, ProcessStatus, RuntimeEventKind,
+    SCHEDULER_CLOCKS, SCHEDULER_FLAG_WIDTH, SCHEDULER_TIME_WIDTH, STABLE_REGION, SchedulerExit,
+    SchedulerSlots, TIME_SLOT_WIDTH, edges::LEVEL_UNKNOWN, schedule::ScheduleModel,
 };
 use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue};
 use num_bigint::BigUint;
@@ -81,6 +81,20 @@ const WAIT_STATUSES: [ProcessStatus; 4] = [
     ProcessStatus::Done,
     ProcessStatus::Finish,
 ];
+
+/// The statuses of a kernel that both waits and delays.
+const MIXED_STATUSES: [ProcessStatus; 6] = [
+    ProcessStatus::Wait,
+    ProcessStatus::Nba,
+    ProcessStatus::Delay,
+    ProcessStatus::InactiveDelay,
+    ProcessStatus::Done,
+    ProcessStatus::Finish,
+];
+
+/// The most distinct edges one kernel waits for: those the edge index of a
+/// baseline byte holds.
+const MAX_TERMS: usize = 1 << (SCHEDULER_FLAG_WIDTH - BASELINE_TERM_SHIFT as usize);
 
 /// Generate the compiled scheduler of `program`, if it qualifies, and record
 /// for every process kernel whether the scheduler runs it.
@@ -210,15 +224,21 @@ struct Kernel {
     /// The events whose signal the kernel writes, as indices into
     /// [`Plan::events`].
     writes: Vec<usize>,
-    /// For a kernel that waits for one edge, the edge and its staged
+    /// For a kernel that waits for edges, the edges and its staged
     /// nonblocking assignments; `None` for a kernel that only delays.
     wait: Option<Wait>,
+    /// The kernel suspends for delays. A kernel that also waits tells the
+    /// two apart by the status it suspended with.
+    delays: bool,
 }
 
-/// The single edge a kernel waits for at every wait site.
+/// The edges a kernel waits for: one at each wait site.
 struct Wait {
-    signal: AbsoluteAddr,
-    kind: CounterKind,
+    /// The distinct edges, in the order of the first site that waits for
+    /// each (see `celox_runtime::SchedulerRefs::wait_terms`).
+    terms: Vec<(AbsoluteAddr, CounterKind)>,
+    /// The edge of each wait site, as an index into [`Self::terms`].
+    site_terms: Vec<usize>,
     /// Its nonblocking sites, by local index.
     sites: Vec<Staged>,
 }
@@ -580,7 +600,11 @@ impl Plan {
                         kernels.push(None);
                         fallback.push(Some(ACTIVE_COMMIT.to_string()));
                     } else {
-                        kernels.push(Some(Kernel { writes, wait: None }));
+                        kernels.push(Some(Kernel {
+                            writes,
+                            wait: None,
+                            delays: true,
+                        }));
                         fallback.push(None);
                     }
                 }
@@ -617,40 +641,50 @@ impl Plan {
             }
             let slots = &schema.processes[index];
             let unit = &sir.processes[index];
-            let term = &process.waits[0].first();
-            let wait = (|| -> Result<Wait, &'static str> {
-                let term = term.ok_or("the process waits for a level")?;
+            let wait = (|| -> Result<(Wait, bool), &'static str> {
+                if process.waits.iter().any(|terms| terms.is_empty()) {
+                    return Err("the process waits for a level");
+                }
+                let (terms, site_terms) = process
+                    .wait_terms()
+                    .ok_or("the process waits for one of several events")?;
                 // The compiled wait tests the edge alone (IEEE 1800-2023
                 // 9.4.2.3: an `iff` condition is judged at the occurrence).
-                if term.gate.is_some() {
-                    return Err("the process waits with an iff condition");
-                }
                 if process
                     .waits
                     .iter()
-                    .any(|terms| terms.len() != 1 || terms[0] != *term)
+                    .flatten()
+                    .any(|term| term.gate.is_some())
                 {
-                    return Err("the process waits for more than one edge");
+                    return Err("the process waits with an iff condition");
                 }
-                let signal = storage(term.signal);
-                let delayed = delay_writers.get(&signal) == Some(&1)
-                    && !rtl_stores.contains(&signal)
-                    && !other_stores.contains(&signal);
-                if program.layout().widths.get(&term.signal) != Some(&1)
-                    || !(delayed || undriven(signal))
+                if terms.len() > MAX_TERMS || (terms.len() > 1 && site_terms.len() > 1 << SITE_BITS)
                 {
-                    return Err(
-                        "the process waits for a signal that neither one kernel that only delays nor the host alone drives",
-                    );
+                    return Err("the process waits for too many distinct edges");
                 }
-                if event_storage
-                    .get(&signal)
-                    .is_some_and(|event| active_commits.contains(event))
+                for &(signal, _) in &terms {
+                    let width = program.layout().widths.get(&signal);
+                    let signal = storage(signal);
+                    let delayed = delay_writers.get(&signal) == Some(&1)
+                        && !rtl_stores.contains(&signal)
+                        && !other_stores.contains(&signal);
+                    if width != Some(&1) || !(delayed || undriven(signal)) {
+                        return Err(
+                            "the process waits for a signal that neither one kernel that only delays nor the host alone drives",
+                        );
+                    }
+                    if event_storage
+                        .get(&signal)
+                        .is_some_and(|event| active_commits.contains(event))
+                    {
+                        return Err(ACTIVE_COMMIT);
+                    }
+                }
+                let delays = !statuses_only(unit, slots.status, &WAIT_STATUSES);
+                if delays
+                    && (!slots.const_delays || !statuses_only(unit, slots.status, &MIXED_STATUSES))
                 {
-                    return Err(ACTIVE_COMMIT);
-                }
-                if !statuses_only(unit, slots.status, &WAIT_STATUSES) {
-                    return Err("the process suspends other than for one edge");
+                    return Err("the process suspends other than for an edge or a delay");
                 }
                 let writes = &kernel_stores[index];
                 if !written(unit).is_empty() || writes.iter().any(|store| waited.contains(store)) {
@@ -688,17 +722,33 @@ impl Plan {
                 if sites.len() > 1 << SITE_BITS {
                     return Err("the process has too many nonblocking sites");
                 }
-                Ok(Wait {
-                    signal: term.signal,
-                    kind: term.kind,
-                    sites,
-                })
+                // A kernel that delays, or waits for edges of several
+                // signals, may run twice in a slot, staging a site again
+                // before the NBA region publishes it.
+                let mut signals: Vec<AbsoluteAddr> =
+                    terms.iter().map(|&(signal, _)| storage(signal)).collect();
+                signals.sort_unstable();
+                signals.dedup();
+                if !sites.is_empty() && (delays || signals.len() > 1) {
+                    return Err(
+                        "the process stages nonblocking assignments and may run twice in a slot",
+                    );
+                }
+                Ok((
+                    Wait {
+                        terms,
+                        site_terms,
+                        sites,
+                    },
+                    delays,
+                ))
             })();
             match wait {
-                Ok(wait) => {
+                Ok((wait, delays)) => {
                     kernels[index] = Some(Kernel {
                         writes: Vec::new(),
                         wait: Some(wait),
+                        delays,
                     })
                 }
                 Err(reason) => fallback[index] = Some(reason.to_string()),
@@ -802,7 +852,8 @@ impl Plan {
                     .iter()
                     .flatten()
                     .filter_map(|kernel| kernel.wait.as_ref())
-                    .all(|wait| !comb_stores.contains(&storage(wait.signal))),
+                    .flat_map(|wait| &wait.terms)
+                    .all(|&(signal, _)| !comb_stores.contains(&storage(signal))),
                 "a compiled wait watches a combinational output"
             );
             let reads =
@@ -811,7 +862,7 @@ impl Plan {
             let observes = |unit: &Unit| reads(unit) || ends(unit);
             let mut longest = 0;
             for (index, kernel) in kernels.iter().enumerate() {
-                if kernel.as_ref().is_some_and(|kernel| kernel.wait.is_none()) {
+                if kernel.as_ref().is_some_and(|kernel| kernel.delays) {
                     let bound = delay_bound(&sir.processes[index], schema.processes[index].delay);
                     longest = longest.max(bound);
                 }
@@ -1121,16 +1172,25 @@ impl Plan {
             .enumerate()
             .filter_map(|(index, kernel)| Some((index, kernel.as_ref()?.wait.as_ref()?)))
             .collect();
-        let delays: Vec<usize> = self
+        // The kernels that delay, with the status slot of those that also
+        // wait, which tells whether they wait for their wake time.
+        let delays: Vec<(usize, Option<AbsoluteAddr>)> = self
             .kernels
             .iter()
             .enumerate()
-            .filter(|(_, kernel)| kernel.as_ref().is_some_and(|kernel| kernel.wait.is_none()))
-            .map(|(index, _)| index)
+            .filter_map(|(index, kernel)| {
+                let kernel = kernel.as_ref().filter(|kernel| kernel.delays)?;
+                let status = kernel
+                    .wait
+                    .is_some()
+                    .then_some(schema.processes[index].status);
+                Some((index, status))
+            })
             .collect();
         // The bit of each kernel in the ready mask: its place among the
         // kernels the scheduler runs, in kernel order.
         let ordinals = ordinals(&self.kernels);
+        let checks = waits_of(&self.kernels, &ordinals, schema);
         // The caller supplies the dirty flag. Timed runs must start dirty:
         // checkpoint restores and partial-slot exits need a fresh settle.
         // A host clock batch may instead enter with already settled inputs.
@@ -1141,9 +1201,9 @@ impl Plan {
         g.b.switch_to_block(header);
         let mut time = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
         let mut any = g.constant(0, 1);
-        for &index in &delays {
+        for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
-            let waiting = g.waiting(index);
+            let waiting = g.waiting_for_time(index, status);
             let earlier = g.binary(1, wake, BinaryOp::LtU, time);
             let earlier = g.binary(1, earlier, BinaryOp::And, waiting);
             let next = g.b.alloc_bit(SCHEDULER_TIME_WIDTH, false);
@@ -1221,9 +1281,9 @@ impl Plan {
         // The kernels due now are ready.
         g.b.switch_to_block(run);
         let mut ready = g.constant(0, MAX_KERNELS);
-        for &index in &delays {
+        for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
-            let waiting = g.waiting(index);
+            let waiting = g.waiting_for_time(index, status);
             let due = g.binary(1, wake, BinaryOp::Eq, time);
             let due = g.binary(1, due, BinaryOp::And, waiting);
             let bit = g.bit(due, ordinals[index]);
@@ -1238,8 +1298,9 @@ impl Plan {
             let waits = waits.iter().any(|&(index, _)| lazy.kernels[index]);
             let observers = delays
                 .iter()
-                .filter(|&&index| lazy.kernels[index])
-                .fold(0u64, |mask, &index| mask | 1 << ordinals[index]);
+                .map(|&(index, _)| index)
+                .filter(|&index| lazy.kernels[index])
+                .fold(0u64, |mask, index| mask | 1 << ordinals[index]);
             let late = lazy.latest < u64::MAX;
             if waits || observers != 0 || late {
                 let mut observed = g.constant(u64::from(waits), 1);
@@ -1383,7 +1444,7 @@ impl Plan {
                     false_block: (pick, Vec::new()),
                 });
                 g.b.switch_to_block(check);
-                g.check_waits(&waits_of(&waits, &ordinals));
+                g.check_waits(&checks);
             }
         }
         g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
@@ -1453,88 +1514,96 @@ impl Plan {
             });
             g.b.switch_to_block(not_finished);
             let resumed = g.b.new_block();
-            match &kernel.wait {
-                None => {
-                    let done = g.equals(status, code(ProcessStatus::Done));
-                    let ended = g.b.new_block();
-                    let suspended = g.b.new_block();
-                    g.b.seal_block(SIRTerminator::Branch {
-                        cond: done,
-                        true_block: (ended, Vec::new()),
-                        false_block: (suspended, Vec::new()),
-                    });
-                    g.b.switch_to_block(ended);
-                    let idle = g.constant(0, SCHEDULER_FLAG_WIDTH);
-                    g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, idle);
-                    g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
+            let done = g.equals(status, code(ProcessStatus::Done));
+            let ended = g.b.new_block();
+            let suspended = g.b.new_block();
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: done,
+                true_block: (ended, Vec::new()),
+                false_block: (suspended, Vec::new()),
+            });
+            // A kernel woken by its edge no longer waits (`check_waits`);
+            // one woken by its wake time does until it ends.
+            g.b.switch_to_block(ended);
+            if kernel.delays {
+                let idle = g.constant(0, SCHEDULER_FLAG_WIDTH);
+                g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, idle);
+            }
+            g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
 
-                    g.b.switch_to_block(suspended);
-                    let delay = g.equals(status, code(ProcessStatus::Delay));
-                    let inactive = g.equals(status, code(ProcessStatus::InactiveDelay));
-                    let delayed = g.binary(1, delay, BinaryOp::Or, inactive);
-                    let wait = g.b.new_block();
-                    g.b.seal_block(SIRTerminator::Branch {
-                        cond: delayed,
-                        true_block: (wait, Vec::new()),
-                        false_block: (internal_exit, Vec::new()),
-                    });
-                    g.b.switch_to_block(wait);
-                    let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
-                    let wake = g.binary(SCHEDULER_TIME_WIDTH, time, BinaryOp::Add, amount);
-                    let overflow = g.binary(1, wake, BinaryOp::LtU, time);
-                    let overflow_exit = g.exit_block(SchedulerExit::DelayOverflow);
-                    let in_range = g.b.new_block();
-                    g.b.seal_block(SIRTerminator::Branch {
-                        cond: overflow,
-                        true_block: (overflow_exit, Vec::new()),
-                        false_block: (in_range, Vec::new()),
-                    });
-                    g.b.switch_to_block(in_range);
-                    g.store(slots.wake[index], SCHEDULER_TIME_WIDTH, wake);
-                    g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
-
-                    // The edges of this run, against the levels before it.
-                    g.b.switch_to_block(resumed);
-                    let mut edges = g.load(slots.exit_arg, self.event_bits);
-                    for (&event, &was) in kernel.writes.iter().zip(&before) {
-                        let is = g.level(&self.events[event]);
-                        let edge = g.edge(&self.events[event], was, is);
-                        let bit = g.event_bit(edge, event);
-                        edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
-                    }
-                    g.store(slots.exit_arg, self.event_bits, edges);
-                }
+            g.b.switch_to_block(suspended);
+            let edge_wait = match &kernel.wait {
                 Some(wait) => {
-                    // A kernel runs at most once a slot (see `Plan::new`), so
-                    // a staged site is never staged again before the NBA
-                    // region and the kernel never returns `Nba`.
-                    let done = g.equals(status, code(ProcessStatus::Done));
+                    // A kernel runs at most once a slot when it stages
+                    // nonblocking assignments (see `Plan::new`), so a staged
+                    // site is never staged again before the NBA region and
+                    // the kernel never returns `Nba`.
                     let suspends = g.equals(status, code(ProcessStatus::Wait));
-                    let other = g.b.new_block();
-                    let suspended = g.b.new_block();
-                    g.b.seal_block(SIRTerminator::Branch {
-                        cond: done,
-                        true_block: (resumed, Vec::new()),
-                        false_block: (other, Vec::new()),
-                    });
-                    g.b.switch_to_block(other);
-                    g.b.seal_block(SIRTerminator::Branch {
-                        cond: suspends,
-                        true_block: (suspended, Vec::new()),
-                        false_block: (internal_exit, Vec::new()),
-                    });
-
-                    // It waits again: the edge is judged against the level
-                    // now (`register_waiter`).
-                    g.b.switch_to_block(suspended);
+                    let block = g.b.new_block();
+                    Some((wait, suspends, block))
+                }
+                None => None,
+            };
+            if kernel.delays {
+                let delay = g.equals(status, code(ProcessStatus::Delay));
+                let inactive = g.equals(status, code(ProcessStatus::InactiveDelay));
+                let delayed = g.binary(1, delay, BinaryOp::Or, inactive);
+                let wait = g.b.new_block();
+                let other = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: delayed,
+                    true_block: (wait, Vec::new()),
+                    false_block: (other, Vec::new()),
+                });
+                g.b.switch_to_block(wait);
+                let amount = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
+                let wake = g.binary(SCHEDULER_TIME_WIDTH, time, BinaryOp::Add, amount);
+                let overflow = g.binary(1, wake, BinaryOp::LtU, time);
+                let overflow_exit = g.exit_block(SchedulerExit::DelayOverflow);
+                let in_range = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: overflow,
+                    true_block: (overflow_exit, Vec::new()),
+                    false_block: (in_range, Vec::new()),
+                });
+                g.b.switch_to_block(in_range);
+                g.store(slots.wake[index], SCHEDULER_TIME_WIDTH, wake);
+                if kernel.wait.is_some() {
                     let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
                     g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
-                    let level = g.signal_level(wait.signal);
-                    let level = g.baseline_byte(level);
-                    g.store(slots.baseline[index], SCHEDULER_FLAG_WIDTH, level);
-                    g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
-                    g.b.switch_to_block(resumed);
                 }
+                g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
+                g.b.switch_to_block(other);
+            }
+            match edge_wait {
+                None => {
+                    g.b.seal_block(SIRTerminator::Jump(internal_exit, Vec::new()));
+                }
+                Some((wait, suspends, block)) => {
+                    g.b.seal_block(SIRTerminator::Branch {
+                        cond: suspends,
+                        true_block: (block, Vec::new()),
+                        false_block: (internal_exit, Vec::new()),
+                    });
+                    // It waits again: the edge is judged against the level
+                    // now (`register_waiter`).
+                    g.b.switch_to_block(block);
+                    let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
+                    g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
+                    g.register_wait(index, process.delay, wait, resumed, internal_exit);
+                }
+            }
+            g.b.switch_to_block(resumed);
+            if kernel.wait.is_none() {
+                // The edges of this run, against the levels before it.
+                let mut edges = g.load(slots.exit_arg, self.event_bits);
+                for (&event, &was) in kernel.writes.iter().zip(&before) {
+                    let is = g.level(&self.events[event]);
+                    let edge = g.edge(&self.events[event], was, is);
+                    let bit = g.event_bit(edge, event);
+                    edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
+                }
+                g.store(slots.exit_arg, self.event_bits, edges);
             }
             // Before the next run, the waits see this one's writes.
             let ready = g.load(slots.ready, MAX_KERNELS);
@@ -1547,7 +1616,7 @@ impl Plan {
                 false_block: (pick, Vec::new()),
             });
             g.b.switch_to_block(check);
-            g.check_waits(&waits_of(&waits, &ordinals));
+            g.check_waits(&checks);
             g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
         }
 
@@ -1571,7 +1640,7 @@ impl Plan {
         // After the settle of a pass the waits see its writes; woken
         // kernels run in another pass.
         g.b.switch_to_block(settled);
-        g.check_waits(&waits_of(&waits, &ordinals));
+        g.check_waits(&checks);
         let ready = g.load(slots.ready, MAX_KERNELS);
         let zero = g.constant(0, MAX_KERNELS);
         let more = g.binary(1, ready, BinaryOp::Ne, zero);
@@ -2120,7 +2189,42 @@ impl Generator<'_> {
         self.binary(1, value, BinaryOp::Eq, constant)
     }
 
-    /// Whether kernel `index` waits for its wake time.
+    /// Whether the status in `status` is `expected`.
+    fn equals_at(&mut self, status: AbsoluteAddr, expected: ProcessStatus) -> RegisterId {
+        let status = self.load(status, celox_design::PROCESS_STATUS_WIDTH);
+        self.equals(status, u64::from(expected.code()))
+    }
+
+    /// Whether the kernel of `status` suspended for a delay.
+    fn delayed_at(&mut self, status: AbsoluteAddr) -> RegisterId {
+        let status = self.load(status, celox_design::PROCESS_STATUS_WIDTH);
+        let delay = self.equals(status, u64::from(ProcessStatus::Delay.code()));
+        let inactive = self.equals(status, u64::from(ProcessStatus::InactiveDelay.code()));
+        self.binary(1, delay, BinaryOp::Or, inactive)
+    }
+
+    /// The `from`-bit `value` zero-extended to `to` bits.
+    fn widen_to(&mut self, value: RegisterId, from: usize, to: usize) -> RegisterId {
+        let zero = self.constant(0, to - from);
+        let wide = self.b.alloc_bit(to, false);
+        self.b.emit(SIRInstruction::Concat(wide, vec![zero, value]));
+        wide
+    }
+
+    /// Whether kernel `index`, with the status slot `status` when it also
+    /// waits for edges, waits for its wake time.
+    fn waiting_for_time(&mut self, index: usize, status: Option<AbsoluteAddr>) -> RegisterId {
+        let waiting = self.waiting(index);
+        match status {
+            None => waiting,
+            Some(status) => {
+                let delayed = self.delayed_at(status);
+                self.binary(1, waiting, BinaryOp::And, delayed)
+            }
+        }
+    }
+
+    /// Whether kernel `index` waits for its wake time, or for its edge.
     fn waiting(&mut self, index: usize) -> RegisterId {
         let flag = self.load(self.slots.waiting[index], SCHEDULER_FLAG_WIDTH);
         let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
@@ -2470,56 +2574,171 @@ impl Generator<'_> {
         wide
     }
 
-    /// Test the waits of `waits`, (kernel, ready bit, signal, edge), against their
-    /// signals now (`check_waits`): a wait whose edge occurred since its
-    /// baseline wakes its kernel; every changed signal becomes the
-    /// baseline.
-    fn check_waits(&mut self, waits: &[(usize, usize, AbsoluteAddr, CounterKind)]) {
+    /// Store the baseline of kernel `index`, which suspended at the wait
+    /// site in its `delay` slot, then continue at `target`: the level of
+    /// the site's edge's signal now, with the edge's index when the kernel
+    /// waits for several.
+    fn register_wait(
+        &mut self,
+        index: usize,
+        delay: AbsoluteAddr,
+        wait: &Wait,
+        target: celox_sir::BlockId,
+        internal_exit: celox_sir::BlockId,
+    ) {
+        if let [(signal, _)] = wait.terms[..] {
+            let level = self.signal_level(signal);
+            let level = self.baseline_byte(level);
+            self.store(self.slots.baseline[index], SCHEDULER_FLAG_WIDTH, level);
+            self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
+            return;
+        }
+        // The site index, which `Plan::new` bounds by a switch selector's
+        // width.
+        let site = self.load(delay, SITE_BITS);
+        let blocks: Vec<celox_sir::BlockId> =
+            wait.terms.iter().map(|_| self.b.new_block()).collect();
+        let cases = wait
+            .site_terms
+            .iter()
+            .enumerate()
+            .map(|(site, &term)| SIRSwitchCase {
+                value: site.into(),
+                target: blocks[term],
+            })
+            .collect();
+        self.b.seal_block(SIRTerminator::Switch {
+            selector: site,
+            cases,
+            default: internal_exit,
+        });
+        for (term, (&(signal, _), block)) in wait.terms.iter().zip(blocks).enumerate() {
+            self.b.switch_to_block(block);
+            let level = self.signal_level(signal);
+            let level = self.baseline_byte(level);
+            let index_bits =
+                self.constant((term as u64) << BASELINE_TERM_SHIFT, SCHEDULER_FLAG_WIDTH);
+            let byte = self.binary(SCHEDULER_FLAG_WIDTH, level, BinaryOp::Or, index_bits);
+            self.store(self.slots.baseline[index], SCHEDULER_FLAG_WIDTH, byte);
+            self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
+        }
+    }
+
+    /// Test the waits of `waits` against their signals now
+    /// (`check_waits`): a wait whose edge occurred since its baseline wakes
+    /// its kernel; every changed signal becomes the baseline.
+    fn check_waits(&mut self, waits: &[WaitCheck]) {
         if waits.is_empty() {
             return;
         }
         let mut woken = self.constant(0, MAX_KERNELS);
-        for &(index, ordinal, signal, kind) in waits {
-            let waiting = self.waiting(index);
-            let baseline = self.load(self.slots.baseline[index], SCHEDULER_FLAG_WIDTH);
-            let is = self.signal_level(signal);
-            let occurred = if self.four_state.is_none() {
-                let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
-                let was = self.binary(1, baseline, BinaryOp::Ne, zero);
-                let changed = self.binary(1, was, BinaryOp::Ne, is);
-                match kind {
-                    CounterKind::Changes => changed,
-                    CounterKind::Rises => self.binary(1, changed, BinaryOp::And, is),
-                    CounterKind::Falls => self.binary(1, changed, BinaryOp::And, was),
-                }
+        for check in waits {
+            let wait = check.wait;
+            let flag = self.waiting(check.index);
+            let mut waiting = flag;
+            if let Some(status) = check.status {
+                let edge = self.equals_at(status, ProcessStatus::Wait);
+                waiting = self.binary(1, waiting, BinaryOp::And, edge);
+            }
+            let baseline = self.load(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH);
+            let level_width = if self.four_state.is_none() { 1 } else { 2 };
+            // With several edges, the byte holds the edge's index above the
+            // level (`BASELINE_TERM_SHIFT`).
+            let (stored, term) = if wait.terms.len() == 1 {
+                (baseline, None)
             } else {
-                // The baseline byte holds the level (`baseline_byte`); the
-                // edges are those of `timing::occurs`, Table 9-2's.
-                let was = self.b.alloc_bit(2, false);
-                self.b.emit(SIRInstruction::Slice(was, baseline, 0, 2));
-                match kind {
-                    CounterKind::Changes => self.binary(1, was, BinaryOp::Ne, is),
-                    CounterKind::Rises => self.level_edge(true, was, is),
-                    CounterKind::Falls => self.level_edge(false, was, is),
-                }
+                let level = self.b.alloc_bit(level_width, false);
+                self.b
+                    .emit(SIRInstruction::Slice(level, baseline, 0, level_width));
+                let level = self.widen_to(level, level_width, SCHEDULER_FLAG_WIDTH);
+                let shift = self.constant(u64::from(BASELINE_TERM_SHIFT), SCHEDULER_FLAG_WIDTH);
+                let term = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::Shr, shift);
+                (level, Some(term))
             };
+            let mut occurred = self.constant(0, 1);
+            let mut current = None;
+            let mut levels: Vec<(AbsoluteAddr, RegisterId)> = Vec::new();
+            for (ordinal, &(signal, kind)) in wait.terms.iter().enumerate() {
+                let is = match levels.iter().find(|(known, _)| *known == signal) {
+                    Some(&(_, level)) => level,
+                    None => {
+                        let level = self.signal_level(signal);
+                        levels.push((signal, level));
+                        level
+                    }
+                };
+                let edge = self.occurred(stored, is, kind);
+                let (edge, is) = match term {
+                    None => (edge, is),
+                    Some(term) => {
+                        let selected = self.equals(term, ordinal as u64);
+                        let edge = self.binary(1, edge, BinaryOp::And, selected);
+                        let is = match current {
+                            None => is,
+                            Some(other) => {
+                                let level = self.b.alloc_bit(level_width, false);
+                                self.b.emit(SIRInstruction::Mux(level, selected, is, other));
+                                level
+                            }
+                        };
+                        (edge, is)
+                    }
+                };
+                occurred = self.binary(1, occurred, BinaryOp::Or, edge);
+                current = Some(is);
+            }
+            let is = current.expect("a wait has an edge");
             let wake = self.binary(1, occurred, BinaryOp::And, waiting);
-            let level = self.baseline_byte(is);
+            let mut level = self.baseline_byte(is);
+            if term.is_some() {
+                // Keep the edge's index.
+                let mask = self.constant(
+                    (1 << SCHEDULER_FLAG_WIDTH) - (1 << BASELINE_TERM_SHIFT),
+                    SCHEDULER_FLAG_WIDTH,
+                );
+                let index = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::And, mask);
+                level = self.binary(SCHEDULER_FLAG_WIDTH, level, BinaryOp::Or, index);
+            }
             let next = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
             self.b
                 .emit(SIRInstruction::Mux(next, waiting, level, baseline));
-            self.store(self.slots.baseline[index], SCHEDULER_FLAG_WIDTH, next);
+            self.store(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH, next);
             let one = self.constant(1, 1);
             let stays = self.binary(1, wake, BinaryOp::Xor, one);
-            let still = self.binary(1, waiting, BinaryOp::And, stays);
+            let still = self.binary(1, flag, BinaryOp::And, stays);
             let flag = self.widen(still, SCHEDULER_FLAG_WIDTH);
-            self.store(self.slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
-            let bit = self.bit(wake, ordinal);
+            self.store(self.slots.waiting[check.index], SCHEDULER_FLAG_WIDTH, flag);
+            let bit = self.bit(wake, check.ordinal);
             woken = self.binary(MAX_KERNELS, woken, BinaryOp::Or, bit);
         }
         let ready = self.load(self.slots.ready, MAX_KERNELS);
         let ready = self.binary(MAX_KERNELS, ready, BinaryOp::Or, woken);
         self.store(self.slots.ready, SCHEDULER_TIME_WIDTH, ready);
+    }
+
+    /// Whether the edge `kind` occurred from the level of the baseline byte
+    /// `baseline`, its edge index cleared, to the level `is`.
+    fn occurred(&mut self, baseline: RegisterId, is: RegisterId, kind: CounterKind) -> RegisterId {
+        if self.four_state.is_none() {
+            let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+            let was = self.binary(1, baseline, BinaryOp::Ne, zero);
+            let changed = self.binary(1, was, BinaryOp::Ne, is);
+            match kind {
+                CounterKind::Changes => changed,
+                CounterKind::Rises => self.binary(1, changed, BinaryOp::And, is),
+                CounterKind::Falls => self.binary(1, changed, BinaryOp::And, was),
+            }
+        } else {
+            // The baseline byte holds the level (`baseline_byte`); the
+            // edges are those of `timing::occurs`, Table 9-2's.
+            let was = self.b.alloc_bit(2, false);
+            self.b.emit(SIRInstruction::Slice(was, baseline, 0, 2));
+            match kind {
+                CounterKind::Changes => self.binary(1, was, BinaryOp::Ne, is),
+                CounterKind::Rises => self.level_edge(true, was, is),
+                CounterKind::Falls => self.level_edge(false, was, is),
+            }
+        }
     }
 
     /// Publish the staged values of `sites` whose pending flag is set into
@@ -2870,15 +3089,35 @@ impl Generator<'_> {
     }
 }
 
-/// The waits of `waits` as (kernel, its bit in the ready mask, signal,
-/// edge).
-fn waits_of(
-    waits: &[(usize, &Wait)],
+/// A kernel's wait as `Generator::check_waits` tests it.
+struct WaitCheck<'a> {
+    index: usize,
+    /// Its bit in the ready mask.
+    ordinal: usize,
+    wait: &'a Wait,
+    /// For a kernel that also delays, its status slot, which tells whether
+    /// it waits for its edge.
+    status: Option<AbsoluteAddr>,
+}
+
+/// The waits of the waiting kernels of `kernels`.
+fn waits_of<'a>(
+    kernels: &'a [Option<Kernel>],
     ordinals: &[usize],
-) -> Vec<(usize, usize, AbsoluteAddr, CounterKind)> {
-    waits
+    schema: &celox_design::RuntimeSchema<AbsoluteAddr>,
+) -> Vec<WaitCheck<'a>> {
+    kernels
         .iter()
-        .map(|(index, wait)| (*index, ordinals[*index], wait.signal, wait.kind))
+        .enumerate()
+        .filter_map(|(index, kernel)| {
+            let kernel = kernel.as_ref()?;
+            Some(WaitCheck {
+                index,
+                ordinal: ordinals[index],
+                wait: kernel.wait.as_ref()?,
+                status: kernel.delays.then_some(schema.processes[index].status),
+            })
+        })
         .collect()
 }
 
