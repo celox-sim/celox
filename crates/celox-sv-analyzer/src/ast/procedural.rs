@@ -3195,8 +3195,8 @@ pub(super) fn subroutine_param_declarations(
     native: &celox_sv_syntax::Subroutine,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    env: impl ToShared<i128>,
+    aliases: impl ToShared<Type>,
 ) -> Converted<
     Vec<(
         String,
@@ -3219,7 +3219,7 @@ pub(super) fn subroutine_argument_names(
     tree: &AnalysisContext<'_>,
     session: &mut Session,
     const_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
+    type_aliases: &SharedMap<Type>,
 ) -> Result<
     (
         HashMap<String, Vec<String>>,
@@ -3233,16 +3233,12 @@ pub(super) fn subroutine_argument_names(
     let mut directions = HashMap::default();
     for item in generate::subroutine_items(tree, session, const_env, type_aliases)? {
         let tree = &item.scoped(tree);
+        let item_aliases = item.shared_type_aliases(type_aliases);
         for native_id in subroutine_owners::item(item.id, tree)? {
             let native = tree.declarations().subroutine(native_id);
             let tree = &item.enter(tree);
-            let params = subroutine_param_declarations(
-                native,
-                tree,
-                session,
-                &item.env,
-                &item.type_aliases(type_aliases),
-            )?;
+            let params =
+                subroutine_param_declarations(native, tree, session, &item.env, &item_aliases)?;
             let qualified = item.name(&instances::normalize_identifier(&native.name.spelling));
             let param_shapes: Vec<VariableDimensions> = params
                 .iter()
@@ -3297,10 +3293,11 @@ pub(super) fn subroutine_argument_names(
                     )
                 }));
             }
+            // The methods bind their formals in one context of the class.
+            let context = PackedDimensions::new(HashMap::default(), &env, &aliases);
             for (name, native_id, is_static) in methods {
                 let native = tree.declarations().subroutine(native_id);
-                let mut params =
-                    subroutine_param_declarations(native, tree, session, &env, &aliases)?;
+                let mut params = type_binding::subroutine_formals(native, tree, session, &context)?;
                 constructor |= native.kind == celox_sv_syntax::SubroutineKind::Constructor;
                 if !is_static {
                     params.insert(0, this.clone());
@@ -3449,20 +3446,18 @@ pub(super) fn subroutines_with_symbolic_parameters(
             };
             let item_dimensions = &*item_dimensions;
 
-            let declaration_env = if symbolic_parameters.is_empty() {
-                std::borrow::Cow::Borrowed(&*item.env)
+            let declaration_env: SharedMap<i128> = if symbolic_parameters.is_empty() {
+                item.env.clone()
             } else {
-                std::borrow::Cow::Owned(
-                    item.env
-                        .iter()
-                        .filter(|(name, _)| !symbolic_parameters.contains(*name))
-                        .map(|(name, value)| (name.clone(), *value))
-                        .collect::<HashMap<_, _>>(),
-                )
+                item.env
+                    .iter()
+                    .filter(|(name, _)| !symbolic_parameters.contains(*name))
+                    .map(|(name, value)| (name.clone(), *value))
+                    .collect()
             };
 
             let tree = &item.enter(tree);
-            let type_aliases = item.type_aliases(module_type_aliases);
+            let type_aliases = item.shared_type_aliases(module_type_aliases);
             let name = instances::normalize_identifier(
                 &tree.declarations().subroutine(native_id).name.spelling,
             );
@@ -3615,8 +3610,8 @@ pub(super) fn lower_subroutine(
     native_id: celox_sv_syntax::SubroutineId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    declaration_env: &HashMap<String, i128>,
-    type_aliases: &HashMap<String, Type>,
+    declaration_env: &SharedMap<i128>,
+    type_aliases: &SharedMap<Type>,
     item_dimensions: &PackedDimensions,
     literals: &HashMap<String, Expr>,
     state: &mut BodyState<'_>,
@@ -4994,6 +4989,8 @@ fn lower_class(
     // A specialization's methods see its parameters (IEEE 1800-2023 8.25).
     let (declaration_env, type_aliases) =
         classes::specializations::scope(session, name, declaration_env, type_aliases);
+    let (declaration_env, type_aliases): (SharedMap<i128>, SharedMap<Type>) =
+        (declaration_env.into(), type_aliases.into());
     let (item_dimensions, literals) =
         classes::specializations::body_scope(session, name, item_dimensions, literals);
     let (declaration_env, type_aliases, item_dimensions, literals) =

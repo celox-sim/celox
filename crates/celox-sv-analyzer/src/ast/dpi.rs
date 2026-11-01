@@ -102,7 +102,7 @@ fn export(
     // no class handles and no `ref` formals (35.5.6). Types are bound in the
     // scope of the export, as its subroutine's are.
     let aliases = item.type_aliases(type_aliases);
-    let context = PackedDimensions::new(HashMap::default(), &item.env, &aliases);
+    let context = PackedDimensions::new(HashMap::default(), &item.env, &*aliases);
     let mut class_handle = |id| -> Result<bool, AnalyzerError> {
         Ok(type_binding::bind(id, tree, session, &context)?.is_some_and(|ty| ty.class().is_some()))
     };

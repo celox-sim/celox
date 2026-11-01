@@ -65,8 +65,6 @@ pub(in crate::ast) fn statement(
             _ => Err(unsupported("subroutine callee")),
         };
     }
-    let mut context = dimensions.clone();
-    context.subroutine_param_names = std::sync::Arc::new(signatures.clone());
     if matches!(
         native.expression(root).kind,
         ExprKind::Name(_) | ExprKind::Member { .. }
@@ -79,6 +77,14 @@ pub(in crate::ast) fn statement(
             arg_order: Vec::new(),
         }));
     }
+    // A context that already holds `signatures` binds the call as it is.
+    let context = if std::ptr::eq(signatures, &*dimensions.subroutine_param_names) {
+        std::borrow::Cow::Borrowed(dimensions)
+    } else {
+        let mut context = dimensions.clone();
+        context.subroutine_param_names = std::sync::Arc::new(signatures.clone());
+        std::borrow::Cow::Owned(context)
+    };
     // The result, which may be a chandle, is discarded (13.4.1).
     super::bind_chandle_value(root, native, tree, session, &context, None).map(Some)
 }
