@@ -148,6 +148,51 @@ fn last_queue_elements_remain_typed_method_receivers() {
 }
 
 #[test]
+fn string_character_selections_have_the_declared_byte_type() {
+    // IEEE 1800-2023 6.16, Table 6-9: Str[index] returns byte,
+    // independently of the index and the runtime length of the string.
+    let declarations = "string text, words[2], queue[$]; int index; class Cell; string text; endclass Cell h; function string make(); return text; endfunction";
+    for expression in [
+        "text[index]",
+        "words[index][index]",
+        "queue[index][index]",
+        "queue[$][index]",
+        "h.text[index]",
+        "make()[index]",
+        "text.toupper()[index]",
+    ] {
+        let (session, ty) = query(declarations, expression);
+        let TyData::Packed(packed) = session.types.data(ty) else {
+            panic!("a string character has no integral type")
+        };
+        assert_eq!(packed.bits(), 8);
+        assert!(packed.signed);
+        assert!(!packed.four_state);
+        assert_eq!(packed.keyword, Some("byte"));
+    }
+}
+
+#[test]
+fn selected_string_characters_support_packed_selections() {
+    // IEEE 1800-2023 6.16 and 11.5.1: the byte result is an integral
+    // value; its bit and part selections are unsigned.
+    for (expression, width) in [
+        ("text[index][bit_index]", 1),
+        ("text[index][3:1]", 3),
+        ("text[index][offset+:3]", 3),
+    ] {
+        let (session, ty) = query("string text; int index, bit_index, offset;", expression);
+        let TyData::Packed(packed) = session.types.data(ty) else {
+            panic!("a selected character lost its packed type")
+        };
+        assert_eq!(packed.bits(), width);
+        assert!(!packed.signed);
+        assert!(!packed.four_state);
+        assert_eq!(packed.keyword, None);
+    }
+}
+
+#[test]
 fn runtime_queue_slices_preserve_selected_class_receivers() {
     let declarations = "class Cell; int value; function int read(); return value; endfunction endclass Cell q[$]; int lo, hi; function int next_lo(); return lo++; endfunction";
     for bounds in ["lo:hi", "lo:$", "$:hi", "$:$", "next_lo():hi"] {

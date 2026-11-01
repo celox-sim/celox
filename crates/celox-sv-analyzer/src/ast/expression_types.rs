@@ -256,6 +256,15 @@ fn select(
     if matches!(selection, DimensionKind::Index(_)) {
         return match data {
             TyData::Array { element, .. } => Some(element),
+            // A string character has type byte, as does getc (6.16,
+            // Table 6-9). The index and runtime string length do not
+            // affect its self-determined type.
+            TyData::String => semantic_types::of_type(
+                &mut session.types,
+                &tree.functions,
+                &type_binding::builtin_type("byte", None)?,
+                &dims.const_env,
+            ),
             TyData::Packed(mut packed) if !packed.dims.is_empty() => {
                 // The legacy packed representation has no named-element
                 // boundary. Do not guess where an enum/aggregate element ends.
