@@ -1,0 +1,1 @@
+Fix PR #2886 cocotb regression: preserve host observation of data changes before native RTL-driven waiters resume; add O0/O2 and 2/4-state observer coverage.
