@@ -287,6 +287,7 @@ test("every retained baseline accepts only its existing failures", () => {
             ? [
                 "array_locators::array_locator_unique_class_handles",
                 "class::casts_to_class_properties",
+                "class::constrained_enumerations_and_randc",
                 "class::container_type_aliases_of_classes",
                 "class::enumeration_constants_of_classes",
                 "class::failing_casts_evaluate_their_sources",
@@ -430,6 +431,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "virtual_interfaces::unit_import_package_variables",
               ]
             : [
+                "class::constrained_enumerations_and_randc",
                 "class::failing_casts_evaluate_their_sources",
                 "class::foreign_generic_constructor_lexical_scope",
                 "class::foreign_generic_declaration_scope_and_equivalent_defaults",

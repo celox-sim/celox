@@ -197,6 +197,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 14; see <case>/build.log\n<case>/source_0.sv:11: sorry: Constraint declarations not supported.\n<case>/source_0.sv:16: sorry: Constraint declarations not supported.\n<case>/source_0.sv:22: sorry: Constraint declarations not supported.\n<case>/source_0.sv:31: sorry: Constraint declarations not supported.\n<case>/source_0.sv:54: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:55: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:79: syntax error\n<case>/source_0.sv:79: error: Malformed statement\n<case>/source_0.sv:79: syntax error\n<case>/source_0.sv:79: error: Malformed statement\n<case>/source_0.sv:81: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:81: sorry: \"inside\" expressions not supported yet.\n<case>/source_0.sv:98: syntax error\n<case>/source_0.sv:98: error: Malformed conditional expression.\n",
+      "expectation": "Simulation",
+      "name": "class::constrained_enumerations_and_randc",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus rejects constraint declarations and inline randomize with blocks before elaboration. IEEE 1800-2023 18.5 and 18.7 define these constructs. Celox retains all assertions.",
       "expectation": "Simulation",
       "known_issue": {

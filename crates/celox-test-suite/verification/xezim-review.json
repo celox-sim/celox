@@ -963,6 +963,10 @@
       "title": "Overlapping calls of a static task do not share its formals: each call keeps the value it passed, also for a package task called from two modules",
       "standard": "IEEE 1800-2023 13.3.2, 6.21"
     },
+    "sv_selected_enum_domain": {
+      "title": "randomize(e) of a non-rand enumeration property assigns a value outside its type: with the constraint e == 5 on an enum of 1, 4 and 9 it succeeds and stores 5",
+      "standard": "IEEE 1800-2023 18.3, 18.11"
+    },
     "sv_parenless_method_chain": {
       "title": "A method called without parentheses on the handle that another parenless method call returns (n.get_peer.get_id) reads unknown bits",
       "standard": "IEEE 1800-2023 13.5.5"
@@ -5399,6 +5403,14 @@
       "classification": "xezim_bug",
       "bug": "sv_static_task_formals_per_call",
       "note": "Top calls p::wait_for(2, ...) at time 0 and Other calls p::wait_for(3, ...) at time 1, while Top's call waits; the formal n is static, so after its delay Top's call logs 3. xezim logs 2, the value Top passed. Verilator 5.052 and Celox log 3 and 3."
+    },
+    {
+      "suite": "sv",
+      "name": "class::constrained_enumerations_and_randc",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_selected_enum_domain",
+      "note": "sel.randomize(e), where e has type enum bit [3:0] {A = 1, B = 4, C = 9} and the constraint is e == 5, must fail and leave e at 0; xezim returns 1 and stores 5. The earlier assertions (enumeration values, the implication, the randc cycle) pass."
     }
   ]
 }
