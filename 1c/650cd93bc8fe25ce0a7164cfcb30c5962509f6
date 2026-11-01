@@ -1,7 +1,1 @@
-Revision history for #2937:
-
-rev 3 (rebase) 2026-11-01 19:06 UTC — Drop lower members that merged while review validation ran; retain #2936 and #2937
-rev 2 (content) 2026-11-01 19:05 UTC — Fix review 5729304455: normalize sensitivity offsets and include omitted-argument function writes; accept the two verified always_latch conformance improvements
-rev 1 (initial) 2026-11-01 19:05 UTC
-
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2937,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"42b45da95ed8019a046de33f5cdf8fbc97945c89","timestamp_iso":"2026-11-01T19:05:04Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"42b45da95ed8019a046de33f5cdf8fbc97945c89","new_sha":"ac580ada4da6c60ddf12220ccf75e94c0552fe0a","timestamp_iso":"2026-11-01T19:05:04Z","reason":"Fix review 5729304455: normalize sensitivity offsets and include omitted-argument function writes; accept the two verified always_latch conformance improvements","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/42b45da95ed8019a046de33f5cdf8fbc97945c89...ac580ada4da6c60ddf12220ccf75e94c0552fe0a"},{"number":3,"change_type":"rebase","old_sha":"ac580ada4da6c60ddf12220ccf75e94c0552fe0a","new_sha":"1c650cd93bc8fe25ce0a7164cfcb30c5962509f6","timestamp_iso":"2026-11-01T19:06:24Z","reason":"Drop lower members that merged while review validation ran; retain #2936 and #2937","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ac580ada4da6c60ddf12220ccf75e94c0552fe0a...1c650cd93bc8fe25ce0a7164cfcb30c5962509f6"}]} -->
+Address r4436977533: include retained folded function branches when excluding sensitivity writes, including nested callees
