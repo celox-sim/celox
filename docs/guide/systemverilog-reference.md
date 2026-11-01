@@ -343,11 +343,23 @@ from an assignment pattern (`'{a, b}`, `'{m: v, default: d}`, `T'{...}`, with
 `default` applied to the members of nested structures). Other operators,
 selects and casts of a whole structure are rejected.
 
+Module variables and procedural locals also support fixed-size unpacked array
+members of simple integral types, including packed vectors. Member dimensions
+may be multidimensional, use arbitrary constant bounds, or come from a typedef.
+Nested structures, assignment patterns (including structure replication), whole
+structure copies, compatible member-array and subarray copies, array-valued
+`default:` items, and dynamic indices are supported. Invalid indices follow 7.4.5, including preserving X/Z
+in untouched members. Array members of enum, packed aggregate, string, handle
+or unpacked structure type, variable-size dimensions and declared initial
+values on array members remain unsupported. Structures with array members
+cannot yet be ports, class properties, subroutine interfaces or dynamic
+container elements.
+
 Fixed-size arrays of structures are supported for module variables and
 procedural locals when every leaf member is integral, all leaves are 2-state
 or all are 4-state, and no member has a declared initial value. This includes
-nested structures, multidimensional arrays, element and member assignments,
-assignment patterns, and copies of elements and whole arrays. Compatible subarrays
+nested structures, integral array members, multidimensional arrays, element and
+member assignments, assignment patterns, and copies of elements and whole arrays. Compatible subarrays
 can be items of list and `default:` assignment patterns. Invalid indices
 read the element's default value and ignore writes (7.4.5). Arrays with string,
 handle, mixed-state or defaulted members, and array ports, class properties and
@@ -396,7 +408,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   `real`, and unpacked structs as ports, nets, parameters, static, `rand` or
   `const` class properties, or with members that
-  are arrays (also dynamic arrays, queues and associative arrays) or `real`.
+  are `real` or arrays outside the [supported subset](#unpacked-structures)
+  (including dynamic arrays, queues and associative arrays).
   Restrictions on member initial values are listed [above](#unpacked-structures).
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit

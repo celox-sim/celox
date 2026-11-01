@@ -1,0 +1,45 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: Internal Error: <case>/source_0.sv:16:33: ../V3Ast.cpp:665: Node has no back, already unlinked?\n   16 |         values = '{default: src.a};\n      |                                 ^\n                        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_member_defaults",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::integral_array_members_of_arrays at 81:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_of_arrays",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator shared-adapter build exits 2; the captured adapter excerpt is truncated before the C++ diagnostic. The standalone sv_struct_array_members_wide.sv probe reproduces: VTop___024root__0__Slow.cpp:16:27: error: could not convert __Vinline_0__eval_static__TOP___Vtemp_1 from VlUnpacked<VlWide<5>, 2> to WDataOutP, at VL_CONST_W_1X(129, __Vinline_0__eval_static__TOP___Vtemp_1, 0x00000000); the same error occurs for __Vtemp_2 at line 19.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_wide",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "exclude_stronger_than_sv": false,
+  "include_ignored": false,
+  "schema_version": 3,
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "scope": "Focused integral array members of unpacked structures before reviewed exclusions; passing and unsupported cases omitted."
+}

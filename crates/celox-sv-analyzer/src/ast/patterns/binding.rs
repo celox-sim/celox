@@ -413,7 +413,7 @@ pub(in crate::ast) fn bind_native(
                 if default
                     && let Some((dim, rest)) = shape.unpacked.split_first()
                     && !pattern
-                    && native_rank(id, native, dims) < shape.unpacked.len()
+                    && native_rank(id, native, tree, session, dims)? < shape.unpacked.len()
                 {
                     let (_, _, count) =
                         dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
@@ -540,7 +540,8 @@ pub(in crate::ast) fn bind_native(
                             .ok_or_else(|| unsupported("assignment pattern operand signedness"))?;
                     let descend_default = default
                         && (shape.unpacked.is_empty()
-                            || native_rank(id, native, dims) < shape.unpacked.len());
+                            || native_rank(id, native, tree, session, dims)?
+                                < shape.unpacked.len());
                     let value_type =
                         bound_patterns::native_value_type(id, tree, session, &type_dims)?;
                     values.push(assignment_value(
@@ -605,6 +606,9 @@ fn unpacked_struct_items<'a>(
             }
             bindings.into_iter().map(|value| (value, false)).collect()
         }
+        NativeKind::Repeat(times) => {
+            indexed_items(NativeKind::Repeat(times), bindings, members.len(), |_| None)?
+        }
         NativeKind::Keyed(keys) => {
             let mut named = Vec::new();
             let mut default = None;
@@ -641,7 +645,6 @@ fn unpacked_struct_items<'a>(
                 })
                 .collect::<Converted<Vec<_>>>()?
         }
-        _ => return Err(unsupported("structure assignment pattern form")),
     };
     Ok(members
         .iter()
@@ -657,8 +660,11 @@ fn unpacked_struct_items<'a>(
 fn native_rank(
     mut id: ExprId,
     native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dims: &PackedDimensions,
-) -> usize {
+) -> Converted<usize> {
+    let root = id;
     let mut indices = 0;
     loop {
         match &native.expression(id).kind {
@@ -671,11 +677,17 @@ fn native_rank(
                 id = *expression;
             }
             ExprKind::Name(name) => {
-                return dims
+                return Ok(dims
                     .get(&instances::normalize_identifier(&name.spelling))
-                    .map_or(0, |shape| shape.unpacked.len().saturating_sub(indices));
+                    .map_or(0, |shape| shape.unpacked.len().saturating_sub(indices)));
             }
-            _ => return 0,
+            _ => {
+                // Members and subarrays retain their resolved unpacked shape.
+                // An array-valued default is copied as a whole value rather
+                // than broadcast into scalar elements (10.9.2).
+                return Ok(dimensions::operand_shape(root, tree, session, dims)?
+                    .map_or(0, |shape| shape.unpacked.len()));
+            }
         }
     }
 }

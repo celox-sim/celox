@@ -94,7 +94,7 @@ fn member_dimensions(name: &str, r#type: &Type, dimensions: &PackedDimensions) -
             class: None,
             virtual_interface: None,
             packed: function_packed_dimension_widths(&r#type.packed_ranges),
-            unpacked: Vec::new(),
+            unpacked: dimensions::unpacked_dimension_widths(&r#type.unpacked_ranges),
             signed: r#type.is_signed,
             is_2state: r#type.kind == TypeKind::Bit,
             members: r#type.members.clone(),
@@ -226,6 +226,9 @@ pub(in crate::ast) fn select_element_member(
         &member_dimensions(&name, ty, dimensions),
         true,
     )?;
+    if !ty.unpacked_ranges.is_empty() {
+        return array_member_selection(tree, name, indices, (offset, ty), relative, dimensions);
+    }
     let Some(LValue::Select {
         msb,
         lsb,
@@ -251,6 +254,101 @@ pub(in crate::ast) fn select_element_member(
         *selected_2state = is_2state;
     }
     Ok(lvalue)
+}
+
+/// Flatten an integral array member into the cell that holds its structure.
+/// Guard its own window before adding offsets, so an invalid inner index can
+/// never reach the next member or the next structure element.
+fn array_member_selection(
+    tree: &AnalysisContext<'_>,
+    name: String,
+    indices: Vec<ConstExpr>,
+    member: (usize, &Type),
+    relative: LValue,
+    dimensions: &PackedDimensions,
+) -> Converted<LValue> {
+    let (offset, ty) = member;
+    let context = member_dimensions(&name, ty, dimensions);
+    let member_width = lvalue_expr_type(&tree.functions, &LValue::Ident(name.clone()), &context)
+        .ok_or_else(|| unsupported("structure array member width"))?
+        .width;
+    let width = lvalue_expr_type(&tree.functions, &relative, &context)
+        .ok_or_else(|| unsupported("structure array member selection width"))?
+        .width;
+    let (msb, lsb, signed, slice_width, reversed) = match relative {
+        LValue::Ident(_) => (
+            ConstExpr::Literal((member_width - 1).to_string()),
+            ConstExpr::Literal("0".into()),
+            ty.is_signed,
+            None,
+            false,
+        ),
+        LValue::Select {
+            msb,
+            lsb,
+            signed,
+            array_slice_width,
+            array_slice_reversed,
+            ..
+        } => (msb, lsb, signed, array_slice_width, array_slice_reversed),
+    };
+    let valid = ConstExpr::Binary {
+        left: Box::new(ConstExpr::Binary {
+            left: Box::new(lsb.clone()),
+            op: BinaryOp::Ge,
+            right: Box::new(ConstExpr::Literal("0".into())),
+        }),
+        op: BinaryOp::LogicAnd,
+        right: Box::new(ConstExpr::Binary {
+            left: Box::new(msb.clone()),
+            op: BinaryOp::Lt,
+            right: Box::new(ConstExpr::Literal(member_width.to_string())),
+        }),
+    };
+    let known = eval_ast_const_expr(&tree.functions, &valid, &dimensions.const_env);
+    let full_width = lvalue_expr_type(&tree.functions, &LValue::Ident(name.clone()), dimensions)
+        .ok_or_else(|| unsupported("structure array storage width"))?
+        .width;
+    let invalid = ConstExpr::Literal(full_width.to_string());
+    let lsb = if known == Some(0) {
+        invalid
+    } else {
+        let offset = ConstExpr::Literal(offset.to_string());
+        let target = crate::ast::selects::lvalue_from_range(
+            tree,
+            name.clone(),
+            indices,
+            add_expr(msb, offset.clone()),
+            add_expr(lsb, offset),
+            false,
+            dimensions,
+        )?;
+        let LValue::Select { lsb, .. } = target else {
+            return Err(unsupported("structure array member selection"));
+        };
+        if known.is_some() {
+            lsb
+        } else {
+            ConstExpr::Mux {
+                condition: Box::new(ConstExpr::Binary {
+                    left: Box::new(valid),
+                    op: BinaryOp::EqCase,
+                    right: Box::new(ConstExpr::Literal("1'b1".into())),
+                }),
+                then_expr: Box::new(lsb),
+                else_expr: Box::new(invalid),
+            }
+        }
+    };
+    Ok(LValue::Select {
+        name,
+        msb: add_expr(lsb.clone(), ConstExpr::Literal((width - 1).to_string())),
+        lsb,
+        signed,
+        array_slice_width: slice_width,
+        array_slice_reversed: reversed,
+        is_2state: ty.kind == TypeKind::Bit,
+    })
 }
 
 /// The offset and type of member path `members` in an element of unpacked

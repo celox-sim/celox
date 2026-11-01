@@ -466,6 +466,259 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_member_defaults",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_member_defaults_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_local",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_nested",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_of_arrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_of_arrays_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_replication",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_wide",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_struct_array_members_syntax",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects unpacked structure declarations in all eleven integral array-member cases, including array-valued defaults. IEEE 1800-2023 7.2 permits unpacked arrays as unpacked structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects these unpacked-structure member-initializer cases with \"sorry: Unpacked structs not supported.\" IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides.",
       "expectation": "Simulation",
       "name": "unpacked_structs::member_initial_values",

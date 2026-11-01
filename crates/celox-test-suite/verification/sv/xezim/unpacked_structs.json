@@ -234,6 +234,154 @@
     },
     {
       "category": "Types",
+      "detail": "Xezim 0.11.4 leaves destinations of matching array-valued defaults at their initial values: dst, nested members, array rows and selected subarrays remain zero, while the scalar default correctly produces 7,7. The four-state probe leaves dst as xxxx,xxxx instead of copying 10xz,z001. IEEE 1800-2023 10.9.2 evaluates a matching default in the context of assignment to the array member.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_member_defaults",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_array_member_defaults",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 leaves destinations of matching array-valued defaults at their initial values: dst, nested members, array rows and selected subarrays remain zero, while the scalar default correctly produces 7,7. The four-state probe leaves dst as xxxx,xxxx instead of copying 10xz,z001. IEEE 1800-2023 10.9.2 evaluates a matching default in the context of assignment to the array member.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-xezim.json",
+          "verification/repros/sv_struct_array_member_defaults.sv",
+          "verification/repros/sv_struct_array_member_defaults_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 leaves destinations of matching array-valued defaults at their initial values: dst, nested members, array rows and selected subarrays remain zero, while the scalar default correctly produces 7,7. The four-state probe leaves dst as xxxx,xxxx instead of copying 10xz,z001. IEEE 1800-2023 10.9.2 evaluates a matching default in the context of assignment to the array member.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_member_defaults_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_array_member_defaults",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 leaves destinations of matching array-valued defaults at their initial values: dst, nested members, array rows and selected subarrays remain zero, while the scalar default correctly produces 7,7. The four-state probe leaves dst as xxxx,xxxx instead of copying 10xz,z001. IEEE 1800-2023 10.9.2 evaluates a matching default in the context of assignment to the array member.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-xezim.json",
+          "verification/repros/sv_struct_array_member_defaults.sv",
+          "verification/repros/sv_struct_array_member_defaults_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 reverses element order when copying values[3:2] into saved[0:1] (22,11 instead of 11,22), and does not copy a member-array expression or subarray of a fixed structure array (saved remains 0,0 and rows[0].values remains 11,55). IEEE 1800-2023 7.6 assigns corresponding array elements in left-to-right order. Standalone probes preserve both observations.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_array_members_copies",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 reverses element order when copying values[3:2] into saved[0:1] (22,11 instead of 11,22), and does not copy a member-array expression or subarray of a fixed structure array (saved remains 0,0 and rows[0].values remains 11,55). IEEE 1800-2023 7.6 assigns corresponding array elements in left-to-right order. Standalone probes preserve both observations.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-xezim.json",
+          "verification/repros/sv_struct_array_members_basic.sv",
+          "verification/repros/sv_struct_array_members_bounds.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 reverses element order when copying values[3:2] into saved[0:1] (22,11 instead of 11,22), and does not copy a member-array expression or subarray of a fixed structure array (saved remains 0,0 and rows[0].values remains 11,55). IEEE 1800-2023 7.6 assigns corresponding array elements in left-to-right order. Standalone probes preserve both observations.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_of_arrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_array_members_copies",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 reverses element order when copying values[3:2] into saved[0:1] (22,11 instead of 11,22), and does not copy a member-array expression or subarray of a fixed structure array (saved remains 0,0 and rows[0].values remains 11,55). IEEE 1800-2023 7.6 assigns corresponding array elements in left-to-right order. Standalone probes preserve both observations.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-xezim.json",
+          "verification/repros/sv_struct_array_members_basic.sv",
+          "verification/repros/sv_struct_array_members_bounds.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 applies an X-indexed outer-array write to row zero and reads part of row zero through the invalid index. The standalone probe prints row0=0000,z001 invalid=xxxx,0000 copy=0000,z001,z. IEEE 1800-2023 7.4.5 requires ignored writes and per-member default values (all X for these logic members).",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_of_arrays_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_array_members_invalid_index",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 applies an X-indexed outer-array write to row zero and reads part of row zero through the invalid index. The standalone probe prints row0=0000,z001 invalid=xxxx,0000 copy=0000,z001,z. IEEE 1800-2023 7.4.5 requires ignored writes and per-member default values (all X for these logic members).",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-xezim.json",
+          "verification/repros/sv_struct_array_members_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 initializes only the first member of a replicated structure pattern and drops or misplaces items in nested replicated array patterns: triple=1,0,0 rows=7,22,0,0,0 instead of triple=1,1,1 rows=7,11,22,11,22. IEEE 1800-2023 10.9.2 requires replicated items to fill the corresponding structure members.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::integral_array_members_replication",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_array_members_replication",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 initializes only the first member of a replicated structure pattern and drops or misplaces items in nested replicated array patterns: triple=1,0,0 rows=7,22,0,0,0 instead of triple=1,1,1 rows=7,11,22,11,22. IEEE 1800-2023 10.9.2 requires replicated items to fill the corresponding structure members.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-members-xezim.json",
+          "verification/repros/sv_struct_array_members_replication.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
       "expectation": "Simulation",
       "name": "unpacked_structs::member_initial_values",
