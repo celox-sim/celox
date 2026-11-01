@@ -1,4 +1,6 @@
-#![cfg(feature = "host-runtime")]
+// The registry fixture loads prebuilt/vip.wasm; a native host alone does not
+// provide WASM component hosting. This feature also enables host-runtime.
+#![cfg(feature = "wasm-component")]
 
 use std::path::{Path, PathBuf};
 
