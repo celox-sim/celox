@@ -745,6 +745,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Unable to bind wire/reg/memory `HIGH'",
                         ),
+                        ("icarus", "class::prototype_formals_inherit_types") => {
+                            ("compile_error", "compile", "source_0.sv:7: syntax error")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
