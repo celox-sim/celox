@@ -61,12 +61,12 @@ pub(super) fn native_functions(
     let names = Arc::new(names);
     let mut functions = HashMap::default();
     for (item, id) in owners {
-        let aliases = item.type_aliases(&dimensions.type_aliases);
+        let aliases = item.shared_type_aliases(&dimensions.type_aliases);
         let tree = &item.scoped(tree);
         let tree = &item.enter(tree);
         let mut signature_context = item.dimensions(dimensions);
         signature_context.const_env = item.env.clone();
-        signature_context.type_aliases = aliases.as_ref().clone().into();
+        signature_context.type_aliases = aliases.clone();
         let mut function = native_signature(
             tree.declarations().subroutine(id),
             tree,

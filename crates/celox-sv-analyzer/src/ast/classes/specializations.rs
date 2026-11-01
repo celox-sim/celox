@@ -1155,10 +1155,12 @@ impl Parameters {
                             let id = default.ok_or_else(|| {
                                 unsupported(format!("type parameter `{name}` without a type"))
                             })?;
-                            type_binding::procedural_type(id, native, tree, session, env, aliases)?
-                                .ok_or_else(|| {
-                                    unsupported(format!("type of type parameter `{name}`"))
-                                })?
+                            type_binding::procedural_type(
+                                id, native, tree, session, &*env, &*aliases,
+                            )?
+                            .ok_or_else(|| {
+                                unsupported(format!("type of type parameter `{name}`"))
+                            })?
                         }
                     };
                     // The type is fixed in the scope that assigns it.

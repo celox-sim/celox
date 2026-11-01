@@ -9,8 +9,8 @@ pub(super) fn expression(
     native: &Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    env: impl ToShared<i128>,
+    aliases: impl ToShared<Type>,
 ) -> Converted<Option<ConstExpr>> {
     bind_in(
         root,
