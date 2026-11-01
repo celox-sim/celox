@@ -1,1 +1,0 @@
-Tag checks: every member of the value path goes through packed_structs::member_guards against the value it selects from (reads) or the local that holds it when assigned (writes)
