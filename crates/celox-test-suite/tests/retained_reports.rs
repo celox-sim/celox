@@ -740,6 +740,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "class::methods_called_without_parentheses") => {
                             ("compile_error", "compile", "source_0.sv:27: syntax error")
                         }
+                        ("icarus", "types::local_typedefs") => (
+                            "compile_error",
+                            "compile",
+                            "Unable to bind wire/reg/memory `HIGH'",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

@@ -3541,6 +3541,9 @@ struct PackedDimensions {
     /// The values of the operands whose side effects a procedural body has
     /// already executed before their statement (see [`effects`]).
     effect_values: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
+    /// The enumerations of the members of the local enumerations of a
+    /// procedural body, which visible typedefs may have members like.
+    enum_constants: Arc<HashMap<String, Arc<enums::EnumDomain>>>,
     /// The class property expression whose select is being bound against
     /// the property's template; every other property is read through its
     /// object.
@@ -3576,6 +3579,7 @@ impl PackedDimensions {
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),
+            enum_constants: Arc::default(),
             property_select_base: None,
             element_select: None,
         }

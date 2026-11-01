@@ -1095,94 +1095,14 @@ pub(super) fn enum_member_constants_from_items(
         let Some(id) = enum_type(id) else {
             continue;
         };
-        let DataTypeKind::Enum { base, items } = &native.data_type(id).kind else {
-            unreachable!();
-        };
-        let member_base = match base {
-            Some(id) => type_binding::enum_constant_base(
-                *id,
-                syntax_tree,
-                session,
-                &eval_env,
-                &resolved_type_aliases,
-            )?,
-            None => type_binding::builtin_type("int", None),
-        }
-        .ok_or_else(|| unsupported("enum base type"))?;
-        type_binding::binding::validate_enum_initializers(
-            id,
-            native,
+        enum_members_of(
             syntax_tree,
             session,
-            &PackedDimensions::new(HashMap::default(), &eval_env, &resolved_type_aliases),
-            &member_base,
+            id,
+            &mut eval_env,
+            &resolved_type_aliases,
+            &mut constants,
         )?;
-        let member_type = expr_type_from_type(&syntax_tree.functions, &member_base, &eval_env)
-            .ok_or_else(|| unsupported("enum base type"))?;
-        let mut next_enum_value = 0i128;
-        for new in items {
-            let name = instances::normalize_identifier(&new.name.spelling);
-            if !new.dimensions.is_empty() {
-                return Err(unsupported(format!("ranged enum member `{name}`")));
-            }
-            let value = match new.value {
-                Some(id) => constant_binding::expression(
-                    id,
-                    syntax_tree.declarations(),
-                    syntax_tree,
-                    session,
-                    &eval_env,
-                    &resolved_type_aliases,
-                )?
-                .ok_or_else(|| unsupported(format!("enum member `{name}` value")))?,
-                // An unvalued member follows its predecessor (the first is 0).
-                None => ConstExpr::Literal(format_typed_parameter_literal(
-                    next_enum_value,
-                    member_type.width,
-                    member_type.signed,
-                )),
-            };
-            let value = match value {
-                ConstExpr::Literal(literal) => ConstExpr::Literal(
-                    resize_unbased_fill_literal_for_cast(
-                        &literal,
-                        member_type.width,
-                        member_type.signed,
-                    )
-                    .unwrap_or(literal),
-                ),
-                value => value,
-            };
-            let value_type =
-                infer_const_expr_type(&value, &parameter_types_from_const_env(&eval_env))
-                    .ok_or_else(|| {
-                        AnalyzerError::Unsupported(format!("enum member `{name}` value type"))
-                    })?;
-            let number = eval_ast_const_expr(&syntax_tree.functions, &value, &eval_env)
-                .ok_or_else(|| {
-                    AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
-                })?;
-            if !enum_initializer_fits_base_type(number, value_type, member_type) {
-                return Err(AnalyzerError::Unsupported(format!(
-                    "enum member `{name}` value does not fit its base type"
-                )));
-            }
-            let number =
-                coerce_const_parameter_value(number, member_type.width, member_type.signed);
-            next_enum_value = number.wrapping_add(1);
-            constants.numbers.insert(name.clone(), number);
-            eval_env.insert(name.clone(), number);
-            insert_parameter_type_markers(&mut eval_env, &name, member_type);
-            constants.types.insert(name.clone(), member_type);
-            constants.exprs.insert(
-                name,
-                Expr::Literal(format_typed_parameter_literal(
-                    number,
-                    member_type.width,
-                    member_type.signed,
-                )),
-            );
-        }
         // A later typedef may use a cast or range that depends on this
         // enum's members. Rebuild aliases from the enriched environment
         // before resolving a subsequent enum base through that typedef.
@@ -1195,6 +1115,108 @@ pub(super) fn enum_member_constants_from_items(
         )?;
     }
     Ok(constants)
+}
+
+/// Add the members of enumeration declaration `id` to `constants`, with
+/// their values, types and literals, and to `eval_env` with their type
+/// markers, after checking its initializers (IEEE 1800-2023 6.19).
+pub(super) fn enum_members_of(
+    syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: celox_sv_syntax::TypeId,
+    eval_env: &mut HashMap<String, i128>,
+    resolved_type_aliases: &HashMap<String, Type>,
+    constants: &mut EnumMemberConstants,
+) -> Result<(), AnalyzerError> {
+    use celox_sv_syntax::DataTypeKind;
+    let native = syntax_tree.declarations();
+    let DataTypeKind::Enum { base, items } = &native.data_type(id).kind else {
+        return Ok(());
+    };
+    let member_base = match base {
+        Some(id) => type_binding::enum_constant_base(
+            *id,
+            syntax_tree,
+            session,
+            &*eval_env,
+            resolved_type_aliases,
+        )?,
+        None => type_binding::builtin_type("int", None),
+    }
+    .ok_or_else(|| unsupported("enum base type"))?;
+    type_binding::binding::validate_enum_initializers(
+        id,
+        native,
+        syntax_tree,
+        session,
+        &PackedDimensions::new(HashMap::default(), &*eval_env, resolved_type_aliases),
+        &member_base,
+    )?;
+    let member_type = expr_type_from_type(&syntax_tree.functions, &member_base, &*eval_env)
+        .ok_or_else(|| unsupported("enum base type"))?;
+    let mut next_enum_value = 0i128;
+    for new in items {
+        let name = instances::normalize_identifier(&new.name.spelling);
+        if !new.dimensions.is_empty() {
+            return Err(unsupported(format!("ranged enum member `{name}`")));
+        }
+        let value = match new.value {
+            Some(id) => constant_binding::expression(
+                id,
+                syntax_tree.declarations(),
+                syntax_tree,
+                session,
+                &*eval_env,
+                resolved_type_aliases,
+            )?
+            .ok_or_else(|| unsupported(format!("enum member `{name}` value")))?,
+            // An unvalued member follows its predecessor (the first is 0).
+            None => ConstExpr::Literal(format_typed_parameter_literal(
+                next_enum_value,
+                member_type.width,
+                member_type.signed,
+            )),
+        };
+        let value = match value {
+            ConstExpr::Literal(literal) => ConstExpr::Literal(
+                resize_unbased_fill_literal_for_cast(
+                    &literal,
+                    member_type.width,
+                    member_type.signed,
+                )
+                .unwrap_or(literal),
+            ),
+            value => value,
+        };
+        let value_type = infer_const_expr_type(&value, &parameter_types_from_const_env(eval_env))
+            .ok_or_else(|| {
+            AnalyzerError::Unsupported(format!("enum member `{name}` value type"))
+        })?;
+        let number =
+            eval_ast_const_expr(&syntax_tree.functions, &value, &*eval_env).ok_or_else(|| {
+                AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
+            })?;
+        if !enum_initializer_fits_base_type(number, value_type, member_type) {
+            return Err(AnalyzerError::Unsupported(format!(
+                "enum member `{name}` value does not fit its base type"
+            )));
+        }
+        let number = coerce_const_parameter_value(number, member_type.width, member_type.signed);
+        next_enum_value = number.wrapping_add(1);
+        constants.numbers.insert(name.clone(), number);
+        eval_env.insert(name.clone(), number);
+        insert_parameter_type_markers(eval_env, &name, member_type);
+        constants.types.insert(name.clone(), member_type);
+        constants.exprs.insert(
+            name,
+            Expr::Literal(format_typed_parameter_literal(
+                number,
+                member_type.width,
+                member_type.signed,
+            )),
+        );
+    }
+    Ok(())
 }
 
 pub(super) fn parameter_value_env(
