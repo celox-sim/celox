@@ -1,8 +1,7 @@
 Revision history for #2897:
 
+rev 3 (content) 2026-11-01 13:19 UTC
 rev 2 (content) 2026-11-01 13:08 UTC — Reject a sort receiver read through an expression with a side effect (Codex P2)
 rev 1 (initial) 2026-11-01 13:08 UTC
 
-<!-- mergify-revision-data: {"schema_version":1,"pull_number":2897,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"599fb44a93116f2716d418261bd694694c8087fb","timestamp_iso":"2026-11-01T13:08:17Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"599fb44a93116f2716d418261bd694694c8087fb","new_sha":"c01f139c6e69b41fc185c981b86bed2d5e1783ef","timestamp_iso":"2026-11-01T13:08:17Z","reason":"Reject a sort receiver read through an expression with a side effect (Codex P2)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/599fb44a93116f2716d418261bd694694c8087fb...c01f139c6e69b41fc185c981b86bed2d5e1783ef"}]} -->
-
-Keep integral sort keys four-state so unknown keys order no element, as sort() does (Codex P2)
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2897,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"599fb44a93116f2716d418261bd694694c8087fb","timestamp_iso":"2026-11-01T13:08:17Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"599fb44a93116f2716d418261bd694694c8087fb","new_sha":"c01f139c6e69b41fc185c981b86bed2d5e1783ef","timestamp_iso":"2026-11-01T13:08:17Z","reason":"Reject a sort receiver read through an expression with a side effect (Codex P2)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/599fb44a93116f2716d418261bd694694c8087fb...c01f139c6e69b41fc185c981b86bed2d5e1783ef"},{"number":3,"change_type":"content","old_sha":"c01f139c6e69b41fc185c981b86bed2d5e1783ef","new_sha":"5574f1672483297bb0fa467e81625a5e8bee9ffe","timestamp_iso":"2026-11-01T13:19:03Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/c01f139c6e69b41fc185c981b86bed2d5e1783ef...5574f1672483297bb0fa467e81625a5e8bee9ffe"}]} -->
