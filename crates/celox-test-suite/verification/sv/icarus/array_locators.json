@@ -240,6 +240,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 14; see <case>/build.log\n<case>/source_0.sv:24: syntax error\n<case>/source_0.sv:24: error: Malformed statement\n<case>/source_0.sv:26: syntax error\n<case>/source_0.sv:26: error: Malformed statement\n<case>/source_0.sv:30: syntax error\n<case>/source_0.sv:30: error: Malformed statement\n<case>/source_0.sv:34: syntax error\n<case>/source_0.sv:34: error: Malformed statement\n<case>/source_0.sv:37: syntax error\n<case>/source_0.sv:37: error: Malformed statement\n<case>/source_0.sv:41: syntax error\n<case>/source_0.sv:41: error: Malformed statement\n<case>/source_0.sv:45: syntax error\n<case>/source_0.sv:45: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "array_locators::ordering_methods_with_expressions",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }
