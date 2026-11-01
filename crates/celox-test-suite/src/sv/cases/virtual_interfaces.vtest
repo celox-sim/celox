@@ -955,3 +955,38 @@ endmodule
 "#)
   (top Top) (run_until 1)
   (expect_output "3d 7 2\n"))
+
+(case unit_import_package_variables
+  (source "virtual_interfaces.sv" #"
+package p;
+    int states[$];
+    class Root;
+        function void run(); states.push_front(3); states.push_back(4); endfunction
+    endclass
+endpackage
+// The package is imported into the compilation unit, whose class holds a
+// virtual interface: the instance of the interface and the module share
+// the package's variables (IEEE 1800-2023 26.3).
+import p::*;
+interface clk_if;
+    logic clk;
+    function int seen(); return states.size(); endfunction
+endinterface
+class env extends Root;
+    virtual clk_if m_if;
+endclass
+module Top(output int size, output int first, output int through);
+    clk_if ci();
+    env e;
+    initial begin
+        e = new;
+        e.m_if = ci;
+        e.run();
+        size = states.size();
+        first = states[0];
+        through = ci.seen();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq size 2) (assert_eq first 3) (assert_eq through 2))
