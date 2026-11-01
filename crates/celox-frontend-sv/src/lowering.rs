@@ -43,6 +43,7 @@ mod comb_retention;
 mod ff;
 mod floating;
 mod hierarchy;
+mod masked;
 mod procedural;
 mod virtual_interfaces;
 

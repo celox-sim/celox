@@ -841,6 +841,14 @@ fn narrow_nonblocking_updates_cover_staged_and_queued_sites() {
 }
 
 sv_backends! {
+    fn process_dynamic_writes_preserve_xz(sim) {
+        @case "timing::process_dynamic_writes_preserve_xz";
+    }
+
+    fn process_dynamic_writes_preserve_xz_at_unknown_positions(sim) {
+        @case "timing::process_dynamic_writes_preserve_xz_at_unknown_positions";
+    }
+
     fn static_function_storage_is_shared_between_processes(sim) {
         @case "timing::static_function_storage_is_shared_between_processes";
     }
