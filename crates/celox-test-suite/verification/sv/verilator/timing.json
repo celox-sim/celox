@@ -1831,6 +1831,54 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 reschedules an entire delayed vector when another bit changes, postponing the first bit: the standalone probe prints w=00 selected=00 at 10.1 ns instead of 01 for both. IEEE 1800-2023 10.3.3 and 28.16 apply the independent net delay to each bit. Xezim and Celox preserve the first bit deadline. Only the whole-vector and selected-driver cases are excluded.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_per_bit",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 reschedules an entire delayed vector when another bit changes, postponing the first bit: the standalone probe prints w=00 selected=00 at 10.1 ns instead of 01 for both. IEEE 1800-2023 10.3.3 and 28.16 apply the independent net delay to each bit. Xezim and Celox preserve the first bit deadline. Only the whole-vector and selected-driver cases are excluded.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-verilator.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 reschedules an entire delayed vector when another bit changes, postponing the first bit: the standalone probe prints w=00 selected=00 at 10.1 ns instead of 01 for both. IEEE 1800-2023 10.3.3 and 28.16 apply the independent net delay to each bit. Xezim and Celox preserve the first bit deadline. Only the whole-vector and selected-driver cases are excluded.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_selected_drivers",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_independent_net_delays",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 reschedules an entire delayed vector when another bit changes, postponing the first bit: the standalone probe prints w=00 selected=00 at 10.1 ns instead of 01 for both. IEEE 1800-2023 10.3.3 and 28.16 apply the independent net delay to each bit. Xezim and Celox preserve the first bit deadline. Only the whole-vector and selected-driver cases are excluded.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-verilator.json",
+          "verification/repros/sv_independent_net_delay.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }
