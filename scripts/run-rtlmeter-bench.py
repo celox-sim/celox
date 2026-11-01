@@ -54,10 +54,16 @@ def specification(name, source):
     descriptor = yaml.safe_load((design / 'descriptor.yaml').read_text())
     compile_spec = descriptor['compile']
     test = descriptor['execute']['tests'][spec['test']]
+    configurations = descriptor.get('configurations', {})
+    configuration = configurations[spec['configuration']] if 'configuration' in spec else configurations.get('default', {})
+    configured_compile = configuration.get('compile', {})
+    configured_execute = configuration.get('execute', {})
+    test = {**test, **configured_execute.get('tests', {}).get(spec['test'], {})}
     sources = [design / p for p in compile_spec['verilogSourceFiles']]
     sources.append(source / 'rtl/__rtlmeter_utils.sv')
     files = [design / p for p in test.get('files', [])]
-    defines = {**compile_spec.get('verilogDefines', {}), '__RTLMETER_MAIN_CLOCK': compile_spec['mainClock']}
+    defines = {**compile_spec.get('verilogDefines', {}), **configured_compile.get('verilogDefines', {}),
+               '__RTLMETER_MAIN_CLOCK': compile_spec['mainClock']}
     # Fingerprint all potential local headers, not only explicit compilation inputs.
     inputs = sorted(set([*sources, *files, design / 'descriptor.yaml', *design.joinpath('src').rglob('*'),
                          source / 'rtl/__rtlmeter_top_include.vh']))
@@ -96,12 +102,12 @@ def execute(command, cwd, log, timeout, cpu):
     return {'exitCode': code, 'timedOut': code in (124, 137), 'elapsedNs': time.monotonic_ns() - start}
 
 
-def accept(stdout, cycles, outcome, payload):
+def accept(stdout, cycles, outcome, payload, success_marker='TEST PASSED'):
     if outcome['timedOut'] or outcome['exitCode'] != 0:
         raise ValueError('process failed or timed out')
-    if re.search(r'TEST\s+FAIL(?:ED)?|simulation finished with error|\$fatal|%Error:', stdout, re.I):
+    if re.search(r'TEST[\s_]+FAIL(?:ED)?|Time Out !!!|simulation finished with error|\$fatal|%Error:', stdout, re.I):
         raise ValueError('testbench reported failure')
-    if stdout.splitlines().count('TEST PASSED') != 1 or stdout.splitlines().count(payload) != 1:
+    if stdout.splitlines().count(success_marker) != 1 or stdout.splitlines().count(payload) != 1:
         raise ValueError('missing unique upstream success marker or expected program output')
     if not re.fullmatch(r'[1-9][0-9]*', cycles.strip()):
         raise ValueError('missing valid final RTLMeter clock count')
@@ -168,7 +174,7 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
     release = locked['original'].get('ref')
     if release is None or versions['xezim'].splitlines()[0] != f'xezim version {release.removeprefix("v")}':
         raise ValueError('xezim must be built from the release fixed by flake.lock')
-    report = {'schemaVersion': 1, 'contract': MANIFEST['contract'], 'case': name,
+    report = {'schemaVersion': 1, 'contract': MANIFEST['contract'], 'case': name, 'caseSpec': MANIFEST['cases'][name],
               'rtlmeterRevision': MANIFEST['revision'], 'sourceSha256': spec['sourceSha256'],
               'inputSha256': spec['inputSha256'], 'celoxCommit': git(ROOT, 'rev-parse', 'HEAD'),
               'dirty': bool(git(ROOT, 'status', '--porcelain')), 'requestedSamples': samples,
@@ -219,7 +225,7 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
             text = ''.join(p.read_text(errors='replace') for p in sorted((control / 'logs').glob('*.log')))
             control_cycles = control / '_rtlmeter_cycles.txt'
             if (outcome['exitCode'] == 0 and not outcome['timedOut']
-                    and 'RTLMeter: +max_cycles reached, exiting' in text and 'TEST PASSED' not in text
+                    and 'RTLMeter: +max_cycles reached, exiting' in text and spec.get('successMarker', 'TEST PASSED') not in text
                     and control_cycles.exists() and control_cycles.read_text().strip() == '1'):
                 row['negativeControl'] = 'passed'
             else:
@@ -245,7 +251,7 @@ def measure_case(name, source, celox, xezim, output, build_root, timeout=1800, s
             stdout = ''.join(p.read_text(errors='replace') for p in sorted((directory / 'logs').glob('*.log')))
             cycles = directory / '_rtlmeter_cycles.txt'
             try:
-                count = accept(stdout, cycles.read_text() if cycles.exists() else '', outcome, spec['payload'])
+                count = accept(stdout, cycles.read_text() if cycles.exists() else '', outcome, spec['payload'], spec.get('successMarker', 'TEST PASSED'))
                 if count >= spec['maxCycles']:
                     raise ValueError('Workload reached the cycle limit instead of completing normally')
                 row['samples'].append({'status': 'passed', 'processNs': outcome['elapsedNs'], 'cycles': count})
