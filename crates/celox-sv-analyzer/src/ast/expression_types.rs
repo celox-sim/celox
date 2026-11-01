@@ -14,6 +14,7 @@ use semantic_types::{ArrayKind, Decl, PackedElement, Range, TyData, TyId};
 
 mod builtins;
 mod memo;
+mod values;
 pub(super) use memo::Memo;
 #[cfg(test)]
 mod tests;
@@ -63,6 +64,12 @@ fn resolve(
             .intern(TyData::Class(Decl::Class(name.into())))
     };
     let id = ungroup(id, native);
+    if matches!(
+        native.expression(id).kind,
+        ExprKind::Literal(_) | ExprKind::Unary { .. } | ExprKind::Binary { .. }
+    ) {
+        return values::resolve(tree, session, id, native, dims);
+    }
     // Index chains are walked iteratively, so deeply nested arrays do not
     // consume the host stack. Each select removes one type-tree layer (7.4.5).
     if matches!(native.expression(id).kind, ExprKind::Select { .. }) {
