@@ -4425,5 +4425,47 @@
         "unpacked_structs::integral_array_member_defaults_four_state"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_associative_defaults",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects default-only associative array literals and associative array declarations in the four focused cases. IEEE 1800-2023 7.9.11 permits user defaults for associative arrays.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/associative-defaults-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "containers::associative_default_strings",
+        "containers::associative_default_copy",
+        "containers::associative_default_four_state",
+        "containers::associative_default_wide"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_associative_defaults",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 keeps a reference to the default expression rather than capturing its value (changing seed changes the default and its copies), retains a previous default when assigning an array without a user default, and returns 0 for an unknown-index read instead of the user default 10xz. Standalone probes reproduce each observation. IEEE 1800-2023 7.9.9 and 7.9.11 specify array assignment and user defaults; 7.8.6 also applies user defaults to unknown-index reads.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/associative-defaults-xezim.json",
+      "verification/repros/sv_associative_default_strings.sv",
+      "verification/repros/sv_associative_default_copy.sv",
+      "verification/repros/sv_associative_default_four_state.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "containers::associative_default_strings",
+        "containers::associative_default_copy",
+        "containers::associative_default_four_state"
+      ]
+    }
   }
 ]
