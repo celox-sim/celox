@@ -1318,6 +1318,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 7; see <case>/build.log\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Invalid class item.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:8: error: Invalid class item.\n<case>/source_0.sv:14: sorry: External methods are not yet supported.\n<case>/source_0.sv:18: syntax error\n<case>/source_0.sv:18: error: I give up on this function definition.\n",
+      "expectation": "Simulation",
+      "name": "class::prototype_formals_inherit_types",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 cannot elaborate class randomize, srandom and rand_mode calls in the randc cases. IEEE 1800-2023 18.4.2, 18.6 and 18.8 define these operations. The unchanged assertions cover full cycles, signed and enum domains, modes and inheritance.",
       "expectation": "Simulation",
       "known_issue": {

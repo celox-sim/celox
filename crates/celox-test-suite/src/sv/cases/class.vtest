@@ -3991,3 +3991,40 @@ endmodule
   (top Top) (run_until 0)
   (assert_eq id 4) (assert_eq twice 8) (assert_eq added 6) (assert_eq peer_id 9)
   (assert_eq count 2) (assert_eq named 1) (assert_eq colored 1))
+
+(case prototype_formals_inherit_types
+  (source "class.sv" #"
+module Top(output int config_bits, output int summed, output bit indexed);
+    typedef bit [3:0] nibble_t;
+    virtual class Adder;
+        // `b` has no type of its own: it is a formal of type int, as is
+        // `y` of nibble_t (IEEE 1800-2023 13.4).
+        pure virtual function int add(int a, b);
+        pure virtual function int widen(nibble_t x, y);
+    endclass
+    class Root extends Adder;
+        string nm;
+        function new(string nm); this.nm = nm; endfunction
+        virtual function string get_name(); return nm; endfunction
+        extern function int m_process_config(string cfg, bit is_int, is_bitstream);
+        virtual function int add(int a, b); return a + b; endfunction
+        virtual function int widen(nibble_t x, y); return {x, y}; endfunction
+    endclass
+    function int Root::m_process_config(string cfg, bit is_int, is_bitstream);
+        return cfg.len() * 4 + is_int * 2 + is_bitstream;
+    endfunction
+    Root children[string];
+    Root r;
+    Adder a;
+    initial begin
+        r = new("x");
+        children[r.get_name()] = r;
+        indexed = children.exists("x");
+        config_bits = r.m_process_config("ab", .is_bitstream(1), .is_int(0));
+        a = r;
+        summed = a.add(2, 3) + a.widen(4'h1, 4'h2);
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq config_bits 9) (assert_eq summed 23) (assert_eq indexed 1))
