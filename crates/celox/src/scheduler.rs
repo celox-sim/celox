@@ -1,5 +1,6 @@
 //! The compiled scheduler: one SIR unit that runs time slots of the process
-//! kernels that only delay, as the runtime's reference loop runs them.
+//! kernels, as the runtime's reference loop runs them. Host operations and
+//! queued NBA values use synchronous services without returning to that loop.
 //!
 //! In a design whose event signals only such kernels write, a time slot of
 //! the reference loop is short. The kernels due at the slot run in kernel
@@ -68,23 +69,27 @@ const SITE_BITS: usize = 8;
 
 const ACTIVE_COMMIT: &str = "the process drives or waits for a clock whose domain commits blocking results in the active region";
 
-const DELAY_STATUSES: [ProcessStatus; 4] = [
+const DELAY_STATUSES: [ProcessStatus; 6] = [
     ProcessStatus::Delay,
     ProcessStatus::InactiveDelay,
     ProcessStatus::Done,
     ProcessStatus::Finish,
+    ProcessStatus::HostRequest,
+    ProcessStatus::Yield,
 ];
 
-const WAIT_STATUSES: [ProcessStatus; 5] = [
+const WAIT_STATUSES: [ProcessStatus; 7] = [
     ProcessStatus::Wait,
     ProcessStatus::Pending,
     ProcessStatus::Nba,
     ProcessStatus::Done,
     ProcessStatus::Finish,
+    ProcessStatus::HostRequest,
+    ProcessStatus::Yield,
 ];
 
 /// The statuses of a kernel that both waits and delays.
-const MIXED_STATUSES: [ProcessStatus; 7] = [
+const MIXED_STATUSES: [ProcessStatus; 9] = [
     ProcessStatus::Wait,
     ProcessStatus::Pending,
     ProcessStatus::Nba,
@@ -92,11 +97,42 @@ const MIXED_STATUSES: [ProcessStatus; 7] = [
     ProcessStatus::InactiveDelay,
     ProcessStatus::Done,
     ProcessStatus::Finish,
+    ProcessStatus::HostRequest,
+    ProcessStatus::Yield,
 ];
 
 /// The most distinct edges one kernel waits for: those the edge index of a
 /// baseline byte holds.
 const MAX_TERMS: usize = 1 << (SCHEDULER_FLAG_WIDTH - BASELINE_TERM_SHIFT as usize);
+
+/// The normal C ABI supplies native file writes without suspending into the
+/// host scheduler. Register the symbol only for native-target compilation.
+pub(crate) fn enable_native_services(program: &mut LaidOutProgram) {
+    let schema = &mut program.runtime.runtime_schema;
+    let name = crate::simulator::native_io::SYMBOL;
+    let needs_service = !schema.processes.is_empty()
+        || schema
+            .host_request_sites
+            .iter()
+            .any(crate::simulator::native_io::supported)
+        || schema
+            .processes
+            .iter()
+            .zip(&program.sir.processes)
+            .any(|(slots, unit)| returns_status(unit, slots.status, ProcessStatus::Yield));
+    if !needs_service
+        || schema
+            .extern_functions
+            .iter()
+            .any(|function| function.name == name)
+    {
+        return;
+    }
+    schema.extern_functions.push(celox_design::ExternFunction {
+        name: name.into(),
+        signature: crate::simulator::native_io::signature(),
+    });
+}
 
 /// Generate the compiled scheduler of `program`, if it qualifies, and record
 /// for every process kernel whether the scheduler runs it.
@@ -272,6 +308,11 @@ struct Plan {
     fallback: Vec<Option<String>>,
     /// Runtime event sites that record a `$finish`.
     finish_sites: HashSet<u32>,
+    service_function: Option<u32>,
+    service_processes: HashSet<usize>,
+    nba_processes: HashSet<usize>,
+    /// Native fixed-point work lists need runtime bounds, not a DAG restriction.
+    cyclic: bool,
     /// The storage combinational logic reads, when a settle whose inputs did
     /// not change may be skipped; `None` when every settle runs.
     settle_reads: Option<HashSet<AbsoluteAddr>>,
@@ -489,6 +530,13 @@ impl Plan {
             .take(schema.processes.len())
             .map(stores)
             .collect();
+        let control_slots: HashSet<_> = schema
+            .processes
+            .iter()
+            .flat_map(|process| process.iter())
+            .copied()
+            .map(storage)
+            .collect();
         let waited: HashSet<AbsoluteAddr> = model.waited.iter().map(|s| storage(*s)).collect();
         // Storage whose changes bump an occurrence counter: the reference
         // counts the nonblocking updates it publishes into it, which the
@@ -617,6 +665,58 @@ impl Plan {
             ));
         }
 
+        let service_function = schema
+            .extern_functions
+            .iter()
+            .position(|function| function.name == crate::simulator::native_io::SYMBOL)
+            .and_then(|index| u32::try_from(index).ok());
+        let nba_processes: HashSet<usize> = model
+            .processes
+            .iter()
+            .enumerate()
+            .filter(|(_, process)| {
+                service_function.is_some()
+                    && !process.nbas.is_empty()
+                    && process.nbas.iter().all(|site| {
+                        let target = storage(site.target);
+                        site.delay == 0
+                            && site.position.is_none()
+                            && !program.layout().unpacked_arrays.contains_key(&site.target)
+                            && !event_storage.contains_key(&target)
+                            && !probed.contains(&target)
+                            && !rtl_stores.contains(&target)
+                            && !kernel_stores.iter().any(|stores| stores.contains(&target))
+                    })
+            })
+            .map(|(index, _)| index)
+            .collect();
+        let yielding: HashSet<usize> = schema
+            .processes
+            .iter()
+            .zip(&sir.processes)
+            .enumerate()
+            .filter(|(_, (slots, unit))| returns_status(unit, slots.status, ProcessStatus::Yield))
+            .map(|(index, _)| index)
+            .collect();
+        let service_processes: HashSet<usize> = model
+            .processes
+            .iter()
+            .enumerate()
+            .filter(|(index, process)| {
+                service_function.is_some()
+                    && (!process.host_requests.is_empty()
+                        || yielding.contains(index)
+                        || nba_processes.contains(index))
+                    && process.host_requests.iter().all(|site| {
+                        crate::simulator::native_io::supported(site)
+                            && site
+                                .args
+                                .iter()
+                                .all(|arg| !program.layout().unpacked_arrays.contains_key(&arg.id))
+                    })
+            })
+            .map(|(index, _)| index)
+            .collect();
         let mut kernels: Vec<Option<Kernel>> = Vec::with_capacity(schema.processes.len());
         let mut fallback = Vec::with_capacity(schema.processes.len());
         // Kernels that only delay first: the signals they write are those a
@@ -634,10 +734,16 @@ impl Plan {
                 Some("the process has dynamic activation frames")
             } else if slots.program.is_some() {
                 Some("a program process runs in the reactive region set")
-            } else if slots.requires_timed_simulation {
+            } else if returns_status(unit, slots.status, ProcessStatus::DeferActive) {
+                Some("the process defers rearming until other Active work runs")
+            } else if slots.requires_timed_simulation && !service_processes.contains(&index) {
                 Some("an edge procedure")
-            } else if !process.host_requests.is_empty() {
+            } else if !process.host_requests.is_empty() && !service_processes.contains(&index) {
                 Some("the process makes host requests")
+            } else if service_processes.contains(&index) && !written(unit).is_empty() {
+                Some("a synchronous host-service process drives an event signal")
+            } else if yielding.contains(&index) && !service_processes.contains(&index) {
+                Some("a loop checkpoint requires native services")
             } else if !process.waits.is_empty() {
                 None
             } else if !slots.const_delays {
@@ -689,19 +795,7 @@ impl Plan {
             .filter(|(kernel, _)| kernel.is_none())
             .flat_map(|(_, stores)| stores.iter().copied())
             .collect();
-        let active_stores: HashSet<AbsoluteAddr> = active_commits
-            .iter()
-            .flat_map(|&index| events[index].eval_only.iter().flatten())
-            .flat_map(instructions)
-            .filter_map(|inst| match inst {
-                SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..)
-                    if target.region == STABLE_REGION =>
-                {
-                    Some(storage(target.absolute_addr()))
-                }
-                _ => None,
-            })
-            .collect();
+
         let opaque_dependencies = rtl_units()
             .chain(
                 sir.processes
@@ -801,6 +895,12 @@ impl Plan {
                 if delays
                     && (!slots.const_delays || !statuses_only(unit, slots.status, &MIXED_STATUSES))
                 {
+                    tracing::debug!(target: "celox::scheduler", process = index,
+                        status_definitions = ?instructions(unit).filter_map(|inst| match inst {
+                            SIRInstruction::Store(target, _, _, value, ..) if *target == stable(slots.status) =>
+                                Some((*value, instructions(unit).find(|definition| definition.defined_register() == Some(*value)))),
+                            _ => None,
+                        }).collect::<Vec<_>>(), "unsupported native wait statuses");
                     return Err("the process suspends other than for an edge or a delay");
                 }
                 let writes = &kernel_stores[index];
@@ -808,57 +908,49 @@ impl Plan {
                     return Err("the process drives an event signal");
                 }
                 reactive |= writes.iter().any(|store| waited.contains(store));
-                if reactive && !process.nbas.is_empty() {
+                if reactive && !process.nbas.is_empty() && !nba_processes.contains(&index) {
                     return Err("a reactive wait stages nonblocking assignments");
-                }
-                if reactive && !active_stores.is_empty() {
-                    let signals = terms.iter().map(|&(signal, _)| signal);
-                    let cone = wait_slicer
-                        .as_ref()
-                        .map(|slicer| slicer.slice(signals.clone()))
-                        .unwrap_or_default();
-                    if signals
-                        .chain(cone.iter().flat_map(loads))
-                        .any(|signal| active_stores.contains(&storage(signal)))
-                    {
-                        return Err("a reactive wait observes Active-region domain updates");
-                    }
                 }
                 if reactive && opaque_dependencies {
                     return Err("a reactive wait has opaque dependencies");
                 }
-                if raw.is_some() && !process.nbas.is_empty() {
+                if raw.is_some() && !process.nbas.is_empty() && !nba_processes.contains(&index) {
                     return Err("a raw-expression wait stages nonblocking assignments");
                 }
-                let sites = process
-                    .nbas
-                    .iter()
-                    .map(|site| {
-                        let target = storage(site.target);
-                        let pending = site.pending.ok_or("a nonblocking site queues its values")?;
-                        // A position computed at run time, or an element of
-                        // an unpacked array, which the runtime merges through
-                        // the array's layout, needs the runtime's publication.
-                        if site.position.is_some()
-                            || program.layout().unpacked_arrays.contains_key(&site.target)
-                            || nba_targets.get(&target) != Some(&1)
-                            || rtl_stores.contains(&target)
-                            || kernel_stores.iter().any(|stores| stores.contains(&target))
-                            || waited.contains(&target)
-                            || probed.contains(&target)
-                            || event_storage.contains_key(&target)
-                        {
-                            return Err("a nonblocking target has other writers or observers");
-                        }
-                        Ok(Staged {
-                            pending,
-                            value: site.value,
-                            target: site.target,
-                            lsb: site.lsb,
-                            width: site.width,
+                let sites = if nba_processes.contains(&index) {
+                    Vec::new()
+                } else {
+                    process
+                        .nbas
+                        .iter()
+                        .map(|site| {
+                            let target = storage(site.target);
+                            let pending =
+                                site.pending.ok_or("a nonblocking site queues its values")?;
+                            // A position computed at run time, or an element of
+                            // an unpacked array, which the runtime merges through
+                            // the array's layout, needs the runtime's publication.
+                            if site.position.is_some()
+                                || program.layout().unpacked_arrays.contains_key(&site.target)
+                                || nba_targets.get(&target) != Some(&1)
+                                || rtl_stores.contains(&target)
+                                || kernel_stores.iter().any(|stores| stores.contains(&target))
+                                || waited.contains(&target)
+                                || probed.contains(&target)
+                                || event_storage.contains_key(&target)
+                            {
+                                return Err("a nonblocking target has other writers or observers");
+                            }
+                            Ok(Staged {
+                                pending,
+                                value: site.value,
+                                target: site.target,
+                                lsb: site.lsb,
+                                width: site.width,
+                            })
                         })
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
+                        .collect::<Result<Vec<_>, _>>()?
+                };
                 if sites.len() > 1 << SITE_BITS {
                     return Err("the process has too many nonblocking sites");
                 }
@@ -896,8 +988,8 @@ impl Plan {
                 Err(reason) => fallback[index] = Some(reason.to_string()),
             }
         }
-        // Acyclic dependencies bound the number of process passes in one
-        // slot. Include combinational cones: writing an input of a waited
+        // Find feedback that needs the native work-list bounds. Include
+        // combinational cones: writing an input of a waited
         // expression can wake its consumer after the settle, even when no
         // kernel stores the expression itself.
         let dependencies: Vec<(HashSet<AbsoluteAddr>, HashSet<AbsoluteAddr>)> = kernels
@@ -911,7 +1003,12 @@ impl Plan {
                     .as_ref()
                     .map(|slicer| slicer.slice(signals.clone()))
                     .unwrap_or_default();
-                let comb: HashSet<_> = cone.iter().flat_map(loads).map(storage).collect();
+                let comb: HashSet<_> = cone
+                    .iter()
+                    .flat_map(loads)
+                    .map(storage)
+                    .filter(|input| !control_slots.contains(input))
+                    .collect();
                 let all = signals.map(storage).chain(comb.iter().copied()).collect();
                 (all, comb)
             })
@@ -947,11 +1044,14 @@ impl Plan {
                 remaining.remove(&root);
             }
         }
+        let cyclic =
+            service_function.is_some() && (!remaining.is_empty() || !nba_processes.is_empty());
         for index in remaining {
-            if kernels[index]
-                .as_ref()
-                .and_then(|kernel| kernel.wait.as_ref())
-                .is_some_and(|wait| wait.reactive)
+            if !cyclic
+                && kernels[index]
+                    .as_ref()
+                    .and_then(|kernel| kernel.wait.as_ref())
+                    .is_some_and(|wait| wait.reactive)
             {
                 kernels[index] = None;
                 fallback[index] = Some("reactive waits have cyclic dependencies".into());
@@ -1145,6 +1245,10 @@ impl Plan {
             clocks,
             fallback,
             finish_sites,
+            service_function,
+            service_processes,
+            nba_processes,
+            cyclic,
             settle_reads,
             lazy,
             derived: Vec::new(),
@@ -1403,15 +1507,6 @@ impl Plan {
             // The domains of a slot evaluate in waves until none triggers
             // (see `Generator::batch`), which these the reference loop
             // runs otherwise keep out of.
-            if plan
-                .kernels
-                .iter()
-                .flatten()
-                .filter_map(|kernel| kernel.wait.as_ref())
-                .any(|wait| !wait.sites.is_empty())
-            {
-                return Err("a design with derived clocks stages nonblocking assignments".into());
-            }
             // A gated clock is judged at the settle after its source changes,
             // before a kernel the change wakes runs in another pass; what that
             // kernel writes moves the clock only for the waves after the
@@ -1429,6 +1524,9 @@ impl Plan {
                             |inputs| inputs.iter().copied().map(storage).collect(),
                         )
                     })
+                    // Startup guards read the private process-control slots;
+                    // they are scheduling state, not HDL clock-gate inputs.
+                    .filter(|input| !control_slots.contains(input))
                     .collect();
                 let feeds_gates = plan.kernels.iter().enumerate().any(|(index, kernel)| {
                     kernel.as_ref().is_some_and(|kernel| kernel.wait.is_some())
@@ -1437,6 +1535,14 @@ impl Plan {
                             .any(|store| gate_inputs.contains(store))
                 });
                 if feeds_gates {
+                    tracing::debug!(target: "celox::scheduler",
+                        writers = ?plan.kernels.iter().enumerate().filter_map(|(index,kernel)| {
+                            kernel.as_ref()?.wait.as_ref()?;
+                            let writes: Vec<_> = kernel_stores[index].intersection(&gate_inputs).map(|address| program.get_path(address)).collect();
+                            (!writes.is_empty()).then_some((index, writes))
+                        }).collect::<Vec<_>>(),
+                        unknown_cones = ?topology.combinational_derived.values().flatten().filter(|clock| clock.inputs.is_none()).map(|clock| program.get_path(&clock.clock)).collect::<Vec<_>>(),
+                        "native waits feeding clock gates");
                     return Err(
                         "a waiting kernel writes what combinational logic of a gated clock reads"
                             .into(),
@@ -1520,8 +1626,10 @@ impl Plan {
             event_bits: self.event_bits,
             event_batch: {
                 let capacity = program.layout().runtime_event_capacity;
-                (capacity > 0 && !schema.runtime_event_sites.is_empty())
-                    .then_some((capacity / 8).max(1) as u64)
+                (capacity > 0
+                    && (!schema.runtime_event_sites.is_empty()
+                        || !self.service_processes.is_empty()))
+                .then_some((capacity / 8).max(1) as u64)
             },
         };
         let waits: Vec<(usize, &Wait)> = self
@@ -1636,8 +1744,18 @@ impl Plan {
             g.settle_then(limit_exit);
         }
 
+        let internal_exit = g.exit_block(SchedulerExit::Internal);
         // The kernels due now are ready.
         g.b.switch_to_block(run);
+        if !self.service_processes.is_empty() {
+            g.service_call(
+                self.service_function.expect("native host services"),
+                u64::MAX,
+                crate::simulator::native_io::PROCESS_PHASE,
+                time,
+                internal_exit,
+            );
+        }
         let mut ready = g.constant(0, MAX_KERNELS);
         for &(index, status) in &delays {
             let wake = g.load(slots.wake[index], SCHEDULER_TIME_WIDTH);
@@ -1687,6 +1805,13 @@ impl Plan {
             }
         }
         g.store(slots.now, SCHEDULER_TIME_WIDTH, time);
+        let fresh = g.constant(0, SCHEDULER_FLAG_WIDTH);
+        g.store_at(
+            slots.defer_limit_settle,
+            celox_design::SCHEDULER_ACTIVE_RESUME_BIT,
+            SCHEDULER_FLAG_WIDTH,
+            fresh,
+        );
         let count = g.load(slots.count, SCHEDULER_TIME_WIDTH);
         let one = g.constant(1, SCHEDULER_TIME_WIDTH);
         let count = g.binary(SCHEDULER_TIME_WIDTH, count, BinaryOp::Add, one);
@@ -1717,7 +1842,6 @@ impl Plan {
         let zero = g.constant(0, self.event_bits);
         g.store(slots.exit_arg, self.event_bits, zero);
         let finish_exit = g.exit_block(SchedulerExit::Finish);
-        let internal_exit = g.exit_block(SchedulerExit::Internal);
         let pick = g.b.new_block();
         if let Some((armed, clocked)) = started {
             let apply = g.b.new_block();
@@ -1852,17 +1976,110 @@ impl Plan {
             g.store(slots.ready, SCHEDULER_TIME_WIDTH, ready);
             let current = g.constant(index as u64, SCHEDULER_TIME_WIDTH);
             g.store(slots.current, SCHEDULER_TIME_WIDTH, current);
+            if self.cyclic {
+                g.service_call(
+                    self.service_function.expect("native work-list services"),
+                    index as u64,
+                    crate::simulator::native_io::SCHEDULER_RUN,
+                    time,
+                    internal_exit,
+                );
+            }
             let before: Vec<_> = kernel
                 .writes
                 .iter()
                 .map(|&event| g.level(&self.events[event]))
                 .collect();
-            let enter = g.b.new_block();
-            g.b.seal_block(SIRTerminator::Jump(enter, Vec::new()));
+            let first_host = self
+                .service_processes
+                .contains(&index)
+                .then(|| g.b.alloc_bit(64, false));
+            let enter = match first_host {
+                Some(first) => g.b.new_block_with(vec![first]),
+                None => g.b.new_block(),
+            };
+            let enter_args = first_host
+                .map(|_| vec![g.constant(1, 64)])
+                .unwrap_or_default();
+            g.b.seal_block(SIRTerminator::Jump(enter, enter_args));
             g.b.switch_to_block(enter);
             g.inline_writer(&program.sir.processes[index], finish_exit);
             let status = g.load(process.status, celox_design::PROCESS_STATUS_WIDTH);
             let code = |status: ProcessStatus| u64::from(status.code());
+            if self.service_processes.contains(&index) {
+                let host = g.equals(status, code(ProcessStatus::HostRequest));
+                let yielded = yielding_status(&program.sir.processes[index], process.status)
+                    .then(|| g.equals(status, code(ProcessStatus::Yield)));
+                let mut service =
+                    yielded.map_or(host, |yielded| g.binary(1, host, BinaryOp::Or, yielded));
+                let nba = self
+                    .nba_processes
+                    .contains(&index)
+                    .then(|| g.equals(status, code(ProcessStatus::Nba)));
+                if let Some(nba) = nba {
+                    service = g.binary(1, service, BinaryOp::Or, nba);
+                }
+                let call = g.b.new_block();
+                let returned = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: service,
+                    true_block: (call, Vec::new()),
+                    false_block: (returned, Vec::new()),
+                });
+                g.b.switch_to_block(call);
+                let current = g.constant(index as u64, 64);
+                let request = g.load(process.delay, celox_design::PROCESS_DELAY_WIDTH);
+                let request = if let Some(yielded) = yielded {
+                    let checkpoint = g.constant(crate::simulator::native_io::CHECKPOINT, 64);
+                    let selected = g.b.alloc_bit(64, false);
+                    g.b.emit(SIRInstruction::Mux(selected, yielded, checkpoint, request));
+                    selected
+                } else {
+                    request
+                };
+                let request = if let Some(nba) = nba {
+                    let prefix = g.constant(crate::simulator::native_io::NBA_REQUEST, 64);
+                    let encoded = g.binary(64, request, BinaryOp::Or, prefix);
+                    let selected = g.b.alloc_bit(64, false);
+                    g.b.emit(SIRInstruction::Mux(selected, nba, encoded, request));
+                    selected
+                } else {
+                    request
+                };
+                let result = g.b.alloc_bit(64, false);
+                let context = g.load_at(
+                    slots.defer_limit_settle,
+                    celox_design::SCHEDULER_HOST_CONTEXT_BIT,
+                    64,
+                );
+                g.b.emit(SIRInstruction::ExternCall {
+                    dst: Some(result),
+                    func: self.service_function.expect("qualified native host call"),
+                    args: vec![
+                        context,
+                        current,
+                        request,
+                        time,
+                        first_host.expect("a native host continuation"),
+                    ],
+                });
+                let ok = g.equals(result, 0);
+                let resume = g.b.new_block();
+                g.b.seal_block(SIRTerminator::Branch {
+                    cond: ok,
+                    true_block: (resume, Vec::new()),
+                    false_block: (internal_exit, Vec::new()),
+                });
+                g.b.switch_to_block(resume);
+                // The reference observes the writes on either side of a host
+                // request before continuing the same process. A direct call
+                // keeps that boundary without leaving the native scheduler.
+                g.check_waits(&checks);
+                let resumed = g.constant(0, 64);
+                g.b.seal_block(SIRTerminator::Jump(enter, vec![resumed]));
+                g.b.switch_to_block(returned);
+            }
+
             let finished = g.equals(status, code(ProcessStatus::Finish));
             let not_finished = g.b.new_block();
             g.b.seal_block(SIRTerminator::Branch {
@@ -1984,6 +2201,15 @@ impl Plan {
         // combinational logic. A deferred settle after a pass runs for the
         // kernels that may run in another.
         g.b.switch_to_block(pass_end);
+        if self.cyclic {
+            g.service_call(
+                self.service_function.expect("native work-list services"),
+                u64::MAX,
+                crate::simulator::native_io::SCHEDULER_PASS,
+                time,
+                internal_exit,
+            );
+        }
         let none = g.constant(u64::MAX, SCHEDULER_TIME_WIDTH);
         g.store(slots.current, SCHEDULER_TIME_WIDTH, none);
         let settled = g.b.new_block();
@@ -2005,6 +2231,8 @@ impl Plan {
         let zero = g.constant(0, MAX_KERNELS);
         let more = g.binary(1, ready, BinaryOp::Ne, zero);
         let domains = g.b.new_block();
+        let resume_domains = (!self.active.is_empty()).then(|| g.b.new_block());
+        let route_domains = resume_domains.map(|_| g.b.new_block()).unwrap_or(domains);
         let another = if wait_observers {
             g.b.new_block()
         } else {
@@ -2013,8 +2241,21 @@ impl Plan {
         g.b.seal_block(SIRTerminator::Branch {
             cond: more,
             true_block: (another, Vec::new()),
-            false_block: (domains, Vec::new()),
+            false_block: (route_domains, Vec::new()),
         });
+        if let Some(resume) = resume_domains {
+            g.b.switch_to_block(route_domains);
+            let pending = g.load_at(
+                slots.defer_limit_settle,
+                celox_design::SCHEDULER_ACTIVE_RESUME_BIT,
+                SCHEDULER_FLAG_WIDTH,
+            );
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: pending,
+                true_block: (resume, Vec::new()),
+                false_block: (domains, Vec::new()),
+            });
+        }
         if wait_observers {
             g.b.switch_to_block(another);
             g.settle_then(pick);
@@ -2023,7 +2264,15 @@ impl Plan {
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
         if !self.active.is_empty() {
-            self.batch_active(&mut g, &tracked, slot_end, finish_exit, &checks);
+            self.batch_active(
+                &mut g,
+                &tracked,
+                slot_end,
+                finish_exit,
+                &checks,
+                pick,
+                resume_domains.expect("active resume block"),
+            );
         } else if !self.derived.is_empty() {
             self.batch(&mut g, &tracked, slot_end, finish_exit, &checks);
         } else {
@@ -2043,16 +2292,26 @@ impl Plan {
             g.b.switch_to_block(untriggered);
             if let Some(lazy) = &self.lazy {
                 g.publish(&staged);
+                g.publish_service(
+                    self.service_function
+                        .filter(|_| !self.nba_processes.is_empty()),
+                    &checks,
+                );
                 g.eager_then(&lazy.eager, slot_end);
-            } else if staged.is_empty() {
+            } else if staged.is_empty() && self.nba_processes.is_empty() {
                 g.b.seal_block(SIRTerminator::Jump(slot_end, Vec::new()));
             } else {
-                let mut any = g.constant(0, 1);
+                let mut any = g.constant(u64::from(!self.nba_processes.is_empty()), 1);
                 for site in &staged {
                     let pending = g.load(site.pending, 1);
                     any = g.binary(1, any, BinaryOp::Or, pending);
                 }
                 g.publish(&staged);
+                g.publish_service(
+                    self.service_function
+                        .filter(|_| !self.nba_processes.is_empty()),
+                    &checks,
+                );
                 let publish_settle = g.b.new_block();
                 g.b.seal_block(SIRTerminator::Branch {
                     cond: any,
@@ -2183,6 +2442,11 @@ impl Plan {
             // combinational logic settles.
             g.b.switch_to_block(evaluated);
             g.publish(&staged);
+            g.publish_service(
+                self.service_function
+                    .filter(|_| !self.nba_processes.is_empty()),
+                &checks,
+            );
             match &self.lazy {
                 Some(lazy) => g.eager_then(&lazy.eager, slot_end),
                 None => g.settle_then(slot_end),
@@ -2290,6 +2554,15 @@ impl Plan {
                 false_block: (drained, Vec::new()),
             });
             g.b.switch_to_block(resume);
+            if !self.service_processes.is_empty() {
+                g.service_call(
+                    self.service_function.expect("native host services"),
+                    u64::MAX,
+                    crate::simulator::native_io::PROCESS_PHASE,
+                    time,
+                    internal_exit,
+                );
+            }
             let mut levels = g.no_levels();
             for (bit, &event) in tracked.iter().enumerate() {
                 let level = g.level(&self.events[event]);
@@ -2347,11 +2620,12 @@ impl Plan {
         slot_end: celox_sir::BlockId,
         finish_exit: celox_sir::BlockId,
         checks: &[WaitCheck<'_>],
+        pick: celox_sir::BlockId,
+        wave: celox_sir::BlockId,
     ) {
         let slots = g.slots;
         let empty = g.constant(0, self.event_bits);
         g.store_at(slots.exit_arg, self.event_bits, self.event_bits, empty);
-        let wave = g.b.new_block();
         let flush = g.b.new_block();
         let mask = g.b.alloc_bit(self.event_bits, false);
         let fire = g.b.new_block_with(vec![mask]);
@@ -2420,6 +2694,30 @@ impl Plan {
             // Match the reference round: remember the occurrence at this
             // settle and drain its ready processes after the domain waves.
             g.check_waits(checks);
+            let ready = g.load(slots.ready, MAX_KERNELS);
+            let pending = g.load_at(slots.exit_arg, self.event_bits, self.event_bits);
+            let zero = g.constant(0, self.event_bits);
+            let before_nba = g.binary(1, pending, BinaryOp::Ne, zero);
+            let zero = g.constant(0, MAX_KERNELS);
+            let ready = g.binary(1, ready, BinaryOp::Ne, zero);
+            let resume = g.binary(1, before_nba, BinaryOp::And, ready);
+            let drain = g.b.new_block();
+            let next = g.b.new_block();
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: resume,
+                true_block: (drain, Vec::new()),
+                false_block: (next, Vec::new()),
+            });
+            g.b.switch_to_block(drain);
+            let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
+            g.store_at(
+                slots.defer_limit_settle,
+                celox_design::SCHEDULER_ACTIVE_RESUME_BIT,
+                SCHEDULER_FLAG_WIDTH,
+                flag,
+            );
+            g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
+            g.b.switch_to_block(next);
         }
 
         let fired = g.load(slots.exit_arg, self.event_bits);
@@ -2490,6 +2788,13 @@ impl Plan {
         // No Active work remains: publish the deferred NBA results, then
         // judge the edges that those updates cause in another wave.
         g.b.switch_to_block(flush);
+        let flag = g.constant(0, SCHEDULER_FLAG_WIDTH);
+        g.store_at(
+            slots.defer_limit_settle,
+            celox_design::SCHEDULER_ACTIVE_RESUME_BIT,
+            SCHEDULER_FLAG_WIDTH,
+            flag,
+        );
         let pending = g.load_at(slots.exit_arg, self.event_bits, self.event_bits);
         for &index in tracked {
             g.if_bit(pending, index, |g| {
@@ -2510,6 +2815,11 @@ impl Plan {
             .flat_map(|wait| &wait.sites)
             .collect();
         g.publish(&staged);
+        g.publish_service(
+            self.service_function
+                .filter(|_| !self.nba_processes.is_empty()),
+            checks,
+        );
         let empty = g.constant(0, self.event_bits);
         g.store_at(slots.exit_arg, self.event_bits, self.event_bits, empty);
         g.settle_then(wave);
@@ -2571,11 +2881,27 @@ impl Plan {
         g.store(slots.exit_arg, self.event_bits, triggers);
         let quiet = g.binary(1, triggers, BinaryOp::Eq, zero);
         let first = g.b.new_block();
+        let flush_only = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
             cond: quiet,
-            true_block: (slot_end, Vec::new()),
+            true_block: (flush_only, Vec::new()),
             false_block: (first, Vec::new()),
         });
+        g.b.switch_to_block(flush_only);
+        let staged: Vec<&Staged> = self
+            .kernels
+            .iter()
+            .flatten()
+            .filter_map(|kernel| kernel.wait.as_ref())
+            .flat_map(|wait| &wait.sites)
+            .collect();
+        g.publish(&staged);
+        g.publish_service(
+            self.service_function
+                .filter(|_| !self.nba_processes.is_empty()),
+            checks,
+        );
+        g.settle_then(wave);
         g.b.switch_to_block(first);
         g.b.seal_block(SIRTerminator::Jump(fire, vec![triggers]));
 
@@ -2675,6 +3001,12 @@ impl Plan {
         }
         g.b.seal_block(SIRTerminator::Jump(committed, Vec::new()));
         g.b.switch_to_block(committed);
+        g.publish(&staged);
+        g.publish_service(
+            self.service_function
+                .filter(|_| !self.nba_processes.is_empty()),
+            checks,
+        );
         g.settle_then(wave);
     }
 
@@ -2780,6 +3112,84 @@ impl Generator<'_> {
         let register = self.b.alloc_bit(width, false);
         self.b.emit(SIRInstruction::Binary(register, lhs, op, rhs));
         register
+    }
+
+    fn publish_service(&mut self, function: Option<u32>, checks: &[WaitCheck<'_>]) {
+        let Some(function) = function else {
+            return;
+        };
+        let again = self.b.new_block();
+        let done = self.b.new_block();
+        let changed = self.b.new_block();
+        let failed = self.exit_block(SchedulerExit::Internal);
+        self.b.seal_block(SIRTerminator::Jump(again, Vec::new()));
+        self.b.switch_to_block(again);
+        let context = self.load_at(
+            self.slots.defer_limit_settle,
+            celox_design::SCHEDULER_HOST_CONTEXT_BIT,
+            64,
+        );
+        let process = self.constant(u64::MAX, 64);
+        let request = self.constant(crate::simulator::native_io::NBA_PUBLISH, 64);
+        let time = self.load(self.slots.now, 64);
+        let first = self.constant(0, 64);
+        let result = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::ExternCall {
+            dst: Some(result),
+            func: function,
+            args: vec![context, process, request, time, first],
+        });
+        let ok = self.equals(result, 0);
+        let next = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: ok,
+            true_block: (done, Vec::new()),
+            false_block: (next, Vec::new()),
+        });
+        self.b.switch_to_block(next);
+        let update = self.equals(result, 2);
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: update,
+            true_block: (changed, Vec::new()),
+            false_block: (failed, Vec::new()),
+        });
+        self.b.switch_to_block(changed);
+        self.mark_dirty();
+        self.check_waits(checks);
+        self.b.seal_block(SIRTerminator::Jump(again, Vec::new()));
+        self.b.switch_to_block(done);
+    }
+
+    fn service_call(
+        &mut self,
+        function: u32,
+        process: u64,
+        request: u64,
+        time: RegisterId,
+        failed: celox_sir::BlockId,
+    ) {
+        let context = self.load_at(
+            self.slots.defer_limit_settle,
+            celox_design::SCHEDULER_HOST_CONTEXT_BIT,
+            64,
+        );
+        let process = self.constant(process, 64);
+        let request = self.constant(request, 64);
+        let first = self.constant(0, 64);
+        let result = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::ExternCall {
+            dst: Some(result),
+            func: function,
+            args: vec![context, process, request, time, first],
+        });
+        let ok = self.equals(result, 0);
+        let next = self.b.new_block();
+        self.b.seal_block(SIRTerminator::Branch {
+            cond: ok,
+            true_block: (next, Vec::new()),
+            false_block: (failed, Vec::new()),
+        });
+        self.b.switch_to_block(next);
     }
 
     fn equals(&mut self, value: RegisterId, constant: u64) -> RegisterId {
@@ -3998,6 +4408,25 @@ fn stable(address: AbsoluteAddr) -> RegionedAbsoluteAddr {
 
 fn instructions(unit: &Unit) -> impl Iterator<Item = &SIRInstruction<RegionedAbsoluteAddr>> {
     unit.blocks.values().flat_map(|block| &block.instructions)
+}
+
+fn yielding_status(unit: &Unit, status: AbsoluteAddr) -> bool {
+    returns_status(unit, status, ProcessStatus::Yield)
+}
+
+fn returns_status(unit: &Unit, status: AbsoluteAddr, wanted: ProcessStatus) -> bool {
+    let constants: HashMap<RegisterId, u64> = instructions(unit)
+        .filter_map(|inst| match inst {
+            SIRInstruction::Imm(register, value) => u64::try_from(&value.payload)
+                .ok()
+                .map(|value| (*register, value)),
+            _ => None,
+        })
+        .collect();
+    instructions(unit).any(|inst| matches!(inst,
+        SIRInstruction::Store(target, SIROffset::Static(0), _, value, ..)
+            if *target == stable(status) && constants.get(value) == Some(&u64::from(wanted.code()))
+    ))
 }
 
 /// Whether every status `unit` stores into `status` is a constant among

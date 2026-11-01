@@ -44,6 +44,7 @@ mod host {
     mod file_io;
     mod format;
     mod fread;
+    pub(crate) mod native_io;
     mod scan;
     mod system;
     use super::*;
@@ -136,6 +137,10 @@ mod host {
         pub(crate) testbench_hardware_ranges: std::sync::OnceLock<Vec<std::ops::Range<usize>>>,
         pub(crate) process_heap_roots: Vec<celox_heap::Root>,
         pub(super) file_io: celox_runtime::file_io::FileIo,
+        native_file_io: Option<Arc<native_io::Metadata>>,
+        pub(crate) native_host_return_budget: u64,
+        pub(crate) native_host_round_budget: u64,
+        pub(crate) native_nba_queue: std::collections::VecDeque<celox_runtime::NbaUpdate>,
         pending_host_events: Arc<std::sync::Mutex<PendingRuntimeEvents>>,
         pub(crate) program: RuntimeProgram,
         /// The program's scheduling facts.
@@ -1355,6 +1360,7 @@ mod host {
             }
             let runtime_event_handles =
                 sites_record_handles(&program.runtime_schema.runtime_event_sites);
+            let native_file_io = native_io::Metadata::new(&backend, &program);
             let mut sim = Self {
                 backend,
                 program,
@@ -1369,6 +1375,10 @@ mod host {
                 testbench_hardware_ranges: Default::default(),
                 process_heap_roots: Vec::new(),
                 file_io: Default::default(),
+                native_file_io,
+                native_host_return_budget: u64::MAX,
+                native_host_round_budget: u64::MAX,
+                native_nba_queue: Default::default(),
                 pending_host_events: Arc::new(std::sync::Mutex::new(PendingRuntimeEvents {
                     deferred: DeferredQueues {
                         sites: deferred_sites.clone(),
@@ -2579,7 +2589,41 @@ mod host {
 
         pub(crate) fn run_process_checked(&mut self, index: usize) -> Result<(), RuntimeErrorCode> {
             let start = self.runtime_event_write_seq();
-            let result = self.backend.run_process(index);
+            let scheduler = self
+                .program
+                .runtime_schema
+                .scheduler
+                .as_ref()
+                .and_then(|scheduler| scheduler.unit);
+            let generated = index >= self.program.runtime_schema.processes.len();
+            let result = if scheduler == Some(index) || generated {
+                if let Some(metadata) = &self.native_file_io {
+                    let (state, state_size) = self.backend.memory_as_ptr();
+                    let mut scope = native_io::Scope {
+                        metadata,
+                        state,
+                        state_size,
+                        files: &mut self.file_io,
+                        pending: &self.pending_host_events,
+                        read_seq: &self.runtime_event_read_seq,
+                        error: None,
+                        return_budget: self.native_host_return_budget,
+                        returns: 0,
+                        round_budget: self.native_host_round_budget,
+                        scheduler_time: None,
+                        passes: 0,
+                        run_returns: 0,
+                        nbas: &mut self.native_nba_queue,
+                        pending_scan: 0,
+                    };
+                    let (result, error) = scope.run(&mut self.backend, index);
+                    error.map_or(result, Err)
+                } else {
+                    self.backend.run_process(index)
+                }
+            } else {
+                self.backend.run_process(index)
+            };
             self.checked_kernel_result(result, start)
         }
 
@@ -4382,3 +4426,6 @@ pub(crate) fn message_diagnostic(bytes: &[u8]) -> String {
         Err(_) => bytes.escape_ascii().to_string(),
     }
 }
+
+#[cfg(feature = "host-runtime")]
+pub(crate) use host::native_io;

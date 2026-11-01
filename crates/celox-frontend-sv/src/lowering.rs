@@ -6380,12 +6380,24 @@ fn lower_initial_processes(
                 }
                 None => process.body(),
             };
-            let kernel = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
+            let startup_inactive = !four_state
+                && process.level_sensitive().is_some_and(|(_, body)| {
+                    body.iter()
+                        .all(|stmt| !stmt_may_suspend(module.subroutines(), stmt))
+                });
+            let mut kernel = ff::Ff::new(&mut pm, random_seed).lower_initial_kernel(
                 body,
                 slots,
                 index,
                 process.is_final(),
             )?;
+            if startup_inactive {
+                // This level-sensitive body contains no timing controls. Its
+                // synthetic #0 executes once at time zero in the reference
+                // loop, before any compiled slot can start. Every subsequent
+                // suspension is an event wait.
+                kernel.slots.const_delays = true;
+            }
             wait_sites.extend(kernel.wait_sites);
             nba_sites.extend(kernel.nba_sites);
             nba_switches.extend(kernel.nba_switches);
