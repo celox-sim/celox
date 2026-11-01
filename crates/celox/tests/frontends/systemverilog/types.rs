@@ -2,6 +2,8 @@ use super::*;
 
 sv_backends! {
     fn inline_enum_wider_expression_initializer(sim) { @case "types::inline_enum_wider_expression_initializer"; }
+    fn scalar_integral_type_casts(sim) { @case "types::scalar_integral_type_casts"; }
+    fn scalar_integral_type_casts_four_state(sim) { @case "types::scalar_integral_type_casts_four_state"; }
     fn inline_enum_wide_unknown_explicit_successor(sim) { @case "types::inline_enum_wide_unknown_explicit_successor"; }
     fn inline_enum_wide_unused(sim) { @case "types::inline_enum_wide_unused"; }
     fn inline_enum_wide_constants(sim) { @case "types::inline_enum_wide_constants"; }
