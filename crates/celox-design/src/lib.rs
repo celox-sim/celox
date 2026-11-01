@@ -1723,6 +1723,7 @@ pub struct EventTopology<A> {
 
 /// A clock computed combinationally from an event's signal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(deserialize = "A: Deserialize<'de>"))]
 pub struct CombDerivedClock<A> {
     /// The canonical derived clock.
     pub clock: A,
@@ -1730,6 +1731,13 @@ pub struct CombDerivedClock<A> {
     /// variables, when its combinational cone is small enough. It lets an
     /// event-based tick judge the edge without settling the design.
     pub gate: Option<Vec<GateOp<A>>>,
+    /// All storage in the transitive combinational cone, including its
+    /// output. Unlike `gate`, this also covers procedural definitions and
+    /// large expressions. Absent metadata cannot prove that a state update
+    /// leaves the clock unchanged. These compiler hints are not needed to
+    /// execute an image and do not change its serialized representation.
+    #[serde(skip)]
+    pub inputs: Option<Vec<A>>,
 }
 
 /// One step of a postfix program computing a derived clock from its source
