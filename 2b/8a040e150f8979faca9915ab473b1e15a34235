@@ -1,0 +1,1 @@
+An omitted foreach index of a string skips its dimension, so the body runs once (Codex P2)
