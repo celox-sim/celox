@@ -882,12 +882,29 @@ pub(in crate::ast) fn cast(
     ) else {
         return Ok(None);
     };
+    // A class property is cast to through a hidden handle, see
+    // `BodyBuilder::cast_to_property`, where its body can hold one.
+    if native_class(tree, session, destination, native, dimensions).is_some()
+        && property(tree, session, destination, native, dimensions)?.is_some()
+    {
+        return Err(unsupported("`$cast` to a class property"));
+    }
+    cast_to(tree, session, destination, source, native, dimensions)
+}
+
+/// The `$cast` of handle `source` to `destination`, a class handle of any
+/// kind of variable, element or property.
+pub(in crate::ast) fn cast_to(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    destination: ExprId,
+    source: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<Cast>> {
     let Some(target) = native_class(tree, session, destination, native, dimensions) else {
         return Ok(None);
     };
-    if property(tree, session, destination, native, dimensions)?.is_some() {
-        return Err(unsupported("`$cast` to a class property"));
-    }
     class(tree, session, dimensions, &target)?;
     // The source's class may be a base of the destination's, or an interface
     // class, whose object the call checks; any other class's cannot be

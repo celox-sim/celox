@@ -13,6 +13,12 @@
 //! condition runs its operators every time it is evaluated (see
 //! [`BodyBuilder::loop_condition`]). Other contexts that skip or repeat an
 //! operand keep rejecting it.
+//!
+//! A `$cast` to a class property runs the same way, as a cast to a hidden
+//! handle that the property takes when the cast succeeds (8.16). So does a
+//! `$cast` whose classes make it fail whatever its source's value, when
+//! evaluating the source may call a subroutine: the source is still
+//! evaluated.
 use super::*;
 use celox_sv_syntax::{Declarations, DimensionKind, ExprId, ExprKind};
 
@@ -124,8 +130,48 @@ fn operands(kind: &ExprKind) -> Vec<ExprId> {
     operands
 }
 
-/// The expressions of `roots` that hold an assignment, increment or decrement.
-fn updating(native: &Declarations, roots: &[ExprId]) -> HashSet<ExprId> {
+/// The destination and source of `$cast(destination, source)` call `id`.
+fn cast_operands(native: &Declarations, id: ExprId) -> Option<(ExprId, ExprId)> {
+    let ExprKind::Call {
+        expression,
+        arguments,
+    } = &native.expression(id).kind
+    else {
+        return None;
+    };
+    let ExprKind::Name(name) = &native.expression(*expression).kind else {
+        return None;
+    };
+    match arguments.as_slice() {
+        [destination, source]
+            if name.spelling == "$cast" && destination.name.is_none() && source.name.is_none() =>
+        {
+            Some((destination.value?, source.value?))
+        }
+        _ => None,
+    }
+}
+
+/// Whether `id` holds a call.
+fn calls(native: &Declarations, id: ExprId) -> bool {
+    let mut jobs = vec![id];
+    while let Some(id) = jobs.pop() {
+        let kind = &native.expression(id).kind;
+        if matches!(kind, ExprKind::Call { .. }) {
+            return true;
+        }
+        jobs.extend(operands(kind));
+    }
+    false
+}
+
+/// The expressions of `roots` that hold an assignment, increment or
+/// decrement, or a `$cast` that `hoists_cast`.
+fn updating(
+    native: &Declarations,
+    roots: &[ExprId],
+    hoists_cast: &mut dyn FnMut(ExprId) -> bool,
+) -> HashSet<ExprId> {
     let mut updating = HashSet::default();
     let mut jobs: Vec<(ExprId, bool)> = roots.iter().map(|id| (*id, false)).collect();
     let mut path = Vec::new();
@@ -136,6 +182,7 @@ fn updating(native: &Declarations, roots: &[ExprId]) -> HashSet<ExprId> {
         }
         if update(native, id).is_some()
             || matches!(native.expression(id).kind, ExprKind::Assignment { .. })
+            || hoists_cast(id)
         {
             updating.insert(id);
             updating.extend(path.iter().copied());
@@ -161,7 +208,9 @@ impl BodyBuilder<'_, '_, '_> {
     /// in that order, and return the statements that do.
     pub(super) fn effects(&mut self, roots: &[ExprId]) -> Converted<Vec<Stmt>> {
         let native = self.tree.declarations();
-        let updating = updating(native, roots);
+        let updating = updating(native, roots, &mut |id| {
+            matches!(self.hoisted_cast(id), Ok(Some(_)))
+        });
         let mut stmts = Vec::new();
         if updating.is_empty() {
             return Ok(stmts);
@@ -182,6 +231,11 @@ impl BodyBuilder<'_, '_, '_> {
             return Ok(());
         }
         let native = self.tree.declarations();
+        if let Some((destination, source)) = self.hoisted_cast(id)? {
+            self.effect(destination, updating, stmts)?;
+            self.effect(source, updating, stmts)?;
+            return self.cast_to_property(id, destination, source, stmts);
+        }
         if let Some((operand, postfix, increment)) = update(native, id) {
             self.effect(operand, updating, stmts)?;
             return self.update(id, operand, Some(postfix), increment, stmts);
@@ -271,6 +325,175 @@ impl BodyBuilder<'_, '_, '_> {
             }
             _ => return Err(unsupported_context()),
         }
+        Ok(())
+    }
+
+    /// The destination and source of `id` when it is a `$cast` that runs
+    /// as statements: one to a class property or an element of one (see
+    /// [`Self::property_cast`]), or one that fails whatever its source's
+    /// value while an operand calls a subroutine, whose call must still run.
+    fn hoisted_cast(&mut self, id: ExprId) -> Converted<Option<(ExprId, ExprId)>> {
+        if let Some(operands) = self.property_cast(id)? {
+            return Ok(Some(operands));
+        }
+        let native = self.tree.declarations();
+        let Some((destination, source)) = cast_operands(native, id) else {
+            return Ok(None);
+        };
+        if !calls(native, source) && !calls(native, destination) {
+            return Ok(None);
+        }
+        let cast = expression_binding::object_cast_to(
+            self.tree,
+            self.session,
+            destination,
+            source,
+            native,
+            &self.dims,
+        )?;
+        Ok(matches!(cast, Some(expression_binding::ObjectCast::Fails))
+            .then_some((destination, source)))
+    }
+
+    /// The destination and source of `id` when it is a `$cast` to a class
+    /// property or to an element of one, which is no variable that the
+    /// cast's subroutine could write (8.16).
+    fn property_cast(&mut self, id: ExprId) -> Converted<Option<(ExprId, ExprId)>> {
+        let native = self.tree.declarations();
+        let Some((destination, source)) = cast_operands(native, id) else {
+            return Ok(None);
+        };
+        if expression_binding::object_native_class(
+            self.tree,
+            self.session,
+            destination,
+            native,
+            &self.dims,
+        )
+        .is_none()
+        {
+            return Ok(None);
+        }
+        let mut root = destination;
+        loop {
+            if expression_binding::object_property(
+                self.tree,
+                self.session,
+                root,
+                native,
+                &self.dims,
+            )?
+            .is_some()
+            {
+                return Ok(Some((destination, source)));
+            }
+            match &native
+                .expression(expression_binding::ungroup(root, native))
+                .kind
+            {
+                ExprKind::Select { expression, .. } => root = *expression,
+                _ => return Ok(None),
+            }
+        }
+    }
+
+    /// `$cast(destination, source)` `id` to a class property or an element
+    /// of one: the cast is to a hidden handle, which the destination takes
+    /// only when the cast succeeds, as a failed cast leaves the destination
+    /// unchanged (8.16). `id` binds to whether it succeeded. A cast that
+    /// fails whatever the source's value only evaluates the source.
+    fn cast_to_property(
+        &mut self,
+        id: ExprId,
+        destination: ExprId,
+        source: ExprId,
+        stmts: &mut Vec<Stmt>,
+    ) -> Converted<()> {
+        let native = self.tree.declarations();
+        // The destination is evaluated whether or not the cast succeeds,
+        // but only written when it does.
+        if calls(native, destination) {
+            return Err(unsupported(
+                "`$cast` destination selected with a side effect",
+            ));
+        }
+        let (succeeded_source, succeeded) = self.hidden(int_type());
+        let cast = expression_binding::object_cast_to(
+            self.tree,
+            self.session,
+            destination,
+            source,
+            native,
+            &self.dims,
+        )?;
+        let Some(expression_binding::ObjectCast::Call { name, .. }) = cast else {
+            // The source is evaluated although the cast fails, into a
+            // hidden handle of its class, which a failing cast knows.
+            if calls(native, source)
+                && let Some(class) = expression_binding::object_native_class(
+                    self.tree,
+                    self.session,
+                    source,
+                    native,
+                    &self.dims,
+                )
+            {
+                let ty = classes::handle_type(self.tree, self.session, &class)
+                    .ok_or_else(|| unsupported(format!("class `{class}`")))?;
+                let (_, handle) = self.hidden(ty);
+                let mut value =
+                    expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+                self.rename_expr(&mut value);
+                stmts.push(Stmt::Assign {
+                    lhs: LValue::Ident(handle),
+                    rhs: value,
+                    nonblocking: false,
+                });
+            }
+            stmts.push(Stmt::Assign {
+                lhs: LValue::Ident(succeeded),
+                rhs: Expr::Literal("0".into()),
+                nonblocking: false,
+            });
+            self.bind_effect(id, Expr::Ident(succeeded_source));
+            return Ok(());
+        };
+        let target = expression_binding::object_native_class(
+            self.tree,
+            self.session,
+            destination,
+            native,
+            &self.dims,
+        )
+        .expect("checked by `property_cast`");
+        let ty = classes::handle_type(self.tree, self.session, &target)
+            .ok_or_else(|| unsupported(format!("class `{target}`")))?;
+        let (handle_source, _) = self.hidden(ty);
+        let value = expression_binding::value(source, native, self.tree, self.session, &self.dims)?;
+        let mut call = Expr::Call {
+            callee: Callee::Subroutine(name),
+            args: vec![Some(Expr::Ident(handle_source.clone())), Some(value)],
+            arg_order: Vec::new(),
+        };
+        self.rename_expr(&mut call);
+        stmts.push(Stmt::Assign {
+            lhs: LValue::Ident(succeeded),
+            rhs: call,
+            nonblocking: false,
+        });
+        // The destination is written as `destination = id`, with `id` bound
+        // to the handle for the write.
+        self.bind_effect(id, Expr::Ident(handle_source));
+        let mut write = Vec::new();
+        self.write_update(destination, id, &mut write)?;
+        let mut condition = Expr::Ident(succeeded_source.clone());
+        self.rename_expr(&mut condition);
+        stmts.push(Stmt::If {
+            condition,
+            then_body: write,
+            else_body: Vec::new(),
+        });
+        self.bind_effect(id, Expr::Ident(succeeded_source));
         Ok(())
     }
 
@@ -608,6 +831,18 @@ mod tests {
             (
                 "int a[4], i; initial case (i) i++: a[0] = 1; endcase",
                 "increment or decrement expression",
+            ),
+            (
+                "class D; endclass class K; D a[int]; endclass K k; D d; int n; \
+                 function int f(); n++; return n; endfunction \
+                 initial begin k = new; void'($cast(k.a[f()], d)); end",
+                "`$cast` destination selected with a side effect",
+            ),
+            (
+                "class D; endclass class R; endclass D a[4]; R r; int n; \
+                 function int f(); n++; return n; endfunction \
+                 initial void'($cast(a[f()], r));",
+                "`$cast` destination selected with a side effect",
             ),
             (
                 "int a[4], n; function int f(); n++; return n; endfunction initial a[f()]++;",
