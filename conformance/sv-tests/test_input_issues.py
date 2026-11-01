@@ -32,3 +32,17 @@ class InputIssueTests(unittest.TestCase):
                     self.assertFalse(adapter.known_missing_include(path, {"should_fail": "0"}))
                 with patch.object(adapter.subprocess, "check_output", return_value="different revision"):
                     self.assertFalse(adapter.known_missing_include(path, {"should_fail": "0"}))
+
+    def test_core_include_exception_is_exact_and_only_for_positive_tests(self):
+        issues = json.loads((HERE / "input-issues.json").read_text())
+        case = "generated/ariane/cva6_tb_cv64a6_imafdc_sv39.sv"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            env = {"TESTS_DIR": str(root / "tests"), "CELOX_SV_TESTS_CASE": case}
+            with patch.dict(os.environ, env), patch.object(adapter.subprocess, "check_output", return_value=issues["revision"]):
+                for relative in issues["cases"][case]["missing_includes"]:
+                    self.assertTrue(adapter.known_missing_include(root / relative, {"should_fail": "0"}))
+                    self.assertFalse(adapter.known_missing_include(root / relative, {"should_fail": "1"}))
+                self.assertFalse(adapter.known_missing_include(root / "unreviewed", {"should_fail": "0"}))
+                with patch.object(adapter.subprocess, "check_output", return_value="other"):
+                    self.assertFalse(adapter.known_missing_include(root / issues["cases"][case]["missing_includes"][0], {"should_fail": "0"}))
