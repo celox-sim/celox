@@ -4566,5 +4566,24 @@
         "containers::shuffle_nested_receivers"
       ]
     }
+  },
+  {
+    "id": "sv_xezim_continuous_delay_selects",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 propagates both selected continuous drivers at the shorter delay: y becomes 1111 instead of 0011, and generated g becomes 11 instead of 01. IEEE 1800-2023 10.3.3 attaches each delay to its assignment. The standalone probe prints y=1111 g=11 at 6.5 ns where Icarus and Celox preserve the later selected updates; Verilator also passes both shared cases.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/continuous-delays-xezim.json",
+      "verification/repros/sv_continuous_delay_selects.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "timing::continuous_delay_selected_drivers",
+        "timing::continuous_delay_generate_parameters"
+      ]
+    }
   }
 ]

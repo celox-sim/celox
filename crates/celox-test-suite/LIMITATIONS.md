@@ -1889,3 +1889,24 @@ methods and additional class/nested-container limitations. The exact failures
 are retained for [Icarus](verification/sv/limitations/shuffle-icarus.json) and
 [xezim](verification/sv/limitations/shuffle-xezim.json), with exclusions limited
 to those observed cases. Passing cases do not add historical baseline rows.
+
+
+### Continuous assignment delays
+
+Eight `timing::continuous_delay_*` cases exercise IEEE 1800-2023 10.3.3:
+inertial cancellation, unchanged RHS deadlines, destination-width conversion,
+129-bit and signed values, independent selected drivers, generate-local delay
+constants, X/Z transitions and zero delay. Overlapping net drivers remain
+unsupported in Celox; this change retains independent assignments to disjoint
+selects. API-specific cases additionally check scope precision, checkpoint replay
+and that a cancelled timer leaves no future simulation event.
+
+Icarus 13.0 passes all eight cases. Verilator 5.052 passes seven, with the
+four-state case a capability skip. Xezim 0.11.4 passes six but applies the
+shorter delay to both selected destinations in the two independent-driver
+cases. The [standalone probe](verification/repros/sv_continuous_delay_selects.sv)
+prints `y=1111 g=11` at 6.5 ns instead of `y=0011 g=01`; Icarus prints the
+expected values, and Verilator passes the shared cases. Only
+`continuous_delay_selected_drivers` and `continuous_delay_generate_parameters`
+are excluded for xezim. Their [focused failure report](verification/sv/limitations/continuous-delays-xezim.json)
+is retained; passing cases add no historical baseline rows.

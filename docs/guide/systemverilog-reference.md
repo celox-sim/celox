@@ -313,6 +313,28 @@ delay such as `#1.5` or `#r` rounds the same way, with ties away from zero
 (6.12.1); a negative one waits its two's complement (9.4.1), and a NaN one
 waits zero.
 
+### Continuous assignment delays {#continuous-assignment-delays}
+
+`assign #5 y = a;` accepts one nonnegative integral constant delay, including
+parameters and generate-local constants, or a time literal such as `#1.25ns`.
+Time literals round at the declaring scope's precision. The target must be a
+scalar or packed integral variable/net, optionally with a constant bit or part
+select; the RHS must be integral and contain no subroutine calls.
+
+Updates use inertial delay (IEEE 1800-2023 10.3.3): a changed, destination-sized
+RHS cancels the pending update. A return to the current driven value cancels
+without scheduling another update; input changes that leave the RHS unchanged
+preserve the pending deadline. Assignments to disjoint bit/part selects keep
+independent deadlines. Overlapping multiple net drivers retain the existing
+unsupported diagnostic. X/Z, wide values, checkpoint replay and timer
+cancellation are supported. `#0` uses ordinary continuous-assignment evaluation.
+
+Rise/fall/turn-off delay lists, variable or negative amounts, unitless fractional
+real amounts, concatenated or aggregate destinations and dynamic destination
+selects remain unsupported ([#444](https://github.com/celox-sim/celox/issues/444)).
+Delays on net declarations (`wire #5 w;` and `wire #5 w = a;`) are outside this
+supported subset; their parsed delay is currently not applied.
+
 ### Built-in functions and tasks
 
 | Area | Supported |
@@ -385,7 +407,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 
 - Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants of a module or package as class parameter values (a class passes its own such parameters on by name), module-local classes as type arguments to package-class specializations, properties that are `real` or arrays, reads of bit and part selects of a property not declared `[N-1:0]`, selects of a member of a property of unpacked structure type, packed structure members of a property, properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Recursive calls remain unsupported.
 - Behavioral and verification constructs: nonblocking intra-assignment event controls and nonconstant delays,
-  delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
+  continuous assignment delays beyond the [supported subset](#continuous-assignment-delays) ([#444](https://github.com/celox-sim/celox/issues/444)),
   `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
 - Named events beyond those [listed](#named-events): arrays of events, event ports,
   event members of unpacked structures, functions returning an event, triggers
