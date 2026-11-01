@@ -2131,6 +2131,7 @@ mod tests {
         let tree = AnalysisContext::unspecialized(&tree);
         let active = items(&tree, session, &HashMap::default(), &HashMap::default()).unwrap();
         let outer = FunctionReturnMetadata {
+            semantic_type: None,
             arguments: None,
             width: Some(8),
             first_packed_dimension_width: Some(2),
@@ -2145,6 +2146,7 @@ mod tests {
             virtual_interface: None,
         };
         let inner = FunctionReturnMetadata {
+            semantic_type: None,
             arguments: None,
             width: Some(4),
             first_packed_dimension_width: Some(4),

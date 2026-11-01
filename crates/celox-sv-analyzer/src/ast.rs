@@ -61,6 +61,7 @@ pub(crate) struct Session {
     virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
     /// The semantic types of the design.
     types: semantic_types::TyTable,
+    expression_types: expression_types::Memo,
 }
 
 impl Session {
@@ -1492,12 +1493,18 @@ impl Module {
                     .entry(name.clone())
                     .or_insert_with(|| metadata.clone());
             }
+            let semantic_returns = packed_dimensions
+                .function_return_types
+                .iter()
+                .filter_map(|(name, metadata)| metadata.semantic_type.map(|ty| (name.clone(), ty)))
+                .collect::<HashMap<_, _>>();
             packed_dimensions
                 .function_return_types
                 .extend(functions.iter().map(|(name, function)| {
                     (
                         name.clone(),
                         FunctionReturnMetadata {
+                            semantic_type: semantic_returns.get(name).copied(),
                             arguments: Some(function_argument_metadata(&function.params)),
                             width: function.return_width,
                             first_packed_dimension_width: function
@@ -1521,6 +1528,7 @@ impl Module {
                     Some((
                         import.name().to_string(),
                         FunctionReturnMetadata {
+                            semantic_type: None,
                             arguments: Some(dpi_argument_metadata(import)),
                             width: Some(r#type.width()),
                             first_packed_dimension_width: (r#type.width() > 1)
@@ -3487,6 +3495,8 @@ struct FunctionArgumentMetadata {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct FunctionReturnMetadata {
+    /// Resolved self-determined result type in this design's semantic table.
+    semantic_type: Option<semantic_types::TyId>,
     /// Validate calls in type queries without retaining or executing bodies.
     arguments: Option<Arc<[FunctionArgumentMetadata]>>,
     width: Option<usize>,

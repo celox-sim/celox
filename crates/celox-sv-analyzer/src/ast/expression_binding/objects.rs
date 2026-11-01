@@ -37,7 +37,7 @@ pub(in crate::ast) fn native_class(
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<String> {
-    let ty = expression_types::type_of(tree, session, id, native, dimensions)?;
+    let ty = expression_types::type_of(tree, session, id, native, dimensions).ok()?;
     expression_types::class_name(&session.types, ty)
 }
 
