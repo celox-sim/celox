@@ -910,6 +910,17 @@
     },
     {
       "category": "Types",
+      "detail": "native testbench failed: exit status: 1; see runtime.log and protocol.log\nnative testbench exited without reaching $finish\n",
+      "expectation": "Simulation",
+      "name": "class::formatting_task_place_outputs",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: Invalid module item.\n<case>/source_0.sv:5: syntax error\n<case>/source_0.sv:5: error: I give up on this function definition.\n<case>/source_0.sv:8: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Syntax error in typedef clause.\n<case>/source_0.sv:15: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:15: syntax error\n<case>/source_0.sv:15: error: Malformed statement\n<case>/source_0.sv:16: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:16: syntax error\n<case>/source_0.sv:16: error: Invalid module item.\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Invalid module item.\n<case>/source_0.sv:11: assert: pform.cc:1727: failed assertion lexical_scope == pform_cur_generate\nAborted (core dumped)\n",
       "expectation": "Simulation",
       "name": "class::generate_scope_enum_type_arguments",
@@ -1332,6 +1343,28 @@
       "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
       "expectation": "Simulation",
       "name": "class::parameter_strings_wider_than_a_constant",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::property_assignment_sites",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:43: sorry: Streaming concatenation not supported.\n<case>/source_0.sv:43: sorry: Streaming concatenation not supported in l-values.\n",
+      "expectation": "Simulation",
+      "name": "class::property_place_addresses",
       "phase": "compile",
       "status": "compile_error",
       "stronger_than_sv": false,

@@ -116,6 +116,8 @@ fn finish_lvalue(
     let functions = &tree.functions;
     let width = expr_type_from_type(&tree.functions, r#type, &dimensions.const_env)?.width;
     let (msb, lsb, signed) = match relative {
+        // A selection within a member is of a variable.
+        LValue::Object { .. } => lowered_object(),
         LValue::Ident(_) => (width.checked_sub(1)? as i128, 0, r#type.is_signed),
         LValue::Select {
             msb, lsb, signed, ..
@@ -276,6 +278,8 @@ fn array_member_selection(
         .ok_or_else(|| unsupported("structure array member selection width"))?
         .width;
     let (msb, lsb, signed, slice_width, reversed) = match relative {
+        // A selection within a member is of a variable.
+        LValue::Object { .. } => lowered_object(),
         LValue::Ident(_) => (
             ConstExpr::Literal((member_width - 1).to_string()),
             ConstExpr::Literal("0".into()),
