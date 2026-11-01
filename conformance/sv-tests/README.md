@@ -16,7 +16,8 @@ per state mode**, comprising 1,028 checked-in cases and 622 generated cases.
 library submodules, generates into a fresh temporary tree, checks the reviewed
 counts in [`corpus.json`](corpus.json), and rejects stale or foreign generated
 cases. CI prepares this corpus before collecting results. The dashboard's
-`cores` and `imported` groups are separate corpora and are not included here.
+`cores` and `imported` groups are separate corpora and are not included in the
+PR corpus. Imported tests run in the daily extended workflow described below.
 
 The TSV report has a companion `.summary.json` containing the tested revision,
 per-group/per-state pass totals, per-tag results, fully passing tag totals, and execution-mode
@@ -612,3 +613,32 @@ not a new full-corpus measurement. The shared suite exercises element and
 member writes, whole-array and subarray copies, nested members, local lifetime,
 wide NBA destinations, and invalid-index defaults. Arrays with non-integral,
 mixed-state or defaulted members remain unsupported.
+
+## Daily extended verification and website
+
+`sv-tests-daily.yml` runs on a daily schedule and manual dispatch only. It adds
+upstream's `path_generator`, `ivtest`, and `yosys_hana` imported cases to the main
+corpus (3,442 imported cases at the pinned revision). It does not run core-design
+generators or change the PR expectation contract. Initialize the main dependencies
+above and these additional pinned submodules:
+
+```sh
+git -C ../sv-tests submodule update --init --depth 1 \
+  third_party/tests/hdlconvertor third_party/tests/utd-sv \
+  third_party/tests/projf-explore third_party/cores/basejump_stl \
+  third_party/tools/yosys third_party/tools/icarus
+git -C ../sv-tests/third_party/tools/icarus submodule update --init --depth 1 ivtest
+python conformance/sv-tests/prepare.py ../sv-tests
+python conformance/sv-tests/prepare_imported.py ../sv-tests
+python conformance/sv-tests/run.py ../sv-tests \
+  --driver target/debug/examples/sv_tests --jobs 4 --group imported \
+  --out-dir work/sv-tests-extended --report work/sv-tests-extended.tsv
+```
+
+Use a clean checkout; prepare the main corpus before adding imported tests.
+The extended run selects `--group imported` and deliberately has no `--expected`: official case failures are
+measurements, while infrastructure failures fail the workflow. Complete summaries
+are published under `verification-data/latest.json` on the existing Pages branch;
+the website's Verification page displays them with source revisions and run link.
+Raw reports and logs are retained as workflow artifacts for 14 days. The committed
+website snapshot provides an initial/offline measurement and is not a PR baseline.

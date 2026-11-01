@@ -55,6 +55,14 @@ class AggregateTests(unittest.TestCase):
                 runner.read_meta_tags(path)
 
 
+    def test_group_selection_uses_upstream_reporting_annotation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "case.sv"
+            path.write_text("/*\n:results_group: imported\n*/\nmodule t; endmodule")
+            self.assertEqual(runner.case_group(path), "imported")
+            path.write_text("module t; endmodule")
+            self.assertEqual(runner.case_group(path), "main")
+
     def test_jobs_require_a_positive_integer(self):
         self.assertEqual(runner.positive_int("4"), 4)
         for value in ("0", "-1", "invalid"):
@@ -132,6 +140,8 @@ sys.exit(code)
         self.assertEqual(self.case(":type: preprocessing\n", "// EXIT: 1")["result"], "fail")
         self.assertEqual(self.case(":type: preprocessing\n:should_fail_because: invalid\n", "// EXIT: 1")["result"], "pass")
         self.assertEqual(self.case(":compatible-runners: other\n")["result"], "skip")
+        row = self.case(":compatible-runners: other\n:results_group: imported\n")
+        self.assertEqual((row["result"], row["group"]), ("skip", "imported"))
         # The source has no module. Its diagnostic still reaches official judgement.
         row = self.case(body="// OUTPUT: no module diagnostic\n// EXIT: 1")
         self.assertEqual((row["result"], row["rc"]), ("fail", "1"))

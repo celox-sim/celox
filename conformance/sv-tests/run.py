@@ -121,7 +121,7 @@ def run_case(root, driver, out_dir, test, state_mode):
     return reporting.annotate({
         "test": test, "state_mode": state_mode, "result": verdict,
         "mode": meta.get("mode", ""), "tags": meta.get("tags", ""),
-        "group": (meta.get("results_group") or "main") if meta else "unclassified",
+        "group": (meta.get("results_group") or "main") if meta else case_group(root / "tests" / test),
         "input_issue": (input_issues.get(test, {}).get("reason", "")
                         if meta.get("rc") == "1" and "include directory is unavailable:" in log else ""),
         "rc": meta.get("rc", ""), "tool_success": meta.get("tool_success", ""),
@@ -241,6 +241,12 @@ def collect_cases(root, driver, out_dir, tests, modes, jobs):
     return sorted(rows, key=lambda row: (row["test"], row["state_mode"]))
 
 
+def case_group(path):
+    """Read only the reporting group; verdicts remain owned by tools/runner."""
+    matches = re.findall(r"^:results_group:\s*(.+)", path.read_text(), re.MULTILINE | re.IGNORECASE)
+    return matches[-1].strip() if matches else "main"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sv_tests", type=Path, help="pinned sv-tests checkout root")
@@ -248,12 +254,15 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path, required=True, help="official logs and temporary directories")
     parser.add_argument("--jobs", type=positive_int, default=1, help="concurrent official runner processes (default: 1)")
     parser.add_argument("--state-mode", choices=(*MODES, "both"), default="both")
+    parser.add_argument("--group", choices=("main", "imported", "cores"), help="select an upstream reporting group")
     parser.add_argument("--expected", type=Path)
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--shard", type=shard,
                         help="INDEX/COUNT: run and compare only that shard of the tests and expectations")
     options = parser.parse_args(argv)
+    if options.group and options.expected:
+        parser.error("--group cannot be combined with --expected")
     if options.update and not options.expected:
         parser.error("--update requires --expected")
     root, driver, out_dir = options.sv_tests.resolve(), options.driver.resolve(), options.out_dir.resolve()
@@ -273,6 +282,8 @@ def main(argv=None):
         stage = "corpus"
         tests = sorted(p.relative_to(root / "tests").as_posix()
                        for p in (root / "tests").rglob("*") if p.is_file() and p.suffix.lower() == ".sv")
+        if options.group:
+            tests = [test for test in tests if case_group(root / "tests" / test) == options.group]
         if not tests:
             raise ValueError("sv-tests checkout contains no .sv tests")
         # Expected tests that the corpus lost belong to a shard too, so that

@@ -1,0 +1,86 @@
+name: sv-tests extended verification
+on:
+  schedule:
+    - cron: '23 4 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: sv-tests-extended
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+      - uses: $/.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.14'
+      - run: pip install -r conformance/sv-tests/requirements.txt
+      - name: Fetch pinned corpus and imported dependencies
+        run: |
+          git init -q work/upstream
+          git -C work/upstream fetch --depth 1 https://github.com/chipsalliance/sv-tests.git "$(cat conformance/sv-tests/revision)"
+          git -C work/upstream checkout -q FETCH_HEAD
+          git -C work/upstream submodule update --init --depth 1 \
+            third_party/tests/uvm third_party/tests/uvm-1.2 \
+            third_party/tests/easyUVM third_party/tests/uvm-examples \
+            third_party/tests/hdlconvertor third_party/tests/utd-sv \
+            third_party/tests/projf-explore third_party/cores/basejump_stl \
+            third_party/tools/yosys third_party/tools/icarus
+          git -C work/upstream/third_party/tools/icarus submodule update --init --depth 1 ivtest
+      - run: |
+          python conformance/sv-tests/prepare.py work/upstream
+          python conformance/sv-tests/prepare_imported.py work/upstream
+      - name: Validate official runner contracts
+        env:
+          SV_TESTS_ROOT: ${{ github.workspace }}/work/upstream
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python -m unittest discover -s conformance/sv-tests -p 'test_*.py' -v
+      - run: cargo build --locked --release -p celox --features systemverilog --example sv_tests
+      - name: Collect official verdicts (failures are measurements)
+        run: >-
+          python conformance/sv-tests/run.py work/upstream
+          --driver target/release/examples/sv_tests --jobs 4 --group imported
+          --out-dir work/results --report work/report.tsv
+      - name: Prepare website data
+        env:
+          CELOX_SV_DRIVER_PROFILE: release
+        run: |
+          python conformance/sv-tests/website_report.py work/report.summary.json work/public/latest.json
+          cat work/report.summary.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: sv-tests-extended
+          path: |
+            work/report.*
+            work/results
+          retention-days: 14
+      - uses: actions/upload-artifact@v7
+        with:
+          name: verification-website
+          path: work/public
+  publish:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: verification-website
+          path: public
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: public
+          destination_dir: verification-data
+          keep_files: true

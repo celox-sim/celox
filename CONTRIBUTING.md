@@ -581,3 +581,10 @@ upstream release or an explicitly maintained patch.
 
 See [Dependabot security updates](https://docs.github.com/en/code-security/concepts/supply-chain-security/dependabot-security-updates)
 and [security-only configuration](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/configure-security-updates).
+
+Extended sv-tests measurement (`sv-tests-daily.yml`) runs daily at 04:23 UTC and
+on manual dispatch, outside PR gates. It measures the imported group in both
+state modes and publishes complete results to the website Verification page.
+Changes to its preparation/reporting scripts require the Python contract suite;
+website changes require `pnpm docs:build`. The existing PR main-corpus expectation
+check remains independent; extended measurements do not refresh that baseline.
