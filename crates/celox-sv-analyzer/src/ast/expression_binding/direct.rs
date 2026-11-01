@@ -215,7 +215,15 @@ pub(in crate::ast) fn cast_target_native(
             celox_sv_syntax::DataTypeKind::Builtin(name)
                 if matches!(
                     name.as_str(),
-                    "byte" | "shortint" | "int" | "longint" | "integer" | "time"
+                    "bit"
+                        | "logic"
+                        | "reg"
+                        | "byte"
+                        | "shortint"
+                        | "int"
+                        | "longint"
+                        | "integer"
+                        | "time"
                 ) => {}
             celox_sv_syntax::DataTypeKind::Named(_) => {}
             _ => return Err(unsupported("cast target type")),
