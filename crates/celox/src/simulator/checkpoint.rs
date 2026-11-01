@@ -125,9 +125,11 @@ pub enum CheckpointError {
     /// Core checkpoint capture and restore do not depend on their state.
     #[error("portable state files do not capture opaque external component state")]
     ExternalComponents,
-    /// Source-driven files and waveform controls have host state that is
-    /// not represented in the saved HDL memory image.
-    #[error("the saved state does not include restorable external file I/O or VCD control state")]
+    /// Source-driven files, waveform controls and shell commands have host
+    /// effects that are not represented in the saved HDL memory image.
+    #[error(
+        "the saved state does not include restorable external file I/O, VCD or shell command state"
+    )]
     ExternalSystemTasks,
     #[error("the checkpoint was taken from a different design")]
     DesignMismatch,
@@ -226,7 +228,9 @@ impl<B: SimBackend> Simulator<B> {
             .any(|site| {
                 matches!(
                     site.kind,
-                    celox_design::HostRequestKind::FileIo | celox_design::HostRequestKind::Vcd
+                    celox_design::HostRequestKind::FileIo
+                        | celox_design::HostRequestKind::Vcd
+                        | celox_design::HostRequestKind::System
                 ) || (site.kind == celox_design::HostRequestKind::Scan && site.operation == 1)
             })
         {

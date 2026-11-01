@@ -94,7 +94,7 @@ impl Ff<'_, '_> {
 
     /// `expr` captured in a temporary that the host reads. A string keeps
     /// its handle, which also keeps the string alive until the host reads it.
-    fn format_input(
+    pub(super) fn format_input(
         &mut self,
         expr: &sv::ir::Expr,
     ) -> Result<HostRequestValue<SourceVarId>, sv::AnalyzerError> {
