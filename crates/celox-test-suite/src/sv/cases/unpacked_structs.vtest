@@ -1,5 +1,155 @@
 (group unpacked_structs (category types))
 
+(case fixed_array_pattern_rows
+  (source "struct_pattern_rows.sv" #"
+    module Top(output bit same);
+      typedef struct { int x; int y; } row_t;
+      row_t source_row[5:4] = '{'{1, -2}, '{3, -4}};
+      row_t listed[2][2], defaults[2][2], selected[2][2];
+      initial begin
+        listed = '{source_row, source_row};
+        defaults = '{default: source_row};
+        selected = '{listed[0], defaults[1]};
+        source_row[5].x = 99;
+        listed[0][1].y = 77;
+        same = listed[1][0].x == 1 && listed[1][1].y == -4
+          && defaults[0][0].x == 1 && defaults[1][1].y == -4
+          && selected[0][0].x == 1 && selected[0][1].y == -4
+          && selected[1][0].x == 1 && selected[1][1].y == -4;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case fixed_array_pattern_rows_four_state
+  (source "struct_pattern_rows.sv" #"
+    module Top(output bit same);
+      typedef struct { logic [3:0] x; logic [3:0] y; } row_t;
+      row_t source_row[2] = '{'{4'b10xz, 4'bz001}, '{4'bx110, 4'b0z1x}};
+      row_t listed[2][2], defaults[2][2];
+      initial begin
+        listed = '{source_row, source_row};
+        defaults = '{default: source_row};
+        same = listed[0][0].x === 4'b10xz && listed[1][1].y === 4'b0z1x
+          && defaults[0][0].y === 4'bz001 && defaults[1][1].x === 4'bx110;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case fixed_array_members_and_copies
+  (source "struct_arrays.sv" #"
+    module Top(output bit same, output int index);
+      typedef struct { int a; int b; } row_t;
+      row_t rows[3] = '{'{1, 2}, '{3, 4}, '{5, 6}};
+      row_t copy, saved[3];
+      initial begin
+        rows[index++].a = 9;
+        copy = rows[1];
+        rows[2] = copy;
+        rows[2].b += 3;
+        saved = rows;
+        rows[0].b = 8;
+        same = rows[0].a == 9 && rows[0].b == 8
+          && rows[1].a == 3 && rows[1].b == 4
+          && rows[2].a == 3 && rows[2].b == 7
+          && saved[0].b == 2 && copy.a == 3 && copy.b == 4;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1) (assert_eq index 1))
+
+(case fixed_array_nested_members
+  (source "struct_arrays.sv" #"
+    module Top(output bit same);
+      typedef struct { bit [3:0] n; bit flag; } inner_t;
+      typedef struct { inner_t inner; bit [11:0] data; } outer_t;
+      outer_t rows[2];
+      inner_t copy;
+      initial begin
+        rows[0] = '{'{3, 1}, 12'habc};
+        rows[1].inner.n = 7;
+        rows[1].data[3:0] = 5;
+        copy = rows[0].inner;
+        same = copy.n == 3 && copy.flag == 1 && rows[0].data == 12'habc
+          && rows[1].inner.n == 7 && !rows[1].inner.flag && rows[1].data == 5;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case fixed_array_multidimensional_and_bounds
+  (source "struct_arrays.sv" #"
+    module Top(output bit same);
+      typedef struct { bit [7:0] a; bit [3:0] b; } row_t;
+      row_t rows[2:1][0:0] = '{'{ '{1, 2} }, '{ '{3, 4} }};
+      row_t line[4:4], empty;
+      int bad = 0;
+      initial begin
+        line = rows[1];
+        rows[bad][0].a = 99;
+        empty = rows[bad][0];
+        same = rows[2][0].a == 1 && rows[1][0].b == 4
+          && line[4].a == 3 && empty.a == 0 && empty.b == 0
+          && rows[2][1].a == 0;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case fixed_array_local_lifetime
+  (source "struct_arrays.sv" #"
+    module Top(output bit same);
+      typedef struct { int a; int b; } row_t;
+      initial begin
+        automatic row_t local_rows[2] = '{'{1, 2}, '{3, 4}};
+        #1;
+        local_rows[1].b = 7;
+        same = local_rows[0].a == 1 && local_rows[1].a == 3 && local_rows[1].b == 7;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case fixed_array_wide_and_nba
+  (source "struct_arrays.sv" #"
+    module Top(output bit same);
+      typedef struct { bit [128:0] data; bit [2:0] tag; } row_t;
+      row_t rows[2] = '{default: '{129'h100000000000000000000000000000001, 3'd2}};
+      row_t copy;
+      int index = 0;
+      initial begin
+        rows[index].data[67:60] <= 8'hab;
+        index = 1;
+        copy = rows[1];
+        #1;
+        same = rows[0].data[128] && rows[0].data[67:60] == 8'hab
+          && rows[0].data[0] && rows[0].tag == 2
+          && rows[1] == copy && rows[1].data[67:60] == 0;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case fixed_array_four_state
+  (source "struct_arrays.sv" #"
+    module Top(output bit same);
+      typedef struct { logic [3:0] a; logic signed [7:0] b; } row_t;
+      row_t rows[2], copy;
+      logic index;
+      initial begin
+        rows[0] = '{4'b10xz, -8'sd3};
+        index = 1'bx;
+        rows[index].b = 0;
+        copy = rows[index];
+        same = rows[0].a === 4'b10xz && rows[0].b === -8'sd3
+          && rows[1].a === 4'bxxxx && rows[5].b === 8'bxxxxxxxx
+          && copy.a === 4'bxxxx && copy.b === 8'bxxxxxxxx;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
 (case member_initial_values
   (source "struct_defaults.sv" #"
     module Top(output bit same);

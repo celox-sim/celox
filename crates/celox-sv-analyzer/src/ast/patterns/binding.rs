@@ -113,8 +113,9 @@ fn select<'a>(
     }
     if let Some((dim, rest)) = shape.unpacked.split_first() {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
+        // Selecting an unpacked dimension keeps the declaration of its
+        // element type, including the nominal structure identity.
         let sub = Shape::Owned(Rc::new(VariableDimensions {
-            declared: type_names::Declared::default(),
             container: None,
             real: false,
             class: None,
@@ -417,7 +418,6 @@ pub(in crate::ast) fn bind_native(
                     let (_, _, count) =
                         dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
                     let sub = Shape::Owned(Rc::new(VariableDimensions {
-                        declared: type_names::Declared::default(),
                         container: None,
                         real: false,
                         class: None,
@@ -438,10 +438,14 @@ pub(in crate::ast) fn bind_native(
                 }
                 // A typed pattern of a member must name the member's
                 // structure type (6.22.3).
-                if pattern && let Some(aggregate) = shape.unpacked_struct.as_deref() {
+                if pattern
+                    && shape.unpacked.is_empty()
+                    && let Some(aggregate) = shape.unpacked_struct.as_deref()
+                {
                     unpacked_structs::check_value(aggregate, id, native, tree, session, dims)?;
                 }
                 if let Some(aggregate) = shape.unpacked_struct.clone()
+                    && shape.unpacked.is_empty()
                     && !pattern
                 {
                     // A default that is not a structure of the member's type

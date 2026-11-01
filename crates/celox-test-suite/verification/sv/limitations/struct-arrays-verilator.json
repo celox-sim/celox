@@ -1,0 +1,45 @@
+{
+  "schema_version": 3,
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "suite": "sv",
+  "suite_version": "0.12.0",
+  "include_ignored": false,
+  "exclude_stronger_than_sv": false,
+  "scope": "Focused fixed-size unpacked-structure array failures before exclusions; passes and the unsupported four-state case omitted.",
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::fixed_array_multidimensional_and_bounds at 61:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_multidimensional_and_bounds",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "unpacked_structs::fixed_array_wide_and_nba at 95:27: assert_eq same: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_wide_and_nba",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ],
+  "counts": {
+    "compile_error": 0,
+    "emission_error": 0,
+    "ignored": 0,
+    "mismatch": 2,
+    "passed": 0,
+    "rejected": 0,
+    "runtime_error": 0,
+    "unexpected_accept": 0,
+    "unsupported": 0
+  }
+}

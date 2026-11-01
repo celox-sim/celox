@@ -753,6 +753,20 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         deferred_destination_checks: Option<&mut Vec<Expr>>,
     ) -> Result<Stmt, AnalyzerError> {
         let (left, right) = native;
+        if op != "="
+            && unpacked_structs::native_struct(
+                left,
+                self.tree.declarations(),
+                self.tree,
+                self.session,
+                &self.dims,
+            )?
+            .is_some()
+        {
+            return Err(unsupported(format!(
+                "operator `{op}` on an unpacked structure"
+            )));
+        }
         if containers::element_member(
             left,
             self.tree.declarations(),
@@ -2042,7 +2056,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             None,
         )?;
         let mut stmts = Vec::new();
-        for (signal, assignment) in
+        for (mut signal, assignment) in
             signals
                 .into_iter()
                 .zip(native.variables.iter().filter(|variable| {
@@ -2053,6 +2067,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                     )
                 }))
         {
+            if signal.r#type.unpacked_struct().is_some()
+                && !signal.r#type.unpacked_ranges.is_empty()
+            {
+                if signal.is_const {
+                    return Err(unsupported("const variable of unpacked structure type"));
+                }
+                signal.r#type = unpacked_structs::array_storage(signal.r#type)?;
+            }
             // A declaration may not repeat a name of its own scope, such as
             // a subroutine argument (IEEE 1800-2023 6.21).
             let scope = self.names.scopes.last().expect("a body always has a scope");
@@ -2116,7 +2138,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 None => None,
             };
             let implicit_event = assignment.value.is_none() && init.is_some();
-            if signal.r#type().unpacked_struct().is_some() {
+            if signal.r#type().unpacked_struct().is_some()
+                && signal.r#type().unpacked_ranges.is_empty()
+            {
                 let explicit = native.lifetime.as_deref() == Some("static");
                 stmts.extend(self.aggregate_local(
                     &signal,

@@ -113,6 +113,79 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator 5.052 returns an existing struct element for invalid indices in a multidimensional unpacked array: rows[0][0] of rows[2:1][0:0] reads {3,4}, and rows[2][1].a reads 1. IEEE 1800-2023 7.4.5 requires the element type's default values, which are zero for these bit members. The standalone reproduction also confirms the valid subarray copy succeeds.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_multidimensional_and_bounds",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_fixed_struct_array_bounds",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 returns an existing struct element for invalid indices in a multidimensional unpacked array: rows[0][0] of rows[2:1][0:0] reads {3,4}, and rows[2][1].a reads 1. IEEE 1800-2023 7.4.5 requires the element type's default values, which are zero for these bit members. The standalone reproduction also confirms the valid subarray copy succeeds.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-arrays-verilator.json",
+          "verification/repros/sv_struct_array_subarray_and_bounds.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 rejects compatible unpacked-structure subarrays used as list or default assignment-pattern items with \"Item is incompatible with the array type\" and \"Array initialization has too many elements\". IEEE 1800-2023 10.9.1 assigns each item to its corresponding element or subarray type; 6.22.2 and 7.6 permit equivalent arrays with different index bounds.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_pattern_rows",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_struct_array_pattern_rows",
+        "category": "simulator_compile_limitation",
+        "phase": "compile",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 rejects compatible unpacked-structure subarrays used as list or default assignment-pattern items with \"Item is incompatible with the array type\" and \"Array initialization has too many elements\". IEEE 1800-2023 10.9.1 assigns each item to its corresponding element or subarray type; 6.22.2 and 7.6 permit equivalent arrays with different index bounds.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-array-pattern-rows-verilator.json",
+          "verification/repros/sv_struct_array_pattern_rows.sv",
+          "verification/repros/sv_struct_array_pattern_rows_four_state.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Verilator 5.052 evaluates the index of a nonblocking assignment to a 129-bit member of an unpacked-structure array when applying the NBA update. After rows[index].data[67:60] <= 8'hab; index = 1; it updates row 1 rather than row 0. IEEE 1800-2023 10.4.2 requires the destination index to be evaluated when the assignment is scheduled; xezim agrees with the expected row-0 update.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::fixed_array_wide_and_nba",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_fixed_struct_array_nba_index",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 evaluates the index of a nonblocking assignment to a 129-bit member of an unpacked-structure array when applying the NBA update. After rows[index].data[67:60] <= 8'hab; index = 1; it updates row 1 rather than row 0. IEEE 1800-2023 10.4.2 requires the destination index to be evaluated when the assignment is scheduled; xezim agrees with the expected row-0 update.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-arrays-verilator.json",
+          "verification/repros/sv_verilator_struct_array_nba_index.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "four-state expectations",
       "expectation": "Simulation",
       "name": "unpacked_structs::four_state_members",

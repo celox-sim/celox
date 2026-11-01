@@ -667,6 +667,13 @@ impl BodyBuilder<'_, '_, '_> {
     ) -> Converted<()> {
         let native = self.tree.declarations();
         self.reject_tagged_integral_target(operand)?;
+        if unpacked_structs::native_struct(operand, native, self.tree, self.session, &self.dims)?
+            .is_some()
+        {
+            return Err(unsupported(
+                "increment or decrement of an unpacked structure",
+            ));
+        }
         // A virtual interface is no number to step (IEEE 1800-2023 25.9).
         if let Some(ty) =
             virtual_interfaces::native_type(self.tree, self.session, operand, native, &self.dims)

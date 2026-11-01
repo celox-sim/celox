@@ -1,6 +1,6 @@
 //! Unpacked structures (IEEE 1800-2023 7.2).
 //!
-//! An unpacked structure is not storage of its own. A variable of such a type
+//! A scalar unpacked structure is not storage of its own. A variable of such a type
 //! is a set of *leaf* variables, one for each member that is not itself an
 //! unpacked structure, named by its member path (`s.a.b`). Each leaf keeps the
 //! type of its member, so a `string` or class handle member is an ordinary
@@ -10,6 +10,12 @@
 //! first declared member in the most significant bits. Such a flat value only
 //! lives inside one evaluation, so the handles it carries need no root of
 //! their own.
+//!
+//! Fixed arrays of uniform-state integral structures instead use one flat
+//! storage cell per element. Their member offsets reuse selection lowering,
+//! while their unpacked nominal identity remains available to semantic checks.
+//! Defaulted and non-integral members require distinct element storage and
+//! invalid-index defaults and are not supported in this representation.
 
 use super::*;
 use celox_sv_syntax::{ExprId, ExprKind};
@@ -246,10 +252,84 @@ pub(in crate::ast) fn native_type(
     Some(r#type)
 }
 
+/// Fixed arrays use one flat integral cell per structure. Keep scalar structures
+/// on their existing leaf-variable representation, including handle roots.
+pub(in crate::ast) fn array_storage(ty: Type) -> Converted<Type> {
+    let aggregate = ty.unpacked_struct().expect("an unpacked structure");
+    let leaves = aggregate.leaves();
+    let two_state = leaves
+        .first()
+        .is_some_and(|leaf| leaf.r#type.kind == TypeKind::Bit);
+    if leaves.iter().any(|leaf| {
+        leaf.default.is_some()
+            || !matches!(
+                leaf.r#type.kind,
+                TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
+            )
+            || leaf.r#type.chandle
+            || !leaf.r#type.unpacked_ranges.is_empty()
+            || (leaf.r#type.kind == TypeKind::Bit) != two_state
+    }) {
+        return Err(unsupported(
+            "array of unpacked structures with non-integral, mixed-state or defaulted members",
+        ));
+    }
+    enum Job {
+        Enter(Type),
+        Finish(Type),
+    }
+    let mut jobs = vec![Job::Enter(ty)];
+    let mut values = Vec::new();
+    while let Some(job) = jobs.pop() {
+        match job {
+            Job::Enter(ty) => {
+                if let Some(aggregate) = ty.unpacked_struct().cloned() {
+                    jobs.push(Job::Finish(ty));
+                    jobs.extend(
+                        aggregate
+                            .members()
+                            .iter()
+                            .rev()
+                            .map(|m| Job::Enter(m.r#type.clone())),
+                    );
+                } else {
+                    values.push(ty);
+                }
+            }
+            Job::Finish(mut ty) => {
+                let aggregate = ty.unpacked_struct().expect("a structure");
+                let count = aggregate.members().len();
+                let children = values.split_off(values.len() - count);
+                let mut offset = aggregate.width();
+                ty.members = aggregate
+                    .members()
+                    .iter()
+                    .zip(children)
+                    .map(|(member, child)| {
+                        offset -= member.width;
+                        packed_structs::PackedMember::storage_member(
+                            aggregate.owner.clone(),
+                            member.name.clone(),
+                            offset,
+                            child,
+                        )
+                    })
+                    .collect();
+                values.push(ty);
+            }
+        }
+    }
+    Ok(values.pop().expect("one array storage type"))
+}
+
 /// The flat value of the variable or member `name` of unpacked structure
 /// type: the concatenation of its leaf variables.
 pub(in crate::ast) fn whole(name: &str, dims: &PackedDimensions) -> Option<Expr> {
-    let aggregate = dims.get(name)?.unpacked_struct.clone()?;
+    let shape = dims.get(name)?;
+    if !shape.unpacked.is_empty() {
+        return None;
+    }
+    let aggregate = shape.unpacked_struct.clone()?;
     Some(Expr::Concat(
         aggregate
             .leaves()
@@ -262,7 +342,11 @@ pub(in crate::ast) fn whole(name: &str, dims: &PackedDimensions) -> Option<Expr>
 /// The leaf variables that an assignment to the whole variable or member
 /// `name` of unpacked structure type writes, first declared first.
 pub(in crate::ast) fn targets(name: &str, dims: &PackedDimensions) -> Option<Vec<LValue>> {
-    let aggregate = dims.get(name)?.unpacked_struct.clone()?;
+    let shape = dims.get(name)?;
+    if !shape.unpacked.is_empty() {
+        return None;
+    }
+    let aggregate = shape.unpacked_struct.clone()?;
     Some(
         aggregate
             .leaves()
@@ -324,6 +408,32 @@ pub(in crate::ast) fn native_struct(
     if let Some((container, _)) = locators::record_iterator(id, native, dims) {
         return Ok(container.element.unpacked_struct().cloned());
     }
+    let mut base = id;
+    let mut indices = 0;
+    while let ExprKind::Select {
+        expression,
+        dimension,
+    } = &native.expression(base).kind
+    {
+        if !matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_)) {
+            break;
+        }
+        indices += 1;
+        base = expression_binding::ungroup(*expression, native);
+    }
+    if indices > 0
+        && let Some(name) = expression_binding::native_name(tree, base, native)
+        && let Some(shape) = dims.get(&name)
+        && indices == shape.unpacked.len()
+        && !shape.unpacked.is_empty()
+    {
+        return Ok(shape.unpacked_struct.clone());
+    }
+    if let Some(element) = expression_binding::fixed_array_member(id, native, tree, session, dims)
+        && let Ok((_, ty)) = packed_structs::element_member(&element.name, &element.members, dims)
+    {
+        return Ok(ty.unpacked_struct().cloned());
+    }
     Ok(match &native.expression(id).kind {
         ExprKind::Name(_) | ExprKind::Member { .. } => match member_path(id, native)
             .map(|mut parts| {
@@ -331,8 +441,14 @@ pub(in crate::ast) fn native_struct(
                 parts
             })
             .filter(|parts| parts.len() == 1)
-            .and_then(|parts| dims.get(&parts[0])?.unpacked_struct.clone())
-        {
+            .and_then(|parts| {
+                let shape = dims.get(&parts[0])?;
+                shape
+                    .unpacked
+                    .is_empty()
+                    .then(|| shape.unpacked_struct.clone())
+                    .flatten()
+            }) {
             Some(aggregate) => Some(aggregate),
             None if let Some((ty, _)) =
                 containers::element_member(id, native, tree, session, dims)? =>
@@ -371,9 +487,9 @@ pub(in crate::ast) fn native_struct(
         // A typed assignment pattern, `T'{...}`.
         ExprKind::Pattern {
             target: Some(_), ..
-        } if std::ptr::eq(native, tree.declarations()) => {
-            patterns::typed_shape(id, tree, dims)?.and_then(|shape| shape.unpacked_struct)
-        }
+        } if std::ptr::eq(native, tree.declarations()) => patterns::typed_shape(id, tree, dims)?
+            .filter(|shape| shape.unpacked.is_empty())
+            .and_then(|shape| shape.unpacked_struct),
         _ if containers::native_struct_element(id, native, tree, session, dims)?.is_some() => {
             containers::native_struct_element(id, native, tree, session, dims)?
         }
