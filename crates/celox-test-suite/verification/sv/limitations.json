@@ -4587,5 +4587,66 @@
         "timing::continuous_delay_generate_parameters"
       ]
     }
+  },
+  {
+    "id": "sv_icarus_independent_net_delays",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects independent net delays with Net delays not supported in all seven focused cases. IEEE 1800-2023 10.3.3 and 28.16 specify this form separately from net-declaration continuous initializers, which pass. The standalone probe reproduces the compilation diagnostic.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/independent-net-delays-icarus.json",
+      "verification/repros/sv_independent_net_delay.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "timing::continuous_delay_net_four_state",
+        "timing::continuous_delay_net_gate_driver",
+        "timing::continuous_delay_net_independent",
+        "timing::continuous_delay_net_mixed_generate",
+        "timing::continuous_delay_net_partially_undriven",
+        "timing::continuous_delay_net_per_bit",
+        "timing::continuous_delay_net_selected_drivers"
+      ]
+    }
+  },
+  {
+    "id": "sv_verilator_independent_net_delays",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 reschedules an entire delayed vector when another bit changes, postponing the first bit: the standalone probe prints w=00 selected=00 at 10.1 ns instead of 01 for both. IEEE 1800-2023 10.3.3 and 28.16 apply the independent net delay to each bit. Xezim and Celox preserve the first bit deadline. Only the whole-vector and selected-driver cases are excluded.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/independent-net-delays-verilator.json",
+      "verification/repros/sv_independent_net_delay.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "timing::continuous_delay_net_per_bit",
+        "timing::continuous_delay_net_selected_drivers"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_independent_net_undriven_bits",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 initializes undriven bits of a partially driven delayed vector to X until the net delay elapses: the standalone probe prints xxxx at 1 ns, then zz00 at 4 ns. IEEE 1800-2023 6.7.1 requires bits without drivers to default to Z, so the first value must be zzxx. The wholly undriven scalar net and the other six independent-delay cases pass.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/independent-net-delays-xezim.json",
+      "verification/repros/sv_independent_net_delay_partial.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "timing::continuous_delay_net_partially_undriven"
+      ]
+    }
   }
 ]
