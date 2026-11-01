@@ -1,0 +1,1 @@
+Treat real property reads as real in the analyzer (increments) and keep integral operands at their width before a real property store (Codex P2s)
