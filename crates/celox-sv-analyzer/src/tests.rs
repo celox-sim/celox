@@ -6388,6 +6388,17 @@ fn time_literal_delays_reject_scheduler_overflow() {
 }
 
 #[test]
+fn time_literals_in_expressions_scale_without_rounding() {
+    // Scaled to the time unit (IEEE 1800-2023 5.8); the precision rounds
+    // delays only (3.14.1, 20.3).
+    let source = "module Top; timeunit 1ns / 1ps; real r; initial r = 1.2345ns + 2s; endmodule";
+    let ir = analyze_source(source, Path::new("time_literal_value.sv")).unwrap();
+    let body = format!("{:?}", ir.modules()[0].initial_processes()[0].body());
+    assert!(body.contains("\"1.2345\""), "{body}");
+    assert!(body.contains("\"2000000000.0\""), "{body}");
+}
+
+#[test]
 fn time_literal_delays_accept_numeric_separators() {
     let source = "module Top; timeunit 1ns / 1ps; initial #1_000ps; endmodule";
     let ir = analyze_source(source, Path::new("separated_time.sv")).unwrap();
