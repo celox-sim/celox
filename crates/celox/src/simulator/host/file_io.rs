@@ -62,6 +62,43 @@ impl<B: SimBackend> Simulator<B> {
             })
     }
 
+    /// Read bytes through the descriptor manager so EOF and pushback retain
+    /// their usual meaning. A no-data/error return does not copy out a value.
+    fn run_fgets_request(&mut self, site: &HostRequestSite<SignalRef>) -> Result<(), Halt> {
+        let (descriptor, mask) = self.backend.get_four_state(site.args[0].id);
+        if mask != BigUint::default() {
+            return Err(Halt::Error(SimulatorErrorCode::Runtime {
+                message: "$fgets descriptor contains X or Z".into(),
+                signals: Vec::new(),
+            }));
+        }
+        let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
+        let mut line = Vec::new();
+        let success = loop {
+            match self.file_io.read_byte(descriptor) {
+                Ok(Some(byte)) => {
+                    line.push(byte);
+                    if byte == b'\n' {
+                        break true;
+                    }
+                }
+                Ok(None) => break true,
+                Err(_) => break false,
+            }
+        };
+        let count = if success { line.len() as u32 } else { 0 };
+        if count != 0 {
+            // Characters consumed still count, but a SystemVerilog string
+            // cannot contain NUL characters (6.16).
+            line.retain(|&byte| byte != 0);
+            let handle = self.backend.heap_mut().intern(&line);
+            self.backend.set(site.results[1].id, handle);
+        }
+        self.backend.set(site.results[0].id, count);
+        self.dirty = true;
+        Ok(())
+    }
+
     pub(crate) fn run_file_io_request(
         &mut self,
         site: &HostRequestSite<SignalRef>,
@@ -69,6 +106,9 @@ impl<B: SimBackend> Simulator<B> {
     ) -> Result<(), Halt> {
         if site.operation == 13 {
             return self.run_fread_request(site);
+        }
+        if site.operation == 14 {
+            return self.run_fgets_request(site);
         }
         let error = |message: String| {
             Halt::Error(SimulatorErrorCode::Runtime {

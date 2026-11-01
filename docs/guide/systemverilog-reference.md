@@ -463,7 +463,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
-  `$fgets`, is
+  `$ferror`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
@@ -1452,6 +1452,27 @@ start at the lowest index by default and proceed through increasing indices;
 optional start and count operands select the range. Packed destinations ignore
 those operands. Partial reads preserve bits that received no input, including
 X/Z bits. The return value is the number of bytes read, or zero on an I/O error.
+
+### Line input
+
+`$fgets(str, fd)` reads one line into a writable `string` variable or selected
+fixed string-array element (IEEE 1800-2023 21.3.4.2). The signed 32-bit result
+counts bytes read, including a transferred newline. An unterminated final line
+returns its remaining bytes; EOF detection and `$ungetc` use the same state as
+`$fgetc`. NUL bytes are counted as input but omitted from the resulting string,
+which cannot contain NUL (6.16); other bytes need not be UTF-8.
+
+When no bytes are read, or a read fails, the result is zero and Celox leaves the
+destination unchanged. Other simulators differ on the no-data EOF destination;
+the clause specifies the count but does not explicitly specify that value.
+The destination is captured once before evaluating the descriptor, including
+side effects in a selected array index. The descriptor is converted to 32 bits;
+unknown bits remaining after conversion cause a runtime error.
+
+The call runs in timed `Simulation` processes, including subroutines and
+scheduled edge processes. Packed integral buffers, class properties and dynamic
+container destinations are outside this subset. External input state is owned
+by the file handler; replay needs its snapshot as well as the core checkpoint.
 
 ### Byte input and file positioning
 

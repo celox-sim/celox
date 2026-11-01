@@ -1941,3 +1941,30 @@ The exact [Icarus](verification/sv/limitations/independent-net-delays-icarus.jso
 and [Verilator](verification/sv/limitations/independent-net-delays-verilator.json)
 failures are retained with exclusions limited to the observed cases. No
 passing case adds a historical baseline row.
+
+### String line input
+
+The shared `file_io::fgets_invalid_descriptor_status_and_type` case passes
+Icarus 13.0, Verilator 5.052 and xezim 0.11.4. Temporary-file tests in Celox
+cover successful reads, blank lines, an unterminated final line, byte counts,
+pushback, descriptor conversion, long lines and single evaluation of selected
+string-array destinations. Host-supplied filesystem tests cover replay with
+core/handler snapshots across interpreter, native, tiered, Cranelift, Wasm
+and native-image loading. The shared scripts have no file-fixture facility;
+the temporary-file and host-embedding tests therefore live in the Celox crate.
+
+The [standalone probe](verification/repros/sv_fgets_string_buffers.sv) checks
+ordinary line contents, counts and EOF's zero result on all three external
+tools, then prints their destination policies. The shared case checks error
+counts and return width; destination preservation on errors is checked only
+in Celox API tests, since Verilator also clears it for invalid descriptors.
+After a no-data EOF, Icarus and
+xezim retain the seven-byte previous string; Verilator clears it. IEEE
+1800-2023 21.3.4.2 does not explicitly specify that destination value. Celox's
+API tests require preserving it on no-data/error returns.
+
+For input bytes `A NUL B LF`, Icarus reports count/length 1/1; Verilator and
+xezim report 4/4 and retain the NUL. Celox counts the four bytes consumed but
+stores the three-byte string `AB LF`: 6.16 prohibits NUL characters in string
+variables. The probe records these differences separately from its portable
+assertions. No new shared-case exclusion or historical passing row is added.
