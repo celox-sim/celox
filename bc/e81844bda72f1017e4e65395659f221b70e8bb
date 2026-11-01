@@ -1,1 +1,7 @@
-Classify unpacked-structure and virtual-interface results of parenless method calls (Codex P2)
+Revision history for #2839:
+
+rev 3 (content) 2026-11-01 05:47 UTC — Classify unpacked-structure and virtual-interface results of parenless method calls (Codex P2)
+rev 2 (content) 2026-11-01 05:37 UTC — Type scope-qualified parenless calls and classify chandle results of parenless method calls (Codex P2s)
+rev 1 (initial) 2026-11-01 05:37 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2839,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"9f9c415f780affb64690558fe164eef7264e98df","timestamp_iso":"2026-11-01T05:37:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"9f9c415f780affb64690558fe164eef7264e98df","new_sha":"9e113e21a60df763435f1e5b45c3d68208cfb42e","timestamp_iso":"2026-11-01T05:37:56Z","reason":"Type scope-qualified parenless calls and classify chandle results of parenless method calls (Codex P2s)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/9f9c415f780affb64690558fe164eef7264e98df...9e113e21a60df763435f1e5b45c3d68208cfb42e"},{"number":3,"change_type":"content","old_sha":"9e113e21a60df763435f1e5b45c3d68208cfb42e","new_sha":"bce81844bda72f1017e4e65395659f221b70e8bb","timestamp_iso":"2026-11-01T05:47:51Z","reason":"Classify unpacked-structure and virtual-interface results of parenless method calls (Codex P2)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/9e113e21a60df763435f1e5b45c3d68208cfb42e...bce81844bda72f1017e4e65395659f221b70e8bb"}]} -->
