@@ -1930,6 +1930,7 @@ fn bind_value_in(
                                     | SystemFunction::DistErlang
                                     | SystemFunction::TestPlusargs
                                     | SystemFunction::ValuePlusargs
+                                    | SystemFunction::System
                                     | SystemFunction::Fopen
                                     | SystemFunction::Ftell
                                     | SystemFunction::Fseek

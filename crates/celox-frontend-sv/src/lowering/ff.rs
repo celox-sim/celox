@@ -21,6 +21,7 @@ mod references;
 mod scan;
 mod streams;
 mod strings;
+mod system;
 
 use super::procedural::*;
 use super::*;
@@ -1730,6 +1731,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::ObjectOp::Stream(op) => self.stream_call(op, args)?,
                 _ => self.object_call(op, args)?,
             },
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::System),
+                args,
+                ..
+            } => self.system_call(args)?,
             Expr::Call {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fopen),
                 args,

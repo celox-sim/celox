@@ -125,6 +125,8 @@ pub enum SystemFunction {
     UrandomRange,
     /// `$fopen` (21.3.1).
     Fopen,
+    /// Host command execution (20.17.1).
+    System,
     /// Binary input into packed integers or a static memory (21.3.4.4).
     Fread,
     /// File position and byte input functions (21.3.4–8).
@@ -211,6 +213,7 @@ impl SystemFunction {
         matches!(
             self,
             Self::Fopen
+                | Self::System
                 | Self::Fread
                 | Self::Ftell
                 | Self::Fseek
@@ -338,6 +341,7 @@ impl SystemFunction {
             Self::ScopeRandomizeEnum => "$__celox_randomize_enum",
             Self::UrandomRange => "$urandom_range",
             Self::Fopen => "$fopen",
+            Self::System => "$system",
             Self::Fread => "$fread",
             Self::Ftell => "$ftell",
             Self::Fseek => "$fseek",
@@ -395,6 +399,7 @@ impl SystemFunction {
                     | Self::ValuePlusargs
                     | Self::Urandom
                     | Self::Fopen
+                    | Self::System
                     | Self::Fread
                     | Self::Ftell
                     | Self::Fseek
@@ -521,7 +526,8 @@ impl SystemFunction {
             | Self::Fell
             | Self::Stable
             | Self::Changed => Some((1, false)),
-            Self::Random
+            Self::System
+            | Self::Random
             | Self::DistUniform
             | Self::DistNormal
             | Self::DistExponential
@@ -1926,7 +1932,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     unsupported("$sync$or$plane", Task),
     unsupported("$sync$nor$plane", Task),
     // 20.17 Miscellaneous tasks and functions
-    unsupported("$system", TaskOrFunction),
+    function(SystemFunction::System, 0, Some(1)),
     unsupported("$stacktrace", TaskOrFunction),
     // 21.2 Display system tasks
     task(

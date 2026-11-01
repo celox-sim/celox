@@ -322,7 +322,7 @@ waits zero.
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | Sampled values | `$sampled` in processes, combinational logic and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes whose clock they infer and the subroutines those call; see [Sampled values](#sampled-values) |
 | System tasks | `$printtimescale`, `$display`, `$write` and their `b` / `o` / `h` forms, `$error`, `$warning`, `$info`, `$fatal`, `$finish`, `$stop`, `$exit` in `always` processes, subroutines and `initial` blocks; `$readmemh` / `$readmemb` there and in `initial` blocks; Veryl's `$assert` and `$assert_continue` |
-| Runtime I/O | `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, `$sformatf` / `$sformat` / `$swrite` and its radix variants (see [Formatted output to strings](#formatted-output-to-strings)), and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
+| Runtime I/O | `$system`, `$test$plusargs`, `$value$plusargs`, `$fopen`, `$fclose`, `$fdisplay` / `$fwrite` and radix variants, `$writememh` / `$writememb`, `$sformatf` / `$sformat` / `$swrite` and its radix variants (see [Formatted output to strings](#formatted-output-to-strings)), and [VCD controls](./vcd#systemverilog-source-controls) in timed processes |
 | State | two-state and four-state simulation |
 
 Every construct above is covered by tests that compare the result with a
@@ -1490,6 +1490,16 @@ Each call with conversions is a host request of a timed `Simulation`, like the
 file output tasks below; a format without conversions and arguments is a
 constant. Calls from combinational processes and continuous assignments are
 unsupported.
+
+### Host commands
+
+`$system([command])` executes a host shell command at runtime as a task or a function
+(IEEE 1800-2023 20.17.1).
+The signed 32-bit result is the C `system()` return value, including the host
+platform's exit-status encoding. With no argument it queries command-processor
+availability; an empty string executes an empty command. Commands run only when
+the simulation reaches the call, in scheduled processes. WebAssembly hosts do
+not support shell execution (a WASM simulation backend on a native host does).
 
 ### Runtime file output
 

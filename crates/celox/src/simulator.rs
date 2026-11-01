@@ -45,6 +45,7 @@ mod host {
     mod format;
     mod fread;
     mod scan;
+    mod system;
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
