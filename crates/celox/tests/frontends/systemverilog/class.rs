@@ -4,6 +4,7 @@ use super::*;
 
 sv_backends! {
     fn class_imported_member_type_dimensions(sim) { @case "class::imported_member_type_dimensions"; }
+    fn class_members_hide_module_names(sim) { @case "class::members_hide_module_names"; }
     fn class_imported_member_type_inheritance(sim) { @case "class::imported_member_type_inheritance"; }
     fn class_package_constant_class_defaults(sim) { @case "class::package_constant_class_defaults"; }
     fn class_waits_on_static_properties(sim) { @case "class::waits_on_static_properties"; }
