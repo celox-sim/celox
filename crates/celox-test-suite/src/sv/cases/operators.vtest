@@ -2343,3 +2343,33 @@ endmodule
   (top Top) (run_until 0)
   (assert_eq sum 12)
   (assert_eq final_value_ok 1))
+
+; An integer vector type is a one-bit casting type (IEEE 1800-2023 6.24.1,
+; A.2.2.1), as `bit'(value.rand_mode())` in UVM's uvm_reg_field uses it.
+(case one_bit_casts
+  (source "operators.sv" #"
+module Top(output bit low, output bit odd, output logic picked, output bit was_rand,
+           output bit now_fixed);
+    class F;
+        rand bit [7:0] value;
+        function bit is_rand(); return bit'(value.rand_mode()); endfunction
+    endclass
+    F f;
+    int x;
+    logic [3:0] l;
+    initial begin
+        x = 6;
+        l = 4'b0101;
+        low = bit'(x);
+        odd = reg'(x + 1);
+        picked = logic'(l[2]);
+        f = new;
+        was_rand = f.is_rand();
+        f.value.rand_mode(0);
+        now_fixed = !f.is_rand();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq low 0) (assert_eq odd 1) (assert_eq picked 1) (assert_eq was_rand 1)
+  (assert_eq now_fixed 1))

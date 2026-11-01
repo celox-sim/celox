@@ -764,6 +764,16 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "recv_real(1.000000) not implemented",
                         ),
+                        ("icarus", "operators::one_bit_casts") => (
+                            "compile_error",
+                            "compile",
+                            "Method name nesting is not supported yet",
+                        ),
+                        ("xezim", "operators::one_bit_casts") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq was_rand: expected 0x1, got 0x0",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
