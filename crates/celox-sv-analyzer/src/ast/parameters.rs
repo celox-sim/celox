@@ -1067,12 +1067,12 @@ pub(super) fn enum_member_constants_from_items(
     use celox_sv_syntax::{BodyItemKind, DataDeclaration, DataTypeKind, TypeAliasTarget};
     let native = syntax_tree.declarations();
     let enum_type = |id| {
-        let data_type = match native.body_item(id).kind {
+        let (data_type, alias) = match native.body_item(id).kind {
             BodyItemKind::TypeAlias(alias) => {
                 let TypeAliasTarget::DataType(id) = native.type_alias(alias).target else {
                     return None;
                 };
-                id
+                (id, Some(alias))
             }
             BodyItemKind::Data(id) => match native.data_declaration(id) {
                 DataDeclaration::Variables(declaration)
@@ -1086,13 +1086,14 @@ pub(super) fn enum_member_constants_from_items(
                     {
                         return None;
                     }
-                    declaration.data_type
+                    (declaration.data_type, None)
                 }
                 DataDeclaration::Unconverted(_) => return None,
             },
             _ => return None,
         };
-        matches!(native.data_type(data_type).kind, DataTypeKind::Enum { .. }).then_some(data_type)
+        matches!(native.data_type(data_type).kind, DataTypeKind::Enum { .. })
+            .then_some((data_type, alias))
     };
     if !declarations.iter().any(|id| enum_type(*id).is_some()) {
         return Ok(EnumMemberConstants::default());
@@ -1130,8 +1131,33 @@ pub(super) fn enum_member_constants_from_items(
             )?;
             continue;
         }
-        let Some(id) = enum_type(id) else {
+        let Some((id, alias)) = enum_type(id) else {
             continue;
+        };
+        // Resolve the base before these members can shadow an enclosing
+        // parameter used in its bounds (6.19, 27.4).
+        let declared = match alias {
+            Some(alias) => {
+                let name = instances::normalize_identifier(&native.type_alias(alias).name.spelling);
+                resolved_type_aliases.get(&name).cloned()
+            }
+            None => type_binding::bind(
+                id,
+                syntax_tree,
+                session,
+                &PackedDimensions::new(HashMap::default(), &eval_env, &resolved_type_aliases),
+            )?,
+        };
+        let binding = match declared.as_ref() {
+            Some(declared) => enum_constant_type(
+                syntax_tree,
+                session,
+                id,
+                declared,
+                &eval_env,
+                &resolved_type_aliases,
+            )?,
+            None => None,
         };
         enum_members_of(
             syntax_tree,
@@ -1141,6 +1167,16 @@ pub(super) fn enum_member_constants_from_items(
             &resolved_type_aliases,
             &mut constants,
         )?;
+        if let Some(binding) = binding
+            && let DataTypeKind::Enum { items, .. } = &native.data_type(id).kind
+        {
+            for item in items {
+                constants.declarations.insert(
+                    instances::normalize_identifier(&item.name.spelling),
+                    binding.clone(),
+                );
+            }
+        }
         // A later typedef may use a cast or range that depends on this
         // enum's members. Rebuild aliases from the enriched environment
         // before resolving a subsequent enum base through that typedef.
@@ -2074,4 +2110,34 @@ pub(super) fn real_literal(
             arg_order: Vec::new(),
         }
     })
+}
+
+/// The resolved scalar type of the constants declared by this native enum.
+/// Its base bounds and nominal declaration are retained independently of the
+/// numeric value, and of any array dimensions surrounding the enum typedef.
+pub(super) fn enum_constant_type(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: celox_sv_syntax::TypeId,
+    declaration: &Type,
+    env: &HashMap<String, i128>,
+    aliases: &HashMap<String, Type>,
+) -> Converted<Option<enums::ConstantType>> {
+    let celox_sv_syntax::DataTypeKind::Enum { base, items } =
+        &tree.declarations().data_type(id).kind
+    else {
+        return Ok(None);
+    };
+    // Ranged enumerators require generated names; do not invent a binding
+    // for their unexpanded source identifier in this scalar-only collector.
+    if items.iter().any(|item| !item.dimensions.is_empty()) {
+        return Ok(None);
+    }
+    let base = match base {
+        Some(id) => type_binding::enum_constant_base(*id, tree, session, env, aliases)?,
+        None => type_binding::builtin_type("int", None),
+    };
+    Ok(base.and_then(|base| {
+        enums::ConstantType::new(base, declaration, &tree.functions, &mut session.types, env)
+    }))
 }

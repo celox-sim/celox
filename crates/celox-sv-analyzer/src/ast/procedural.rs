@@ -29,14 +29,13 @@ struct Scope {
     /// The types that the typedefs of the scope shadow, in declaration
     /// order.
     shadowed_types: Vec<(String, Option<Type>)>,
-    /// The enumerations that the members of its local enumerations shadow.
-    shadowed_enum_constants: Vec<(String, Option<Arc<enums::EnumDomain>>)>,
 }
 
 struct ScopeEntry {
     source: String,
     unique: Option<String>,
     shadowed_dimensions: Option<VariableDimensions>,
+    shadowed_enum_constant: Option<enums::ConstantType>,
     shadowed_constants: Vec<(String, Option<i128>)>,
     shadowed_literal: Option<String>,
     shadowed_parameter_value: Option<Expr>,
@@ -453,7 +452,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 scopes: vec![Scope {
                     entries: Vec::new(),
                     shadowed_types: Vec::new(),
-                    shadowed_enum_constants: Vec::new(),
                 }],
                 local_constants: HashMap::default(),
             },
@@ -485,7 +483,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         self.names.scopes.push(Scope {
             entries: Vec::new(),
             shadowed_types: Vec::new(),
-            shadowed_enum_constants: Vec::new(),
         });
     }
 
@@ -493,13 +490,6 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         let Some(scope) = self.names.scopes.pop() else {
             return;
         };
-        for (name, shadowed) in scope.shadowed_enum_constants.into_iter().rev() {
-            let constants = Arc::make_mut(&mut self.dims.enum_constants);
-            match shadowed {
-                Some(domain) => constants.insert(name, domain),
-                None => constants.remove(&name),
-            };
-        }
         for (name, shadowed) in scope.shadowed_types.into_iter().rev() {
             match shadowed {
                 Some(ty) => {
@@ -513,6 +503,16 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
         }
         for entry in scope.entries.into_iter().rev() {
+            match entry.shadowed_enum_constant {
+                Some(binding) => {
+                    Arc::make_mut(&mut self.dims.enum_constants)
+                        .insert(entry.source.clone(), binding);
+                }
+                None if self.dims.enum_constants.contains_key(&entry.source) => {
+                    Arc::make_mut(&mut self.dims.enum_constants).remove(&entry.source);
+                }
+                None => {}
+            }
             for (key, value) in entry.shadowed_constants {
                 if let Some(value) = value {
                     self.dims.const_env.insert(key, value);
@@ -617,6 +617,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             shadowed_literal: self.names.local_constants.remove(source),
             shadowed_parameter_value: self.dims.parameter_values.remove(source),
             shadowed_dimensions: self.dims.remove(source),
+            shadowed_enum_constant: if self.dims.enum_constants.contains_key(source) {
+                Arc::make_mut(&mut self.dims.enum_constants).remove(source)
+            } else {
+                None
+            },
             shadowed_signedness: self.dims.expression_signedness.remove(source),
         }
     }
@@ -628,6 +633,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     /// it (IEEE 1800-2023 8.9).
     fn enter_class_scope(&mut self, class: &classes::Class) {
         self.dims.class_scope = Some(class.name.clone());
+        let constants =
+            classes::specializations::enum_constants(self.tree, self.session, &class.name);
+        Arc::make_mut(&mut self.dims.enum_constants).extend(constants);
         // The name of a property of unpacked structure type, whose members
         // are properties named by their member paths, is hidden too.
         let aggregates = class
@@ -2231,71 +2239,41 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .expect("a body always has a scope")
             .entries
             .push(hidden);
-        // The members are constants of the scope, also where a visible
-        // typedef has a member of their name and value.
-        // An enumeration with container dimensions is the element of their
-        // innermost container.
-        let mut declared = &ty;
-        let domain = loop {
-            match (&declared.enum_domain, &declared.container) {
-                (Some(domain), _) => break Some(domain.clone()),
-                (None, Some(container)) => declared = &container.element,
-                (None, None) => break None,
-            }
-        };
-        // The members of an enumeration whose typedef this one hides stay
-        // visible, and keep their type for `A.num()` and other methods.
-        if let Some(outer) = self
-            .dims
-            .type_aliases
-            .get(&name)
-            .and_then(|ty| ty.enum_domain.clone())
-        {
-            for member in &outer.members {
-                if self.dims.enum_constants.contains_key(&member.name) {
-                    continue;
-                }
-                Arc::make_mut(&mut self.dims.enum_constants)
-                    .insert(member.name.clone(), outer.clone());
-                self.names
-                    .scopes
-                    .last_mut()
-                    .expect("a body always has a scope")
-                    .shadowed_enum_constants
-                    .push((member.name.clone(), None));
-            }
-        }
-        for (member, number) in members.numbers {
+        let binding = parameters::enum_constant_type(
+            self.tree,
+            self.session,
+            target,
+            &ty,
+            &self.dims.const_env,
+            &self.type_aliases,
+        )?;
+        for (member, literal) in members.exprs {
             let r#type = members.types[&member];
             let entry = self.take_binding(&member, None, 0);
-            self.dims.const_env.insert(member.clone(), number);
-            self.dims.const_env.insert(enum_marker(&member), number);
+            if let Some(&number) = members.numbers.get(&member) {
+                self.dims.const_env.insert(member.clone(), number);
+            }
+            self.dims.const_env.insert(enum_marker(&member), 1);
             insert_parameter_type_markers(&mut self.dims.const_env, &member, r#type);
-            if let Some(Expr::Literal(literal)) = members.exprs.get(&member) {
+            if let Expr::Literal(text) = &literal {
                 self.names
                     .local_constants
-                    .insert(member.clone(), literal.clone());
+                    .insert(member.clone(), text.clone());
             }
-            if let Some(literal) = members.exprs.get(&member) {
-                self.dims
-                    .parameter_values
-                    .insert(member.clone(), literal.clone());
-            }
+            self.dims.parameter_values.insert(member.clone(), literal);
             self.dims
                 .expression_signedness
                 .insert(member.clone(), r#type.signed);
-            let shadowed = domain.as_ref().and_then(|domain| {
-                Arc::make_mut(&mut self.dims.enum_constants).insert(member.clone(), domain.clone())
-            });
-            let scope = self
-                .names
+            if let Some(binding) = &binding {
+                Arc::make_mut(&mut self.dims.enum_constants)
+                    .insert(member.clone(), binding.clone());
+            }
+            self.names
                 .scopes
                 .last_mut()
-                .expect("a body always has a scope");
-            scope.entries.push(entry);
-            if domain.is_some() {
-                scope.shadowed_enum_constants.push((member, shadowed));
-            }
+                .expect("a body always has a scope")
+                .entries
+                .push(entry);
         }
         let shadowed = self.type_aliases.insert(name.clone(), ty.clone());
         self.dims.type_aliases.insert(name.clone(), ty);
@@ -6456,3 +6434,6 @@ fn vector_type(width: usize, signed: bool) -> Type {
     }
     r#type
 }
+
+#[cfg(test)]
+mod enum_binding_tests;

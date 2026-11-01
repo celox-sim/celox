@@ -28,6 +28,7 @@ pub(in crate::ast) struct Specialization {
     /// extending it inherits without the scope around the declaration.
     pub declared_env: HashMap<String, Option<i128>>,
     pub declared_aliases: HashMap<String, Type>,
+    pub enum_constants: HashMap<String, enums::ConstantType>,
     /// The literals that replace the value parameters.
     pub literals: HashMap<String, Expr>,
     /// The type parameters and typedefs, and the class name itself.
@@ -933,6 +934,7 @@ fn finish_specialization(
         )
         .collect::<Vec<_>>();
     body.sort_by_key(|(start, _)| *start);
+    let mut own_enum_constants = HashMap::default();
     for (_, item) in body {
         match item {
             Ok(id) => {
@@ -977,6 +979,18 @@ fn finish_specialization(
                     });
                 if let Some(mut ty) = ty {
                     let alias = instances::normalize_identifier(&alias.name.spelling);
+                    ty.name_declaration(|| {
+                        (
+                            format!("{name}::{alias}"),
+                            type_names::TypedefName::Class {
+                                class: name.as_str().into(),
+                                name: alias.as_str().into(),
+                            },
+                        )
+                    });
+                    let enum_binding = crate::ast::parameters::enum_constant_type(
+                        tree, session, target, &ty, &env, &aliases,
+                    )?;
                     // The members of an enumeration the class declares are
                     // constants of the class scope (IEEE 1800-2023 6.19,
                     // 8.18), with their type, which a derived class inherits
@@ -987,6 +1001,10 @@ fn finish_specialization(
                     ) && let Some(domain) = ty.enum_domain.clone()
                     {
                         for member in &domain.members {
+                            for key in crate::ast::parameters::binding_keys(&member.name, &env, 0) {
+                                env.remove(&key);
+                                parameters.own_env.insert(key, None);
+                            }
                             let mut constants = HashMap::default();
                             constants.insert(member.name.clone(), member.value);
                             constants.insert(dimensions::enum_marker(&member.name), member.value);
@@ -1013,15 +1031,25 @@ fn finish_specialization(
                             );
                         }
                     }
-                    ty.name_declaration(|| {
-                        (
-                            format!("{name}::{alias}"),
-                            type_names::TypedefName::Class {
-                                class: name.as_str().into(),
-                                name: alias.as_str().into(),
-                            },
-                        )
-                    });
+                    if let Some(binding) = enum_binding
+                        && let celox_sv_syntax::DataTypeKind::Enum { items, .. } =
+                            &native.data_type(target).kind
+                    {
+                        for member in items {
+                            if binding.domain().is_none() {
+                                let member = instances::normalize_identifier(&member.name.spelling);
+                                for key in crate::ast::parameters::binding_keys(&member, &env, 0) {
+                                    env.remove(&key);
+                                    parameters.own_env.insert(key, None);
+                                }
+                                parameters.literals.remove(&member);
+                            }
+                            own_enum_constants.insert(
+                                instances::normalize_identifier(&member.name.spelling),
+                                binding.clone(),
+                            );
+                        }
+                    }
                     parameters.own_aliases.insert(alias.clone(), ty.clone());
                     aliases.insert(alias, ty);
                 }
@@ -1040,6 +1068,7 @@ fn finish_specialization(
                 .collect(),
             declared_env: parameters.own_env,
             declared_aliases: parameters.own_aliases,
+            enum_constants: own_enum_constants,
             env,
             literals: parameters.literals,
             aliases,
@@ -1907,6 +1936,67 @@ fn argument_spelling(native: &celox_sv_syntax::Declarations, arguments: &[Argume
         })
         .collect::<Vec<_>>()
         .join(",")
+}
+
+/// Enum constants belonging to the resolved class and its bases, never a scan
+/// of typedef contents. A derived declaration shadows the base binding.
+pub(in crate::ast) fn enum_constants(
+    tree: &AnalysisContext<'_>,
+    session: &Session,
+    class: &str,
+) -> HashMap<String, enums::ConstantType> {
+    let imported = scope::imported(tree);
+    let mut result = HashMap::default();
+    let prefix = format!("{class}::");
+    for (name, binding) in &imported.enum_constants.declarations {
+        if let Some(member) = name.strip_prefix(&prefix)
+            && !member.contains("::")
+        {
+            result.insert(member.to_owned(), binding.clone());
+        }
+    }
+    for specialization in lineage(session, class) {
+        for base in &specialization.bases {
+            if lookup(session, base).is_none() {
+                let prefix = format!("{base}::");
+                for (name, binding) in &imported.enum_constants.declarations {
+                    if let Some(member) = name.strip_prefix(&prefix)
+                        && !member.contains("::")
+                    {
+                        result.insert(member.to_owned(), binding.clone());
+                    }
+                }
+            }
+        }
+        result.retain(|member, _| {
+            !specialization.declared_aliases.contains_key(member)
+                && !specialization
+                    .declared_env
+                    .contains_key(&crate::ast::parameters::unbounded_parameter_marker(member))
+        });
+        result.extend(
+            specialization
+                .enum_constants
+                .iter()
+                .map(|(n, t)| (n.clone(), t.clone())),
+        );
+    }
+    result
+}
+
+pub(in crate::ast) fn export_enum_constants(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+) -> HashMap<String, enums::ConstantType> {
+    let mut result = HashMap::default();
+    for declaration in super::scope_declarations(tree) {
+        for class in super::specializations_of(tree, session, declaration) {
+            for (member, binding) in enum_constants(tree, session, &class) {
+                result.insert(format!("{class}::{member}"), binding);
+            }
+        }
+    }
+    result
 }
 
 #[cfg(test)]

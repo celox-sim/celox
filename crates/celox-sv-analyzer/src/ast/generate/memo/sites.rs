@@ -247,6 +247,7 @@ impl CallSites for Item {
             literals,
             parameter_dimensions,
             qualified_types,
+            enum_constants: _, // Frozen declaration types contain no runtime call sites.
             names: _,
             imports: _,
             shadowed: _,
