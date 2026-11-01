@@ -4,3 +4,5 @@ rev 2 (content) 2026-11-01 18:07 UTC — One heap helper owns randc cycles (enum
 rev 1 (initial) 2026-11-01 18:07 UTC
 
 <!-- mergify-revision-data: {"schema_version":1,"pull_number":2941,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"fcc43bc8d591c3e32ecfac8064f4869debd2153e","timestamp_iso":"2026-11-01T18:07:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"fcc43bc8d591c3e32ecfac8064f4869debd2153e","new_sha":"aecc8129774bb4e676ff2e97d84aebef75ba74e3","timestamp_iso":"2026-11-01T18:07:56Z","reason":"One heap helper owns randc cycles (enumeration member indices) for the unconstrained and constrained paths; restart only exhausted cycles, then one at a time; apply enum domains to every solver variable (Codex P2s)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fcc43bc8d591c3e32ecfac8064f4869debd2153e...aecc8129774bb4e676ff2e97d84aebef75ba74e3"}]} -->
+
+Commit randc cycle restarts only after a satisfying model; build enum membership as a balanced tree, tested with a 1024-member enum (Codex P2s)
