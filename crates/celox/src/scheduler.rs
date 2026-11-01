@@ -275,6 +275,7 @@ struct Plan {
     /// as indices into [`Self::events`]: their domains run in the waves of
     /// a slot (see `Generator::batch`).
     derived: Vec<usize>,
+    active: Vec<usize>,
     /// The events the slots change that gate clocks computed
     /// combinationally from them, with those clocks: their edges are judged
     /// when the source changes.
@@ -463,15 +464,6 @@ impl Plan {
         // The events RTL logic drives: clocks derived from the events the
         // scheduler's slots change, and only those (checked below).
         let rtl_written: BTreeSet<usize> = rtl_units().flat_map(written).collect();
-        // A domain that commits its blocking results in the active region
-        // evaluates before the NBA region when it triggers; a kernel that
-        // may trigger it keeps the reference loop.
-        let active_commits: HashSet<usize> = events
-            .iter()
-            .enumerate()
-            .filter(|(_, event)| model.active_commits.contains(&event.signal))
-            .map(|(index, _)| index)
-            .collect();
         // The storage each unit writes.
         let stores = |unit: &Unit| -> HashSet<AbsoluteAddr> {
             instructions(unit)
@@ -498,6 +490,58 @@ impl Plan {
             .probes
             .iter()
             .map(|(source, _)| storage(source.id))
+            .collect();
+        // Blocking results need an intermediate Active-region settle when
+        // they can wake a process, move a clock, or feed stateful combinational
+        // logic before NBA publication.
+        // Otherwise the existing evaluate/apply sequence has the same visible
+        // ordering: processes run first, blocking results become stable during
+        // evaluation, and nonblocking results publish afterward (LRM 4.5).
+        let mut active_observers: HashSet<AbsoluteAddr> = waited
+            .iter()
+            .chain(&probed)
+            .copied()
+            .chain(events.iter().map(|event| storage(event.signal)))
+            .collect();
+        // A stateful combinational consumer can retain an intermediate
+        // blocking result even when no waiter or clock reads it. Include all
+        // combinational inputs so indirect cones are covered too. Missing
+        // statefulness metadata is conservative for the same reason.
+        if sir
+            .eval_comb_stateful
+            .as_ref()
+            .is_none_or(|targets| !targets.is_empty())
+        {
+            active_observers.extend(sir.eval_comb.iter().flat_map(loads).map(storage));
+        }
+        let mut unknown_gate = false;
+        for clock in topology.combinational_derived.values().flatten() {
+            match &clock.gate {
+                Some(gate) => active_observers.extend(gate.iter().filter_map(|op| match op {
+                    celox_design::GateOp::Load { address, .. } => Some(storage(*address)),
+                    _ => None,
+                })),
+                None => unknown_gate = true,
+            }
+        }
+        let active_commits: HashSet<usize> = events
+            .iter()
+            .enumerate()
+            .filter(|(_, event)| model.active_commits.contains(&event.signal))
+            .filter(|(_, event)| {
+                unknown_gate
+                    || event.eval_only.as_ref().is_none_or(|units| {
+                        units.iter().flat_map(instructions).any(|inst| match inst {
+                            SIRInstruction::Store(target, ..)
+                            | SIRInstruction::Commit(_, target, ..) => {
+                                target.region == STABLE_REGION
+                                    && active_observers.contains(&storage(target.absolute_addr()))
+                            }
+                            _ => false,
+                        })
+                    })
+            })
+            .map(|(index, _)| index)
             .collect();
         let mut nba_targets: HashMap<AbsoluteAddr, usize> = HashMap::default();
         for process in &model.processes {
@@ -543,10 +587,9 @@ impl Plan {
         let clocks: Vec<usize> = events
             .iter()
             .enumerate()
-            .filter(|(index, event)| {
+            .filter(|(_, event)| {
                 (event.clock || testbench_resets.contains(&storage(event.signal)))
                     && event.width == 1
-                    && !active_commits.contains(index)
                     && undriven(storage(event.signal))
             })
             .map(|(index, _)| index)
@@ -596,17 +639,12 @@ impl Plan {
                 }
                 None if process.waits.is_empty() => {
                     let writes = written(unit);
-                    if writes.iter().any(|event| active_commits.contains(event)) {
-                        kernels.push(None);
-                        fallback.push(Some(ACTIVE_COMMIT.to_string()));
-                    } else {
-                        kernels.push(Some(Kernel {
-                            writes,
-                            wait: None,
-                            delays: true,
-                        }));
-                        fallback.push(None);
-                    }
+                    kernels.push(Some(Kernel {
+                        writes,
+                        wait: None,
+                        delays: true,
+                    }));
+                    fallback.push(None);
                 }
                 None => {
                     kernels.push(None);
@@ -672,12 +710,6 @@ impl Plan {
                         return Err(
                             "the process waits for a signal that neither one kernel that only delays nor the host alone drives",
                         );
-                    }
-                    if event_storage
-                        .get(&signal)
-                        .is_some_and(|event| active_commits.contains(event))
-                    {
-                        return Err(ACTIVE_COMMIT);
                     }
                 }
                 let delays = !statuses_only(unit, slots.status, &WAIT_STATUSES);
@@ -936,6 +968,7 @@ impl Plan {
             settle_reads,
             lazy,
             derived: Vec::new(),
+            active: active_commits.iter().copied().collect(),
             gating: Vec::new(),
             event_bits,
         };
@@ -977,6 +1010,104 @@ impl Plan {
                 }
             }
         }
+        // Active waves currently retain one pending result per domain. Keep
+        // cases that can generate a second edge of that domain in the host:
+        // mixed Active/NBA gate inputs, unknown-to-known edge sequences,
+        // direct procedural clock writes, and Active-clock feedback need an
+        // ordered queue rather than a domain mask.
+        if !plan.active.is_empty() {
+            let mut active_stores: HashMap<AbsoluteAddr, Vec<usize>> = HashMap::default();
+            for (index, event) in plan.events.iter().enumerate() {
+                if !model.active_commits.contains(&event.signal) {
+                    continue;
+                }
+                for unit in event.eval_only.iter().flatten() {
+                    for inst in instructions(unit) {
+                        if let SIRInstruction::Store(target, ..)
+                        | SIRInstruction::Commit(_, target, ..) = inst
+                            && target.region == STABLE_REGION
+                        {
+                            active_stores
+                                .entry(storage(target.absolute_addr()))
+                                .or_default()
+                                .push(index);
+                        }
+                    }
+                }
+            }
+            if active_stores
+                .keys()
+                .any(|address| event_storage.contains_key(address))
+            {
+                return Err("an Active-region update directly drives an event".into());
+            }
+            let nba_stores: HashSet<_> =
+                sir.apply_ffs.values().flatten().flat_map(stores).collect();
+            let primary = |index: &usize| edged.contains(index) && !rtl_written.contains(index);
+            for (source, clocks) in &topology.combinational_derived {
+                for clock in clocks {
+                    let Some(gate) = &clock.gate else {
+                        return Err(
+                            "an Active-region clock has an unknown combinational cone".into()
+                        );
+                    };
+                    let inputs: Vec<_> = gate
+                        .iter()
+                        .filter_map(|op| match op {
+                            celox_design::GateOp::Load { address, .. } => Some(storage(*address)),
+                            _ => None,
+                        })
+                        .collect();
+                    if !inputs.iter().any(|input| active_stores.contains_key(input)) {
+                        continue;
+                    }
+                    let source = storage(*source);
+                    let source_event = index_of.get(&topology.canonical(source));
+                    if !source_event.is_some_and(primary)
+                        || inputs.iter().any(|input| {
+                            nba_stores.contains(input)
+                                || rtl_stores.contains(input) && !active_stores.contains_key(input)
+                                || active_stores
+                                    .get(input)
+                                    .is_some_and(|writers| !writers.iter().all(primary))
+                        })
+                    {
+                        return Err("an Active-region clock requires ordered updates".into());
+                    }
+                    if program.layout().four_state
+                        && std::iter::once(&source).chain(&inputs).any(|input| {
+                            program
+                                .layout()
+                                .is_4states
+                                .get(input)
+                                .copied()
+                                .unwrap_or(true)
+                        })
+                    {
+                        return Err(
+                            "an Active-region clock may have repeated four-state edges".into()
+                        );
+                    }
+                    if plan.kernels.iter().enumerate().any(|(index, kernel)| {
+                        kernel
+                            .as_ref()
+                            .is_some_and(|kernel| kernel.writes.contains(source_event.unwrap()))
+                            && instructions(&sir.processes[index])
+                                .filter(|inst| match inst {
+                                    SIRInstruction::Store(target, ..)
+                                    | SIRInstruction::Commit(_, target, ..) => {
+                                        storage(target.absolute_addr()) == source
+                                    }
+                                    _ => false,
+                                })
+                                .count()
+                                > 1
+                    }) {
+                        return Err("an Active-region clock has several procedural writes".into());
+                    }
+                }
+            }
+        }
         // A combinational reset (or clock) driven only by host-owned inputs
         // is stable throughout a compiled run. Host writes are settled and
         // their edges handled before entering the scheduler. Callable kernels,
@@ -1001,9 +1132,29 @@ impl Plan {
             .iter()
             .map(|&event| storage(plan.events[event].signal))
             .collect();
+        // Reference processes stop a compiled run before their next wakeup,
+        // and ready processes, waiters and queued NBAs prevent entry. Their
+        // stores are therefore stable inputs here, just like host writes.
+        // Only stores that can execute inside this unit invalidate stability.
+        let compiled_stores: HashSet<AbsoluteAddr> = kernel_stores
+            .iter()
+            .zip(&plan.kernels)
+            .filter(|(_, kernel)| kernel.is_some())
+            .flat_map(|(stores, _)| stores.iter().copied())
+            .chain(
+                model
+                    .processes
+                    .iter()
+                    .zip(&plan.kernels)
+                    .filter(|(_, kernel)| kernel.is_some())
+                    .flat_map(|(process, _)| process.nbas.iter().map(|site| storage(site.target))),
+            )
+            .collect();
         let stable_input = |address| {
             let address = storage(address);
-            undriven(address) && !clocked_storage.contains(&address)
+            !rtl_stores.contains(&address)
+                && !compiled_stores.contains(&address)
+                && !clocked_storage.contains(&address)
         };
         let stable_host_events: BTreeSet<usize> = topology
             .combinational_derived
@@ -1021,10 +1172,21 @@ impl Plan {
             })
             .filter_map(|clock| index_of.get(&topology.canonical(clock.clock)).copied())
             .collect();
-        if rtl_written
+        let unhandled_rtl_events: Vec<_> = rtl_written
             .difference(&derived)
-            .any(|event| !stable_host_events.contains(event))
-        {
+            .filter(|event| !stable_host_events.contains(event))
+            .copied()
+            .collect();
+        tracing::debug!(target: "celox::scheduler",
+                active_commits = ?active_commits.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
+                kernels = ?plan.fallback.iter().enumerate().map(|(index, reason)| (index, schema.process_origins.get(index).map(ToString::to_string), reason, written(&sir.processes[index]).iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>())).collect::<Vec<_>>(),
+                "compiled scheduler process plans");
+        if !unhandled_rtl_events.is_empty() {
+            tracing::debug!(target: "celox::scheduler",
+                signals = ?unhandled_rtl_events.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
+                edged = ?edged.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
+                "compiled scheduler rejected RTL-driven events");
+
             return Err("RTL logic drives an event signal".into());
         }
         let gating: Vec<(usize, Vec<usize>)> = edged
@@ -1058,9 +1220,6 @@ impl Plan {
             {
                 return Err("a design with derived clocks stages nonblocking assignments".into());
             }
-            if tracked.iter().any(|event| active_commits.contains(event)) {
-                return Err(ACTIVE_COMMIT.into());
-            }
             // A gated clock is judged at the settle after its source changes,
             // before a kernel the change wakes runs in another pass; what that
             // kernel writes moves the clock only for the waves after the
@@ -1093,6 +1252,14 @@ impl Plan {
             }) {
                 return Err("a domain of a design with derived clocks may end the run".into());
             }
+        }
+        if !plan.active.is_empty()
+            && (program.layout().widths[&slots.exit_arg] < event_bits * 2
+                || tracked.iter().any(|&event| {
+                    plan.events[event].eval_only.is_none() || plan.events[event].apply.is_none()
+                }))
+        {
+            return Err(ACTIVE_COMMIT.into());
         }
         if tracked.len() > 1
             && tracked.iter().any(|&event| {
@@ -1662,7 +1829,9 @@ impl Plan {
 
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
-        if !self.derived.is_empty() {
+        if !self.active.is_empty() {
+            self.batch_active(&mut g, &tracked, slot_end, finish_exit);
+        } else if !self.derived.is_empty() {
             self.batch(&mut g, &tracked, slot_end, finish_exit);
         } else {
             let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
@@ -1947,6 +2116,170 @@ impl Plan {
     /// each wave commits and logic settles, the domains not run yet whose
     /// clocks moved to their active edge run in another, until none does.
     /// The domains run in the slot collect in `exit_arg`.
+    /// Active-region domain waves, with NBA publication deferred until
+    /// blocking-result edges have quiesced. The upper half of `exit_arg`
+    /// holds the deferred-domain mask across the shared settle continuation.
+    fn batch_active(
+        &self,
+        g: &mut Generator<'_>,
+        tracked: &[usize],
+        slot_end: celox_sir::BlockId,
+        finish_exit: celox_sir::BlockId,
+    ) {
+        let slots = g.slots;
+        let empty = g.constant(0, self.event_bits);
+        g.store_at(slots.exit_arg, self.event_bits, self.event_bits, empty);
+        let wave = g.b.new_block();
+        let flush = g.b.new_block();
+        let mask = g.b.alloc_bit(self.event_bits, false);
+        let fire = g.b.new_block_with(vec![mask]);
+        let judge = g.b.new_block();
+        // A pass of the process phase settles before the domains; a
+        // deferred one runs now.
+        match &self.lazy {
+            Some(_) => g.settle_then(judge),
+            None => {
+                g.b.seal_block(SIRTerminator::Jump(judge, Vec::new()));
+            }
+        }
+
+        g.b.switch_to_block(judge);
+        let active = g.load(slots.exit_arg, self.event_bits);
+        let levels = g.load_levels();
+        let stable = self.stable_edges(g, tracked, levels);
+        let mut gated_edges = g.constant(0, self.event_bits);
+        let mut judged = levels;
+        for (source, gated) in &self.gating {
+            let source_bit = position(tracked, *source);
+            let was = g.saved_level(levels, source_bit);
+            let is = g.level(&self.events[*source]);
+            let changed = g.binary(1, was, BinaryOp::Ne, is);
+            for &clock in gated {
+                let clock_bit = position(tracked, clock);
+                let was = g.saved_level(levels, clock_bit);
+                let is = g.level(&self.events[clock]);
+                let edge = g.edge(&self.events[clock], was, is);
+                let edge = g.binary(1, edge, BinaryOp::And, changed);
+                let bit = g.event_bit(edge, clock);
+                gated_edges = g.binary(self.event_bits, gated_edges, BinaryOp::Or, bit);
+                // The judged level is the clock's baseline from now on.
+                let level = g.b.alloc_bit(g.level_width(), false);
+                g.b.emit(SIRInstruction::Mux(level, changed, is, was));
+                judged = g.replace_level(judged, level, clock_bit);
+            }
+        }
+        g.store_levels(judged);
+        let zero = g.constant(0, self.event_bits);
+        let edged = g.binary(1, active, BinaryOp::Ne, zero);
+        let sources = g.binary(self.event_bits, active, BinaryOp::Or, gated_edges);
+        let triggers = g.b.alloc_bit(self.event_bits, false);
+        g.b.emit(SIRInstruction::Mux(triggers, edged, sources, stable));
+        g.store(slots.exit_arg, self.event_bits, triggers);
+        let quiet = g.binary(1, triggers, BinaryOp::Eq, zero);
+        let first = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: quiet,
+            true_block: (flush, Vec::new()),
+            false_block: (first, Vec::new()),
+        });
+        g.b.switch_to_block(first);
+        g.b.seal_block(SIRTerminator::Jump(fire, vec![triggers]));
+
+        // A wave after a commit: the domains not run yet whose clocks moved.
+        g.b.switch_to_block(wave);
+        let fired = g.load(slots.exit_arg, self.event_bits);
+        let levels = g.load_levels();
+        let stable = self.stable_edges(g, tracked, levels);
+        let all = g.ones(self.event_bits);
+        let unfired = g.binary(self.event_bits, fired, BinaryOp::Xor, all);
+        let ready = g.binary(self.event_bits, stable, BinaryOp::And, unfired);
+        let zero = g.constant(0, self.event_bits);
+        let quiet = g.binary(1, ready, BinaryOp::Eq, zero);
+        let drained = g.b.new_block();
+        let next = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: quiet,
+            true_block: (drained, Vec::new()),
+            false_block: (next, Vec::new()),
+        });
+        g.b.switch_to_block(next);
+        let fired = g.binary(self.event_bits, fired, BinaryOp::Or, ready);
+        g.store(slots.exit_arg, self.event_bits, fired);
+        g.b.seal_block(SIRTerminator::Jump(fire, vec![ready]));
+
+        g.b.switch_to_block(drained);
+        let pending = g.load_at(slots.exit_arg, self.event_bits, self.event_bits);
+        let zero = g.constant(0, self.event_bits);
+        let empty = g.binary(1, pending, BinaryOp::Eq, zero);
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: empty,
+            true_block: (slot_end, Vec::new()),
+            false_block: (flush, Vec::new()),
+        });
+
+        // Evaluation commits blocking results immediately, while every NBA
+        // stays in working state. Their Active-region edges settle and run
+        // before this batch publishes any deferred domain (LRM 4.5).
+        g.b.switch_to_block(fire);
+        for &index in tracked {
+            g.if_bit(mask, index, |g| {
+                for unit in self.events[index]
+                    .eval_only
+                    .as_ref()
+                    .expect("split active domain")
+                {
+                    g.inline_writer(unit, finish_exit);
+                }
+            });
+        }
+        let pending = g.load_at(slots.exit_arg, self.event_bits, self.event_bits);
+        let pending = g.binary(self.event_bits, pending, BinaryOp::Or, mask);
+        g.store_at(slots.exit_arg, self.event_bits, self.event_bits, pending);
+        let mut active = g.constant(0, self.event_bits);
+        for &index in &self.active {
+            let bit = g.single(index, self.event_bits);
+            active = g.binary(self.event_bits, active, BinaryOp::Or, bit);
+        }
+        let active = g.binary(self.event_bits, mask, BinaryOp::And, active);
+        let zero = g.constant(0, self.event_bits);
+        let committed = g.binary(1, active, BinaryOp::Ne, zero);
+        let settle = g.b.new_block();
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: committed,
+            true_block: (settle, Vec::new()),
+            false_block: (flush, Vec::new()),
+        });
+        g.b.switch_to_block(settle);
+        g.settle_then(wave);
+
+        // No Active work remains: publish the deferred NBA results, then
+        // judge the edges that those updates cause in another wave.
+        g.b.switch_to_block(flush);
+        let pending = g.load_at(slots.exit_arg, self.event_bits, self.event_bits);
+        for &index in tracked {
+            g.if_bit(pending, index, |g| {
+                for unit in self.events[index]
+                    .apply
+                    .as_ref()
+                    .expect("split active domain")
+                {
+                    g.inline_writer(unit, finish_exit);
+                }
+            });
+        }
+        let staged: Vec<&Staged> = self
+            .kernels
+            .iter()
+            .flatten()
+            .filter_map(|kernel| kernel.wait.as_ref())
+            .flat_map(|wait| &wait.sites)
+            .collect();
+        g.publish(&staged);
+        let empty = g.constant(0, self.event_bits);
+        g.store_at(slots.exit_arg, self.event_bits, self.event_bits, empty);
+        g.settle_then(wave);
+    }
+
     fn batch(
         &self,
         g: &mut Generator<'_>,
@@ -3690,4 +4023,243 @@ mod wide_event_tests {
         #[cfg(feature = "wasm-runtime")]
         counts_every_edge("wasm", builder(&source).build_wasm().unwrap());
     }
+}
+
+#[cfg(all(
+    test,
+    feature = "systemverilog",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod reference_reset_compiled_tests {
+    #[test]
+    fn reference_process_reset_is_stable_between_compiled_runs() {
+        let directory = tempfile::tempdir().unwrap();
+        let memory = directory.path().join("reset-memory.hex");
+        std::fs::write(&memory, "a5\n").unwrap();
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit [7:0] q = 0, releases = 0;
+    bit clk = 0, reset_n = 0;
+    wire reset = !reset_n;
+    logic [7:0] mem [0:0];
+    initial begin
+        // #0 keeps this process in the reference loop without host state.
+        #0;
+        $readmemh("MEMFILE", mem);
+        #3 reset_n = 1;
+        #13 reset_n = 0;
+        #2 reset_n = 1;
+    end
+    always_ff @(posedge reset_n) releases <= releases + 1;
+    always #1 clk = !clk;
+    always_ff @(posedge clk or posedge reset)
+        if (reset) q <= 0;
+        else q <= q + 1;
+endmodule"#
+            .replace(
+                "\"MEMFILE\"",
+                &serde_json::to_string(&memory.to_string_lossy()).unwrap(),
+            );
+        for four_state in [false, true] {
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("reference-reset.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+            simulation.run_until(24).unwrap();
+            let q = simulation.signal("q");
+            assert_eq!(simulation.get(q), num_bigint::BigUint::from(3u8));
+            let releases = simulation.signal("releases");
+            assert_eq!(simulation.get(releases), num_bigint::BigUint::from(2u8));
+            let mem = simulation.signal("mem");
+            assert_eq!(simulation.get(mem), num_bigint::BigUint::from(0xa5u8));
+            let stats = simulation.scheduler_stats();
+            assert!(stats.compiled_slots > 0, "{stats:?}");
+            assert!(
+                stats.checked_steps > 0,
+                "compiled runs must match the reference: {stats:?}"
+            );
+        }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "systemverilog",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod active_commit_compiled_tests {
+    #[test]
+    fn unobserved_blocking_results_keep_clock_and_waiter_compiled() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+            bit clk = 0;
+            bit [7:0] count = 0, q = 0;
+            always #1 clk = !clk;
+            always @(posedge clk) begin count = count + 1; q <= count; end
+            initial begin
+                repeat (10) @(negedge clk);
+                if (count != 10 || q != 10) $fatal(1, "bad count");
+                $finish;
+            end
+        endmodule"#;
+        for four_state in [false, true] {
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("active-counter.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+            simulation.run_until(24).unwrap();
+            assert!(simulation.is_finished());
+            let stats = simulation.scheduler_stats();
+            assert!(stats.compiled_slots > 0, "{stats:?}");
+            assert!(stats.checked_steps > 0, "{stats:?}");
+        }
+    }
+
+    #[test]
+    fn blocking_gate_update_keeps_its_edge_before_nba() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+            bit clk = 0, enable = 0, a = 0, seen = 0;
+            wire gated = clk & enable;
+            always #1 clk = !clk;
+            always @(posedge clk) begin enable = 1; a <= 1; end
+            always @(posedge gated) seen <= a;
+            initial begin #2; if (seen != 0) $fatal(1, "NBA published before active edge"); $finish; end
+        endmodule"#;
+        for four_state in [false, true] {
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("active-gate.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+            simulation.run_until(4).unwrap();
+            assert!(simulation.is_finished());
+            let seen = simulation.signal("seen");
+            assert_eq!(simulation.get(seen), num_bigint::BigUint::from(0u8));
+            let stats = simulation.scheduler_stats();
+            assert!(stats.compiled_slots > 0, "{stats:?}");
+            assert!(stats.checked_steps > 0, "{stats:?}");
+        }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "systemverilog",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod repeated_active_edge_tests {
+    #[test]
+    fn mixed_active_and_nba_clock_inputs_preserve_both_edges() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, enable = 1, active_value = 0;
+    bit [7:0] edges = 0;
+    wire first = clk & enable;
+    wire second = first ^ active_value;
+    always #1 clk = !clk;
+    always @(posedge clk) enable <= 0;
+    always @(posedge first) active_value = 1;
+    always @(posedge second) edges = edges + 1;
+    initial begin #2; if (edges != 2) $fatal(1, "lost repeated edge"); $finish; end
+endmodule"#;
+        for four_state in [false, true] {
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("repeated-active.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+            simulation.run_until(3).unwrap();
+            assert!(simulation.is_finished());
+            let edges = simulation.signal("edges");
+            assert_eq!(simulation.get(edges), num_bigint::BigUint::from(2u8));
+            assert_eq!(simulation.scheduler_stats().compiled_slots, 0);
+        }
+    }
+
+    #[test]
+    fn unknown_then_known_clock_counts_both_four_state_posedges() {
+        for four_state in [false, true] {
+            let expected = if four_state { 2 } else { 1 };
+            let source = format!(
+                r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    logic enable = 1'bx;
+    bit [7:0] edges = 0;
+    wire gated = clk & enable;
+    always #1 clk = !clk;
+    always @(posedge clk) enable = 1;
+    always @(posedge gated) edges = edges + 1;
+    initial begin #2; if (edges != {expected}) $fatal(1, "bad unknown edges"); $finish; end
+endmodule"#
+            );
+            let mut simulation = crate::Simulation::from_sv_sources(
+                vec![(source.as_str(), std::path::Path::new("unknown-active.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+            simulation.run_until(3).unwrap();
+            assert!(simulation.is_finished());
+            let edges = simulation.signal("edges");
+            assert_eq!(
+                simulation.get(edges),
+                num_bigint::BigUint::from(expected as u8)
+            );
+            if four_state {
+                assert_eq!(simulation.scheduler_stats().compiled_slots, 0);
+            }
+        }
+    }
+}
+
+/// Rebuild only the scheduler without occurrence-probe hints. The design's
+/// instrumented stores stay intact; metadata can be omitted to exercise the
+/// conservative statefulness check.
+#[cfg(all(
+    test,
+    feature = "systemverilog",
+    feature = "host-runtime",
+    any(
+        all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+        all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+    )
+))]
+pub(crate) fn without_probe_hints_for_test(
+    mut program: LaidOutProgram,
+    statefulness_known: bool,
+) -> LaidOutProgram {
+    program.runtime.runtime_schema.occurrence_probes.clear();
+    if !statefulness_known {
+        program.sir.eval_comb_stateful = None;
+    }
+    let schema = program.runtime.runtime_schema.scheduler.clone().unwrap();
+    let plan = Plan::new(&program, &schema.slots, true).unwrap();
+    assert_eq!(schema.fallback, plan.fallback);
+    assert_eq!(
+        schema.events,
+        plan.tracked()
+            .iter()
+            .map(|&event| plan.events[event].signal)
+            .collect::<Vec<_>>()
+    );
+    program.sir.processes[schema.unit.unwrap()] = plan.generate(&program, &schema.slots);
+    program
 }

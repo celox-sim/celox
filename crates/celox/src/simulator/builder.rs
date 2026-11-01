@@ -4880,6 +4880,70 @@ endmodule"#;
         assert!(!by_loads, "the fixture must load stale bits it discards");
     }
 
+    #[cfg(all(
+        test,
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn blocking_latch_input_settles_before_nba_closes_the_latch() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, d = 0, en = 0, q = 0;
+    always #1 clk = !clk;
+    always_latch if (!en) q = d;
+    always @(posedge clk) begin d = 1; en <= 1; end
+    initial begin #2; if (d != 1 || q != 1) $fatal(1, "latch missed Active update"); $finish; end
+endmodule"#;
+        for (fused, statefulness_known) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+                for four_state in [false, true] {
+                    let mut simulation = crate::Simulation::from_sv_sources(
+                        vec![(source, std::path::Path::new("active-latch.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                    .build_with_backend(
+                        crate::MemoryLayoutMode::ElementStrided,
+                        true,
+                        |program, options| {
+                            // Existing SV probes otherwise mask the missing stateful
+                            // consumer dependency in the scheduler's classification.
+                            let program = crate::scheduler::without_probe_hints_for_test(
+                                program.clone(),
+                                statefulness_known,
+                            );
+                            if fused {
+                                crate::NativeBackend::new(&program, options)
+                            } else {
+                                let first_tier =
+                                    crate::scheduler::without_fused_domains(program.clone(), true);
+                                crate::NativeBackend::new(&first_tier, options)
+                            }
+                        },
+                    )
+                    .unwrap();
+                    simulation.run_until(3).unwrap_or_else(|error| {
+                        panic!("four_state={four_state}, level={level:?}, fused={fused}: {error}")
+                    });
+                    assert!(simulation.is_finished());
+                    let q = simulation.signal("q");
+                    assert_eq!(simulation.get(q), num_bigint::BigUint::from(1u8));
+                    let stats = simulation.scheduler_stats();
+                    assert!(stats.compiled_slots > 0, "{stats:?}");
+                    assert!(stats.checked_steps > 0, "{stats:?}");
+                }
+            }
+        }
+    }
+
     /// A first tier settles before a domain instead of compiling a fused
     /// copy of the settle into the scheduler for it.
     #[test]
