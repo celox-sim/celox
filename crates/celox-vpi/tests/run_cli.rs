@@ -1010,3 +1010,29 @@ endmodule
         assert!(String::from_utf8_lossy(&resumed.stderr).contains("exceeded --max-steps 3"));
     }
 }
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_report_exposes_actual_compiled_scheduler_execution() {
+    let source = r#"module Top;
+        bit clk = 0;
+        bit [7:0] q = 0;
+        always #1 clk = !clk;
+        always_ff @(posedge clk) q <= q + 1;
+        initial begin #20; if (q != 10) $fatal(1, "bad count"); $finish; end
+    endmodule"#;
+    let output = run(&[("top.sv", source)], &["--backend", "native", "--report"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let line = stdout
+        .lines()
+        .find(|line| line.starts_with("CELOX_SCHEDULER phase=finished "))
+        .unwrap();
+    let slots: u64 = line
+        .split_whitespace()
+        .find_map(|field| field.strip_prefix("compiled_slots="))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(slots > 0, "{stdout}");
+}

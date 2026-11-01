@@ -63,7 +63,7 @@ pub(super) struct ExecutionArgs {
     pub threads: u32,
     /// Emit machine-readable CELOX_* timing, configuration and result records.
     #[arg(long)]
-    report: bool,
+    pub(super) report: bool,
     /// Require the tiered backend to adopt and execute generated code.
     #[arg(long, requires = "report")]
     require_compiled: bool,
@@ -110,10 +110,12 @@ impl ExecutionArgs {
             || self.native_memory_width.is_some()
             || self.x86_slp.is_some()
             || self.always_partition
-            || self.report
             || self.require_compiled
         {
-            return Err("compilation artifacts, codegen tuning and --report currently require a Veryl testbench".into());
+            return Err(
+                "compilation artifacts and codegen tuning currently require a Veryl testbench"
+                    .into(),
+            );
         }
         Ok(())
     }
