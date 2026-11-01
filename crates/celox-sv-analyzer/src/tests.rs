@@ -3564,10 +3564,6 @@ fn rejects_unimplemented_timing_constructs() {
             "event control mixing named events with other events",
         ),
         ("initial begin : b disable b; end", "disable statement"),
-        (
-            "logic a, y; always_latch y <= a;",
-            "nonblocking assignment inside always_latch",
-        ),
     ] {
         let code = format!("module Top; {body} endmodule");
         let error = analyze_source(&code, Path::new("timing.sv"))
@@ -3653,7 +3649,7 @@ fn implicit_event_controls_wait_on_the_reads_of_their_statement() {
     for process in ir.modules()[0].initial_processes() {
         for stmt in process.body() {
             stmt.walk(&mut |stmt| match stmt {
-                ir::Stmt::WaitImplicit(reads) => implicit.push(!reads.is_empty()),
+                ir::Stmt::WaitImplicit { reads, .. } => implicit.push(!reads.is_empty()),
                 ir::Stmt::WaitEvent(items) => explicit.push(
                     items
                         .iter()

@@ -77,6 +77,56 @@
     },
     {
       "category": "Sequential",
+      "detail": "The two nonblocking latch sensitivity cases fail to converge in Verilator before reaching their timed assertions. Their adapter-free sources reproduce DIDNOTCONVERGE with converge-limit 10000. IEEE 1800-2023 9.2.2.3 and 9.2.2.2.1 exclude written expressions from implicit sensitivity, including a partial written range and a module variable written by a called function; 10.4.2 schedules the updates in NBA. Celox completes the original assertions on every enabled backend.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/nonblocking_latch_sensitivity.json",
+          "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+          "verification/repros/nonblocking_latch_function_writes.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_nonblocking_latch_self_activation",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "The two nonblocking latch sensitivity cases fail to converge in Verilator before reaching their timed assertions. Their adapter-free sources reproduce DIDNOTCONVERGE with converge-limit 10000. IEEE 1800-2023 9.2.2.3 and 9.2.2.2.1 exclude written expressions from implicit sensitivity, including a partial written range and a module variable written by a called function; 10.4.2 schedules the updates in NBA. Celox completes the original assertions on every enabled backend.",
+        "upstream": []
+      },
+      "name": "latch::nonblocking_latch_function_writes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "The two nonblocking latch sensitivity cases fail to converge in Verilator before reaching their timed assertions. Their adapter-free sources reproduce DIDNOTCONVERGE with converge-limit 10000. IEEE 1800-2023 9.2.2.3 and 9.2.2.2.1 exclude written expressions from implicit sensitivity, including a partial written range and a module variable written by a called function; 10.4.2 schedules the updates in NBA. Celox completes the original assertions on every enabled backend.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_disagreement",
+        "evidence": [
+          "verification/repros/nonblocking_latch_sensitivity.json",
+          "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+          "verification/repros/nonblocking_latch_function_writes.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_nonblocking_latch_self_activation",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "The two nonblocking latch sensitivity cases fail to converge in Verilator before reaching their timed assertions. Their adapter-free sources reproduce DIDNOTCONVERGE with converge-limit 10000. IEEE 1800-2023 9.2.2.3 and 9.2.2.2.1 exclude written expressions from implicit sensitivity, including a partial written range and a module variable written by a called function; 10.4.2 schedules the updates in NBA. Celox completes the original assertions on every enabled backend.",
+        "upstream": []
+      },
+      "name": "latch::nonblocking_latch_partial_sensitivity",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "Verilator 5.052 reports DIDNOTCONVERGE in the settle region for these self-reading @* / always_latch processes, before the timed pulse assertions. The unchanged adapter-free sources also fail to settle, while Icarus 13.0 completes both. IEEE 1800-2023 9.2.2.3 applies the always_comb written-expression sensitivity exclusion (9.2.2.2.1) to always_latch; an @* procedure waits at its event control and does not wait on its own blocking body writes (9.2.2.1, 9.4.2.2). A self-write must not produce an endless activation loop. This exclusion concerns the observed nonconvergence, not arbitrary ordering between independent active-region processes.",
       "expectation": "Simulation",
       "name": "latch::same_activation_change_return",

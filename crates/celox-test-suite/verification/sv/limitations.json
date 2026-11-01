@@ -4685,5 +4685,45 @@
         "packed_structs::packed_struct_array_unknown_indices"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_nonblocking_latch_self_activation",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "The two nonblocking latch sensitivity cases fail to converge in Verilator before reaching their timed assertions. Their adapter-free sources reproduce DIDNOTCONVERGE with converge-limit 10000. IEEE 1800-2023 9.2.2.3 and 9.2.2.2.1 exclude written expressions from implicit sensitivity, including a partial written range and a module variable written by a called function; 10.4.2 schedules the updates in NBA. Celox completes the original assertions on every enabled backend.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/nonblocking_latch_sensitivity.json",
+      "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+      "verification/repros/nonblocking_latch_function_writes.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "latch::nonblocking_latch_partial_sensitivity",
+        "latch::nonblocking_latch_function_writes"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_nonblocking_latch_sensitivity_support",
+    "category": "simulator_support",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus rejects the partial-range sensitivity source with constant selects in always_* processes are not fully supported and always_latch process has no event control. It rejects the function-write source with functions cannot have non blocking assignment statements. Both diagnostics reproduce without the suite adapters. IEEE 1800-2023 9.2.2.2.1 defines sensitivity at the longest static prefix, 9.2.2.3 permits the nonblocking latch form, and 13.4 does not forbid scheduling NBA updates of module variables.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/nonblocking_latch_sensitivity.json",
+      "verification/repros/nonblocking_latch_partial_sensitivity.sv",
+      "verification/repros/nonblocking_latch_function_writes.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "latch::nonblocking_latch_partial_sensitivity",
+        "latch::nonblocking_latch_function_writes"
+      ]
+    }
   }
 ]

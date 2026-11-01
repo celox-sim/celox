@@ -909,7 +909,7 @@ fn breaks(body: &[Stmt]) -> bool {
         Stmt::Case { items, default, .. } => {
             items.iter().any(|item| breaks(&item.body)) || default.as_deref().is_some_and(breaks)
         }
-        Stmt::WaitImplicit(body) => breaks(body),
+        Stmt::WaitImplicit { reads, .. } => breaks(reads),
         _ => false,
     })
 }
@@ -954,7 +954,10 @@ pub(super) fn mark_breaks(body: Vec<Stmt>, stop: &str) -> Vec<Stmt> {
                     .collect(),
                 default: default.map(|body| mark_breaks(body, stop)),
             }),
-            Stmt::WaitImplicit(body) => marked.push(Stmt::WaitImplicit(mark_breaks(body, stop))),
+            Stmt::WaitImplicit { reads, always_comb } => marked.push(Stmt::WaitImplicit {
+                reads: mark_breaks(reads, stop),
+                always_comb,
+            }),
             stmt => marked.push(stmt),
         }
     }

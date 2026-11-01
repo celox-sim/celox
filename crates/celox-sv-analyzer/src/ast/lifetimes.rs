@@ -836,7 +836,7 @@ impl Flow<'_> {
                 Ok(Exits::next(written))
             }
             // An `@*` samples what its statements read; they do not run.
-            Stmt::WaitImplicit(reads) => {
+            Stmt::WaitImplicit { reads, .. } => {
                 let mut exprs = Vec::new();
                 for stmt in reads {
                     stmt.walk(&mut |stmt| exprs.extend(stmt_exprs(stmt)));
@@ -990,7 +990,7 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
         | Stmt::AssertionRegion { .. }
         | Stmt::WaitFork
         | Stmt::DisableFork
-        | Stmt::WaitImplicit(_)
+        | Stmt::WaitImplicit { .. }
         | Stmt::Break
         | Stmt::Continue => Vec::new(),
     }

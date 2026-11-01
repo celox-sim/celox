@@ -522,6 +522,17 @@ including its positive check that changing the argument does wake the procedures
 The [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
 records both executions. Only this Verilator case is excluded for this reason.
 
+The nonblocking latch cases `latch::nonblocking_latch_partial_sensitivity` and
+`latch::nonblocking_latch_function_writes` fail to converge in Verilator 5.052
+before their timed assertions. Icarus 13.0 rejects the first because it cannot
+form the partial-select sensitivity, and the second because it rejects NBA
+assignments in functions. The [standalone observations](verification/repros/nonblocking_latch_sensitivity.json)
+retain both tools' diagnostics and the original sources. IEEE 1800-2023
+9.2.2.3 applies the written-expression exclusions of 9.2.2.2.1 to these latches;
+10.4.2 defines the delayed updates, and 13.4 permits these function statements
+that update module variables. Only these two cases are excluded for each tool;
+their assertions remain unchanged and available with `--include-ignored`.
+
 The packed-structure array case `packed_structs::packed_struct_array_dynamic_members`
 passes its valid-index checks but Verilator 5.052 writes element 0 when the NBA
 destination index is 4 for an array declared `[3:0]`. Icarus 13.0 rejects that

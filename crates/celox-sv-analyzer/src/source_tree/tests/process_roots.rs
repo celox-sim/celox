@@ -206,10 +206,6 @@ fn native_direct_nested_unit_restrictions_are_preserved_for_selected_parent() {
     for (process, expected) in [
         ("final #1;", "timing control in a final procedure"),
         (
-            "always_latch begin int y;y<=1;end",
-            "nonblocking assignment inside always_latch",
-        ),
-        (
             "always_comb begin int y;y<=1;end",
             "nonblocking assignment inside always_comb",
         ),
@@ -231,8 +227,8 @@ fn unconverted_checker_processes_retain_existing_restriction_diagnostics() {
     for (process, expected) in [
         ("final #1;", "timing control in a final procedure"),
         (
-            "always_latch begin int y;y<=1;end",
-            "nonblocking assignment inside always_latch",
+            "always_comb begin int y;y<=1;end",
+            "nonblocking assignment inside always_comb",
         ),
     ] {
         let tree = parse_source(

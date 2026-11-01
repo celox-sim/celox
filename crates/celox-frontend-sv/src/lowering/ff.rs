@@ -3742,7 +3742,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             stmt,
             sv::ir::Stmt::Delay { .. }
                 | sv::ir::Stmt::WaitEvent(_)
-                | sv::ir::Stmt::WaitImplicit(_)
+                | sv::ir::Stmt::WaitImplicit { .. }
                 | sv::ir::Stmt::Wait(_)
         ) && (self.kernel.is_none()
             || self
@@ -3835,8 +3835,8 @@ impl<'p, 'a> Ff<'p, 'a> {
                 self.wait_event(items)?;
                 Ok(true)
             }
-            sv::ir::Stmt::WaitImplicit(reads) => {
-                self.wait_implicit(reads)?;
+            sv::ir::Stmt::WaitImplicit { reads, always_comb } => {
+                self.wait_implicit(reads, *always_comb)?;
                 Ok(true)
             }
             sv::ir::Stmt::Wait(condition) => {
@@ -7277,10 +7277,63 @@ impl Ff<'_, '_> {
     /// branches and the defaults of omitted subroutine arguments count. A
     /// process-local variable it reads is sampled like an operand of an
     /// event expression.
-    fn wait_implicit(&mut self, reads: &[sv::ir::Stmt]) -> Result<(), sv::AnalyzerError> {
+    fn wait_implicit(
+        &mut self,
+        reads: &[sv::ir::Stmt],
+        always_comb: bool,
+    ) -> Result<(), sv::AnalyzerError> {
         // The expressions of timing controls are not part of the event list.
         let reads = without_timing_controls(reads);
         let reads = reads.as_slice();
+        if always_comb {
+            let sources = self.m.implicit_reads(reads, true);
+            let mut writes = Vec::new();
+            super::comb::static_writes(self.m, reads, &mut HashSet::default(), &mut writes, true);
+            let writes = writes
+                .into_iter()
+                .map(|(id, access)| VarAtomBase::new(id, access.lsb, access.msb))
+                .collect::<Vec<_>>();
+            let sources = super::comb::subtract_written_sensitivity(sources, &writes);
+            let mut sources: Vec<_> = sources
+                .into_iter()
+                .filter(|atom| !self.m.is_hidden(atom.id))
+                .collect();
+            sources.sort_by_key(|atom| (atom.id.0, atom.access.lsb, atom.access.msb));
+            let mut terms = Vec::new();
+            let mut gates = Vec::new();
+            let mut samples = Vec::new();
+            let mut selected = Vec::new();
+            for source in sources {
+                if source.access.lsb == 0 && source.access.msb + 1 == self.m.var(source.id).width {
+                    terms.push((source.id, CounterKind::Changes));
+                    gates.push(None);
+                    continue;
+                }
+                let name = self
+                    .m
+                    .name_to_id
+                    .iter()
+                    .filter_map(|(name, id)| (*id == source.id).then_some(name))
+                    .min()
+                    .cloned()
+                    .ok_or_else(|| unsupported("implicit sensitivity variable"))?;
+                selected.push(sv::ir::EventItem {
+                    edge: sv::ir::EventEdge::Any,
+                    expr: sv::ir::Expr::Select {
+                        // Sensitivity ranges are storage offsets. A concatenation
+                        // normalizes shifted, ascending and multidimensional
+                        // declarations to a zero-based packed value.
+                        expr: Box::new(sv::ir::Expr::Concat(vec![sv::ir::Expr::Ident(name)])),
+                        msb: sv::ir::ConstExpr::Literal(source.access.msb.to_string()),
+                        lsb: sv::ir::ConstExpr::Literal(source.access.lsb.to_string()),
+                        signed: false,
+                    },
+                    iff: None,
+                });
+            }
+            self.event_terms(&selected, &mut terms, &mut gates, &mut samples)?;
+            return self.suspend_on(terms, gates, samples);
+        }
         let mut ids: Vec<SourceVarId> = self
             .m
             .implicit_reads(reads, false)
@@ -7930,7 +7983,7 @@ fn without_timing_controls(stmts: &[sv::ir::Stmt]) -> Vec<sv::ir::Stmt> {
         .filter(|stmt| {
             !matches!(
                 stmt,
-                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit(_) | Stmt::Wait(_)
+                Stmt::Delay { .. } | Stmt::WaitEvent(_) | Stmt::WaitImplicit { .. } | Stmt::Wait(_)
             )
         })
         .map(|stmt| match stmt {
@@ -7983,7 +8036,9 @@ fn always_suspends(stmts: &[sv::ir::Stmt]) -> bool {
     stmts.iter().any(|stmt| {
         matches!(
             stmt,
-            sv::ir::Stmt::Delay { .. } | sv::ir::Stmt::WaitEvent(_) | sv::ir::Stmt::WaitImplicit(_)
+            sv::ir::Stmt::Delay { .. }
+                | sv::ir::Stmt::WaitEvent(_)
+                | sv::ir::Stmt::WaitImplicit { .. }
         )
     })
 }
@@ -8179,7 +8234,7 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                     | sv::ir::Stmt::SystemTask { .. }
                     | sv::ir::Stmt::Delay { .. }
                     | sv::ir::Stmt::WaitEvent(_)
-                    | sv::ir::Stmt::WaitImplicit(_)
+                    | sv::ir::Stmt::WaitImplicit { .. }
                     | sv::ir::Stmt::Wait(_) => effect = true,
                     _ => {}
                 });
