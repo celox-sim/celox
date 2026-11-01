@@ -9,7 +9,7 @@
 //! type it renames.
 
 use fxhash::FxHashMap as HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 mod conversion;
 mod relations;
@@ -127,11 +127,39 @@ pub(super) enum TyData {
 #[derive(Clone, Debug, Default)]
 pub(super) struct TyTable {
     /// Each type with the id of the type it matches in canonical form.
-    types: Vec<(TyData, TyId)>,
-    ids: HashMap<TyData, TyId>,
+    types: Vec<(Arc<TyData>, TyId)>,
+    ids: HashMap<Arc<TyData>, TyId>,
+}
+
+/// A declaration's ID together with its immutable interned node. A cloned
+/// table shares its prefix; unrelated or independently appended nodes do not.
+#[derive(Clone, Debug)]
+pub(super) struct RetainedType {
+    id: TyId,
+    node: Weak<TyData>,
+}
+impl RetainedType {
+    pub(super) fn same_node(&self, other: &Self) -> bool {
+        self.id == other.id && Weak::ptr_eq(&self.node, &other.node)
+    }
+
+    pub(super) fn in_table(&self, table: &TyTable) -> Option<TyId> {
+        table
+            .types
+            .get(self.id.0 as usize)
+            .filter(|(node, _)| std::ptr::eq(Arc::as_ptr(node), self.node.as_ptr()))
+            .map(|_| self.id)
+    }
 }
 
 impl TyTable {
+    pub(super) fn retain(&self, id: TyId) -> RetainedType {
+        RetainedType {
+            id,
+            node: Arc::downgrade(&self.types[id.0 as usize].0),
+        }
+    }
+
     /// The id of type `data`.
     pub fn intern(&mut self, data: TyData) -> TyId {
         if let Some(&id) = self.ids.get(&data) {
@@ -142,6 +170,7 @@ impl TyTable {
             None => TyId(self.types.len() as u32),
         };
         let id = TyId(self.types.len() as u32);
+        let data = Arc::new(data);
         self.types.push((data.clone(), canonical));
         self.ids.insert(data, id);
         id
