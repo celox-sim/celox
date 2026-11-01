@@ -1,1 +1,1 @@
-Refresh #2882 on the latest master after scheduler event-wait and release CI changes; verify the combined tree.
+Validate rebased #2882 on master e4126a3b11: the patch is unchanged; all 119 string backend checks, Clippy and formatting pass.
