@@ -504,8 +504,11 @@ Fixed unpacked arrays of strings support assignment patterns, whole-array and
 subarray copies, indexed reads and assignments, and string methods that do not
 modify the receiver. A full element selection yields a string; a further index
 reads a character. Invalid element indices read as the empty string and writes
-are ignored (7.4.5). Mutating methods and character writes on array elements,
-and array-valued string arguments or return values, remain unsupported.
+are ignored (7.4.5). Complete elements also support blocking character writes,
+`putc`, `itoa`, `hextoa`, `octtoa` and `bintoa`. Each array index is evaluated
+once before the update; copies of the string retain their prior text.
+Nonblocking character writes, method calls on whole arrays or subarrays,
+and array-valued string arguments or return values remain unsupported.
 
 Not yet supported: `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,

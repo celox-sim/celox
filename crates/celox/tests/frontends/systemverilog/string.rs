@@ -1,6 +1,11 @@
 use super::*;
 
 sv_backends! {
+    fn string_fixed_array_mutations(sim) { @case "string::fixed_array_mutations"; }
+    fn string_fixed_array_mutating_methods(sim) { @case "string::fixed_array_mutating_methods"; }
+    fn string_fixed_array_mutation_indices(sim) { @case "string::fixed_array_mutation_indices"; }
+    fn string_fixed_array_mutations_invalid_indices(sim) { @case "string::fixed_array_mutations_invalid_indices"; }
+
     fn string_fixed_array_pattern_rows(sim) { @case "string::fixed_array_pattern_rows"; }
     fn string_fixed_array_continuous_elements(sim) { @case "string::fixed_array_continuous_elements"; }
 
@@ -30,20 +35,17 @@ sv_backends! {
 }
 
 #[test]
-fn string_array_element_mutating_methods_remain_unsupported() {
-    let source = r#"
-        module Top;
-            string names [2];
-            initial names[0].putc(0, "a");
-        endmodule
-    "#;
-    let Err(error) = Simulator::from_sv_sources(vec![(source, Path::new("strings.sv"))], "Top")
-        .build_cranelift()
-    else {
-        panic!("mutating methods on string array elements are unsupported");
-    };
-    let error = error.to_string();
-    assert!(error.contains("on an array element"), "{error}");
+fn string_array_mutations_require_a_complete_element() {
+    for receiver in ["names", "names[0]", "names[0:1]"] {
+        let source =
+            format!("module Top; string names[2][2]; initial {receiver}.putc(0, \"a\"); endmodule");
+        assert!(
+            Simulator::from_sv_sources(vec![(&source, Path::new("strings.sv"))], "Top")
+                .build_cranelift()
+                .is_err(),
+            "array-valued receiver accepted: {source}"
+        );
+    }
 }
 
 #[test]
@@ -102,4 +104,28 @@ fn fixed_string_array_state_roundtrip() {
         let same = loaded.signal("same");
         assert_eq!(loaded.get(same), 1u8.into());
     }
+}
+
+#[test]
+fn nonblocking_string_array_character_assignments_remain_unsupported() {
+    let source = r#"
+        module Top;
+            string words[2];
+            initial begin
+                words[0][0] <= "x";
+                words[0][1] <= "y";
+            end
+        endmodule
+    "#;
+    let Err(error) = Simulator::from_sv_sources(vec![(source, Path::new("strings.sv"))], "Top")
+        .build_cranelift()
+    else {
+        panic!("nonblocking string array character assignments accepted");
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("nonblocking assignment to a string array character"),
+        "{error}"
+    );
 }

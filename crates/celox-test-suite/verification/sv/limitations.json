@@ -4467,5 +4467,63 @@
         "containers::associative_default_four_state"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_fixed_string_array_mutations",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "Verilator 5.052 reports an internal error in V3Ast.h:1113 (AstNode is not of expected type, but instead has type ARRAYSEL) for putc and integer-conversion methods on fixed string-array elements. The standalone conversion probe reproduces the error at words[0].itoa(-17). IEEE 1800-2023 6.16.2 and 6.16.11-14 define these methods on string variables.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-array-mutations-verilator.json",
+      "verification/repros/sv_string_array_mutations_methods.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "string::fixed_array_mutations",
+        "string::fixed_array_mutating_methods",
+        "string::fixed_array_mutation_indices"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_fixed_string_array_mutations",
+    "category": "simulator_disagreement",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+    "reason": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-array-mutations-icarus.json",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "string::fixed_array_mutations",
+        "string::fixed_array_mutating_methods",
+        "string::fixed_array_mutation_indices",
+        "string::fixed_array_mutations_invalid_indices"
+      ]
+    }
+  },
+  {
+    "id": "sv_xezim_fixed_string_array_mutations",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "xezim version 0.11.4",
+    "reason": "Xezim 0.11.4 evaluates each of the two authored select_word() calls twice and also increments a postfix array index twice while updating string-array elements. The standalone probe prints calls=4 index=2 words=ZXQ,12 instead of calls=2 index=1 words=12,def. IEEE 1800-2023 6.16.2 makes putc equivalent to a character assignment; lowering its read and write must preserve the effects of evaluating the selected destination.",
+    "upstream": [],
+    "evidence": [
+      "verification/sv/limitations/string-array-mutations-xezim.json",
+      "verification/repros/sv_string_array_mutations_indices.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "xezim": [
+        "string::fixed_array_mutation_indices"
+      ]
+    }
   }
 ]
