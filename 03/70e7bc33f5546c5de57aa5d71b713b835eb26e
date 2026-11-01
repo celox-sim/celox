@@ -1,0 +1,1 @@
+Address review r4436309773: preserve wide inline enum constants as literals, including references and implicit successors; add portable regressions.
