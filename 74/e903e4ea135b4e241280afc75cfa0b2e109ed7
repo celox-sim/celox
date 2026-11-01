@@ -1,0 +1,6 @@
+Revision history for #2817:
+
+rev 2 (content) 2026-11-01 08:36 UTC — Address #2817 latch-settle review: preserve intermediate Active settles for stateful combinational consumers, reproduce the missing dependency without probe hints, refresh the hidden-slot MIR offsets, and rebase onto current master after #2816 merged.
+rev 1 (initial) 2026-11-01 08:36 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2817,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"44c82343d319120b1f7b5bc99cae32bd0b18dec8","timestamp_iso":"2026-11-01T08:36:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"44c82343d319120b1f7b5bc99cae32bd0b18dec8","new_sha":"ef8e77af7a2fa737c05c6365da17d7de4ceb929a","timestamp_iso":"2026-11-01T08:36:57Z","reason":"Address #2817 latch-settle review: preserve intermediate Active settles for stateful combinational consumers, reproduce the missing dependency without probe hints, refresh the hidden-slot MIR offsets, and rebase onto current master after #2816 merged.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/44c82343d319120b1f7b5bc99cae32bd0b18dec8...ef8e77af7a2fa737c05c6365da17d7de4ceb929a"}]} -->
