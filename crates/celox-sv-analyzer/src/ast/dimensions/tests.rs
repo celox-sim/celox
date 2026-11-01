@@ -205,6 +205,7 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                     pattern_type: f.return_type.clone(),
                     enum_domain: None,
                     virtual_interface: None,
+                    container: None,
                 },
             )
         }));

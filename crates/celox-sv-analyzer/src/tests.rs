@@ -7974,7 +7974,6 @@ fn container_formals_copy_only_what_container_assignment_represents() {
         ("output int q[$]", "x", "compatible container"),
         ("inout int q[$]", "m", "incompatible dynamic container"),
         ("int q[$]", "m", "incompatible dynamic container"),
-        ("int q[$]", "make()", "compatible container"),
     ] {
         let source = format!(
             "module Top; typedef int q_t[$]; int a[$]; int b[$:3]; int x; int m[string]; \

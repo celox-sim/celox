@@ -2143,6 +2143,7 @@ mod tests {
             pattern_type: None,
             enum_domain: None,
             virtual_interface: None,
+            container: None,
         };
         let inner = FunctionReturnMetadata {
             semantic_type: None,
@@ -2157,6 +2158,7 @@ mod tests {
             pattern_type: None,
             enum_domain: None,
             virtual_interface: None,
+            container: None,
         };
         let dimensions = PackedDimensions {
             function_return_types: [
