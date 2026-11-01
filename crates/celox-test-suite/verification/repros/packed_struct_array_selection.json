@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "standard": "IEEE 1800-2023 7.4.6 permits integral expressions to select packed-array elements; out-of-range indices select no storage to write. 10.4.2 retains the evaluated destination of each NBA update.",
+  "source": "verification/repros/packed_struct_array_dynamic_members.sv",
+  "adapter_observations": {
+    "verilator": [
+      {
+        "detail": "packed_structs::packed_struct_array_dynamic_members at 284:3: assert_eq whole: expected 0x1234ab78, got 0x1234abff",
+        "name": "packed_structs::packed_struct_array_dynamic_members",
+        "phase": "execute",
+        "status": "mismatch"
+      },
+      {
+        "detail": "four-state expectations",
+        "name": "packed_structs::packed_struct_array_unknown_indices",
+        "phase": "compile",
+        "status": "unsupported"
+      }
+    ],
+    "icarus": [
+      {
+        "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:9: error: A reference to a net or variable (`index') is not allowed in a constant expression.\n<case>/source_0.sv:9: error: Array index expressions must be constant here.\nivl: netmisc.cc:1597: NetExpr* collapse_array_indices(Design*, NetScope*, const NetNet*, const std::__cxx11::list<index_component_t>&): Assertion `rc' failed.\nAborted (core dumped)\n",
+        "name": "packed_structs::packed_struct_array_dynamic_members",
+        "phase": "compile",
+        "status": "compile_error"
+      },
+      {
+        "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:8: error: A reference to a net or variable (`index') is not allowed in a constant expression.\n<case>/source_0.sv:8: error: Array index expressions must be constant here.\nivl: netmisc.cc:1597: NetExpr* collapse_array_indices(Design*, NetScope*, const NetNet*, const std::__cxx11::list<index_component_t>&): Assertion `rc' failed.\nAborted (core dumped)\n",
+        "name": "packed_structs::packed_struct_array_unknown_indices",
+        "phase": "compile",
+        "status": "compile_error"
+      }
+    ]
+  },
+  "standalone": {
+    "verilator": {
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "compile_command": "verilator --binary --timing -j 2 --top-module Top -Wno-fatal --Mdir <build-dir> packed_struct_array_dynamic_members.sv",
+      "compile_exit_code": 0,
+      "run_exit_code": 1,
+      "run_output": "items=1234abff\n[5] %Fatal: packed_struct_array_dynamic_members.sv:22: Assertion failed in Top: out-of-range write changed storage\n%Error: crates/celox-test-suite/verification/repros/packed_struct_array_dynamic_members.sv:22: Verilog $stop\nAborting...\n",
+      "expected_items_after_oob_write": "1234ab78"
+    },
+    "icarus": {
+      "version": "Icarus Verilog version 13.0",
+      "compile_command": "iverilog -g2012 -s Top -o <output> packed_struct_array_dynamic_members.sv",
+      "compile_exit_code": 134,
+      "compile_output": "verification/repros/packed_struct_array_dynamic_members.sv:11: error: A reference to a net or variable (`index') is not allowed in a constant expression.\nverification/repros/packed_struct_array_dynamic_members.sv:11: error: Array index expressions must be constant here.\nivl: netmisc.cc:1597: NetExpr* collapse_array_indices(Design*, NetScope*, const NetNet*, const std::__cxx11::list<index_component_t>&): Assertion `rc' failed.\nAborted (core dumped)\n"
+    }
+  }
+}
