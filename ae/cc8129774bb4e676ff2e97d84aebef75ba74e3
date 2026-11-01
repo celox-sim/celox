@@ -1,0 +1,1 @@
+One heap helper owns randc cycles (enumeration member indices) for the unconstrained and constrained paths; restart only exhausted cycles, then one at a time; apply enum domains to every solver variable (Codex P2s)
