@@ -1,1 +1,6 @@
-Address review r4437149392: inspect bound actual expressions instead of formal-name fallbacks when checking delayed-net connections.
+Revision history for #2958:
+
+rev 2 (content) 2026-11-01 20:14 UTC — Address review r4437149392: inspect bound actual expressions instead of formal-name fallbacks when checking delayed-net connections.
+rev 1 (initial) 2026-11-01 20:14 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2958,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"ceb3683ee3ff81a4302c3d78aa71f5125104f0a7","timestamp_iso":"2026-11-01T20:14:06Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"ceb3683ee3ff81a4302c3d78aa71f5125104f0a7","new_sha":"582b0e808fac4beb76ffa0ab5f16b483b3a7f4cc","timestamp_iso":"2026-11-01T20:14:06Z","reason":"Address review r4437149392: inspect bound actual expressions instead of formal-name fallbacks when checking delayed-net connections.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/ceb3683ee3ff81a4302c3d78aa71f5125104f0a7...582b0e808fac4beb76ffa0ab5f16b483b3a7f4cc"}]} -->
