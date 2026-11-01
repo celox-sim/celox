@@ -1770,3 +1770,40 @@ is specified. Its exact case ID is excluded only on Icarus. The
 [retained observation](verification/repros/sv_gate_two_state_member.json) also
 records Verilator 5.052 accepting the source in lint mode; this does not claim
 four-state execution agreement. `--include-ignored` reruns the Icarus failure.
+
+### Integral array members of unpacked structures
+
+The eleven `unpacked_structs::integral_array_member*` cases exercise fixed integral
+array members, including nested structures and fixed arrays of structures,
+member-array copies, replication, arbitrary bounds, wide values, dynamic indices
+and four-state defaults, including array-valued member defaults. Every case
+runs through all five Celox backends.
+
+| Tool | Focused result before exclusions | Reviewed limitations |
+| --- | --- | --- |
+| Verilator 5.052 | 5 passed, 1 mismatch, 2 compile errors, 3 four-state cases unsupported | Invalid outer index aliases a valid element; generated C++ for a 129-bit array member does not compile; array-valued default triggers an internal error. |
+| Icarus 13.0 | 11 compile errors | Unpacked structure declarations are unsupported. |
+| xezim 0.11.4 | 5 passed, 6 mismatches | Member-array copy order and subarray copies; X-indexed outer writes and reads; structure and nested array replication; array-valued defaults leave destinations unchanged. |
+
+The focused evidence is retained in
+[Verilator](verification/sv/limitations/struct-array-members-verilator.json),
+[Icarus](verification/sv/limitations/struct-array-members-icarus.json) and
+[xezim](verification/sv/limitations/struct-array-members-xezim.json) reports.
+Adapter-free probes isolate [copy ordering](verification/repros/sv_struct_array_members_basic.sv),
+[bounds and subarray copies](verification/repros/sv_struct_array_members_bounds.sv),
+[four-state invalid indices](verification/repros/sv_struct_array_members_four_state.sv),
+[replication](verification/repros/sv_struct_array_members_replication.sv) and
+[wide member code generation](verification/repros/sv_struct_array_members_wide.sv).
+IEEE 1800-2023 7.4.5 specifies ignored invalid writes and per-element default
+reads; 7.6 preserves left-to-right element correspondence in array copies;
+10.9.2 defines structure pattern replication. Exclusions name only the observed
+failures. Four-state capability skips remain capability skips, and passing
+cases do not add historical baseline rows.
+
+The array-default review regressions preserve whole array-valued defaults from
+members and selected subarrays, recursive defaults through nested structures,
+scalar broadcasts and four-state value copies. Standalone
+[two-state](verification/repros/sv_struct_array_member_defaults.sv) and
+[four-state](verification/repros/sv_struct_array_member_defaults_four_state.sv)
+probes reproduce the exact Verilator and xezim failures above. Incompatible
+member-array lengths and element widths remain rejected by Celox.

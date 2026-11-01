@@ -991,8 +991,8 @@ chapter-5/5.10-structure-arrays-illegal.sv	2state	pass
 chapter-5/5.10-structure-arrays-illegal.sv	4state	pass
 chapter-5/5.10-structure-arrays.sv	2state	pass
 chapter-5/5.10-structure-arrays.sv	4state	pass
-chapter-5/5.10-structure-replication.sv	2state	fail
-chapter-5/5.10-structure-replication.sv	4state	fail
+chapter-5/5.10-structure-replication.sv	2state	pass
+chapter-5/5.10-structure-replication.sv	4state	pass
 chapter-5/5.10-structures.sv	2state	fail
 chapter-5/5.10-structures.sv	4state	fail
 chapter-5/5.11-arrays-key-index.sv	2state	pass

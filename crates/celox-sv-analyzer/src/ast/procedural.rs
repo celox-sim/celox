@@ -927,6 +927,38 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             && let Some((_, ty)) = &member_context
         {
             let shape = procedural::dimensions_from_type(ty);
+            if !shape.unpacked.is_empty() {
+                array_compatibility::check_native_unpacked_assignment(
+                    self.tree,
+                    self.session,
+                    right,
+                    &shape,
+                    || "assignment to a structure array member".into(),
+                    &self.dims,
+                )?;
+                if !matches!(
+                    self.tree
+                        .declarations()
+                        .expression(expression_binding::ungroup(right, self.tree.declarations()))
+                        .kind,
+                    celox_sv_syntax::ExprKind::Pattern { target: None, .. }
+                ) && let Some(actual) =
+                    dimensions::operand_shape(right, self.tree, self.session, &self.dims)?
+                    && let Some((actual, target)) = array_compatibility::incompatible(
+                        self.tree,
+                        self.session,
+                        &actual,
+                        &shape,
+                        &self.dims,
+                    )
+                {
+                    return Err(AnalyzerError::IncompatibleUnpackedArray {
+                        context: "assignment to a structure array member".into(),
+                        actual,
+                        target,
+                    });
+                }
+            }
             expression_binding::bind_value(
                 right,
                 self.tree.declarations(),
@@ -3733,6 +3765,17 @@ pub(super) fn lower_subroutine(
     {
         return Err(unsupported(
             "unpacked structure member initial values in subroutine interfaces",
+        ));
+    }
+    if return_type
+        .as_ref()
+        .into_iter()
+        .chain(params.iter().map(|(_, _, ty, _)| ty))
+        .filter_map(|ty| ty.unpacked_struct())
+        .any(|aggregate| aggregate.has_array_members())
+    {
+        return Err(unsupported(
+            "unpacked structure array members in subroutine interfaces",
         ));
     }
     // An event control could not tell a call of such a function from a

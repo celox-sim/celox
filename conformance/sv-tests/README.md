@@ -612,3 +612,13 @@ not a new full-corpus measurement. The shared suite exercises element and
 member writes, whole-array and subarray copies, nested members, local lifetime,
 wide NBA destinations, and invalid-index defaults. Arrays with non-integral,
 mixed-state or defaulted members remain unsupported.
+
+Fixed integral array members of unpacked structures update two reviewed
+expectation rows: `chapter-5/5.10-structure-replication.sv` passes in both state
+modes. A focused six-verdict official run also confirms the existing structure
+array pass and illegal flattened initializer rejection in both modes. This is
+not a new full-corpus measurement. Shared cases additionally exercise nested
+members, declaration-scope dimensions, dynamic indices, X/Z preservation,
+member-array and subarray copies, wide elements and local lifetime. Variable-size
+and non-integral array members and array-member structure interfaces remain
+unsupported; see the language reference for the exact boundaries.
