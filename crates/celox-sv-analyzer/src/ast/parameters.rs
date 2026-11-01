@@ -1757,14 +1757,28 @@ pub(super) fn infer_const_expr_type(
     expr: &ConstExpr,
     parameter_types: &HashMap<String, ExprType>,
 ) -> Option<ExprType> {
-    infer_const_expr_type_inner(expr, parameter_types, false)
+    infer_const_expr_type_inner(expr, &|name| parameter_types.get(name).copied(), false)
+}
+
+/// [`infer_const_expr_type`] with the types of the parameters the
+/// expression reads looked up in `const_env`, rather than collected from
+/// all of it.
+pub(super) fn infer_const_expr_type_in(
+    expr: &ConstExpr,
+    const_env: &HashMap<String, i128>,
+) -> Option<ExprType> {
+    infer_const_expr_type_inner(
+        expr,
+        &|name| dimensions::parameter_type_from_const_env(const_env, name),
+        false,
+    )
 }
 
 // Only the bounded proof may infer a logical result without resolving its
 // opaque skipped operands. Ordinary type queries must resolve both operands.
 fn infer_const_expr_type_inner(
     expr: &ConstExpr,
-    parameter_types: &HashMap<String, ExprType>,
+    parameter_types: &dyn Fn(&str) -> Option<ExprType>,
     bounded_proof: bool,
 ) -> Option<ExprType> {
     match expr {
@@ -1775,7 +1789,7 @@ fn infer_const_expr_type_inner(
                 signed: literal.signed,
             })
         }
-        ConstExpr::Ident(name) => parameter_types.get(name).copied(),
+        ConstExpr::Ident(name) => parameter_types(name),
         ConstExpr::SelectRange {
             msb, lsb, signed, ..
         } => Some(ExprType {
