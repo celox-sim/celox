@@ -75,16 +75,18 @@ const DELAY_STATUSES: [ProcessStatus; 4] = [
     ProcessStatus::Finish,
 ];
 
-const WAIT_STATUSES: [ProcessStatus; 4] = [
+const WAIT_STATUSES: [ProcessStatus; 5] = [
     ProcessStatus::Wait,
+    ProcessStatus::Pending,
     ProcessStatus::Nba,
     ProcessStatus::Done,
     ProcessStatus::Finish,
 ];
 
 /// The statuses of a kernel that both waits and delays.
-const MIXED_STATUSES: [ProcessStatus; 6] = [
+const MIXED_STATUSES: [ProcessStatus; 7] = [
     ProcessStatus::Wait,
+    ProcessStatus::Pending,
     ProcessStatus::Nba,
     ProcessStatus::Delay,
     ProcessStatus::InactiveDelay,
@@ -239,6 +241,9 @@ struct Wait {
     terms: Vec<(AbsoluteAddr, CounterKind)>,
     /// The edge of each wait site, as an index into [`Self::terms`].
     site_terms: Vec<usize>,
+    /// Identical wide or multi-expression sites use raw planes; distinct
+    /// scalar sites retain the compact baseline byte.
+    raw: Option<celox_design::schedule::CompiledWaitLayout>,
     /// Its nonblocking sites, by local index.
     sites: Vec<Staged>,
 }
@@ -680,15 +685,56 @@ impl Plan {
             if process.waits.is_empty() || fallback[index].is_some() {
                 continue;
             }
+            let baseline = slots.baseline[index];
             let slots = &schema.processes[index];
             let unit = &sir.processes[index];
             let wait = (|| -> Result<(Wait, bool), &'static str> {
                 if process.waits.iter().any(|terms| terms.is_empty()) {
                     return Err("the process waits for a level");
                 }
-                let (terms, site_terms) = process
-                    .wait_terms()
-                    .ok_or("the process waits for one of several events")?;
+                let scalar = process.wait_terms().filter(|(terms, _)| {
+                    terms
+                        .iter()
+                        .all(|(signal, _)| program.layout().widths.get(signal) == Some(&1))
+                });
+                let (terms, site_terms, raw) = match scalar {
+                    Some((terms, sites)) => (terms, sites, None),
+                    None => {
+                        let listed = process
+                            .common_wait_terms()
+                            .ok_or("the process waits for different expression lists")?;
+                        let dimensions = listed
+                            .iter()
+                            .map(|term| {
+                                let width = *program.layout().widths.get(&term.signal)?;
+                                if program.layout().unpacked_arrays.contains_key(&term.signal) {
+                                    return None;
+                                }
+                                Some((
+                                    width,
+                                    program.layout().four_state
+                                        && program
+                                            .layout()
+                                            .is_4states
+                                            .get(&term.signal)
+                                            .copied()
+                                            .unwrap_or(true),
+                                ))
+                            })
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or("the process waits for an unsupported signal representation")?;
+                        let raw = celox_design::schedule::CompiledWaitLayout::new(&dimensions)
+                            .ok_or("the wait snapshot layout overflows")?;
+                        if raw.scalar_byte || program.layout().widths[&baseline] < raw.bits {
+                            return Err("the compiled wait snapshot has insufficient storage");
+                        }
+                        (
+                            listed.iter().map(|term| (term.signal, term.kind)).collect(),
+                            vec![0; process.waits.len()],
+                            Some(raw),
+                        )
+                    }
+                };
                 // The compiled wait tests the edge alone (IEEE 1800-2023
                 // 9.4.2.3: an `iff` condition is judged at the occurrence).
                 if process
@@ -699,7 +745,9 @@ impl Plan {
                 {
                     return Err("the process waits with an iff condition");
                 }
-                if terms.len() > MAX_TERMS || (terms.len() > 1 && site_terms.len() > 1 << SITE_BITS)
+                if raw.is_none()
+                    && (terms.len() > MAX_TERMS
+                        || (terms.len() > 1 && site_terms.len() > 1 << SITE_BITS))
                 {
                     return Err("the process waits for too many distinct edges");
                 }
@@ -709,7 +757,7 @@ impl Plan {
                     let delayed = delay_writers.get(&signal) == Some(&1)
                         && !rtl_stores.contains(&signal)
                         && !other_stores.contains(&signal);
-                    if width != Some(&1) || !(delayed || undriven(signal)) {
+                    if (raw.is_none() && width != Some(&1)) || !(delayed || undriven(signal)) {
                         return Err(
                             "the process waits for a signal that neither one kernel that only delays nor the host alone drives",
                         );
@@ -724,6 +772,9 @@ impl Plan {
                 let writes = &kernel_stores[index];
                 if !written(unit).is_empty() || writes.iter().any(|store| waited.contains(store)) {
                     return Err("the process drives an event or a waited signal");
+                }
+                if raw.is_some() && !process.nbas.is_empty() {
+                    return Err("a raw-expression wait stages nonblocking assignments");
                 }
                 let sites = process
                     .nbas
@@ -773,6 +824,7 @@ impl Plan {
                     Wait {
                         terms,
                         site_terms,
+                        raw,
                         sites,
                     },
                     delays,
@@ -950,6 +1002,7 @@ impl Plan {
                                         ProcessStatus::Delay,
                                         ProcessStatus::InactiveDelay,
                                         ProcessStatus::Wait,
+                                        ProcessStatus::Pending,
                                         ProcessStatus::Nba,
                                         ProcessStatus::Done,
                                     ],
@@ -1708,7 +1761,9 @@ impl Plan {
                     // nonblocking assignments (see `Plan::new`), so a staged
                     // site is never staged again before the NBA region and
                     // the kernel never returns `Nba`.
-                    let suspends = g.equals(status, code(ProcessStatus::Wait));
+                    let waiting = g.equals(status, code(ProcessStatus::Wait));
+                    let pending = g.equals(status, code(ProcessStatus::Pending));
+                    let suspends = g.binary(1, waiting, BinaryOp::Or, pending);
                     let block = g.b.new_block();
                     Some((wait, suspends, block))
                 }
@@ -2939,6 +2994,11 @@ impl Generator<'_> {
         target: celox_sir::BlockId,
         internal_exit: celox_sir::BlockId,
     ) {
+        if wait.raw.is_some() {
+            self.capture_raw_wait(index, wait);
+            self.b.seal_block(SIRTerminator::Jump(target, Vec::new()));
+            return;
+        }
         if let [(signal, _)] = wait.terms[..] {
             let level = self.signal_level(signal);
             let level = self.baseline_byte(level);
@@ -2991,71 +3051,78 @@ impl Generator<'_> {
             let mut waiting = flag;
             if let Some(status) = check.status {
                 let edge = self.equals_at(status, ProcessStatus::Wait);
+                let pending = self.equals_at(status, ProcessStatus::Pending);
+                let edge = self.binary(1, edge, BinaryOp::Or, pending);
                 waiting = self.binary(1, waiting, BinaryOp::And, edge);
             }
-            let baseline = self.load(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH);
-            let level_width = if self.four_state.is_none() { 1 } else { 2 };
-            // With several edges, the byte holds the edge's index above the
-            // level (`BASELINE_TERM_SHIFT`).
-            let (stored, term) = if wait.terms.len() == 1 {
-                (baseline, None)
+            let wake = if wait.raw.is_some() {
+                self.check_raw_wait(check.index, wait, waiting)
             } else {
-                let level = self.b.alloc_bit(level_width, false);
+                let baseline = self.load(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH);
+                let level_width = if self.four_state.is_none() { 1 } else { 2 };
+                // With several edges, the byte holds the edge's index above the
+                // level (`BASELINE_TERM_SHIFT`).
+                let (stored, term) = if wait.terms.len() == 1 {
+                    (baseline, None)
+                } else {
+                    let level = self.b.alloc_bit(level_width, false);
+                    self.b
+                        .emit(SIRInstruction::Slice(level, baseline, 0, level_width));
+                    let level = self.widen_to(level, level_width, SCHEDULER_FLAG_WIDTH);
+                    let shift = self.constant(u64::from(BASELINE_TERM_SHIFT), SCHEDULER_FLAG_WIDTH);
+                    let term = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::Shr, shift);
+                    (level, Some(term))
+                };
+                let mut occurred = self.constant(0, 1);
+                let mut current = None;
+                let mut levels: Vec<(AbsoluteAddr, RegisterId)> = Vec::new();
+                for (ordinal, &(signal, kind)) in wait.terms.iter().enumerate() {
+                    let is = match levels.iter().find(|(known, _)| *known == signal) {
+                        Some(&(_, level)) => level,
+                        None => {
+                            let level = self.signal_level(signal);
+                            levels.push((signal, level));
+                            level
+                        }
+                    };
+                    let edge = self.occurred(stored, is, kind);
+                    let (edge, is) = match term {
+                        None => (edge, is),
+                        Some(term) => {
+                            let selected = self.equals(term, ordinal as u64);
+                            let edge = self.binary(1, edge, BinaryOp::And, selected);
+                            let is = match current {
+                                None => is,
+                                Some(other) => {
+                                    let level = self.b.alloc_bit(level_width, false);
+                                    self.b.emit(SIRInstruction::Mux(level, selected, is, other));
+                                    level
+                                }
+                            };
+                            (edge, is)
+                        }
+                    };
+                    occurred = self.binary(1, occurred, BinaryOp::Or, edge);
+                    current = Some(is);
+                }
+                let is = current.expect("a wait has an edge");
+                let wake = self.binary(1, occurred, BinaryOp::And, waiting);
+                let mut level = self.baseline_byte(is);
+                if term.is_some() {
+                    // Keep the edge's index.
+                    let mask = self.constant(
+                        (1 << SCHEDULER_FLAG_WIDTH) - (1 << BASELINE_TERM_SHIFT),
+                        SCHEDULER_FLAG_WIDTH,
+                    );
+                    let index = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::And, mask);
+                    level = self.binary(SCHEDULER_FLAG_WIDTH, level, BinaryOp::Or, index);
+                }
+                let next = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
                 self.b
-                    .emit(SIRInstruction::Slice(level, baseline, 0, level_width));
-                let level = self.widen_to(level, level_width, SCHEDULER_FLAG_WIDTH);
-                let shift = self.constant(u64::from(BASELINE_TERM_SHIFT), SCHEDULER_FLAG_WIDTH);
-                let term = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::Shr, shift);
-                (level, Some(term))
+                    .emit(SIRInstruction::Mux(next, waiting, level, baseline));
+                self.store(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH, next);
+                wake
             };
-            let mut occurred = self.constant(0, 1);
-            let mut current = None;
-            let mut levels: Vec<(AbsoluteAddr, RegisterId)> = Vec::new();
-            for (ordinal, &(signal, kind)) in wait.terms.iter().enumerate() {
-                let is = match levels.iter().find(|(known, _)| *known == signal) {
-                    Some(&(_, level)) => level,
-                    None => {
-                        let level = self.signal_level(signal);
-                        levels.push((signal, level));
-                        level
-                    }
-                };
-                let edge = self.occurred(stored, is, kind);
-                let (edge, is) = match term {
-                    None => (edge, is),
-                    Some(term) => {
-                        let selected = self.equals(term, ordinal as u64);
-                        let edge = self.binary(1, edge, BinaryOp::And, selected);
-                        let is = match current {
-                            None => is,
-                            Some(other) => {
-                                let level = self.b.alloc_bit(level_width, false);
-                                self.b.emit(SIRInstruction::Mux(level, selected, is, other));
-                                level
-                            }
-                        };
-                        (edge, is)
-                    }
-                };
-                occurred = self.binary(1, occurred, BinaryOp::Or, edge);
-                current = Some(is);
-            }
-            let is = current.expect("a wait has an edge");
-            let wake = self.binary(1, occurred, BinaryOp::And, waiting);
-            let mut level = self.baseline_byte(is);
-            if term.is_some() {
-                // Keep the edge's index.
-                let mask = self.constant(
-                    (1 << SCHEDULER_FLAG_WIDTH) - (1 << BASELINE_TERM_SHIFT),
-                    SCHEDULER_FLAG_WIDTH,
-                );
-                let index = self.binary(SCHEDULER_FLAG_WIDTH, baseline, BinaryOp::And, mask);
-                level = self.binary(SCHEDULER_FLAG_WIDTH, level, BinaryOp::Or, index);
-            }
-            let next = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
-            self.b
-                .emit(SIRInstruction::Mux(next, waiting, level, baseline));
-            self.store(self.slots.baseline[check.index], SCHEDULER_FLAG_WIDTH, next);
             let one = self.constant(1, 1);
             let stays = self.binary(1, wake, BinaryOp::Xor, one);
             let still = self.binary(1, flag, BinaryOp::And, stays);
@@ -4305,4 +4372,110 @@ pub(crate) fn without_probe_hints_for_test(
     );
     program.sir.processes[schema.unit.unwrap()] = plan.generate(&program, &schema.slots);
     program
+}
+
+impl Generator<'_> {
+    fn raw_wait_planes(
+        &mut self,
+        signal: AbsoluteAddr,
+        term: &celox_design::schedule::CompiledWaitTerm,
+    ) -> RegisterId {
+        if term.mask_offset.is_none() {
+            return self.load(signal, term.width);
+        }
+        let mut value = self.load_state(signal, 0, term.width);
+        if term.width < term.plane_bits {
+            let padding = self.b.alloc_logic(term.plane_bits - term.width);
+            self.b
+                .emit(SIRInstruction::Imm(padding, SIRValue::new(0u64)));
+            let padded = self.b.alloc_logic(term.plane_bits);
+            self.b
+                .emit(SIRInstruction::Concat(padded, vec![padding, value]));
+            value = padded;
+        }
+        let planes = self.b.alloc_bit(term.plane_bits * 2, false);
+        self.b.emit(SIRInstruction::Unary(
+            planes,
+            celox_design::UnaryOp::ToPlanes,
+            value,
+        ));
+        planes
+    }
+
+    fn raw_wait_level(
+        &mut self,
+        planes: RegisterId,
+        term: &celox_design::schedule::CompiledWaitTerm,
+    ) -> RegisterId {
+        let value = self.b.alloc_bit(1, false);
+        self.b.emit(SIRInstruction::Slice(value, planes, 0, 1));
+        if term.mask_offset.is_none() {
+            return value;
+        }
+        let mask = self.b.alloc_bit(1, false);
+        self.b
+            .emit(SIRInstruction::Slice(mask, planes, term.plane_bits, 1));
+        let level = self.b.alloc_bit(2, false);
+        self.b
+            .emit(SIRInstruction::Concat(level, vec![mask, value]));
+        level
+    }
+
+    fn capture_raw_wait(&mut self, process: usize, wait: &Wait) {
+        for (&(signal, _kind), term) in wait.terms.iter().zip(&wait.raw.as_ref().unwrap().terms) {
+            let planes = self.raw_wait_planes(signal, term);
+            let width = if term.mask_offset.is_some() {
+                term.plane_bits * 2
+            } else {
+                term.width
+            };
+            self.store_at(
+                self.slots.baseline[process],
+                term.value_offset,
+                width,
+                planes,
+            );
+        }
+    }
+
+    /// Test every expression in an OR event list against its own snapshot,
+    /// before publishing one ready bit and clearing the process's wait flag.
+    fn check_raw_wait(&mut self, process: usize, wait: &Wait, waiting: RegisterId) -> RegisterId {
+        let mut occurred = self.constant(0, 1);
+        for (&(signal, kind), term) in wait.terms.iter().zip(&wait.raw.as_ref().unwrap().terms) {
+            let width = if term.mask_offset.is_some() {
+                term.plane_bits * 2
+            } else {
+                term.width
+            };
+            let previous = self.load_at(self.slots.baseline[process], term.value_offset, width);
+            let current = self.raw_wait_planes(signal, term);
+            let changed = self.binary(1, previous, BinaryOp::Ne, current);
+            let edge = match kind {
+                CounterKind::Changes => changed,
+                CounterKind::Rises | CounterKind::Falls if term.mask_offset.is_some() => {
+                    let was = self.raw_wait_level(previous, term);
+                    let is = self.raw_wait_level(current, term);
+                    self.level_edge(kind == CounterKind::Rises, was, is)
+                }
+                CounterKind::Rises | CounterKind::Falls => {
+                    let was = self.raw_wait_level(previous, term);
+                    let is = self.raw_wait_level(current, term);
+                    let changed = self.binary(1, was, BinaryOp::Ne, is);
+                    self.binary(
+                        1,
+                        changed,
+                        BinaryOp::And,
+                        if kind == CounterKind::Rises { is } else { was },
+                    )
+                }
+            };
+            occurred = self.binary(1, occurred, BinaryOp::Or, edge);
+            let next = self.b.alloc_bit(width, false);
+            self.b
+                .emit(SIRInstruction::Mux(next, waiting, current, previous));
+            self.store_at(self.slots.baseline[process], term.value_offset, width, next);
+        }
+        self.binary(1, occurred, BinaryOp::And, waiting)
+    }
 }

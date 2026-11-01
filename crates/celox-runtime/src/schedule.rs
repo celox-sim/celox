@@ -132,6 +132,8 @@ pub(crate) struct SchedulerRefs {
     /// waits for edges, by process index, with the index of the edge of
     /// each of its wait sites (`ProcessModel::wait_terms`).
     pub(crate) waits: Vec<Option<(SignalRef, SignalRef, Vec<usize>)>>,
+    /// Raw-plane encoding for identical wide or OR event-expression lists.
+    pub(crate) raw_waits: Vec<Option<celox_design::schedule::CompiledWaitLayout>>,
     /// The number of such kernels.
     pub(crate) wait_kernels: usize,
     /// The bit of each kernel the scheduler runs in its ready mask: its
@@ -510,12 +512,39 @@ impl<B: SimBackend> ResolvedSchedule<B> {
                             if scheduler.fallback[index].is_some() || process.waits.is_empty() {
                                 return None;
                             }
-                            let (_, site_terms) = process.wait_terms()?;
+                            let site_terms =
+                                process.wait_terms().map(|(_, sites)| sites).or_else(|| {
+                                    process
+                                        .common_wait_terms()
+                                        .map(|_| vec![0; process.waits.len()])
+                                })?;
                             Some((
                                 resolve(&slots.waiting[index]),
                                 resolve(&slots.baseline[index]),
                                 site_terms,
                             ))
+                        })
+                        .collect(),
+                    raw_waits: (0..scheduler.fallback.len())
+                        .map(|index| {
+                            if scheduler.fallback[index].is_some() {
+                                return None;
+                            }
+                            let process = &model.processes[index];
+                            let terms = process.common_wait_terms()?;
+                            let dimensions = terms
+                                .iter()
+                                .map(|term| {
+                                    let signal = resolve(&term.signal);
+                                    (
+                                        signal.width,
+                                        backend.layout().four_state && signal.is_4state,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            let layout =
+                                celox_design::schedule::CompiledWaitLayout::new(&dimensions)?;
+                            (!layout.scalar_byte).then_some(layout)
                         })
                         .collect(),
                     ordinals: {

@@ -304,3 +304,58 @@ fn a_native_program_instance_rejects_sampled_values() {
         "{error}"
     );
 }
+
+#[test]
+fn raw_wait_snapshots_survive_native_image_reload() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    bit [1:0] phase = 0;
+    logic [69:0] data = 0;
+    bit other = 0;
+    int count = 0;
+    always #1 begin
+        phase = phase + 1;
+        data = phase == 1 ? 'x : (phase == 2 ? 'z : 70'd7);
+    end
+    initial forever begin
+        @(data or other); count = count + 1;
+        #1;
+        @(data or other); count = count + 1;
+    end
+    initial forever begin #2; other = !other; end
+    initial #12 $finish;
+endmodule"#;
+    for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
+        for four_state in [false, true] {
+            let build = || {
+                builder(source)
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .live_signal(Vec::new(), vec!["count".into()])
+            };
+            let image = reloaded(&build().compile_native().unwrap().into_program_image());
+            let mut expected = build()
+                .scheduler_mode(SchedulerMode::Reference)
+                .build_native()
+                .unwrap();
+            let mut actual = Simulation::from_sv_sources(Vec::new(), "Top")
+                .four_state(four_state)
+                .scheduler_mode(SchedulerMode::DifferentialRuns)
+                .build_native_from_image(image)
+                .unwrap();
+            for end in [2, 3, 9, 12] {
+                expected.run_until(end).unwrap();
+                actual.run_until(end).unwrap();
+                assert_eq!(actual.time(), expected.time());
+                assert_eq!(
+                    actual.get(actual.signal("count")),
+                    expected.get(expected.signal("count"))
+                );
+            }
+            assert!(actual.is_finished());
+            let stats = actual.scheduler_stats();
+            assert!(stats.compiled_slots > 0, "{stats:?}");
+            assert!(stats.checked_steps > 0, "{stats:?}");
+        }
+    }
+}

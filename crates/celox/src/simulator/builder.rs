@@ -5098,6 +5098,157 @@ endmodule"#,
         }
     }
 
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn raw_wait_multiple_terms_can_wake_one_kernel_twice_in_a_slot() {
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            let source = r#"`timescale 1ns/1ns
+module Top;
+    bit [69:0] a = 0;
+    bit [3:0] b = 0;
+    bit [7:0] count = 0;
+    always #1 a = a + 70'h200000000000000000;
+    initial forever begin @(a or b); count = count + 1; end
+    initial forever begin #2; b = b + 1; end
+    initial begin #11; if (count != 16) $fatal(1, "lost wakeup"); $finish; end
+endmodule"#;
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("multiple-wait.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                let result = simulation.run_until(11);
+                let observed = simulation.signal("count");
+                assert!(
+                    result.is_ok(),
+                    "{result:?}; count={}; stats={:?}",
+                    simulation.get(observed),
+                    simulation.scheduler_stats()
+                );
+                assert!(simulation.is_finished());
+                let count = simulation.signal("count");
+                assert_eq!(simulation.get(count), num_bigint::BigUint::from(16u8));
+                let stats = simulation.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(stats.checked_steps > 0, "{stats:?}");
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn raw_wait_snapshots_distinguish_x_from_z() {
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let expected = if four_state { 3 } else { 1 };
+                let source = format!(
+                    r#"`timescale 1ns/1ns
+module Top;
+    bit [1:0] phase = 0;
+    logic [69:0] data = 0;
+    bit [7:0] count = 0;
+    always #1 begin
+        phase = phase + 1;
+        data = phase == 1 ? 'x : (phase == 2 ? 'z : 70'd7);
+    end
+    initial forever begin @(data); count = count + 1; end
+    initial begin #4; if (count != {expected}) $fatal(1, "bad raw planes"); $finish; end
+endmodule"#
+                );
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source.as_str(), std::path::Path::new("wide-wait.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                simulation.run_until(4).unwrap();
+                assert!(simulation.is_finished());
+                let count = simulation.signal("count");
+                assert_eq!(
+                    simulation.get(count),
+                    num_bigint::BigUint::from(expected as u8)
+                );
+                let stats = simulation.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(stats.checked_steps > 0, "{stats:?}");
+            }
+        }
+    }
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn raw_wait_rearms_at_distinct_sites_and_across_run_boundaries() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit [69:0] a = 0;
+    bit [3:0] b = 0;
+    int count = 0;
+    always #1 a = a + 70'h200000000000000000;
+    initial forever begin
+        @(a or b); count = count + 1;
+        #1;
+        @(a or b); count = count + 1;
+    end
+    initial forever begin #2; b = b + 1; end
+    initial #12 $finish;
+endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let build = |mode| {
+                    crate::Simulation::from_sv_sources(
+                        vec![(source, std::path::Path::new("rearm-raw-wait.sv"))],
+                        "Top",
+                    )
+                    .opt_level(level)
+                    .four_state(four_state)
+                    .scheduler_mode(mode)
+                    .live_signal(Vec::new(), vec!["count".into()])
+                    .build_native()
+                    .unwrap()
+                };
+                let mut reference = build(crate::SchedulerMode::Reference);
+                let mut compiled = build(crate::SchedulerMode::DifferentialRuns);
+                for end in [2, 3, 4, 5, 11, 12] {
+                    reference.run_until(end).unwrap();
+                    compiled.run_until(end).unwrap();
+                    assert_eq!(compiled.time(), reference.time());
+                    let expected = reference.signal("count");
+                    let actual = compiled.signal("count");
+                    assert_eq!(compiled.get(actual), reference.get(expected));
+                }
+                assert!(compiled.is_finished());
+                let stats = compiled.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(stats.checked_steps > 0, "{stats:?}");
+            }
+        }
+    }
+
     /// A first tier settles before a domain instead of compiling a fused
     /// copy of the settle into the scheduler for it.
     #[test]
