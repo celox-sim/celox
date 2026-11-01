@@ -723,3 +723,11 @@ RHS deadlines, destination sizing, independent selected drivers, X/Z,
 generate-local constants and zero delays. Celox API tests check scope precision,
 checkpoint replay and removal of cancelled timers. Delay lists, dynamic amounts,
 complex targets and net-declaration delays remain outside the supported subset.
+
+Net-declaration continuous initializers now honor a single constant delay, as
+in `wire #5 w = a;`. No official expectation rows change: the pinned net-delay
+case uses an uninitialized net declaration instead. Three shared cases check
+continuous updates, inertial cancellation, independent declarators,
+generate-local constants, destination sizing and X/Z. Icarus and xezim pass
+all three; Verilator passes the two two-state cases and skips the four-state
+case as unsupported. Independent net delays remain a separate implementation.

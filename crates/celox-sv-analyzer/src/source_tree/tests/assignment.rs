@@ -111,12 +111,17 @@ fn native_continuous_assignment_delay_restrictions_preserve_captured_scopes() {
         "if(1)begin:g assign #(1,2) y=0;end",
         "checker C;assign #(1,2) y=0;endchecker",
         "module N;assign #(1,2) y=0;endmodule",
+        "wire #(1,2) n=0;",
+        "if(1)begin:g wire #(1,2) n=0;end",
+        "module N;wire #(1,2) n=0;endmodule",
     ] {
         let code = format!("module M(output wire y);{body} endmodule");
         let tree = parse_source(&code, Path::new("native-assign-delay-validation.sv")).unwrap();
-        let error =
+        let Err(error) =
             Source::from_syntax_module_with_parameter_overrides(&tree, "M", &HashMap::default())
-                .unwrap_err();
+        else {
+            panic!("accepted unsupported delay: {body}");
+        };
         assert!(
             error.to_string().contains("delayed continuous assignment"),
             "{body}: {error}"
