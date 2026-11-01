@@ -1,0 +1,7 @@
+-r requirements.txt
+# Upstream's FuseSoC/Edalize generator versions, plus the tested makefile helpers.
+fusesoc==2.4.3
+edalize==0.6.1
+make_var==0.4.0
+mako==1.4.3
+simplesat==0.9.2

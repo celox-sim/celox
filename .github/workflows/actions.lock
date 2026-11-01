@@ -135,6 +135,14 @@ workflows:
     '.github/workflows/stage-release-candidate.yml':
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
+    '.github/workflows/sv-tests-daily.yml':
+        - 'actions/checkout@v7'
+        - 'actions/download-artifact@v8'
+        - 'actions/setup-python@v7'
+        - 'actions/upload-artifact@v7'
+        - 'dtolnay/rust-toolchain@master'
+        - 'peaceiris/actions-gh-pages@v4'
+        - 'swatinem/rust-cache@v2'
     '.github/workflows/sync-develop.yml':
         - 'actions/checkout@v7'
         - 'actions/create-github-app-token@v3'
