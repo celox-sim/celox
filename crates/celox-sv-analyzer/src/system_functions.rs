@@ -901,6 +901,9 @@ pub struct ObjectField {
     pub four_state: bool,
     /// A member of a [`Record`]: `null` reads as the member's default.
     pub nullable: bool,
+    /// A `real` (64 bits) or `shortreal` (32 bits) value, as its IEEE 754
+    /// bits (IEEE 1800-2023 6.12).
+    pub real: bool,
 }
 
 /// The layout of an immutable heap record that holds the value of an

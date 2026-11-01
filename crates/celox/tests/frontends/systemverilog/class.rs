@@ -1612,6 +1612,7 @@ sv_backends! {
     fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
     fn class_prototype_formals_inherit_types(sim) { @case "class::prototype_formals_inherit_types"; }
     fn class_real_values_round_into_integral_properties(sim) { @case "class::real_values_round_into_integral_properties"; }
+    fn class_real_properties(sim) { @case "class::real_properties"; }
 }
 
 sv_backends! {

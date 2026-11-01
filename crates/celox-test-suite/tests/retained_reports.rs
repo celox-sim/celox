@@ -759,6 +759,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("xezim", "containers::functions_returning_containers") => {
                             ("mismatch", "execute", "got [49, 32, 48, 32, 48, 10")
                         }
+                        ("icarus", "class::real_properties") => (
+                            "runtime_error",
+                            "execute",
+                            "recv_real(1.000000) not implemented",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
