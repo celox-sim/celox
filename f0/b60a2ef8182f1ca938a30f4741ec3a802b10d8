@@ -1,0 +1,1 @@
+Freeze local typedef bounds, give each a scope identity, hide outer values, and declare enum members only for new enumerations with their types, as Codex found
