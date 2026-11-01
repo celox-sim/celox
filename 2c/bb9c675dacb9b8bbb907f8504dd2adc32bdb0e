@@ -1,0 +1,6 @@
+Revision history for #2886:
+
+rev 2 (content) 2026-11-01 13:33 UTC — Fix PR #2886 cocotb regression: preserve host observation of data changes before native RTL-driven waiters resume; add O0/O2 and 2/4-state observer coverage.
+rev 1 (initial) 2026-11-01 13:33 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2886,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"0e92cc229e4f7b2b297f33eb93bf15e2d2094229","timestamp_iso":"2026-11-01T13:33:23Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"0e92cc229e4f7b2b297f33eb93bf15e2d2094229","new_sha":"90a2d0ee2d13f991e6541ed513126ae385791ad5","timestamp_iso":"2026-11-01T13:33:23Z","reason":"Fix PR #2886 cocotb regression: preserve host observation of data changes before native RTL-driven waiters resume; add O0/O2 and 2/4-state observer coverage.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/0e92cc229e4f7b2b297f33eb93bf15e2d2094229...90a2d0ee2d13f991e6541ed513126ae385791ad5"}]} -->
