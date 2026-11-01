@@ -856,7 +856,7 @@ fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
             let _ = self.0.wait();
         }
     }
-    for backend in [
+    for (backend, source_waveform) in [
         "interpreter",
         "native",
         "tiered",
@@ -864,11 +864,22 @@ fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
         "cranelift",
         #[cfg(feature = "wasm-runtime")]
         "wasm",
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|backend| [true, false].map(|source_waveform| (backend, source_waveform)))
+    {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("top.sv");
         let output_path = dir.path().join("output.log");
         let waveform_path = dir.path().join("trace.vcd");
+        let dump_tasks = if source_waveform {
+            format!(
+                "initial begin $dumpfile(\"{}\"); $dumpvars(0, Top); end",
+                waveform_path.display()
+            )
+        } else {
+            String::new()
+        };
         std::fs::write(
             &source,
             format!(
@@ -876,18 +887,21 @@ fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
 module Top(output longint unsigned count);
  timeunit 1ns; timeprecision 1ns;
  int fd = $fopen("{}", "w");
- initial begin $dumpfile("{}"); $dumpvars(0, Top); end
+ {dump_tasks}
  always #1 begin count++; $display("%0d", count); end
 endmodule
 "#,
-                output_path.display(),
-                waveform_path.display()
+                output_path.display()
             ),
         )
         .unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
+        command.arg("run");
+        if !source_waveform {
+            command.arg("--vcd").arg(&waveform_path);
+        }
         let mut process = Running(
-            Command::new(env!("CARGO_BIN_EXE_celox"))
-                .arg("run")
+            command
                 .arg(&source)
                 .args([
                     "--top",
@@ -955,8 +969,13 @@ endmodule
         reader.join().unwrap();
         std::fs::write(&output_path, b"delivered after checkpoint").unwrap();
         let original_waveform = std::fs::read(&waveform_path).unwrap();
-        let resumed = Command::new(env!("CARGO_BIN_EXE_celox"))
-            .arg("run")
+        let resumed_path = dir.path().join("resumed.vcd");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
+        command.arg("run");
+        if !source_waveform {
+            command.arg("--vcd").arg(&resumed_path);
+        }
+        let resumed = command
             .arg(&source)
             .args([
                 "--top",
@@ -988,21 +1007,26 @@ endmodule
             .collect::<Vec<_>>();
         assert_eq!(
             segments.len(),
-            1,
+            usize::from(source_waveform),
             "{backend}: {}",
             String::from_utf8_lossy(&resumed.stderr)
         );
-        let waveform = std::fs::read_to_string(segments[0].path()).unwrap();
+        let path = if source_waveform {
+            segments[0].path()
+        } else {
+            resumed_path
+        };
+        let waveform = std::fs::read_to_string(path).unwrap();
         assert!(waveform.contains("$enddefinitions $end"), "{waveform}");
-        assert!(
-            waveform.contains(&format!("#{}\n", time + 3)),
-            "{backend}: {waveform}"
-        );
         let output = String::from_utf8(resumed.stdout).unwrap();
         let counts: Vec<u64> = output.lines().map(|line| line.parse().unwrap()).collect();
         // A checkpoint before the initial time-zero slot needs one step to
         // start the always process; otherwise all three steps advance time.
         assert!((2..=3).contains(&counts.len()), "{output}");
+        assert!(
+            waveform.contains(&format!("#{}\n", time + counts.len() as u64)),
+            "{backend} source_waveform={source_waveform}: {waveform}"
+        );
         assert_eq!(
             counts,
             (time + 1..=time + counts.len() as u64).collect::<Vec<_>>()
