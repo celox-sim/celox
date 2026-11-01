@@ -72,6 +72,35 @@ pub struct ProcessModel<A> {
     pub host_requests: Vec<crate::HostRequestSite<A>>,
 }
 
+impl<A: Copy + Eq> ProcessModel<A> {
+    /// For a process whose every wait site has one term, the distinct
+    /// edges it waits for, in the order of the first site that waits for
+    /// each, and the edge of each site as an index into them.
+    pub fn wait_terms(&self) -> Option<(Vec<(A, CounterKind)>, Vec<usize>)> {
+        let mut terms: Vec<(A, CounterKind)> = Vec::new();
+        let site_terms = self
+            .waits
+            .iter()
+            .map(|site| {
+                let [term] = site.as_slice() else {
+                    return None;
+                };
+                let edge = (term.signal, term.kind);
+                Some(
+                    terms
+                        .iter()
+                        .position(|&known| known == edge)
+                        .unwrap_or_else(|| {
+                            terms.push(edge);
+                            terms.len() - 1
+                        }),
+                )
+            })
+            .collect::<Option<_>>()?;
+        Some((terms, site_terms))
+    }
+}
+
 /// One term of a wait site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TermModel<A> {
