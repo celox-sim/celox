@@ -2,6 +2,20 @@
 
 Celox は [GTKWave](https://gtkwave.sourceforge.net/) や [Surfer](https://surfer-project.org/) などのツールで波形を確認するための [VCD（Value Change Dump）](https://en.wikipedia.org/wiki/Value_change_dump) ファイルを出力できます。
 
+## CLI
+
+`celox run` に `--vcd <FILE>` を指定すると、HDL にダンプタスクを追加せずに
+SystemVerilog・Veryl テストベンチの波形を記録できます。
+
+```sh
+celox run top.sv --top Top --backend native --vcd waves.vcd
+celox run top.veryl --top Top --vcd waves.vcd
+```
+
+CLI はシミュレーションの各時刻を記録し、テスト失敗やステップ上限による終了時も
+ファイルをフラッシュします。VCD 有効時も適用可能な compiled scheduler を使用し、
+波形を記録する境界でホストに戻ります。`--compile-only` との併用はできません。
+
 ## 基本的な使い方
 
 シミュレータ作成時に `vcd` オプションで出力先ファイルパスを指定します：

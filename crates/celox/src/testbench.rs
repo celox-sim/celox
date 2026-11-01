@@ -3409,6 +3409,10 @@ mod tests {
                 TestResult::Pass
             );
             let counters = compiled::take_counters(&mut sim);
+            assert!(
+                counters.0 > 0,
+                "compiled scheduler did not run: {counters:?}"
+            );
             assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
             sim.flush_vcd().unwrap();
             let native = std::fs::read_to_string(&native_path).unwrap();

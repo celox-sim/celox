@@ -856,7 +856,7 @@ fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
             let _ = self.0.wait();
         }
     }
-    for backend in [
+    for (backend, source_waveform) in [
         "interpreter",
         "native",
         "tiered",
@@ -864,11 +864,22 @@ fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
         "cranelift",
         #[cfg(feature = "wasm-runtime")]
         "wasm",
-    ] {
+    ]
+    .into_iter()
+    .flat_map(|backend| [true, false].map(|source_waveform| (backend, source_waveform)))
+    {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("top.sv");
         let output_path = dir.path().join("output.log");
         let waveform_path = dir.path().join("trace.vcd");
+        let dump_tasks = if source_waveform {
+            format!(
+                "initial begin $dumpfile(\"{}\"); $dumpvars(0, Top); end",
+                waveform_path.display()
+            )
+        } else {
+            String::new()
+        };
         std::fs::write(
             &source,
             format!(
@@ -876,18 +887,21 @@ fn sigusr1_checkpoints_by_default_and_resumes_in_a_new_process() {
 module Top(output longint unsigned count);
  timeunit 1ns; timeprecision 1ns;
  int fd = $fopen("{}", "w");
- initial begin $dumpfile("{}"); $dumpvars(0, Top); end
+ {dump_tasks}
  always #1 begin count++; $display("%0d", count); end
 endmodule
 "#,
-                output_path.display(),
-                waveform_path.display()
+                output_path.display()
             ),
         )
         .unwrap();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
+        command.arg("run");
+        if !source_waveform {
+            command.arg("--vcd").arg(&waveform_path);
+        }
         let mut process = Running(
-            Command::new(env!("CARGO_BIN_EXE_celox"))
-                .arg("run")
+            command
                 .arg(&source)
                 .args([
                     "--top",
@@ -955,8 +969,13 @@ endmodule
         reader.join().unwrap();
         std::fs::write(&output_path, b"delivered after checkpoint").unwrap();
         let original_waveform = std::fs::read(&waveform_path).unwrap();
-        let resumed = Command::new(env!("CARGO_BIN_EXE_celox"))
-            .arg("run")
+        let resumed_path = dir.path().join("resumed.vcd");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_celox"));
+        command.arg("run");
+        if !source_waveform {
+            command.arg("--vcd").arg(&resumed_path);
+        }
+        let resumed = command
             .arg(&source)
             .args([
                 "--top",
@@ -988,21 +1007,26 @@ endmodule
             .collect::<Vec<_>>();
         assert_eq!(
             segments.len(),
-            1,
+            usize::from(source_waveform),
             "{backend}: {}",
             String::from_utf8_lossy(&resumed.stderr)
         );
-        let waveform = std::fs::read_to_string(segments[0].path()).unwrap();
+        let path = if source_waveform {
+            segments[0].path()
+        } else {
+            resumed_path
+        };
+        let waveform = std::fs::read_to_string(path).unwrap();
         assert!(waveform.contains("$enddefinitions $end"), "{waveform}");
-        assert!(
-            waveform.contains(&format!("#{}\n", time + 3)),
-            "{backend}: {waveform}"
-        );
         let output = String::from_utf8(resumed.stdout).unwrap();
         let counts: Vec<u64> = output.lines().map(|line| line.parse().unwrap()).collect();
         // A checkpoint before the initial time-zero slot needs one step to
         // start the always process; otherwise all three steps advance time.
         assert!((2..=3).contains(&counts.len()), "{output}");
+        assert!(
+            waveform.contains(&format!("#{}\n", time + counts.len() as u64)),
+            "{backend} source_waveform={source_waveform}: {waveform}"
+        );
         assert_eq!(
             counts,
             (time + 1..=time + counts.len() as u64).collect::<Vec<_>>()
@@ -1035,4 +1059,182 @@ fn sv_report_exposes_actual_compiled_scheduler_execution() {
         .parse()
         .unwrap();
     assert!(slots > 0, "{stdout}");
+}
+
+fn waveform_body(text: &str) -> &str {
+    text.split_once("$enddefinitions").unwrap().1
+}
+
+#[test]
+fn veryl_vcd_records_clock_phases_across_backends() {
+    let source = r#"
+        module Counter(clk: input clock, q: output logic<8>) {
+            always_ff (clk) { q += 1; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen #(period: 2);
+            var q: logic<8>;
+            inst dut: Counter(clk, q);
+            initial { clk.next(4); $assert(q == 4); $finish(); }
+            initial { clk.next(100); }
+        }
+    "#;
+    let dir = tempfile::tempdir().unwrap();
+    let mut reference = None;
+    for backend in [
+        "interpreter",
+        "native",
+        "tiered",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+        #[cfg(feature = "wasm-runtime")]
+        "wasm",
+    ] {
+        let path = dir.path().join(format!("{backend}.vcd"));
+        let output = run(
+            &[("top.veryl", source)],
+            &["--backend", backend, "--vcd", path.to_str().unwrap()],
+        );
+        assert!(output.status.success(), "{backend}: {output:?}");
+        let text = std::fs::read_to_string(path).unwrap();
+        let body = waveform_body(&text);
+        for time in 0..=7 {
+            assert!(
+                body.lines().any(|line| line == format!("#{time}")),
+                "{backend}: {text}"
+            );
+        }
+        if let Some(reference) = &reference {
+            assert_eq!(body, reference, "{backend}");
+        } else {
+            reference = Some(body.to_string());
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_vcd_preserves_compiled_slots_and_matches_interpreter() {
+    let source = r#"`timescale 1ns/1ns
+    module Top;
+        bit clk = 0;
+        bit [7:0] q = 0;
+        always #1 clk = !clk;
+        always_ff @(posedge clk) q <= q + 1;
+        initial begin #20; if (q != 10) $fatal(1, "bad count"); $finish; end
+    endmodule"#;
+    let dir = tempfile::tempdir().unwrap();
+    let mut reference = None;
+    for backend in ["interpreter", "native"] {
+        let path = dir.path().join(format!("{backend}.vcd"));
+        let output = run(
+            &[("top.sv", source)],
+            &[
+                "--backend",
+                backend,
+                "--report",
+                "--vcd",
+                path.to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{backend}: {output:?}");
+        if backend == "native" {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let line = stdout
+                .lines()
+                .find(|line| line.starts_with("CELOX_SCHEDULER phase=finished "))
+                .unwrap();
+            let slots: u64 = line
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("compiled_slots="))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(slots > 0, "{stdout}");
+        }
+        let text = std::fs::read_to_string(path).unwrap();
+        let body = waveform_body(&text);
+        for time in 0..=20 {
+            assert!(
+                body.lines().any(|line| line == format!("#{time}")),
+                "{backend}: {text}"
+            );
+        }
+        if let Some(reference) = &reference {
+            assert_eq!(body, reference, "{backend}");
+        } else {
+            reference = Some(body.to_string());
+        }
+    }
+}
+
+#[test]
+fn vcd_rejects_compile_only_and_reports_invalid_output_paths() {
+    let source = "#[test(Top)] module Top { initial { $finish(); } }";
+    let output = run(
+        &[("top.veryl", source)],
+        &["--compile-only", "--vcd", "unused.vcd"],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let output = run(
+        &[("top.veryl", source)],
+        &["--vcd", dir.path().to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+}
+
+#[test]
+fn vcd_is_flushed_when_a_veryl_run_hits_the_tick_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("limited.vcd");
+    let source = "#[test(Top)] module Top { inst clk: $tb::clock_gen #(period: 2); initial { clk.next(100); $finish(); } }";
+    let output = run(
+        &[("top.veryl", source)],
+        &[
+            "--backend",
+            "native",
+            "--max-steps",
+            "3",
+            "--vcd",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(
+        waveform_body(&text)
+            .lines()
+            .any(|line| line.starts_with('#')),
+        "{text}"
+    );
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vcd_is_flushed_when_an_sv_run_fails_or_hits_the_step_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    for ending in ["#3 $fatal(1, \"failure\");", "#100 $finish;"] {
+        let path = dir.path().join("failed.vcd");
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top; bit clk; always #1 clk = !clk; initial begin {ending} end endmodule"
+        );
+        let output = run(
+            &[("top.sv", &source)],
+            &[
+                "--backend",
+                "native",
+                "--max-steps",
+                "5",
+                "--vcd",
+                path.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            waveform_body(&text).lines().any(|line| line == "#2"),
+            "{text}"
+        );
+    }
 }
