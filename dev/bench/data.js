@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1793523975947,
+  "lastUpdate": 1793533338855,
   "repoUrl": "https://github.com/celox-sim/celox",
   "entries": {
     "Rust Benchmarks": [
@@ -427340,6 +427340,69 @@ window.BENCHMARK_DATA = {
             "unit": "ns",
             "value": 812825377,
             "range": "810090195–816281329",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "id": "2c7df6364f1889ca82e0fe1ecf889dcffa7ab310",
+          "message": "feat(sv): support integral array members of unpacked structs (#2859)",
+          "timestamp": "2026-11-01T10:35:31Z",
+          "author": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "committer": {
+            "name": "mergify[bot]",
+            "email": "37929162+mergify[bot]@users.noreply.github.com"
+          },
+          "url": "https://github.com/celox-sim/celox/commit/2c7df6364f1889ca82e0fe1ecf889dcffa7ab310"
+        },
+        "date": 1793533338855,
+        "cpu": "AMD EPYC 7763 64-Core Processor",
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "collection-celox-tiered/collection_sha256_32e20b483104_x64_total",
+            "unit": "ns",
+            "value": 383862907,
+            "range": "376437177–406692825",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_sha256_32e20b483104_x64_total",
+            "unit": "ns",
+            "value": 575248703,
+            "range": "574249578–602981529",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"042fdbd77b877b1d680d14a8bafc2b59dcaf9f1895ebfd7a9844f8a0deb3193f\",\"workload\":\"nist-pairs-v1\",\"testbench\":\"collection-nist-pairs-v1\",\"testbenchSha256\":\"ca41757671d4fba6fc3550dab980806d3226b43c3578f466d7e9335145cf878c\",\"workUnits\":8192,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_fft_6334240922e2_x64_total",
+            "unit": "ns",
+            "value": 1752651702,
+            "range": "1745224992–1779577340",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_fft_6334240922e2_x64_total",
+            "unit": "ns",
+            "value": 3624514635,
+            "range": "3616801977–5865726189",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"a60ff7a502095599849773376fb2452336a0b8532ee29dd51bd4945a7efd5079\",\"workload\":\"three-tones-v1\",\"testbench\":\"collection-three-tones-v1\",\"testbenchSha256\":\"f385417fc911372b12f6f8a343b672dac418d6a7eda1c794b707387ee4aa7445\",\"workUnits\":3072,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-celox-tiered/collection_lz77_173e86f7a6ea_x64_total",
+            "unit": "ns",
+            "value": 511567365,
+            "range": "510717557–514116502",
+            "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"celox-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
+          },
+          {
+            "name": "collection-veryl-tiered/collection_lz77_173e86f7a6ea_x64_total",
+            "unit": "ns",
+            "value": 787041157,
+            "range": "785166724–788215304",
             "extra": "{\"comparison\":\"cold-tiered-process-v1\",\"verylVersion\":\"0.22.0\",\"cache\":\"cold\",\"revision\":\"6179df1cd15e13600a36621fc6b57de521a93d9f\",\"sourceSha256\":\"bda69213cec0a967b56060e819a9e6c9bf943ce6b7d6da84c57acd0946a2a1a1\",\"workload\":\"roundtrip-streams-v1\",\"testbench\":\"collection-roundtrip-streams-v1\",\"testbenchSha256\":\"c107718bd22b2b3d2013739babd039c967166f9ddc61ba4433bbd90a0b52196c\",\"workUnits\":2944,\"stateModel\":\"two-state\",\"optimization\":\"default-tiered\",\"threads\":1,\"runner\":\"veryl-tiered\",\"frontend\":\"veryl\",\"backend\":\"tiered\",\"phase\":\"total\"}"
           }
         ]
