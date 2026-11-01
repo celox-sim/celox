@@ -1,0 +1,9 @@
+Revision history for #2964:
+
+rev 3 (content) 2026-11-01 21:25 UTC
+rev 2 (content) 2026-11-01 21:08 UTC — Add a nested generate signal shadowing regression for review r4437304648. The reported logic/wire/bit cases already clear inherited constant types in constants_and_signal_types.
+rev 1 (initial) 2026-11-01 21:08 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2964,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"17d768bcab2522487af19c2c855fb4583040922b","timestamp_iso":"2026-11-01T21:08:25Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"17d768bcab2522487af19c2c855fb4583040922b","new_sha":"fe81e460f34241c8545fc064b5accc260bc63a7f","timestamp_iso":"2026-11-01T21:08:25Z","reason":"Add a nested generate signal shadowing regression for review r4437304648. The reported logic/wire/bit cases already clear inherited constant types in constants_and_signal_types.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/17d768bcab2522487af19c2c855fb4583040922b...fe81e460f34241c8545fc064b5accc260bc63a7f"},{"number":3,"change_type":"content","old_sha":"fe81e460f34241c8545fc064b5accc260bc63a7f","new_sha":"a783bcc13e69abc8f2ac56c48f6ef626624ef5e9","timestamp_iso":"2026-11-01T21:25:12Z","reason":"","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/fe81e460f34241c8545fc064b5accc260bc63a7f...a783bcc13e69abc8f2ac56c48f6ef626624ef5e9"}]} -->
+
+Synchronize after parent #2945 merged, dropping the merged enum-binding commit from the stack.
