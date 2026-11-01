@@ -1,0 +1,6 @@
+Revision history for #2927:
+
+rev 2 (content) 2026-11-01 16:39 UTC — Address review r4436422607: preserve the four-state conditional predicate in integral result types and subsequent casts.
+rev 1 (initial) 2026-11-01 16:39 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2927,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"bc544ce946e076b7aa6aa11d00beae23823c3563","timestamp_iso":"2026-11-01T16:39:15Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"bc544ce946e076b7aa6aa11d00beae23823c3563","new_sha":"d5373b895b5fdca0e629d874108b4673ea6f7ecf","timestamp_iso":"2026-11-01T16:39:15Z","reason":"Address review r4436422607: preserve the four-state conditional predicate in integral result types and subsequent casts.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/bc544ce946e076b7aa6aa11d00beae23823c3563...d5373b895b5fdca0e629d874108b4673ea6f7ecf"}]} -->
