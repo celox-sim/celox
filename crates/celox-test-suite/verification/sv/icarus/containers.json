@@ -139,6 +139,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 11; see <case>/build.log\n<case>/source_0.sv:15: error: Type names are not valid expressions here.\n<case>/source_0.sv:15: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:15:               : Expression is: <type>\n<case>/source_0.sv:15:               : Expression type: 10PETypename\n<case>/source_0.sv:15: error: Dimensions must be constant.\n<case>/source_0.sv:15       : This size expression violates the rule: <type>\n<case>/source_0.sv:6: error: Type names are not valid expressions here.\n<case>/source_0.sv:6: internal error: I do not know how to elaborate this expression. \n<case>/source_0.sv:6:               : Expression is: <type>\n<case>/source_0.sv:6:               : Expression type: 10PETypename\n<case>/source_0.sv:6: error: Dimensions must be constant.\n<case>/source_0.sv:6       : This size expression violates the rule: <type>\n<case>/source_0.sv:9: error: The expression ''sd3' cannot be implicitly cast to the target type.\n<case>/source_0.sv:9: error: The expression ''sd2' cannot be implicitly cast to the target type.\n<case>/source_0.sv:10: error: Object celox_suite_tb.dut.R.names.$ivl_foreach0.s has no method \"name(...)\".\n<case>/source_0.sv:20: warning: ignoring out of bounds l-value array access lv[3].\n<case>/source_0.sv:20: warning: ignoring out of bounds l-value array access lv[1].\n<case>/source_0.sv:21: error: Object celox_suite_tb.dut.$ivl_foreach1.k has no method \"name(...)\".\n<case>/source_0.sv:21: error: Object celox_suite_tb.dut.$ivl_foreach1.k has no method \"next(...)\".\n11 error(s) during elaboration.\n",
+      "expectation": "Simulation",
+      "name": "containers::foreach_enumeration_index_methods",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects an associative array whose index type is a type name (\"Type names are not valid expressions here.\"), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays (\"Sorry: Dynamic array of type `dynamic array of ...` is not yet supported.\"), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases.",
       "expectation": "Simulation",
       "known_issue": {

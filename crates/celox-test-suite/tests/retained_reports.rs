@@ -808,6 +808,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "array_locators::ordering_methods_with_expressions") => {
                             ("compile_error", "compile", "syntax error")
                         }
+                        ("icarus", "containers::foreach_enumeration_index_methods") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
