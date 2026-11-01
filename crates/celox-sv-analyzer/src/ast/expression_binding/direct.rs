@@ -2782,6 +2782,11 @@ pub(in crate::ast) fn real_value(expr: &Expr, dimensions: &PackedDimensions) -> 
             .functions
             .get(name)
             .is_some_and(|function| function.return_real),
+        // A real or shortreal class property (IEEE 1800-2023 6.12).
+        Expr::Call {
+            callee: Callee::Object(op),
+            ..
+        } => matches!(&**op, ObjectOp::Load(field) if field.real),
         // A sampled value has the type of its operand.
         Expr::Call {
             callee: Callee::System(SystemFunction::Sampled | SystemFunction::Past),

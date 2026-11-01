@@ -1399,9 +1399,8 @@ pub(super) fn field(
                 .ok_or_else(|| unsupported("class property type"))?;
             (shape.width, shape.signed, None)
         }
-        TypeKind::Real | TypeKind::Shortreal => {
-            return Err(unsupported("real class property"));
-        }
+        TypeKind::Real => (64, false, None),
+        TypeKind::Shortreal => (32, false, None),
     };
     Ok(ObjectField {
         offset: offset.next_multiple_of(8),
@@ -1415,6 +1414,7 @@ pub(super) fn field(
                 TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit
             ),
         nullable: false,
+        real: matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal),
     })
 }
 
