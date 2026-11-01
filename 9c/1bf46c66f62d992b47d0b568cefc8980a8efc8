@@ -1,0 +1,6 @@
+Revision history for #2818:
+
+rev 2 (rebase) 2026-11-01 08:36 UTC — Sync after #2816 merged; rebase the scheduler and report PRs before fixing the latch-settle review.
+rev 1 (initial) 2026-11-01 08:36 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2818,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e70ec6cf6058e8f9203647fc00a07923d14e136c","timestamp_iso":"2026-11-01T08:36:57Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"e70ec6cf6058e8f9203647fc00a07923d14e136c","new_sha":"880ba63efcab18e432f1a11e8cb79b1806037f3f","timestamp_iso":"2026-11-01T08:36:57Z","reason":"Sync after #2816 merged; rebase the scheduler and report PRs before fixing the latch-settle review.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e70ec6cf6058e8f9203647fc00a07923d14e136c...880ba63efcab18e432f1a11e8cb79b1806037f3f"}]} -->
