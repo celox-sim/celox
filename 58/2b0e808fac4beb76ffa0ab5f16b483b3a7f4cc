@@ -1,0 +1,1 @@
+Address review r4437149392: inspect bound actual expressions instead of formal-name fallbacks when checking delayed-net connections.
