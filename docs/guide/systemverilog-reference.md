@@ -317,6 +317,9 @@ waits zero.
 
 `assign #5 y = a;` accepts one nonnegative integral constant delay, including
 parameters and generate-local constants, or a time literal such as `#1.25ns`.
+The same delay applies to each continuous initializer in a net declaration,
+such as `wire #5 w = a, v = b;` (10.3.3); these are continuous assignments,
+not one-time variable initializers.
 Time literals round at the declaring scope's precision. The target must be a
 scalar or packed integral variable/net, optionally with a constant bit or part
 select; the RHS must be integral and contain no subroutine calls.
@@ -332,8 +335,8 @@ cancellation are supported. `#0` uses ordinary continuous-assignment evaluation.
 Rise/fall/turn-off delay lists, variable or negative amounts, unitless fractional
 real amounts, concatenated or aggregate destinations and dynamic destination
 selects remain unsupported ([#444](https://github.com/celox-sim/celox/issues/444)).
-Delays on net declarations (`wire #5 w;` and `wire #5 w = a;`) are outside this
-supported subset; their parsed delay is currently not applied.
+Independent net delays (`wire #5 w;` followed by a separate driver) are outside
+this supported subset; their parsed delay is currently not applied.
 
 ### Built-in functions and tasks
 

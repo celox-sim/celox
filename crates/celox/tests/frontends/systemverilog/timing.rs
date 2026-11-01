@@ -2192,6 +2192,9 @@ fn blocking_intra_assignment_tag_errors_observe_the_right_time() {
 }
 
 timed_cases! {
+    fn continuous_delay_net_initializer = "timing::continuous_delay_net_initializer";
+    fn continuous_delay_net_initializer_generate = "timing::continuous_delay_net_initializer_generate";
+    fn continuous_delay_net_initializer_four_state = "timing::continuous_delay_net_initializer_four_state";
     fn continuous_delay_inertial = "timing::continuous_delay_inertial";
     fn continuous_delay_unchanged_rhs = "timing::continuous_delay_unchanged_rhs";
     fn continuous_delay_sized_vector = "timing::continuous_delay_sized_vector";
@@ -2259,6 +2262,9 @@ fn continuous_delay_rounds_time_literals_in_the_declaring_scope() {
 fn continuous_delay_unsupported_forms_are_explicit() {
     for body in [
         "bit a, y; int d; assign #(d) y = a;",
+        "bit a; int d; wire #(d) y = a;",
+        "bit a; wire #(-1) y = a;",
+        "bit a; wire #(1,2) y = a;",
         "bit a, y; assign #(-1) y = a;",
         "bit a, y; assign #(1,2) y = a;",
         "bit a, y; assign #(1.5) y = a;",
