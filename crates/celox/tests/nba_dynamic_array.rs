@@ -66,17 +66,11 @@ all_backends! {
         @case "nba_dynamic_array::test_partly_out_of_range_dynamic_ff_part_select";
     }
 
-    // The Veryl reference simulator writes through an unknown index instead
-    // of ignoring the write (IEEE 1800-2023 7.4.6).
     fn test_out_of_range_dynamic_ff_access_four_state(sim) {
-        @ignore_on(veryl);
         @case "nba_dynamic_array::test_out_of_range_dynamic_ff_access_four_state";
     }
 
-    // The Veryl reference simulator reads an existing element through an
-    // invalid index.
     fn test_out_of_range_dynamic_comb_access(sim) {
-        @ignore_on(veryl);
         @case "nba_dynamic_array::test_out_of_range_dynamic_comb_access";
     }
 
@@ -85,12 +79,9 @@ all_backends! {
 all_backends! {
 // Each index of a multidimensional array is checked against its own dimension
 // (IEEE 1800-2023 7.4.6). This stays out of the shared suite: Icarus 13.0,
-// Verilator 5.052, and the Veryl reference simulator all apply `grid[0][3]`
+// Verilator 5.052, and the released Veryl 0.22.0 simulator all apply `grid[0][3]`
 // to another element.
 fn test_out_of_range_inner_index_of_dynamic_ff_write_is_ignored(sim) {
-    // Veryl 0.22.0's simulator applies an out-of-range inner index to another element; Veryl
-    // master no longer does.
-    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
@@ -159,11 +150,9 @@ fn test_out_of_range_inner_index_of_dynamic_ff_write_is_ignored(sim) {
 all_backends! {
 // A `-:` part select whose low bits fall below bit 0 still writes and reads
 // its in-range bits (IEEE 1800-2023 11.5.1). Icarus 13.0 agrees; Verilator
-// 5.052 and the Veryl reference simulator ignore the whole write, so this
+// 5.052 and the released Veryl 0.22.0 simulator ignore the whole write, so this
 // stays out of the shared suite.
 fn test_descending_part_select_below_bit_zero_keeps_in_range_bits(sim) {
-    // Veryl 0.22.0's simulator drops the whole write of a `-:` select that runs below bit 0.
-    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
@@ -222,12 +211,9 @@ all_backends! {
 // Combinational dynamic accesses check each index against its own dimension
 // and keep the in-range bits of a `-:` part select that starts below bit 0
 // (IEEE 1800-2023 7.4.6, 11.5.1). In a two-state simulation an invalid read,
-// like any X, reads 0. The Veryl reference simulator applies `grid[0][3]` to
+// like any X, reads 0. The released Veryl 0.22.0 simulator applies `grid[0][3]` to
 // another element.
 fn test_out_of_range_dynamic_comb_access_two_state(sim) {
-    // Veryl 0.22.0's simulator reads an existing element through an out-of-range inner index,
-    // and drops a `-:` write below bit 0.
-    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
@@ -427,9 +413,6 @@ all_backends! {
 // so a read must still redirect its address instead of loading far outside
 // the array.
 fn test_negative_signed_index_reads_and_writes_nothing(sim) {
-    // Veryl 0.22.0's simulator reads an element through a negative signed index; Veryl master
-    // no longer does.
-    @ignore_on(veryl);
     @setup {
         let source = r#"
             module Top (
