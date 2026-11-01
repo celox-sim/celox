@@ -49,7 +49,16 @@ pub(super) fn result(
         && string.is_none()
         && !matches!(
             method,
-            "pop_front" | "pop_back" | "size" | "num" | "get_randstate"
+            "pop_front"
+                | "pop_back"
+                | "size"
+                | "num"
+                | "get_randstate"
+                | "first"
+                | "last"
+                | "next"
+                | "prev"
+                | "name"
         )
     {
         return None;
@@ -79,6 +88,18 @@ pub(super) fn result(
                 // 7.5.2, 7.9.1, 7.10.2.1.
                 (ArrayKind::Dynamic | ArrayKind::Queue { .. }, "size")
                 | (ArrayKind::Associative { .. }, "num" | "size") => int(tree, session, dims),
+                _ => None,
+            }
+        }
+        TyData::Packed(semantic_types::Packed {
+            element: PackedElement::Enum { array: false, .. },
+            ..
+        }) => {
+            match method {
+                // 6.19.5: member methods return the receiver's enum type.
+                "first" | "last" | "next" | "prev" => Some(receiver),
+                "num" => int(tree, session, dims),
+                "name" => Some(session.types.intern(TyData::String)),
                 _ => None,
             }
         }

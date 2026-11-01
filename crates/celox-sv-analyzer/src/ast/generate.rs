@@ -38,6 +38,7 @@ pub(super) struct Item {
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     qualified_types: SharedMap<Type>,
+    enum_constants: SharedMap<enums::ConstantType>,
     names: SharedMap<String>,
     imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
@@ -285,6 +286,15 @@ impl Item {
     pub fn dimensions(&self, dimensions: &PackedDimensions) -> PackedDimensions {
         let mut local = dimensions.clone();
         local.const_env = self.env.clone();
+        if !self.shadowed.is_empty() || !self.names.is_empty() || !self.enum_constants.is_empty() {
+            let mut bindings = self.function_aliases((*dimensions.enum_constants).clone());
+            bindings.extend(
+                self.enum_constants
+                    .iter()
+                    .map(|(n, t)| (n.clone(), t.clone())),
+            );
+            local.enum_constants = Arc::new(bindings);
+        }
         local.parameter_values =
             if self.shadowed.is_empty() && self.names.is_empty() && self.literals.is_empty() {
                 dimensions.parameter_values.clone()
@@ -524,6 +534,7 @@ struct Scope {
     parameters: Vec<Parameter>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     qualified_types: SharedMap<Type>,
+    enum_constants: SharedMap<enums::ConstantType>,
     names: SharedMap<String>,
     imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
@@ -904,6 +915,7 @@ impl<'a> Elaborator<'a, '_> {
             literals: scope.literals.clone(),
             parameter_dimensions: scope.parameter_dimensions.clone(),
             qualified_types: scope.qualified_types.clone(),
+            enum_constants: scope.enum_constants.clone(),
             names: scope.names.clone(),
             imports: scope.imports.clone(),
             shadowed: scope.shadowed.clone(),
@@ -1332,6 +1344,13 @@ impl<'a> Elaborator<'a, '_> {
                 aliases.insert(qualified, ty.clone());
                 aliases.insert(name, ty);
             }
+            for (name, binding) in &enums.declarations {
+                scope.enum_constants.insert(name.clone(), binding.clone());
+                scope.enum_constants.insert(
+                    format!("{}.{}", scope.path, scope_component(name)),
+                    binding.clone(),
+                );
+            }
             for (name, number) in enums.numbers {
                 if !declared.insert(name.clone()) {
                     return Err(unsupported(format!(
@@ -1507,6 +1526,7 @@ fn module_constant_functions(
             literals: literals.clone().into(),
             parameter_dimensions: Arc::default(),
             qualified_types: SharedMap::default(),
+            enum_constants: SharedMap::default(),
             names: SharedMap::default(),
             imports: SharedMap::default(),
             shadowed: Arc::default(),
