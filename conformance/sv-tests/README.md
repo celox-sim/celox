@@ -118,6 +118,12 @@ because Celox’s simulator requires one root. Each input file is a separate
 compilation unit, so source-defined macros do not leak between files;
 command-line defines apply to each file.
 
+Source files and included headers accept non-UTF-8 bytes inside comments by
+default. Invalid comment bytes are replaced with spaces, preserving valid UTF-8
+and byte offsets; code and string bytes are not silently replaced. The driver
+option `--source-encoding utf8` requires UTF-8 throughout both sources and
+headers; `--source-encoding non-utf8-comments` explicitly selects the default.
+
 | Result | Meaning |
 | --- | --- |
 | `pass` | the official runner emitted `PASS` |

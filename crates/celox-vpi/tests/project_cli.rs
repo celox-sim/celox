@@ -991,6 +991,43 @@ fn separate_units_resolve_relative_headers_without_command_macros_or_include_pat
 
 #[cfg(feature = "systemverilog")]
 #[test]
+fn non_utf8_source_and_header_comments_are_allowed_by_default() {
+    let root = tempfile::tempdir().unwrap();
+    let top = root.path().join("tb.sv");
+    fs::write(&top, b"// \xa9\n`include \"value.svh\"\nmodule Tb; initial begin $display(\"value=%0d\", `VALUE); $finish; end endmodule").unwrap();
+    fs::write(
+        root.path().join("value.svh"),
+        b"/* \xff */\n`define VALUE 42\n",
+    )
+    .unwrap();
+    for mode in ["--single-unit", "--separate-units"] {
+        let output = invoke(root.path(), &["run", "tb.sv", "--top", "Tb", mode]);
+        success(&output);
+        assert_eq!(output.stdout, b"value=42\n");
+        let output = invoke(
+            root.path(),
+            &[
+                "run",
+                "tb.sv",
+                "--top",
+                "Tb",
+                mode,
+                "--strict-source-encoding",
+            ],
+        );
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("utf-8"));
+    }
+    fs::write(&top, "`include \"value.svh\"\nmodule Tb; endmodule").unwrap();
+    fs::write(root.path().join("celox.toml"), "sources=['tb.sv']\ntop='Tb'\nstrict_source_encoding=true\n[targets.compat]\nstrict_source_encoding=false\n").unwrap();
+    let output = invoke(root.path(), &["run"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot read include"));
+    success(&invoke(root.path(), &["run", "--target", "compat"]));
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
 fn macro_expansion_preserves_operator_boundaries_in_both_compilation_modes() {
     let root = tempfile::tempdir().unwrap();
     fs::write(root.path().join("tb.sv"), "`define NEG -\n`define POS +\n`define DIGIT 3\n`define WIDTH 4\n`define DIV /\nmodule Tb; int y; initial begin y=`NEG-1; $display(\"y=%0d\", y); y=`POS+1; $display(\"y=%0d\", y); y=4'd`DIGIT; $display(\"y=%0d\", y); y=`WIDTH'd3; $display(\"y=%0d\", y); y=6`DIV/*block*/2; $display(\"y=%0d\", y); y=6`DIV//line\n2; $display(\"y=%0d\", y); $finish; end endmodule").unwrap();
