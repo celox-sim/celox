@@ -1,1 +1,1 @@
-Rebase onto master: return metadata moved to function_returns.rs; set container in from_type/from_function/from_dpi
+Rebase onto master: keep master's shuffle and unit-import cases next to container returns
