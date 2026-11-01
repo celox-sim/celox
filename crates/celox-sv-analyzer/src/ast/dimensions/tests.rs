@@ -204,7 +204,6 @@ fn complete_scope_queries_match_syntax_discovery_without_rewalking_declarations(
                     chandle: false,
                     pattern_type: f.return_type.clone(),
                     enum_domain: None,
-                    class: None,
                     virtual_interface: None,
                 },
             )

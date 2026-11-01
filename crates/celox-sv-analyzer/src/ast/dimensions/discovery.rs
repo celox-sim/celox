@@ -412,76 +412,6 @@ fn formal_types(
     }
     Ok(result)
 }
-fn return_metadata(
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    ty: Option<&Type>,
-    arguments: Arc<[FunctionArgumentMetadata]>,
-    context: &PackedDimensions,
-) -> FunctionReturnMetadata {
-    let functions = &tree.functions;
-    let widths = ty.map(|ty| {
-        ty.packed_ranges()
-            .iter()
-            .map(|range| {
-                usize::try_from(
-                    eval_ast_const_expr(functions, range.left(), &context.const_env)?.abs_diff(
-                        eval_ast_const_expr(functions, range.right(), &context.const_env)?,
-                    ),
-                )
-                .ok()?
-                .checked_add(1)
-            })
-            .collect::<Option<Vec<_>>>()
-    });
-    let width = ty
-        .and_then(|ty| expr_type_from_type(&tree.functions, ty, &context.const_env))
-        .map(|ty| ty.width);
-    FunctionReturnMetadata {
-        semantic_type: ty.and_then(|ty| {
-            semantic_types::of_type(&mut session.types, functions, ty, &context.const_env)
-        }),
-        arguments: Some(arguments),
-        width,
-        first_packed_dimension_width: widths
-            .as_ref()
-            .and_then(|widths| widths.as_ref())
-            .and_then(|widths| widths.first().copied())
-            .or(width),
-        dimensions: ty.map(|ty| {
-            ty.unpacked_ranges().len()
-                // A chandle has no packed dimensions (IEEE 1800-2023 6.14).
-                + if ty.chandle || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
-                    0
-                } else {
-                    ty.packed_ranges().len()
-                }
-        }),
-        signed: ty.is_some_and(Type::is_signed),
-        is_2state: ty.is_some_and(|ty| ty.kind() == TypeKind::Bit),
-        string: ty.is_some_and(|ty| ty.kind() == TypeKind::String),
-        enum_domain: ty
-            .filter(|ty| ty.unpacked_ranges.is_empty())
-            .and_then(|ty| ty.enum_domain.clone()),
-        class: ty
-            .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
-            .and_then(|ty| ty.class().map(str::to_owned)),
-        virtual_interface: ty.and_then(|ty| ty.virtual_interface.clone()),
-        chandle: ty.is_some_and(|ty| ty.chandle && ty.unpacked_ranges.is_empty()),
-        pattern_type: ty
-            .filter(|ty| {
-                !ty.members.is_empty()
-                    || !ty.unpacked_ranges.is_empty()
-                    || ty.packed_ranges.len() > 1
-            })
-            .and_then(|ty| {
-                ty.pattern_target(&const_functions::Environment {
-                    constants: &*context.const_env,
-                    functions,
-                })
-            }),
-    }
-}
 fn signature(
     id: SubroutineId,
     tree: &AnalysisContext<'_>,
@@ -985,29 +915,13 @@ fn subroutine_signatures(
                 publish(&mut session.dimensions, key, context);
             } else if let BodyItemKind::Dpi(id) = native.body_item(*id).kind
                 && let Ok(import) = dpi::import(id, native)
-                && let Some(ty) = import.return_type()
+                && let Some(metadata) =
+                    FunctionReturnMetadata::from_dpi(&import, &mut session.types)
             {
                 session.dimensions.partial.remove(key);
-                context.function_return_types.insert(
-                    import.name().to_string(),
-                    FunctionReturnMetadata {
-                        semantic_type: None,
-                        arguments: Some(dpi_argument_metadata(&import)),
-                        width: Some(ty.width()),
-                        first_packed_dimension_width: (ty.width() > 1).then_some(ty.width()),
-                        dimensions: Some(usize::from(
-                            ty.width() > 1 && ty != crate::ir::DpiType::Chandle,
-                        )),
-                        signed: ty.is_signed(),
-                        is_2state: !ty.is_4state(),
-                        string: false,
-                        chandle: ty == crate::ir::DpiType::Chandle,
-                        pattern_type: None,
-                        enum_domain: None,
-                        class: None,
-                        virtual_interface: None,
-                    },
-                );
+                context
+                    .function_return_types
+                    .insert(import.name().to_string(), metadata);
                 publish(&mut session.dimensions, key, context);
             }
         }
@@ -1094,7 +1008,8 @@ fn publish_signature(
         Arc::make_mut(&mut context.subroutine_param_names).insert(n.clone(), names);
     }
     if let Some(ty) = result {
-        let metadata = return_metadata(tree, session, ty.as_ref(), arguments, context);
+        let metadata =
+            FunctionReturnMetadata::from_type(tree, session, ty.as_ref(), arguments, context);
         if context.function_return_types.get(&n) != Some(&metadata) {
             context.function_return_types.insert(n, metadata);
         }
