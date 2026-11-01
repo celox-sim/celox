@@ -1,5 +1,78 @@
 (group string (category types))
 
+(case fixed_array_mutations
+  (source "string_array_mutations.sv" #"
+module Top(output bit same);
+  string words[2:1][0:0] = '{'{"abcd"}, '{"efgh"}}, copy[2:1][0:0];
+  int row = 2, column;
+  initial begin
+    copy = words;
+    #1;
+    words[row][column][0] = "A";
+    words[1][0].putc(2, "G");
+    words[2][0].putc(-1, "X");
+    words[2][0].putc(4, "X");
+    words[2][0].putc(1, 0);
+    words[2][0][2] = 16'h015a;
+    same = words[2][0] == "AbZd" && words[1][0] == "efGh"
+      && copy[2][0] == "abcd" && copy[1][0] == "efgh";
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case fixed_array_mutating_methods
+  (source "string_array_mutations.sv" #"
+module Top(output bit same);
+  string words[4];
+  int index = 2;
+  initial begin
+    words[0].itoa(-17);
+    words[1].hextoa(255);
+    words[index].bintoa(5);
+    words[3].octtoa(8);
+    same = words[0] == "-17" && words[1] == "ff"
+      && words[2] == "101" && words[3] == "10";
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case fixed_array_mutation_indices
+  (source "string_array_mutations.sv" #"
+module Top(output bit same);
+  string words[2] = '{"abc", "def"};
+  int calls, index;
+  function automatic int select_word(); calls++; return 0; endfunction
+  function automatic int character_value(); return "Z"; endfunction
+  initial begin
+    words[select_word()].putc(1, "X");
+    words[index].putc(0, character_value());
+    words[select_word()][2] = "Q";
+    same = calls == 2 && index == 0 && words[0] == "ZXQ" && words[1] == "def";
+    words[index++].itoa(12);
+    same = same && index == 1 && words[0] == "12" && words[1] == "def";
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case fixed_array_mutations_invalid_indices
+  (source "string_array_mutations.sv" #"
+module Top(output bit same);
+  string words[2] = '{"abc", "def"};
+  logic unknown_index = 'x;
+  int bad = 9;
+  initial begin
+    words[bad].putc(0, "X");
+    words[unknown_index].itoa(99);
+    words[bad][0] = "Z";
+    same = words[0] == "abc" && words[1] == "def";
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
 (case fixed_array_loops_and_copy
   (source "string_arrays.sv" #"
     module Top(output int total, while_index, do_index, output bit same);

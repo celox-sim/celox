@@ -244,7 +244,7 @@ pub(in crate::ast) fn native_string(
 
 /// Only an index that consumes every unpacked dimension selects one string.
 /// A slice or a remaining subarray is still an array, including extent one.
-pub(super) fn fixed_array_element(
+pub(in crate::ast) fn fixed_array_element(
     tree: &AnalysisContext<'_>,
     mut id: ExprId,
     native: &Declarations,

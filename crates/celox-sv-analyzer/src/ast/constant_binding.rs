@@ -93,6 +93,17 @@ fn bind_in_context(
                     ),
                 ));
             }
+            Job::Enter(id) if dimensions.effect_values.contains_key(&id) => {
+                let Some(value) = selects::indexed_expression_value(
+                    tree,
+                    session,
+                    dimensions.effect_values[&id].clone(),
+                    query_dimensions,
+                ) else {
+                    return Ok(None);
+                };
+                values.push(value);
+            }
             Job::Enter(id) => match &native.expression(id).kind {
                 ExprKind::Group(inner) => jobs.push(Job::Enter(*inner)),
                 ExprKind::Literal(text)
