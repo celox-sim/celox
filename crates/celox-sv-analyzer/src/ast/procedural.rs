@@ -177,7 +177,7 @@ impl Names {
 
 /// The packed and unpacked shape of a declared type, as selects see it.
 pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
-    VariableDimensions {
+    VariableDimensions::new(VariableShape {
         chandle: r#type.chandle,
         container: r#type.container.clone(),
         randomizable: r#type.container.is_none()
@@ -206,7 +206,19 @@ pub(super) fn dimensions_from_type(r#type: &Type) -> VariableDimensions {
         signed_element_depth: r#type.signed_element_depth,
         unpacked_struct: r#type.unpacked_struct.clone(),
         declared: type_names::Declared::new(r#type),
-    }
+    })
+}
+
+/// A declaration whose type can be resolved in its own lexical environment.
+pub(super) fn bound_dimensions_from_type(
+    ty: &Type,
+    functions: &const_functions::ConstantFunctions,
+    table: &mut semantic_types::TyTable,
+    env: &HashMap<String, i128>,
+) -> VariableDimensions {
+    let shape = dimensions_from_type(ty);
+    shape.bind_type(table, functions, env);
+    shape
 }
 
 /// `r#type` with the constants of its declaration scope substituted into its
@@ -552,9 +564,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     pub(super) fn declare(&mut self, source: &str, r#type: Type) -> String {
         let unique = format!("{source}@{}", *self.state.counter);
         *self.state.counter += 1;
+        let shape = bound_dimensions_from_type(
+            &r#type,
+            &self.tree.functions,
+            &mut self.session.types,
+            &self.dims.const_env,
+        );
         let entry = self.take_binding(source, Some(unique.clone()), r#type.packed_ranges.len());
-        self.dims
-            .insert(source.to_string(), dimensions_from_type(&r#type));
+        self.dims.insert(source.to_string(), shape);
         self.dims
             .expression_signedness
             .insert(source.to_string(), r#type.is_signed());
@@ -642,15 +659,18 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             if property.local && property.owner != class.name {
                 continue;
             }
+            let shape = bound_dimensions_from_type(
+                &property.r#type,
+                &self.tree.functions,
+                &mut self.session.types,
+                &self.dims.const_env,
+            );
             let entry = self.take_binding(
                 &property.name,
                 Some(property.variable.clone()),
                 property.r#type.packed_ranges.len(),
             );
-            self.dims.insert(
-                property.name.clone(),
-                dimensions_from_type(&property.r#type),
-            );
+            self.dims.insert(property.name.clone(), shape);
             self.dims
                 .expression_signedness
                 .insert(property.name.clone(), property.r#type.is_signed());
@@ -2532,8 +2552,14 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             return Err(unsupported("array of unpacked structures"));
         }
         for (name, ty) in unpacked_structs::aggregates(source, r#type) {
+            let shape = bound_dimensions_from_type(
+                &ty,
+                &self.tree.functions,
+                &mut self.session.types,
+                &self.dims.const_env,
+            );
             let entry = self.take_binding(&name, None, 0);
-            self.dims.insert(name.clone(), dimensions_from_type(&ty));
+            self.dims.insert(name.clone(), shape);
             self.names
                 .scopes
                 .last_mut()
@@ -3550,7 +3576,12 @@ pub(super) fn subroutine_argument_names(
             let param_shapes: Vec<VariableDimensions> = params
                 .iter()
                 .map(|(_, _, r#type, _)| {
-                    dimensions_from_type(&scoped_type(r#type.clone(), &item.env))
+                    bound_dimensions_from_type(
+                        &scoped_type(r#type.clone(), &item.env),
+                        &tree.functions,
+                        &mut session.types,
+                        &item.env,
+                    )
                 })
                 .collect();
             let param_directions: Vec<ParamDirection> =
@@ -3619,7 +3650,12 @@ pub(super) fn subroutine_argument_names(
                     params
                         .iter()
                         .map(|(_, _, r#type, _)| {
-                            dimensions_from_type(&scoped_type(r#type.clone(), &env))
+                            bound_dimensions_from_type(
+                                &scoped_type(r#type.clone(), &env),
+                                &tree.functions,
+                                &mut session.types,
+                                &env,
+                            )
                         })
                         .collect(),
                 );
@@ -3631,7 +3667,12 @@ pub(super) fn subroutine_argument_names(
             for method in ["randomize", "srandom", "rand_mode"] {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, method));
                 let mut param_names = vec![classes::THIS.to_owned()];
-                let mut param_shapes = vec![dimensions_from_type(&handle)];
+                let mut param_shapes = vec![bound_dimensions_from_type(
+                    &handle,
+                    &tree.functions,
+                    &mut session.types,
+                    &env,
+                )];
                 let (argument, ty) = match method {
                     "randomize" => (
                         "$selection",
@@ -3644,7 +3685,12 @@ pub(super) fn subroutine_argument_names(
                     _ => ("on_off", classes::unsigned_type(1)),
                 };
                 param_names.push(argument.into());
-                param_shapes.push(dimensions_from_type(&ty));
+                param_shapes.push(bound_dimensions_from_type(
+                    &ty,
+                    &tree.functions,
+                    &mut session.types,
+                    &env,
+                ));
                 directions.insert(
                     qualified.clone(),
                     vec![ParamDirection::Input; param_names.len()],
@@ -3652,7 +3698,12 @@ pub(super) fn subroutine_argument_names(
                 shapes.insert(qualified.clone(), param_shapes);
                 names.insert(qualified, param_names);
             }
-            let handle = dimensions_from_type(&scoped_type(handle, &env));
+            let handle = bound_dimensions_from_type(
+                &scoped_type(handle, &env),
+                &tree.functions,
+                &mut session.types,
+                &env,
+            );
             if !constructor && !layout.is_some_and(|layout| layout.is_interface) {
                 let qualified = item.name(&classes::Class::subroutine_name(&class, "new"));
                 directions.insert(qualified.clone(), vec![ParamDirection::Input]);

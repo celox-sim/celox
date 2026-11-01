@@ -78,15 +78,15 @@ fn pattern_value(
     if let Some((dimension, rest)) = shape.unpacked.split_first() {
         let (_, _, count) =
             dimension_bounds(&tree.functions, &dimension.left, &dimension.right, dims)?;
-        let element = VariableDimensions {
+        let element = VariableDimensions::new(VariableShape {
             declared: type_names::Declared::default(),
             container: None,
             real: false,
             string: false,
             class: None,
             unpacked: rest.to_vec(),
-            ..shape.clone()
-        };
+            ..shape.clone_shape()
+        });
         let width = shape_width(&tree.functions, &element, dims)
             .ok_or_else(|| unsupported("typed pattern element width"))?;
         for position in 0..count {
@@ -172,19 +172,19 @@ pub(super) fn assignment_value(
         let array = if let Some((dim, rest)) = shape.unpacked.split_first() {
             Some((
                 &dim.width,
-                VariableDimensions {
+                VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     unpacked: rest.to_vec(),
-                    ..shape.clone()
-                },
+                    ..shape.clone_shape()
+                }),
             ))
         } else if let Some((dim, rest)) = shape.packed.split_first()
             && !rest.is_empty()
         {
             Some((
                 &dim.width,
-                VariableDimensions {
+                VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     packed: rest.to_vec(),
@@ -193,8 +193,8 @@ pub(super) fn assignment_value(
                         .signed_element_depth
                         .and_then(|n| n.checked_sub(1))
                         .filter(|n| *n > 0),
-                    ..shape.clone()
-                },
+                    ..shape.clone_shape()
+                }),
             ))
         } else {
             None

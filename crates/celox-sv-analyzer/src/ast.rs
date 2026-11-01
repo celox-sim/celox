@@ -229,6 +229,8 @@ mod dpi;
 mod enums;
 mod expression_binding;
 mod expression_types;
+mod variable_dimensions;
+use variable_dimensions::{VariableDimensions, VariableShape};
 mod expressions;
 mod ff_process;
 mod function_returns;
@@ -1533,6 +1535,7 @@ impl Module {
             // Bodies now have the active module's declarations and function types.
             // Declaration-time queries still use syntax discovery while metadata
             // is incomplete; generated/procedural scopes overlay this complete base.
+            packed_dimensions.bind_types(&mut session.types, &syntax_tree.functions);
             packed_dimensions.scope_types_complete = true;
             let mut locals = Vec::new();
             let mut local_counter = 0usize;
@@ -3417,36 +3420,6 @@ struct UnpackedDimension {
     width: ConstExpr,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct VariableDimensions {
-    container: Option<Arc<ContainerType>>,
-    randomizable: bool,
-    enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// See [`Type::packed_enum`].
-    packed_enum: bool,
-    real: bool,
-    /// A `string`: each element is a heap handle, not packed bits.
-    string: bool,
-    /// The class of an object handle variable.
-    class: Option<String>,
-    /// The interface of a virtual interface variable.
-    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
-    packed: Vec<PackedDimension>,
-    unpacked: Vec<UnpackedDimension>,
-    signed: bool,
-    is_2state: bool,
-    members: Vec<packed_structs::PackedMember>,
-    /// See [`Type::signed_element_depth`].
-    signed_element_depth: Option<usize>,
-    /// A variable of unpacked structure type: the names of its members
-    /// are variables (see [`unpacked_structs`]).
-    unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
-    /// The declared type, for `$typename`.
-    declared: type_names::Declared,
-    /// A `chandle` variable (see [`Type::chandle`]).
-    chandle: bool,
-}
-
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3525,6 +3498,17 @@ struct PackedDimensions {
 }
 
 impl PackedDimensions {
+    /// Bind the completed declaration set without changing lexical map identity.
+    fn bind_types(
+        &self,
+        table: &mut semantic_types::TyTable,
+        functions: &const_functions::ConstantFunctions,
+    ) {
+        for (_, shape) in self.iter() {
+            shape.bind_type(table, functions, &self.const_env);
+        }
+    }
+
     fn new(
         variables: impl Into<ScopedMap<VariableDimensions>>,
         const_env: impl ToShared<i128>,

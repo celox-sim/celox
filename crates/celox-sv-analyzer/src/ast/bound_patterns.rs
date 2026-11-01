@@ -225,15 +225,15 @@ impl BoundPattern {
             let count = usize::try_from(left.abs_diff(right) + 1)
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
-                VariableDimensions {
+                VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     real: false,
                     string: false,
                     class: None,
                     unpacked: rest.to_vec(),
-                    ..shape.clone()
-                };
+                    ..shape.clone_shape()
+                });
                 count
             ];
             keys = (0..count)
@@ -253,7 +253,7 @@ impl BoundPattern {
             let count = usize::try_from(left.abs_diff(right) + 1)
                 .map_err(|_| unsupported("assignment pattern target size"))?;
             shapes = vec![
-                VariableDimensions {
+                VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     real: false,
@@ -265,8 +265,8 @@ impl BoundPattern {
                         .signed_element_depth
                         .and_then(|n| n.checked_sub(1))
                         .filter(|n| *n > 0),
-                    ..shape.clone()
-                };
+                    ..shape.clone_shape()
+                });
                 count
             ];
             keys = (0..count)
@@ -314,7 +314,7 @@ impl BoundPattern {
             let width = patterns::shape_width(&tree.functions, shape, dims)
                 .ok_or_else(|| unsupported("pattern target width"))?;
             shapes = vec![
-                VariableDimensions {
+                VariableDimensions::new(VariableShape {
                     declared: type_names::Declared::default(),
                     container: None,
                     real: false,
@@ -324,8 +324,8 @@ impl BoundPattern {
                     signed: false,
                     signed_element_depth: None,
                     unpacked_struct: None,
-                    ..shape.clone()
-                };
+                    ..shape.clone_shape()
+                });
                 width
             ];
             keys = (0..width).rev().map(|i| Key::Index(i as i128)).collect();

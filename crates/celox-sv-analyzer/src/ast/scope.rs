@@ -943,23 +943,8 @@ impl Renamer<'_> {
         r#type
     }
 
-    pub fn dimensions(&self, mut dimensions: VariableDimensions) -> VariableDimensions {
-        for dimension in &mut dimensions.packed {
-            dimension.left = self.const_expr(dimension.left.clone());
-            dimension.right = self.const_expr(dimension.right.clone());
-            dimension.width = self.const_expr(dimension.width.clone());
-        }
-        for dimension in &mut dimensions.unpacked {
-            dimension.left = self.const_expr(dimension.left.clone());
-            dimension.right = self.const_expr(dimension.right.clone());
-            dimension.width = self.const_expr(dimension.width.clone());
-        }
-        dimensions.members = dimensions
-            .members
-            .into_iter()
-            .map(|member| member.with_type(|r#type| self.r#type(r#type)))
-            .collect();
-        dimensions
+    pub fn dimensions(&self, dimensions: VariableDimensions) -> VariableDimensions {
+        dimensions.renamed(self)
     }
 
     /// An expression function. Its parameters shadow the names of the scope

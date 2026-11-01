@@ -531,7 +531,7 @@ pub(in crate::ast) fn native_struct(
             target: Some(_), ..
         } if std::ptr::eq(native, tree.declarations()) => patterns::typed_shape(id, tree, dims)?
             .filter(|shape| shape.unpacked.is_empty())
-            .and_then(|shape| shape.unpacked_struct),
+            .and_then(|shape| shape.unpacked_struct.clone()),
         _ if containers::native_struct_element(id, native, tree, session, dims)?.is_some() => {
             containers::native_struct_element(id, native, tree, session, dims)?
         }

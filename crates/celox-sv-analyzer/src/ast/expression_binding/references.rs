@@ -123,10 +123,12 @@ pub(super) fn check_actual(
             }
             array_compatibility::selected_unpacked_shape(&variable, indices, dimensions).or_else(
                 || {
-                    (indices == array.unpacked.len()).then(|| VariableDimensions {
-                        declared: type_names::Declared::default(),
-                        unpacked: Vec::new(),
-                        ..array.clone()
+                    (indices == array.unpacked.len()).then(|| {
+                        VariableDimensions::new(VariableShape {
+                            declared: type_names::Declared::default(),
+                            unpacked: Vec::new(),
+                            ..array.clone_shape()
+                        })
                     })
                 },
             )

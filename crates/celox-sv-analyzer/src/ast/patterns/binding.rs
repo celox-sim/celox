@@ -115,13 +115,13 @@ fn select<'a>(
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
         // Selecting an unpacked dimension keeps the declaration of its
         // element type, including the nominal structure identity.
-        let sub = Shape::Owned(Rc::new(VariableDimensions {
+        let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
             container: None,
             real: false,
             class: None,
             unpacked: rest.to_vec(),
-            ..(*shape).clone()
-        }));
+            ..(*shape).clone_shape()
+        })));
         let items = indexed_items(kind, bindings, count, |index| {
             (left.min(right)..=left.max(right))
                 .contains(&index)
@@ -146,7 +146,7 @@ fn select<'a>(
         && !rest.is_empty()
     {
         let (left, right, count) = dimension_bounds(functions, &dim.left, &dim.right, dims)?;
-        let sub = Shape::Owned(Rc::new(VariableDimensions {
+        let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
             declared: type_names::Declared::default(),
             container: None,
             chandle: false,
@@ -167,7 +167,7 @@ fn select<'a>(
                 .and_then(|depth| depth.checked_sub(1))
                 .filter(|depth| *depth > 0),
             unpacked_struct: None,
-        }));
+        })));
         let items = indexed_items(kind, bindings, count, |index| {
             (left.min(right)..=left.max(right))
                 .contains(&index)
@@ -262,7 +262,7 @@ fn select<'a>(
     }
     let width = shape_width(functions, &shape, dims)
         .ok_or_else(|| unsupported("assignment pattern target width"))?;
-    let bit = Shape::Owned(Rc::new(VariableDimensions {
+    let bit = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
         declared: type_names::Declared::default(),
         container: None,
         chandle: false,
@@ -280,7 +280,7 @@ fn select<'a>(
         members: Vec::new(),
         signed_element_depth: None,
         unpacked_struct: None,
-    }));
+    })));
     let items = indexed_items(kind, bindings, width, |index| {
         usize::try_from(index)
             .ok()
@@ -417,13 +417,13 @@ pub(in crate::ast) fn bind_native(
                 {
                     let (_, _, count) =
                         dimension_bounds(&tree.functions, &dim.left, &dim.right, dims)?;
-                    let sub = Shape::Owned(Rc::new(VariableDimensions {
+                    let sub = Shape::Owned(Rc::new(VariableDimensions::new(VariableShape {
                         container: None,
                         real: false,
                         class: None,
                         unpacked: rest.to_vec(),
-                        ..(*shape).clone()
-                    }));
+                        ..(*shape).clone_shape()
+                    })));
                     jobs.push(Job::Broadcast(count));
                     jobs.push(Job::Value(Selected {
                         value: id,
