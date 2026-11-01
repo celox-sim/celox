@@ -1,1 +1,6 @@
-Validate rebased #2882 on master e4126a3b11: the patch is unchanged; all 119 string backend checks, Clippy and formatting pass.
+Revision history for #2882:
+
+rev 2 (rebase) 2026-11-01 11:53 UTC — Validate rebased #2882 on master e4126a3b11: the patch is unchanged; all 119 string backend checks, Clippy and formatting pass.
+rev 1 (initial) 2026-11-01 11:53 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2882,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"09e16b8b51d7573b0e173726e9c3fe480047aa39","timestamp_iso":"2026-11-01T11:53:20Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"09e16b8b51d7573b0e173726e9c3fe480047aa39","new_sha":"be4ffab7592f1e3d2b04bee85c0ade2c979fbe29","timestamp_iso":"2026-11-01T11:53:20Z","reason":"Validate rebased #2882 on master e4126a3b11: the patch is unchanged; all 119 string backend checks, Clippy and formatting pass.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/09e16b8b51d7573b0e173726e9c3fe480047aa39...be4ffab7592f1e3d2b04bee85c0ade2c979fbe29"}]} -->
