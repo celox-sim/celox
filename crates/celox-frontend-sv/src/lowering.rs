@@ -8984,6 +8984,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::ValuePlusargs
         | SystemFunction::Urandom
         | SystemFunction::UrandomRange
+        | SystemFunction::System
         | SystemFunction::Fopen
         | SystemFunction::ScopeRandomize
         | SystemFunction::ScopeRandomizeEnum
