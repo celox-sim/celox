@@ -1,0 +1,1 @@
+Address PR #2961 review r4437323117: retain controlling block identity and propagate nested branch/switch execution dependencies; add a failing nested-control regression before fixing the graph.
