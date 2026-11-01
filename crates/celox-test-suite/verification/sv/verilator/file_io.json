@@ -1,0 +1,28 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 returns code zero but writes \"Success\" into the description for a successful file operation, including packed buffers. IEEE 1800-2023 21.3.7 explicitly requires the description to be cleared when the most recent operation did not produce an error. Icarus 13.0 and Celox clear both output forms; the standalone probe prints the difference.",
+      "expectation": "Simulation",
+      "name": "file_io::ferror_success_clears_description",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_ferror_success_description",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 returns code zero but writes \"Success\" into the description for a successful file operation, including packed buffers. IEEE 1800-2023 21.3.7 explicitly requires the description to be cleared when the most recent operation did not produce an error. Icarus 13.0 and Celox clear both output forms; the standalone probe prints the difference.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/ferror-verilator.json",
+          "verification/repros/sv_ferror_clears_description.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    }
+  ]
+}

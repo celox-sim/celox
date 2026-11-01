@@ -9002,6 +9002,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::ScopeRandomizeEnum
         | SystemFunction::Fread
         | SystemFunction::Fgets
+        | SystemFunction::Ferror
         | SystemFunction::Ftell
         | SystemFunction::Fseek
         | SystemFunction::Rewind

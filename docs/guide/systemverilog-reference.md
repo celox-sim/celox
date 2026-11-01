@@ -463,7 +463,7 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   ([#456](https://github.com/celox-sim/celox/issues/456)).
 - System tasks and functions: Celox knows every name IEEE 1800-2023
   defines, including the optional ones of its Annex D. One it does not support where it is called, such as
-  `$ferror`, is
+  `$get_coverage`, is
   reported with its name wherever it is written, including in an unused
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
@@ -1452,6 +1452,21 @@ start at the lowest index by default and proceed through increasing indices;
 optional start and count operands select the range. Packed destinations ignore
 those operands. Partial reads preserve bits that received no input, including
 X/Z bits. The return value is the number of bytes read, or zero on an I/O error.
+
+### File error status
+
+`$ferror(fd, str)` returns a signed 32-bit error code and description for the
+most recent I/O operation on that FD (IEEE 1800-2023 21.3.7). Success returns
+zero and clears the destination. Outputs may be `string` variables, selected
+fixed string-array elements or packed buffers of at least 640 bits. The FD and
+output selection are evaluated once, in that order.
+
+Queries do not clear the status; a successful operation on the same FD does.
+Other FDs are independent, and ordinary EOF is not an error. Codes and wording
+are host dependent. Celox also exposes a failed `$fopen`'s details through FD 0.
+Unknown descriptor bits after 32-bit conversion cause a runtime error. Status
+is part of the file-handler snapshot, restored alongside a core checkpoint.
+Class properties and dynamic-container destinations remain unsupported.
 
 ### Line input
 

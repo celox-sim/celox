@@ -783,8 +783,8 @@ chapter-21/21.3--fdisplay.sv	2state	pass
 chapter-21/21.3--fdisplay.sv	4state	pass
 chapter-21/21.3--feof.sv	2state	pass
 chapter-21/21.3--feof.sv	4state	pass
-chapter-21/21.3--ferror.sv	2state	fail
-chapter-21/21.3--ferror.sv	4state	fail
+chapter-21/21.3--ferror.sv	2state	pass
+chapter-21/21.3--ferror.sv	4state	pass
 chapter-21/21.3--fflush.sv	2state	pass
 chapter-21/21.3--fflush.sv	4state	pass
 chapter-21/21.3--fgetc.sv	2state	pass
