@@ -1853,3 +1853,34 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1) (assert_eq total 11)
   (expect_output "3 10 20\n3 3\n2 2\n1 5 30\n11 2\n"))
+; The loop variable of a foreach over an enumeration-indexed associative
+; array has the index type (IEEE 1800-2023 12.7.3), so its enumeration
+; methods apply (6.19.5).
+(case foreach_enumeration_index_methods
+  (source "containers.sv" #"
+module Top(output bit names_ok, output bit levels_ok, output int last);
+    typedef enum {INFO, WARN, ERROR = 5} sev_t;
+    typedef enum bit [1:0] {LOW = 2'd1, HIGH = 2'd3} lvl_t;
+    class R;
+        int count[sev_t];
+        function string names();
+            string text;
+            count[ERROR] = 3; count[INFO] = 1; count[WARN] = 2;
+            foreach (count[s]) text = {text, $sformatf("%s:%0d ", s.name(), count[s])};
+            return text;
+        endfunction
+    endclass
+    R o;
+    string lv[lvl_t];
+    string t;
+    initial begin
+        o = new;
+        names_ok = o.names() == "INFO:1 WARN:2 ERROR:3 ";
+        lv[HIGH] = "h"; lv[LOW] = "l";
+        foreach (lv[k]) begin t = {t, k.name(), "=", lv[k], " "}; last = k.next(); end
+        levels_ok = t == "LOW=l HIGH=h ";
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq names_ok 1) (assert_eq levels_ok 1) (assert_eq last 1))
