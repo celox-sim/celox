@@ -145,8 +145,30 @@ pub(crate) fn instrument_processes_from(program: &mut LaidOutProgram, first: usi
             marker.instrument(unit);
         }
     }
-    for unit in sir.processes.iter_mut().skip(first) {
-        marker.instrument(unit);
+    let scheduler = runtime
+        .runtime_schema
+        .scheduler
+        .as_ref()
+        .and_then(|scheduler| scheduler.unit);
+    for (index, unit) in sir.processes.iter_mut().enumerate().skip(first) {
+        // Its inlined units already own their flags. The generator marks only
+        // its new glue stores, so marking the whole unit would duplicate them.
+        if scheduler != Some(index) {
+            marker.instrument(unit);
+        }
+    }
+}
+
+/// Mark only stores introduced by the compiled scheduler itself. Inlined
+/// kernel/FF units were already instrumented; the settle manages its own flags.
+#[cfg(feature = "host-runtime")]
+pub(crate) fn instrument_generated_glue(
+    program: &LaidOutProgram,
+    unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    blocks: &crate::HashSet<celox_sir::BlockId>,
+) {
+    if let Some(marker) = Marker::new(program.layout(), program.runtime()) {
+        marker.instrument_blocks(unit, |block| blocks.contains(&block));
     }
 }
 
@@ -224,6 +246,14 @@ impl<'a> Marker<'a> {
     }
 
     fn instrument(&self, unit: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+        self.instrument_blocks(unit, |_| true);
+    }
+
+    fn instrument_blocks(
+        &self,
+        unit: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+        include: impl Fn(celox_sir::BlockId) -> bool,
+    ) {
         let mut next_register = unit
             .register_map
             .keys()
@@ -240,7 +270,12 @@ impl<'a> Marker<'a> {
             width: 8,
             signed: false,
         };
-        let block_ids: Vec<_> = unit.blocks.keys().copied().collect();
+        let block_ids: Vec<_> = unit
+            .blocks
+            .keys()
+            .copied()
+            .filter(|block| include(*block))
+            .collect();
         for block_id in block_ids {
             let block = unit.blocks.get_mut(&block_id).expect("listed block");
             let old_instructions = std::mem::take(&mut block.instructions);

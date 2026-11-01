@@ -212,7 +212,7 @@ impl Scope<'_> {
         value: &(BigUint, BigUint),
     ) -> Result<(), RuntimeErrorCode> {
         // The same bounds used for reads cover the planes written below.
-        self.value(signal)?;
+        let before = self.value(signal)?;
         let plane = celox_state_layout::get_byte_size(signal.width);
         let count = if self.metadata.layout.four_state && signal.is_4state {
             2
@@ -232,6 +232,13 @@ impl Scope<'_> {
                 std::ptr::write_bytes(target, 0, plane);
                 std::ptr::copy_nonoverlapping(bytes.as_ptr(), target, bytes.len());
             }
+        }
+        if let Some(settle) = &self.metadata.layout.settle
+            && self.value(signal)? != before
+        {
+            // SAFETY: this scope owns synchronous access to the state image
+            // described by the same layout. These writes bypass backend.set.
+            unsafe { settle.mark_range(self.state.cast_mut(), signal.offset, plane * count) };
         }
         Ok(())
     }
@@ -260,37 +267,47 @@ impl Scope<'_> {
     }
 
     fn publish_nba(&mut self) -> Result<u64, RuntimeErrorCode> {
-        let update = if let Some(update) = self.nbas.pop_front() {
-            Some(update)
-        } else {
-            let mut update = None;
-            while let Some(&(process, index)) = self.metadata.flagged.get(self.pending_scan) {
-                self.pending_scan += 1;
-                let site = self.metadata.nbas[process][index].clone();
-                let pending = site.pending.expect("flagged NBA site");
-                if self.value(pending)?.0.bit(0) {
-                    self.store_value(pending, &(BigUint::default(), BigUint::default()))?;
-                    if site.width == 0 || site.lsb >= site.target.width {
-                        continue;
+        loop {
+            let update = if let Some(update) = self.nbas.pop_front() {
+                Some(update)
+            } else {
+                let mut update = None;
+                while let Some(&(process, index)) = self.metadata.flagged.get(self.pending_scan) {
+                    self.pending_scan += 1;
+                    let site = self.metadata.nbas[process][index].clone();
+                    let pending = site.pending.expect("flagged NBA site");
+                    if self.value(pending)?.0.bit(0) {
+                        self.store_value(pending, &(BigUint::default(), BigUint::default()))?;
+                        if site.width == 0 || site.lsb >= site.target.width {
+                            continue;
+                        }
+                        update = Some(celox_runtime::NbaUpdate {
+                            target: site.target,
+                            lsb: site.lsb,
+                            width: site.width,
+                            value: self.value(site.value)?,
+                        });
+                        break;
                     }
-                    update = Some(celox_runtime::NbaUpdate {
-                        target: site.target,
-                        lsb: site.lsb,
-                        width: site.width,
-                        value: self.value(site.value)?,
-                    });
-                    break;
                 }
+                update
+            };
+            let Some(update) = update else {
+                self.pending_scan = 0;
+                return Ok(0);
+            };
+            let before = self.value(update.target)?;
+            let value = update.merge_into(&before);
+            self.store_value(update.target, &value)?;
+            // The compiled caller marks comb dirty and checks its waiters for a
+            // changed publication. Identical writes cannot wake value-change or
+            // edge waiters; consume them here without requesting another settle.
+            // Compare the stored representation, including partial writes
+            // and targets which do not keep an unknown-mask plane.
+            if self.value(update.target)? != before {
+                return Ok(2);
             }
-            update
-        };
-        let Some(update) = update else {
-            self.pending_scan = 0;
-            return Ok(0);
-        };
-        let value = update.merge_into(&self.value(update.target)?);
-        self.store_value(update.target, &value)?;
-        Ok(2)
+        }
     }
 
     fn charge_scheduler(&mut self, request: u64, timestamp: u64) -> Result<(), RuntimeErrorCode> {
@@ -539,5 +556,134 @@ pub(crate) extern "C" fn call(
             scope.error = Some(error);
             1
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_nba_publication_skips_identical_queue_and_flagged_updates() {
+        let simulation = crate::Simulator::builder("module Top (a: input logic<8>) {}", "Top")
+            .four_state(true)
+            .build_interpreter()
+            .unwrap();
+        let signal = |offset, width, is_4state| SignalRef {
+            offset,
+            width,
+            is_4state,
+            array_layout: None,
+        };
+        let target = signal(0, 8, true);
+        let staged = [signal(4, 8, true), signal(6, 8, true)];
+        let flags = [signal(8, 1, false), signal(9, 1, false)];
+        let mut layout = simulation.layout().clone();
+        layout.settle = Some(celox_state_layout::SettleLayout::new(
+            12,
+            1,
+            vec![celox_state_layout::SettleObject {
+                start: 0,
+                end: 2,
+                partitions: vec![0],
+            }],
+        ));
+        let dirty = signal(12, 8, false);
+        let metadata = Metadata {
+            layout,
+            context: target,
+            events: signal(0, 64, false),
+            sites: vec![],
+            runtime_sites: vec![],
+            process_names: vec![],
+            flagged: vec![(0, 0), (0, 1)],
+            nbas: vec![
+                staged
+                    .iter()
+                    .zip(flags)
+                    .map(|(&value, pending)| celox_design::NbaSite {
+                        delay: 0,
+                        process: 0,
+                        target,
+                        lsb: 0,
+                        width: 8,
+                        value,
+                        position: None,
+                        pending: Some(pending),
+                    })
+                    .collect(),
+            ],
+        };
+        let mut state = [0u8; 16];
+        let mut files = celox_runtime::file_io::FileIo::default();
+        let pending = Arc::default();
+        let read_seq = AtomicU64::new(0);
+        let mut queue = std::collections::VecDeque::new();
+        let mut scope = Scope {
+            metadata: &metadata,
+            state: state.as_mut_ptr().cast_const(),
+            state_size: state.len(),
+            files: &mut files,
+            pending: &pending,
+            read_seq: &read_seq,
+            error: None,
+            return_budget: u64::MAX,
+            returns: 0,
+            round_budget: u64::MAX,
+            scheduler_time: None,
+            passes: 0,
+            run_returns: 0,
+            nbas: &mut queue,
+            pending_scan: 0,
+        };
+        let value = |bits: u8, mask: u8| (BigUint::from(bits), BigUint::from(mask));
+        let update = |target, lsb, width, bits, mask| celox_runtime::NbaUpdate {
+            target,
+            lsb,
+            width,
+            value: value(bits, mask),
+        };
+        scope.store_value(target, &value(0x55, 0)).unwrap();
+        scope.store_value(staged[0], &value(0x55, 0)).unwrap();
+        scope.store_value(staged[1], &value(0xa5, 0)).unwrap();
+        for flag in flags {
+            scope.store_value(flag, &value(1, 0)).unwrap();
+        }
+        scope.store_value(dirty, &value(0, 0)).unwrap();
+        scope.nbas.push_back(update(target, 0, 8, 0x55, 0));
+        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.value(target).unwrap(), value(0xa5, 0));
+        assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
+        for flag in flags {
+            assert_eq!(scope.value(flag).unwrap(), value(0, 0));
+        }
+        assert_eq!(scope.publish_nba().unwrap(), 0);
+        assert!(scope.nbas.is_empty());
+
+        scope.store_value(target, &value(0x55, 0)).unwrap();
+        scope.store_value(dirty, &value(0, 0)).unwrap();
+        scope.nbas.extend([
+            update(target, 0, 4, 5, 0),
+            update(target, 4, 4, 15, 15),
+            update(target, 4, 4, 0, 15),
+            update(target, 4, 4, 0, 15),
+        ]);
+        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.value(target).unwrap(), value(0xf5, 0xf0));
+        assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
+        scope.store_value(dirty, &value(0, 0)).unwrap();
+        assert_eq!(scope.publish_nba().unwrap(), 2);
+        assert_eq!(scope.value(target).unwrap(), value(5, 0xf0));
+        assert_eq!(scope.value(dirty).unwrap(), value(1, 0));
+        scope.store_value(dirty, &value(0, 0)).unwrap();
+        assert_eq!(scope.publish_nba().unwrap(), 0);
+        assert!(scope.nbas.is_empty());
+
+        assert_eq!(scope.value(dirty).unwrap(), value(0, 0));
+
+        // A target without a mask plane compares its stored representation.
+        let bit_target = signal(10, 8, false);
+        scope.nbas.push_back(update(bit_target, 0, 8, 0, 255));
+        assert_eq!(scope.publish_nba().unwrap(), 0);
     }
 }

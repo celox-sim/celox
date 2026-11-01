@@ -295,6 +295,12 @@ struct Staged {
     width: usize,
 }
 
+struct Incremental {
+    source: AbsoluteAddr,
+    sources: HashSet<AbsoluteAddr>,
+    units: Vec<Unit>,
+}
+
 struct Plan {
     /// In event-id order, which the reference loop visits several triggered
     /// domains in.
@@ -319,6 +325,9 @@ struct Plan {
     /// Where the settles run when they wait until their results are read;
     /// `None` when every settle runs where the reference loop's does.
     lazy: Option<Lazy>,
+    /// A single clock write can invalidate only its forward cone. Stateful
+    /// activations remain included; mixed writes request the ordinary settle.
+    incremental: Option<Incremental>,
     /// The clocks derived from the events the slots change, in event order,
     /// as indices into [`Self::events`]: their domains run in the waves of
     /// a slot (see `Generator::batch`).
@@ -1102,7 +1111,7 @@ impl Plan {
             homes_overlap_only_whole(program.layout()),
             "stable homes overlap at different offsets"
         );
-        let settle_reads = (!effects).then(|| {
+        let settle_reads: Option<HashSet<AbsoluteAddr>> = (!effects).then(|| {
             sir.eval_comb
                 .iter()
                 .flat_map(instructions)
@@ -1123,52 +1132,78 @@ impl Plan {
         // alone can only bound it, since a load may cover bits the settle
         // has not stored yet and then discard them.
         let comb_stores: HashSet<AbsoluteAddr> = sir.eval_comb.iter().flat_map(stores).collect();
+        // Keep combinational sensitivity signals eager. Other kernel inputs
+        // and host-visible outputs retain their existing demand-settle path.
+        let watched_comb: HashSet<_> = kernels
+            .iter()
+            .flatten()
+            .filter_map(|kernel| kernel.wait.as_ref())
+            .flat_map(|wait| &wait.terms)
+            .map(|&(signal, _)| storage(signal))
+            .filter(|signal| comb_stores.contains(signal))
+            .collect();
+        let written_homes: HashSet<_> = comb_stores.iter().copied().map(storage).collect();
+        let retained_candidates = sir.eval_comb_stateful.as_ref().map_or_else(
+            || written_homes.clone(),
+            |stateful| {
+                stateful
+                    .iter()
+                    .map(|target| storage(target.absolute_addr()))
+                    .filter(|target| written_homes.contains(target))
+                    .collect()
+            },
+        );
+        let retained = retained_storage(&sir.eval_comb, &storage, &retained_candidates);
+        let mut eager_candidate_instructions = None;
         let eager = settle_reads
             .as_ref()
             .filter(|_| !sir.eval_comb.iter().any(fails))
             .and_then(|_| {
                 let stateful = sir.eval_comb_stateful.as_ref();
                 let eager = stateful.and_then(|stateful| {
-                    if stateful.is_empty() {
+                    if stateful.is_empty() && watched_comb.is_empty() {
                         return Some(Vec::new());
                     }
                     let slicer = CombSlicer::new(&sir.eval_comb, shared.clone());
-                    let targets = stateful.iter().map(|target| target.absolute_addr());
-                    // Optimization may have moved a target's storage.
-                    if !targets.clone().all(|target| slicer.stores(target)) {
-                        return None;
-                    }
-                    let eager = slicer.slice(targets);
-                    // A part nearly the size of the settle saves nothing.
+                    let targets = stateful
+                        .iter()
+                        .map(|target| target.absolute_addr())
+                        .filter(|&target| retained.contains(&storage(target)))
+                        .chain(watched_comb.iter().copied());
+                    // Stateful metadata predates SIR optimization. A target
+                    // with no remaining writer (including its shared-storage
+                    // aliases) cannot retain a new comb value between settles.
+                    // Keep every surviving writer; obsolete targets need no
+                    // eager work and must not disable the whole optimization.
+                    let eager = slicer.eager_slice(targets.filter(|&target| slicer.stores(target)));
+                    // Large eager cones can repeat more work than they save.
+                    // Keep at least half of the comb work deferred.
                     let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
+                    eager_candidate_instructions = Some(size(&eager));
                     (size(&eager) * 2 < size(&sir.eval_comb)).then_some(eager)
                 });
                 eager.or_else(|| {
-                    (!retains_state(&sir.eval_comb, &storage, &comb_stores)).then(Vec::new)
+                    (watched_comb.is_empty()
+                        && !retains_state(&sir.eval_comb, &storage, &comb_stores))
+                    .then(Vec::new)
                 })
             });
-        let eager = eager.filter(|_| {
-            kernels
-                .iter()
-                .flatten()
-                .filter_map(|kernel| kernel.wait.as_ref())
-                .flat_map(|wait| &wait.terms)
-                .all(|&(signal, _)| !comb_stores.contains(&storage(signal)))
-        });
         let lazy = eager.map(|eager| {
-            // The waits never watch what combinational logic writes, so
-            // they see the same with a settle pending.
+            // Pending settles may leave unrelated outputs unpublished. Every
+            // combinational signal a waiter reads belongs to the eager cone.
+            // Kernels that read other pending outputs request a full settle.
+            let eager_stores: HashSet<_> = eager.iter().flat_map(stores).map(storage).collect();
             debug_assert!(
-                kernels
+                watched_comb
                     .iter()
-                    .flatten()
-                    .filter_map(|kernel| kernel.wait.as_ref())
-                    .flat_map(|wait| &wait.terms)
-                    .all(|&(signal, _)| !comb_stores.contains(&storage(signal))),
-                "a compiled wait watches a combinational output"
+                    .all(|target| eager_stores.contains(target))
             );
-            let reads =
-                |unit: &Unit| loads(unit).any(|source| comb_stores.contains(&storage(source)));
+            let reads = |unit: &Unit| {
+                loads(unit).any(|source| {
+                    let source = storage(source);
+                    comb_stores.contains(&source) && !eager_stores.contains(&source)
+                })
+            };
             let ends = |unit: &Unit| fails(unit) || emits_finish(unit, &finish_sites);
             let observes = |unit: &Unit| reads(unit) || ends(unit);
             let mut longest = 0;
@@ -1239,6 +1274,66 @@ impl Plan {
                 eager,
             }
         });
+        let incremental = if lazy.is_none()
+            && settle_reads.is_some()
+            && !sir.eval_comb.iter().any(fails)
+            && sir
+                .eval_comb
+                .iter()
+                .flat_map(instructions)
+                .all(|instruction| {
+                    instruction
+                        .memory_read()
+                        .is_none_or(|read| read.addr.region == STABLE_REGION)
+                })
+            && sir.eval_comb.iter().all(|unit| {
+                celox_sir::cfg::SirCfg::analyze(unit).is_ok_and(|cfg| cfg.loops.is_empty())
+            }) {
+            kernels
+                .iter()
+                .enumerate()
+                .filter_map(|(index, kernel)| kernel.as_ref().map(|kernel| (index, kernel)))
+                .find(|(_, kernel)| kernel.delays && kernel.writes.len() == 1)
+                .and_then(|(index, kernel)| {
+                    let source = storage(events[kernel.writes[0]].signal);
+                    if !settle_reads.as_ref()?.contains(&source) {
+                        return None;
+                    }
+                    let sources: HashSet<_> = instructions(&sir.processes[index])
+                        .filter_map(|instruction| instruction.memory_write())
+                        .filter(|write| write.addr.region == STABLE_REGION)
+                        .map(|write| storage(write.addr.absolute_addr()))
+                        .filter(|address| settle_reads.as_ref().unwrap().contains(address))
+                        .collect();
+                    // Read-before-write activations retain their existing
+                    // per-settle semantics, including their downstream effects.
+                    let stateful: Vec<_> = sir.eval_comb_stateful.as_ref().map_or_else(
+                        || retained.iter().copied().collect(),
+                        |targets| {
+                            targets
+                                .iter()
+                                .map(|target| storage(target.absolute_addr()))
+                                .filter(|target| retained.contains(target))
+                                .collect()
+                        },
+                    );
+                    let slicer = CombSlicer::new(&sir.eval_comb, shared.clone());
+                    let inputs = sources
+                        .iter()
+                        .copied()
+                        .chain(schema.time_slots.iter().copied().map(&storage))
+                        .chain(stateful);
+                    let units = slicer.affected_slice(inputs);
+                    let size = |units: &[Unit]| units.iter().flat_map(instructions).count();
+                    (size(&units) * 4 < size(&sir.eval_comb) * 3).then_some(Incremental {
+                        source,
+                        sources,
+                        units,
+                    })
+                })
+        } else {
+            None
+        };
         let mut plan = Self {
             events,
             kernels,
@@ -1251,6 +1346,7 @@ impl Plan {
             cyclic,
             settle_reads,
             lazy,
+            incremental,
             derived: Vec::new(),
             active: active_commits.iter().copied().collect(),
             gating: Vec::new(),
@@ -1474,6 +1570,17 @@ impl Plan {
             .copied()
             .collect();
         tracing::debug!(target: "celox::scheduler",
+                incremental_instructions = plan.incremental.as_ref().map(|cone| cone.units.iter().flat_map(instructions).count()),
+                incremental_source = ?plan.incremental.as_ref().map(|cone| program.get_path(&cone.source)),
+                deferred_settles = plan.lazy.is_some(),
+                comb_effects = effects,
+                comb_fallible = sir.eval_comb.iter().any(fails),
+                stateful_targets = ?sir.eval_comb_stateful.as_ref().map(Vec::len),
+                watched_targets = watched_comb.len(),
+                retained_targets = retained.len(),
+                ?eager_candidate_instructions,
+                comb_instructions = sir.eval_comb.iter().flat_map(instructions).count(),
+                eager_instructions = plan.lazy.as_ref().map(|lazy| lazy.eager.iter().flat_map(instructions).count()),
                 active_commits = ?active_commits.iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>(),
                 kernels = ?plan.fallback.iter().enumerate().map(|(index, reason)| (index, schema.process_origins.get(index).map(ToString::to_string), reason, written(&sir.processes[index]).iter().map(|&event| program.get_path(&plan.events[event].signal)).collect::<Vec<_>>())).collect::<Vec<_>>(),
                 "compiled scheduler process plans");
@@ -1614,6 +1721,13 @@ impl Plan {
             finish_sites: &self.finish_sites,
             exits: Vec::new(),
             settle_reads: self.settle_reads.as_ref(),
+            incremental: self.incremental.as_ref(),
+            partitioned_glue: program
+                .runtime
+                .runtime_schema
+                .settle_partitions
+                .as_ref()
+                .map(|_| (program, HashSet::default())),
             shared: program.shared_storage(),
             comb,
             continuations: Vec::new(),
@@ -1820,7 +1934,16 @@ impl Plan {
             g.store_state(slot, 0, TIME_SLOT_WIDTH, time);
         }
         if schema.time_slots.iter().any(|&slot| g.settle_reads(slot)) {
-            g.mark_dirty();
+            if self.incremental.is_some() {
+                // The specialized cone includes the time inputs as well as
+                // the clock. Preserve any pending invalidation of other data.
+                let dirty = g.load(slots.dirty, SCHEDULER_FLAG_WIDTH);
+                let time_changed = g.constant(2, SCHEDULER_FLAG_WIDTH);
+                let dirty = g.binary(SCHEDULER_FLAG_WIDTH, dirty, BinaryOp::Or, time_changed);
+                g.store(slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
+            } else {
+                g.mark_dirty();
+            }
         }
         // The levels the slot starts from, the baseline of its edges, for an
         // exit in the middle of the slot; those of the clocks' events below,
@@ -3052,6 +3175,8 @@ struct Generator<'a> {
     exits: Vec<(celox_sir::BlockId, SchedulerExit)>,
     /// See [`Plan::settle_reads`].
     settle_reads: Option<&'a HashSet<AbsoluteAddr>>,
+    incremental: Option<&'a Incremental>,
+    partitioned_glue: Option<(&'a LaidOutProgram, HashSet<celox_sir::BlockId>)>,
     shared: HashMap<AbsoluteAddr, AbsoluteAddr>,
     /// The shared settle, emitted by [`Self::emit_settle`].
     comb: celox_sir::BlockId,
@@ -3260,6 +3385,9 @@ impl Generator<'_> {
     }
 
     fn store_at(&mut self, address: AbsoluteAddr, offset: usize, width: usize, value: RegisterId) {
+        if let Some((_, blocks)) = &mut self.partitioned_glue {
+            blocks.insert(self.b.current_block());
+        }
         self.b.emit(SIRInstruction::Store(
             stable(address),
             SIROffset::Static(offset),
@@ -3806,16 +3934,98 @@ impl Generator<'_> {
     /// Inline `unit` as [`Self::inline`] does, and record a change of what
     /// combinational logic reads after it when it may write any.
     fn inline_writer(&mut self, unit: &Unit, finish_exit: celox_sir::BlockId) {
+        // Keep small stable write sets precise. Reading a bounded number of
+        // words is much cheaper than repeating the whole comb settle when a
+        // process merely rewrites the value already present in its outputs.
+        let ranges = self.tracked_writer_ranges(unit);
+        let before = ranges.as_ref().map(|ranges| {
+            ranges
+                .iter()
+                .map(|&(address, offset, width)| self.load_state(address, offset, width))
+                .collect::<Vec<_>>()
+        });
         self.inline(unit, finish_exit);
-        let writes = instructions(unit).any(|inst| match inst {
+        if let (Some(ranges), Some(before)) = (ranges, before) {
+            if !ranges.is_empty() {
+                let clock_only = self.incremental.is_some_and(|cone| {
+                    ranges.iter().all(|&(address, _, _)| {
+                        cone.sources
+                            .contains(&self.shared.get(&address).copied().unwrap_or(address))
+                    })
+                });
+                let mut dirty = self.load(self.slots.dirty, SCHEDULER_FLAG_WIDTH);
+                for ((address, offset, width), before) in ranges.into_iter().zip(before) {
+                    let after = self.load_state(address, offset, width);
+                    // Case inequality compares both planes, including X/Z-only
+                    // changes, and always produces a known boolean.
+                    let changed = self.binary(1, before, BinaryOp::NeCase, after);
+                    let changed = if clock_only {
+                        let two = self.constant(2, SCHEDULER_FLAG_WIDTH);
+                        let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+                        let flag = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
+                        self.b.emit(SIRInstruction::Mux(flag, changed, two, zero));
+                        flag
+                    } else {
+                        changed
+                    };
+                    dirty = self.binary(SCHEDULER_FLAG_WIDTH, dirty, BinaryOp::Or, changed);
+                }
+                self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
+            }
+        } else if instructions(unit).any(|inst| match inst {
+            SIRInstruction::ExternCall { .. } => true,
             SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..) => {
                 self.settle_reads(target.absolute_addr())
             }
             _ => false,
-        });
-        if writes {
+        }) {
             self.mark_dirty();
         }
+    }
+
+    /// Precise snapshots are bounded independently of design size. Complex
+    /// addressing and large FF domains retain the existing conservative flag.
+    fn tracked_writer_ranges(&self, unit: &Unit) -> Option<Vec<(AbsoluteAddr, usize, usize)>> {
+        const MAX_BITS: usize = 1024;
+        const MAX_RANGES: usize = 32;
+        let mut ranges = Vec::new();
+        let mut bits = 0;
+        for instruction in instructions(unit) {
+            let (target, offset, width) = match instruction {
+                SIRInstruction::Store(target, offset, width, ..)
+                | SIRInstruction::Commit(_, target, offset, width, ..)
+                    if self.settle_reads(target.absolute_addr()) =>
+                {
+                    (target, offset, *width)
+                }
+                // An opaque call can change state outside explicit Stores.
+                SIRInstruction::ExternCall { .. } => return None,
+                _ => continue,
+            };
+            if target.region != STABLE_REGION {
+                return None;
+            }
+            let SIROffset::Static(start) = offset else {
+                return None;
+            };
+            if width > MAX_BITS {
+                return None;
+            }
+            let mut offset = 0;
+            while offset < width {
+                let width = (width - offset).min(64);
+                let range = (target.absolute_addr(), start + offset, width);
+                if !ranges.contains(&range) {
+                    bits += width;
+                    if bits > MAX_BITS || ranges.len() == MAX_RANGES {
+                        return None;
+                    }
+                    ranges.push(range);
+                }
+                offset += width;
+            }
+        }
+        Some(ranges)
     }
 
     /// The unit, once every block is sealed.
@@ -3846,11 +4056,15 @@ impl Generator<'_> {
             }
         }
         blocks.retain(|block, _| reached.contains(block));
-        Unit {
+        let mut unit = Unit {
             entry_block_id: celox_sir::BlockId(0),
             blocks,
             register_map,
+        };
+        if let Some((program, blocks)) = self.partitioned_glue {
+            crate::settle::instrument_generated_glue(program, &mut unit, &blocks);
         }
+        unit
     }
 
     fn emit_exits(&mut self) {
@@ -3971,8 +4185,31 @@ impl Generator<'_> {
                 false_block: (settled, Vec::new()),
             });
             self.b.switch_to_block(settle);
-            for unit in units {
-                self.inline(unit, finish_exit);
+            if let Some(cone) = self.incremental {
+                let partial = self.b.new_block();
+                let full = self.b.new_block();
+                let done = self.b.new_block();
+                let only_clock = self.equals(dirty, 2);
+                self.b.seal_block(SIRTerminator::Branch {
+                    cond: only_clock,
+                    true_block: (partial, Vec::new()),
+                    false_block: (full, Vec::new()),
+                });
+                self.b.switch_to_block(partial);
+                for unit in &cone.units {
+                    self.inline(unit, finish_exit);
+                }
+                self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+                self.b.switch_to_block(full);
+                for unit in units {
+                    self.inline(unit, finish_exit);
+                }
+                self.b.seal_block(SIRTerminator::Jump(done, Vec::new()));
+                self.b.switch_to_block(done);
+            } else {
+                for unit in units {
+                    self.inline(unit, finish_exit);
+                }
             }
             let clean = self.constant(0, SCHEDULER_FLAG_WIDTH);
             self.store(self.slots.dirty, SCHEDULER_FLAG_WIDTH, clean);
@@ -4197,9 +4434,18 @@ fn retains_state(
     storage: &impl Fn(AbsoluteAddr) -> AbsoluteAddr,
     stores: &HashSet<AbsoluteAddr>,
 ) -> bool {
+    !retained_storage(units, storage, stores).is_empty()
+}
+
+fn retained_storage(
+    units: &[Unit],
+    storage: &impl Fn(AbsoluteAddr) -> AbsoluteAddr,
+    stores: &HashSet<AbsoluteAddr>,
+) -> HashSet<AbsoluteAddr> {
     /// The bits of each home a settle has stored so far, as sorted,
     /// disjoint `[start, end)` ranges.
     type Covered = HashMap<(u32, AbsoluteAddr), Vec<(usize, usize)>>;
+    let mut retained = HashSet::default();
     fn add(covered: &mut Covered, key: (u32, AbsoluteAddr), start: usize, end: usize) {
         let ranges = covered.entry(key).or_default();
         ranges.push((start, end));
@@ -4232,9 +4478,9 @@ fn retains_state(
         }
         met
     }
-    // Runs `block` from `covered`; `false` when a load reads what it does
-    // not cover.
-    let step = |block: &celox_sir::BasicBlock<RegionedAbsoluteAddr>, covered: &mut Covered| {
+    // Record every storage whose entry value can reach a read before a
+    // covering write. Keep scanning so independent homes are analyzed once.
+    let mut step = |block: &celox_sir::BasicBlock<RegionedAbsoluteAddr>, covered: &mut Covered| {
         for inst in &block.instructions {
             match inst {
                 SIRInstruction::Load(_, source, offset, width)
@@ -4249,7 +4495,7 @@ fn retains_state(
                             })
                         });
                         if !read {
-                            return false;
+                            retained.insert(home);
                         }
                     }
                 }
@@ -4258,19 +4504,16 @@ fn retains_state(
             match inst {
                 SIRInstruction::Store(target, offset, width, ..)
                 | SIRInstruction::Commit(_, target, offset, width, _) => {
-                    if let Some(start) = offset.constant_bit_offset() {
-                        add(
-                            covered,
-                            (target.region, storage(target.absolute_addr())),
-                            start,
-                            start + width,
-                        );
+                    let home = storage(target.absolute_addr());
+                    if stores.contains(&home)
+                        && let Some(start) = offset.constant_bit_offset()
+                    {
+                        add(covered, (target.region, home), start, start + width);
                     }
                 }
                 _ => {}
             }
         }
-        true
     };
     let mut entry = Covered::default();
     for unit in units {
@@ -4289,9 +4532,7 @@ fn retains_state(
                     continue;
                 };
                 let mut covered = start;
-                if !step(&unit.blocks[&id], &mut covered) {
-                    return true;
-                }
+                step(&unit.blocks[&id], &mut covered);
                 if after.get(&id) == Some(&covered) {
                     continue;
                 }
@@ -4331,7 +4572,7 @@ fn retains_state(
             None => Covered::default(),
         };
     }
-    false
+    retained
 }
 
 /// Whether `unit` may end with an error.
@@ -4536,6 +4777,20 @@ pub(crate) fn defers_settles_for_test(program: &LaidOutProgram) -> (bool, bool) 
         plan.lazy.is_some(),
         !retains_state(&program.sir.eval_comb, &storage, &stores),
     )
+}
+
+#[cfg(all(
+    test,
+    feature = "systemverilog",
+    feature = "host-runtime",
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+pub(crate) fn incremental_inputs_for_test(program: &LaidOutProgram) -> Option<usize> {
+    let schema = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
+    Plan::new(program, &schema.slots, true)
+        .unwrap()
+        .incremental
+        .map(|cone| cone.sources.len())
 }
 
 #[cfg(test)]
