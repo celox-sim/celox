@@ -9,4 +9,5 @@ sv_backends! {
     fn array_locator_fixed_struct_enum(sim) { @case "array_locators::array_locator_fixed_struct_enum"; }
     fn array_locator_struct_elements(sim) { @case "array_locators::array_locator_struct_elements"; }
     fn array_locator_iterator_names(sim) { @case "array_locators::array_locator_iterator_names"; }
+    fn array_locator_unique_class_handles(sim) { @case "array_locators::array_locator_unique_class_handles"; }
 }

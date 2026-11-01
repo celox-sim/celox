@@ -955,6 +955,10 @@
       "title": "A default argument of a method that reads a property of the object reads 0 when the call is made on an array element selected by a static property that an earlier default changes",
       "standard": "IEEE 1800-2023 13.5.3"
     },
+    "sv_parenless_method_chain": {
+      "title": "A method called without parentheses on the handle that another parenless method call returns (n.get_peer.get_id) reads unknown bits",
+      "standard": "IEEE 1800-2023 13.5.5"
+    },
     "sv_pattern_structure_members": {
       "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
       "standard": "IEEE 1800-2023 21.2.1.6"
@@ -1941,6 +1945,14 @@
       "classification": "xezim_bug",
       "bug": "sv_method_default_receiver",
       "note": "m1 = ps[Pair::i].f(), whose defaults are x = bump(), which increments Pair::i and returns 0, and y = n, is 0 instead of 1 (ps[0].n); m1 is the first assertion that fails, the earlier ones pass."
+    },
+    {
+      "suite": "sv",
+      "name": "class::methods_called_without_parentheses",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_parenless_method_chain",
+      "note": "peer_id = n.get_peer.get_id, where get_peer returns the handle of a Node whose id is 9, reads unknown bits in a two-state run; it is the first output the run reports."
     },
     {
       "suite": "sv",

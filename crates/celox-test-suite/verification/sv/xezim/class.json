@@ -343,6 +343,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::methods_called_without_parentheses reads peer_id with unknown bits in a two-state run",
+      "expectation": "Simulation",
+      "name": "class::methods_called_without_parentheses",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "class::methods_of_handle_array_elements",

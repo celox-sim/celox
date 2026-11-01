@@ -734,6 +734,12 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Object f in celox_suite_tb.dut is not a function.",
                         ),
+                        ("icarus", "array_locators::array_locator_unique_class_handles") => {
+                            ("compile_error", "compile", "source_0.sv:18: syntax error")
+                        }
+                        ("icarus", "class::methods_called_without_parentheses") => {
+                            ("compile_error", "compile", "source_0.sv:27: syntax error")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

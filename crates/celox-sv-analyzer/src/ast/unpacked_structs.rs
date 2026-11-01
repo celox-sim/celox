@@ -345,6 +345,13 @@ pub(in crate::ast) fn native_struct(
             {
                 aggregate.r#type.unpacked_struct().cloned()
             }
+            // A class method called without parentheses (13.5.5).
+            None if matches!(native.expression(id).kind, ExprKind::Member { .. })
+                && let Some(ty) =
+                    expression_binding::object_method_result(tree, session, id, native, dims)? =>
+            {
+                ty.unpacked_struct().cloned()
+            }
             // An element popped by `q.pop_front` without parentheses.
             None => containers::native_struct_element(id, native, tree, session, dims)?,
         },

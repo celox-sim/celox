@@ -55,16 +55,24 @@ pub(in crate::ast) fn native_chandle(
         ExprKind::Call { .. } => {
             return call_result(tree, id, native, dimensions, session) == Some(true);
         }
-        // A pop of a queue may omit its parentheses.
         ExprKind::Member {
             expression: receiver,
             separator,
             name,
-        } if separator == "." => {
-            if let Some(chandle) =
-                container_method(tree, *receiver, &name.spelling, native, dimensions, session)
+        } => {
+            // A pop of a queue may omit its parentheses.
+            if separator == "."
+                && let Some(chandle) =
+                    container_method(tree, *receiver, &name.spelling, native, dimensions, session)
             {
                 return chandle;
+            }
+            // So may a class method (13.5.5).
+            if let Ok(Some((method, ..))) = objects::method(tree, session, id, native, dimensions) {
+                return dimensions
+                    .function_return_types
+                    .get(&method)
+                    .is_some_and(|metadata| metadata.chandle);
             }
         }
         // A conditional choosing between chandles, or a chandle and `null`.

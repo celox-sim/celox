@@ -962,6 +962,20 @@ fn native_value_type(
                 None => Err(format!("a call of `{name}`")),
             };
         }
+        // A class method called without parentheses (13.5.5).
+        celox_sv_syntax::ExprKind::Member { .. }
+            if let Ok(Some((name, _, _))) =
+                expression_binding::object_method(tree, session, id, native, dimensions) =>
+        {
+            return match dimensions
+                .function_return_types
+                .get(&name)
+                .and_then(|result| result.virtual_interface.as_ref())
+            {
+                Some(ty) => Ok(Some(ty.as_ref().clone())),
+                None => Err(format!("a call of `{name}`")),
+            };
+        }
         _ => {}
     }
     if let Some(ty) = native_type(tree, session, id, native, dimensions) {
