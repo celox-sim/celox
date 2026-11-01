@@ -33,6 +33,62 @@ endmodule
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "null\ncount=9 get=9 label=first\nafter=1\n"))
 
+(case members_hide_module_names
+  (source "class.sv" #"
+module Top(output int f, output int count, output bit done);
+    int limit = 100;
+    int scale;
+    int tally;
+    function int h();
+        return 100;
+    endfunction
+    class C;
+        int limit = 3;
+        int count;
+        function int f();
+            return 1;
+        endfunction
+        function int scale(int x);
+            return 2 * x;
+        endfunction
+        function int h();
+            return 4;
+        endfunction
+        static function int tally();
+            return 20;
+        endfunction
+        function int g();
+            count++;
+            return f() + scale(limit) + count;
+        endfunction
+        function int own();
+            int limit = 7;
+            return limit + h() + tally();
+        endfunction
+    endclass
+    class D extends C;
+        function int k();
+            return f() + scale(1) + limit;
+        endfunction
+    endclass
+    C c;
+    D d;
+    initial begin
+        c = new;
+        d = new;
+        f = c.g();
+        count = c.count + 10;
+        scale = 5;
+        tally = h();
+        $display("%0d %0d %0d %0d %0d", f, count, limit, scale, tally);
+        $display("%0d %0d", c.own(), d.k());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq f 8) (assert_eq count 11)
+  (expect_output "8 11 100 5 100\n31 6\n"))
+
 (case implicit_constructors_and_this
   (source "class.sv" #"
 module Top(output int sum, output bit done);

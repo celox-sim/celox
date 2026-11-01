@@ -729,6 +729,11 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "expect_output: expected [49, 10, 50, 10, 51, 10, 49, 32, 49, 10], got [48, 10, 48, 10, 48, 10, 49, 32, 49, 10]",
                         ),
+                        ("icarus", "class::members_hide_module_names") => (
+                            "compile_error",
+                            "compile",
+                            "Object f in celox_suite_tb.dut is not a function.",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

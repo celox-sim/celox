@@ -576,8 +576,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         }
     }
 
-    /// Hide the module-scope names that the properties of `class` shadow
-    /// inside its methods (IEEE 1800-2023 8.5), until the scope ends.
+    /// Hide the module-scope names that the properties and methods of
+    /// `class` shadow inside its methods (IEEE 1800-2023 8.5, 23.9), until
+    /// the scope ends.
     /// A static property's name is renamed to the module variable that holds
     /// it (IEEE 1800-2023 8.9).
     fn enter_class_scope(&mut self, class: &classes::Class) {
@@ -589,11 +590,15 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             .iter()
             .filter(|aggregate| !aggregate.name.contains('.'))
             .map(|aggregate| aggregate.name.as_str());
+        // A method's name hides a module variable too, so that an
+        // unqualified call names the method.
+        let methods = class.methods.iter().map(|method| method.name.as_str());
         for name in class
             .properties
             .iter()
             .map(|property| property.name.as_str())
             .chain(aggregates)
+            .chain(methods)
         {
             let entry = self.take_binding(name, None, 0);
             self.names
