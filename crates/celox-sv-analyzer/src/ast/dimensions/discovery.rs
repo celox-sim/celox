@@ -370,11 +370,17 @@ fn formal_types(
                 direction = ParamDirection::declared(d, port.constant);
             }
             let data = tree.declarations().data_type(port.data_type);
-            let omitted = matches!(data.kind, DataTypeKind::Implicit)
-                && data.signed.is_none()
-                && data.packed_dimensions.is_empty();
+            // A prototype's lone identifier that names no type is the
+            // formal's name, its type omitted.
+            let renamed = classes::prototype_formal_name(port, tree, session, &local);
+            let omitted = renamed.is_some()
+                || matches!(data.kind, DataTypeKind::Implicit)
+                    && data.signed.is_none()
+                    && data.packed_dimensions.is_empty();
             let mut base = if port.direction.is_none() && omitted && previous.is_some() {
                 previous.clone().unwrap()
+            } else if renamed.is_some() {
+                Type::new(TypeKind::Logic)
             } else {
                 let Some(mut ty) = type_binding::bind(port.data_type, tree, session, &local)?
                 else {
@@ -391,6 +397,7 @@ fn formal_types(
                 .name
                 .as_ref()
                 .map(name)
+                .or(renamed)
                 .ok_or_else(|| unsupported("subroutine argument without a name"))?;
             declared = Some((n.clone(), base.clone()));
             result.push((

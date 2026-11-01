@@ -1610,6 +1610,7 @@ sv_backends! {
     fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
     fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
     fn class_methods_called_without_parentheses(sim) { @case "class::methods_called_without_parentheses"; }
+    fn class_prototype_formals_inherit_types(sim) { @case "class::prototype_formals_inherit_types"; }
 }
 
 sv_backends! {

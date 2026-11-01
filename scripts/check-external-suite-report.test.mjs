@@ -313,6 +313,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "class::package_constant_type_arguments",
                 "class::parameter_literals_hide_module_constants",
                 "class::parameter_strings_wider_than_a_constant",
+                "class::prototype_formals_inherit_types",
                 "class::scoped_typedef_handles",
                 "class::specialized_scope_typedef_calls",
                 "class::specialized_scope_typedef_properties",
