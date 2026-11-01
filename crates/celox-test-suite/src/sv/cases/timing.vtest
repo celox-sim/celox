@@ -2624,6 +2624,47 @@ module Top(input bit clk,output bit[7:0]seen);bit q;Child c(clk,q);initial forev
 
 ; A position with an unknown bit writes nothing (IEEE 1800-2023 7.4.6,
 ; 11.5.1).
+(case process_dynamic_writes_preserve_xz_at_unknown_positions
+  (source "array_unknown_write.sv" #"
+    module Top(output bit unchanged);
+      logic [3:0] values[2];
+      logic index;
+      initial begin
+        values[0] = 4'b10xz;
+        values[1] = 4'bz001;
+        index = 1'bx;
+        values[index] = 0;
+        unchanged = values[0] === 4'b10xz && values[1] === 4'bz001;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq unchanged 1))
+
+(case process_dynamic_writes_preserve_xz
+  (source "dynamic_xz_write.sv" #"
+    module Top(output bit same);
+      logic [128:0] value;
+      logic [7:0] memory[2];
+      int position, index;
+      initial begin
+        value = 'z;
+        memory[0] = 8'bz10x_01z0;
+        memory[1] = 'z;
+        #1;
+        position = 63;
+        value[position +: 4] = 4'b10xz;
+        position = -1;
+        value[position +: 4] = 4'bz10x;
+        index = 1;
+        memory[index] = 8'bxz01_z0x1;
+        same = value[128:67] === {62{1'bz}} && value[66:63] === 4'b10xz
+          && value[62:3] === {60{1'bz}} && value[2:0] === 3'bz10
+          && memory[0] === 8'bz10x_01z0 && memory[1] === 8'bxz01_z0x1;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 1) (assert_eq same 1))
+
 (case process_nonblocking_assignments_at_unknown_positions
   (source "process_nba_unknown.sv" #"
       module Top(output logic [7:0] q, m0, m1);
