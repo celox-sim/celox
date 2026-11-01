@@ -721,11 +721,33 @@ pub(in crate::ast) fn method(
         }
         _ => return Ok(None),
     };
-    if classes::builtin(&class_name) {
+    let method_name = instances::normalize_identifier(&method_name.spelling);
+    method_of(
+        tree,
+        session,
+        dimensions,
+        &class_name,
+        &method_name,
+        receiver,
+        through_super,
+    )
+}
+
+/// The method `method_name` of class `class_name` called on `receiver`, as
+/// [`method`] returns it; `through_super` for a call as `super.m`.
+pub(in crate::ast) fn method_of(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dimensions: &PackedDimensions,
+    class_name: &str,
+    method_name: &str,
+    receiver: Receiver,
+    through_super: bool,
+) -> Converted<Option<(String, Vec<Option<String>>, Receiver)>> {
+    if classes::builtin(class_name) {
         return Ok(None);
     }
-    let class = class(tree, session, dimensions, &class_name)?;
-    let method_name = instances::normalize_identifier(&method_name.spelling);
+    let class = class(tree, session, dimensions, class_name)?;
     if method_name == "new" {
         return match receiver {
             // `C::new` is a constructor call, see [`constructor`].
@@ -735,7 +757,7 @@ pub(in crate::ast) fn method(
             )),
         };
     }
-    if matches!(method_name.as_str(), "randomize" | "srandom") {
+    if matches!(method_name, "randomize" | "srandom") {
         if receiver == Receiver::Static
             || (receiver == Receiver::This && dimensions.get(THIS).is_none())
         {
@@ -747,12 +769,12 @@ pub(in crate::ast) fn method(
             class.check_randomize()?;
         }
         return Ok(Some((
-            Class::subroutine_name(&class_name, &method_name),
+            Class::subroutine_name(class_name, method_name),
             vec![None],
             receiver,
         )));
     }
-    let Some(method) = class.method(&method_name) else {
+    let Some(method) = class.method(method_name) else {
         return Ok(None);
     };
     check_access(
@@ -796,6 +818,27 @@ pub(in crate::ast) fn method(
         Class::subroutine_name(&method.owner, &method.name)
     };
     Ok(Some((subroutine, formals, receiver)))
+}
+
+/// The callee and arguments of native expression `id` when it calls a
+/// method: `h.m(...)`, or `h.m` with its empty parentheses omitted (IEEE
+/// 1800-2023 13.5.5).
+pub(in crate::ast) fn method_call<'a>(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &'a Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<(ExprId, &'a [celox_sv_syntax::Argument])>> {
+    let (callee, arguments) = match &native.expression(id).kind {
+        ExprKind::Call {
+            expression,
+            arguments,
+        } => (*expression, arguments.as_slice()),
+        ExprKind::Member { .. } => (id, &[][..]),
+        _ => return Ok(None),
+    };
+    Ok(method(tree, session, callee, native, dimensions)?.map(|_| (callee, arguments)))
 }
 
 /// Check that the handle native expression `id` evaluates to may be

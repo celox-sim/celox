@@ -327,3 +327,37 @@ module Top(output bit [2:0] flags);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq flags 7))
+
+(case array_locator_unique_class_handles
+  (source "array_locators.sv" #"
+module Top(output bit [4:0] flags);
+    class Callback;
+        int id;
+        function new(int id); this.id = id; endfunction
+        function int get_inst_id(); return id; endfunction
+    endclass
+    Callback callbacks[$];
+    Callback kept[$];
+    Callback cb;
+    int r[$];
+    initial begin
+        cb = new(3); callbacks.push_back(cb);
+        cb = new(5); callbacks.push_back(cb);
+        cb = new(3); callbacks.push_back(cb);
+        cb = new(7); callbacks.push_back(cb);
+        // unique keeps the first element of each with value (7.12.1).
+        kept = callbacks.unique(cb_) with (cb_.get_inst_id);
+        flags[0] = kept.size() == 3 && kept[0] == callbacks[0] && kept[1] == callbacks[1]
+            && kept[2] == callbacks[3];
+        r = callbacks.unique_index(cb_) with (cb_.get_inst_id());
+        flags[1] = r.size() == 3 && r[0] == 0 && r[1] == 1 && r[2] == 3;
+        kept = callbacks.unique with (item.id);
+        flags[2] = kept.size() == 3;
+        kept = callbacks.find(cb_) with (cb_.get_inst_id == 3);
+        flags[3] = kept.size() == 2 && kept[1] == callbacks[2];
+        kept = callbacks.max(cb_) with (cb_.get_inst_id);
+        flags[4] = kept.size() == 1 && kept[0].id == 7;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 31))

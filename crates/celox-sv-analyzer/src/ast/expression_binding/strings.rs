@@ -198,6 +198,13 @@ pub(in crate::ast) fn native_string(
         }
         // `e.name` without parentheses (6.19.5.6, 6.19.5.7).
         ExprKind::Member { .. } if enum_name(tree, session, id, native, dimensions) => true,
+        // A method called without parentheses (13.5.5).
+        ExprKind::Member { .. }
+            if objects::method(tree, session, id, native, dimensions)
+                .is_ok_and(|method| method.is_some()) =>
+        {
+            returns_string(tree, session, id, native, dimensions)
+        }
         // A string member of a container element of unpacked structure type.
         ExprKind::Member { .. }
             if containers::element_member(

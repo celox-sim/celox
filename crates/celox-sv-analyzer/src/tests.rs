@@ -7918,6 +7918,27 @@ fn long_handle_chains_resolve_in_linear_time() {
 }
 
 #[test]
+fn long_parenless_method_chains_resolve_in_linear_time() {
+    // A method called without parentheses (IEEE 1800-2023 13.5.5) resolves
+    // its receiver once, as a property does.
+    let chain = ".get_next".repeat(30);
+    let source = format!(
+        "class Node; Node next; int value; function Node get_next(); return next; endfunction endclass
+        module Top(output int y);
+            Node head;
+            initial y = head{chain}.value;
+        endmodule"
+    );
+    let started = std::time::Instant::now();
+    analyze_source(&source, Path::new("method-chain.sv")).expect("the chain analyzes");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn container_formals_copy_only_what_container_assignment_represents() {
     // IEEE 1800-2023 13.5.1: a container formal that is not a reference
     // holds a copy, which an input receives as a container value and an

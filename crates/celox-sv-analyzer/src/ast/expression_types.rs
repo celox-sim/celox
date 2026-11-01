@@ -31,13 +31,23 @@ pub(super) fn type_of(
             .intern(TyData::Class(Decl::Class(name.into())))
     };
     let id = ungroup(id, native);
+    // What function or method `name` returns.
+    let returned = |session: &mut Session, name: &str| {
+        let returns = dims.function_return_types.get(name)?;
+        match &returns.class {
+            Some(name) => Some(class(session, name)),
+            None if returns.string => Some(session.types.intern(TyData::String)),
+            None => None,
+        }
+    };
     if let ExprKind::Call { expression, .. } = &native.expression(id).kind {
+        let expression = *expression;
         // `process::self()` (9.7).
         if let ExprKind::Member {
             expression: base,
             separator,
             name,
-        } = &native.expression(*expression).kind
+        } = &native.expression(expression).kind
             && separator == "::"
             && name.spelling == "self"
             && processes::scope(tree, session, *base, native, dims)
@@ -45,17 +55,12 @@ pub(super) fn type_of(
             return Some(class(session, processes::CLASS));
         }
         // What the function or method returns.
-        let name = match objects::method(tree, session, *expression, native, dims) {
+        let name = match objects::method(tree, session, expression, native, dims) {
             Ok(Some((name, ..))) => name,
-            Ok(None) => expression_binding::callable_name(tree, *expression, native)?,
+            Ok(None) => expression_binding::callable_name(tree, expression, native)?,
             Err(_) => return None,
         };
-        let returns = dims.function_return_types.get(&name)?;
-        return match &returns.class {
-            Some(name) => Some(class(session, name)),
-            None if returns.string => Some(session.types.intern(TyData::String)),
-            None => None,
-        };
+        return returned(session, &name);
     }
     // A member of an unpacked structure variable.
     if let Some(name) = unpacked_structs::native_member(id, native, dims) {
@@ -114,9 +119,35 @@ pub(super) fn type_of(
                 .and_then(|receiver| class_name(&session.types, receiver)) =>
         {
             let member = instances::normalize_identifier(&name.spelling);
-            let receiver = (!objects::is_super(*receiver, native)).then_some(*receiver);
-            let ty = objects::member_type(tree, dims, &owner, &member, receiver, session)?;
-            of_type(session, &ty)
+            let through_super = objects::is_super(*receiver, native);
+            let handle = (!through_super).then_some(*receiver);
+            if let Some(ty) = objects::member_type(tree, dims, &owner, &member, handle, session) {
+                return of_type(session, &ty);
+            }
+            // A method called without parentheses (13.5.5).
+            let receiver = match handle {
+                Some(handle) => objects::Receiver::Handle(handle),
+                None => objects::Receiver::This,
+            };
+            let (name, ..) = objects::method_of(
+                tree,
+                session,
+                dims,
+                &owner,
+                &member,
+                receiver,
+                through_super,
+            )
+            .ok()??;
+            returned(session, &name)
+        }
+        // A static property `C::p`, or a static method called without
+        // parentheses (13.5.5).
+        ExprKind::Member { separator, .. } if separator == "::" => {
+            property_type(tree, session, id, native, dims).or_else(|| {
+                let (name, ..) = objects::method(tree, session, id, native, dims).ok()??;
+                returned(session, &name)
+            })
         }
         _ => property_type(tree, session, id, native, dims),
     }
