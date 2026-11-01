@@ -2,6 +2,7 @@ use super::*;
 use std::path::Path;
 
 mod conversions;
+mod enum_constants;
 mod values;
 
 fn query(declarations: &str, expression: &str) -> (Session, TyId) {

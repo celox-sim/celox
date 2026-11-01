@@ -2,7 +2,7 @@
 
 use super::*;
 
-type Key = [usize; 6];
+type Key = [usize; 7];
 
 pub(in crate::ast) struct ScopeViews<'a> {
     dimensions: &'a PackedDimensions,
@@ -61,6 +61,7 @@ fn key(item: &Item) -> Key {
         Arc::as_ptr(&item.shadowed) as usize,
         Arc::as_ptr(&item.parameter_dimensions) as usize,
         item.qualified_types.identity(),
+        item.enum_constants.identity(),
     ]
 }
 
