@@ -872,6 +872,10 @@ sv_backends! {
     fn edge_blocking_results_precede_later_process_writes(sim) {
         @case "timing::edge_blocking_results_precede_later_process_writes";
     }
+
+    fn static_formals_of_package_tasks(sim) {
+        @case "timing::static_formals_of_package_tasks";
+    }
 }
 
 /// An edge whose evaluation a `$fatal` ends before its commit leaves no
