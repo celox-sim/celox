@@ -244,6 +244,8 @@ struct Wait {
     /// Identical wide or multi-expression sites use raw planes; distinct
     /// scalar sites retain the compact baseline byte.
     raw: Option<celox_design::schedule::CompiledWaitLayout>,
+    /// RTL or another waiting kernel can change a watched expression.
+    reactive: bool,
     /// Its nonblocking sites, by local index.
     sites: Vec<Staged>,
 }
@@ -508,6 +510,13 @@ impl Plan {
             .copied()
             .chain(events.iter().map(|event| storage(event.signal)))
             .collect();
+        let wait_slicer =
+            (!model.waited.is_empty()).then(|| CombSlicer::new(&sir.eval_comb, shared.clone()));
+        let observed_cone = wait_slicer
+            .as_ref()
+            .map(|slicer| slicer.slice(model.waited.iter().copied()))
+            .unwrap_or_default();
+        active_observers.extend(observed_cone.iter().flat_map(loads).map(storage));
         // A stateful combinational consumer can retain an intermediate
         // blocking result even when no waiter or clock reads it. Include all
         // combinational inputs so indirect cones are covered too. Missing
@@ -680,6 +689,31 @@ impl Plan {
             .filter(|(kernel, _)| kernel.is_none())
             .flat_map(|(_, stores)| stores.iter().copied())
             .collect();
+        let active_stores: HashSet<AbsoluteAddr> = active_commits
+            .iter()
+            .flat_map(|&index| events[index].eval_only.iter().flatten())
+            .flat_map(instructions)
+            .filter_map(|inst| match inst {
+                SIRInstruction::Store(target, ..) | SIRInstruction::Commit(_, target, ..)
+                    if target.region == STABLE_REGION =>
+                {
+                    Some(storage(target.absolute_addr()))
+                }
+                _ => None,
+            })
+            .collect();
+        let opaque_dependencies = rtl_units()
+            .chain(
+                sir.processes
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, unit)| {
+                        (index < fallback.len() && fallback[index].is_none()).then_some(unit)
+                    }),
+            )
+            .any(|unit| {
+                instructions(unit).any(|inst| matches!(inst, SIRInstruction::ExternCall { .. }))
+            });
         for index in 0..schema.processes.len() {
             let process = &model.processes[index];
             if process.waits.is_empty() || fallback[index].is_some() {
@@ -751,17 +785,17 @@ impl Plan {
                 {
                     return Err("the process waits for too many distinct edges");
                 }
+                let mut reactive = false;
                 for &(signal, _) in &terms {
                     let width = program.layout().widths.get(&signal);
                     let signal = storage(signal);
                     let delayed = delay_writers.get(&signal) == Some(&1)
                         && !rtl_stores.contains(&signal)
                         && !other_stores.contains(&signal);
-                    if (raw.is_none() && width != Some(&1)) || !(delayed || undriven(signal)) {
-                        return Err(
-                            "the process waits for a signal that neither one kernel that only delays nor the host alone drives",
-                        );
+                    if raw.is_none() && width != Some(&1) {
+                        return Err("the process waits for a non-scalar compact edge");
                     }
+                    reactive |= !(delayed || undriven(signal));
                 }
                 let delays = !statuses_only(unit, slots.status, &WAIT_STATUSES);
                 if delays
@@ -770,8 +804,28 @@ impl Plan {
                     return Err("the process suspends other than for an edge or a delay");
                 }
                 let writes = &kernel_stores[index];
-                if !written(unit).is_empty() || writes.iter().any(|store| waited.contains(store)) {
-                    return Err("the process drives an event or a waited signal");
+                if !written(unit).is_empty() {
+                    return Err("the process drives an event signal");
+                }
+                reactive |= writes.iter().any(|store| waited.contains(store));
+                if reactive && !process.nbas.is_empty() {
+                    return Err("a reactive wait stages nonblocking assignments");
+                }
+                if reactive && !active_stores.is_empty() {
+                    let signals = terms.iter().map(|&(signal, _)| signal);
+                    let cone = wait_slicer
+                        .as_ref()
+                        .map(|slicer| slicer.slice(signals.clone()))
+                        .unwrap_or_default();
+                    if signals
+                        .chain(cone.iter().flat_map(loads))
+                        .any(|signal| active_stores.contains(&storage(signal)))
+                    {
+                        return Err("a reactive wait observes Active-region domain updates");
+                    }
+                }
+                if reactive && opaque_dependencies {
+                    return Err("a reactive wait has opaque dependencies");
                 }
                 if raw.is_some() && !process.nbas.is_empty() {
                     return Err("a raw-expression wait stages nonblocking assignments");
@@ -825,6 +879,7 @@ impl Plan {
                         terms,
                         site_terms,
                         raw,
+                        reactive,
                         sites,
                     },
                     delays,
@@ -839,6 +894,67 @@ impl Plan {
                     })
                 }
                 Err(reason) => fallback[index] = Some(reason.to_string()),
+            }
+        }
+        // Acyclic dependencies bound the number of process passes in one
+        // slot. Include combinational cones: writing an input of a waited
+        // expression can wake its consumer after the settle, even when no
+        // kernel stores the expression itself.
+        let dependencies: Vec<(HashSet<AbsoluteAddr>, HashSet<AbsoluteAddr>)> = kernels
+            .iter()
+            .map(|kernel| {
+                let Some(wait) = kernel.as_ref().and_then(|kernel| kernel.wait.as_ref()) else {
+                    return (HashSet::default(), HashSet::default());
+                };
+                let signals = wait.terms.iter().map(|&(signal, _)| signal);
+                let cone = wait_slicer
+                    .as_ref()
+                    .map(|slicer| slicer.slice(signals.clone()))
+                    .unwrap_or_default();
+                let comb: HashSet<_> = cone.iter().flat_map(loads).map(storage).collect();
+                let all = signals.map(storage).chain(comb.iter().copied()).collect();
+                (all, comb)
+            })
+            .collect();
+        let mut remaining: HashSet<usize> = kernels
+            .iter()
+            .enumerate()
+            .filter_map(|(index, kernel)| kernel.as_ref()?.wait.as_ref().map(|_| index))
+            .collect();
+        loop {
+            let roots: Vec<usize> = remaining
+                .iter()
+                .copied()
+                .filter(|&consumer| {
+                    !remaining.iter().any(|&producer| {
+                        // A process is not waiting while its own body runs;
+                        // registration captures direct signal writes afterward.
+                        // A computed expression can still change at the later
+                        // settle, after registration, and wake the same process.
+                        let watched = if producer == consumer {
+                            &dependencies[consumer].1
+                        } else {
+                            &dependencies[consumer].0
+                        };
+                        !kernel_stores[producer].is_disjoint(watched)
+                    })
+                })
+                .collect();
+            if roots.is_empty() {
+                break;
+            }
+            for root in roots {
+                remaining.remove(&root);
+            }
+        }
+        for index in remaining {
+            if kernels[index]
+                .as_ref()
+                .and_then(|kernel| kernel.wait.as_ref())
+                .is_some_and(|wait| wait.reactive)
+            {
+                kernels[index] = None;
+                fallback[index] = Some("reactive waits have cyclic dependencies".into());
             }
         }
         if kernels.iter().flatten().count() > MAX_KERNELS {
@@ -931,6 +1047,14 @@ impl Plan {
                     (!retains_state(&sir.eval_comb, &storage, &comb_stores)).then(Vec::new)
                 })
             });
+        let eager = eager.filter(|_| {
+            kernels
+                .iter()
+                .flatten()
+                .filter_map(|kernel| kernel.wait.as_ref())
+                .flat_map(|wait| &wait.terms)
+                .all(|&(signal, _)| !comb_stores.contains(&storage(signal)))
+        });
         let lazy = eager.map(|eager| {
             // The waits never watch what combinational logic writes, so
             // they see the same with a settle pending.
@@ -1295,11 +1419,22 @@ impl Plan {
             if !plan.gating.is_empty() {
                 let comb_reads: HashSet<AbsoluteAddr> =
                     sir.eval_comb.iter().flat_map(loads).map(storage).collect();
+                let gate_inputs: HashSet<AbsoluteAddr> = topology
+                    .combinational_derived
+                    .values()
+                    .flatten()
+                    .flat_map(|clock| {
+                        clock.inputs.as_ref().map_or_else(
+                            || comb_reads.iter().copied().collect::<Vec<_>>(),
+                            |inputs| inputs.iter().copied().map(storage).collect(),
+                        )
+                    })
+                    .collect();
                 let feeds_gates = plan.kernels.iter().enumerate().any(|(index, kernel)| {
                     kernel.as_ref().is_some_and(|kernel| kernel.wait.is_some())
                         && kernel_stores[index]
                             .iter()
-                            .any(|store| comb_reads.contains(store))
+                            .any(|store| gate_inputs.contains(store))
                 });
                 if feeds_gates {
                     return Err(
@@ -1888,9 +2023,9 @@ impl Plan {
         // The domains the edges trigger, then the NBA region.
         g.b.switch_to_block(domains);
         if !self.active.is_empty() {
-            self.batch_active(&mut g, &tracked, slot_end, finish_exit);
+            self.batch_active(&mut g, &tracked, slot_end, finish_exit, &checks);
         } else if !self.derived.is_empty() {
-            self.batch(&mut g, &tracked, slot_end, finish_exit);
+            self.batch(&mut g, &tracked, slot_end, finish_exit, &checks);
         } else {
             let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
             let mask = g.load(slots.exit_arg, self.event_bits);
@@ -2058,8 +2193,8 @@ impl Plan {
         // opposite level, half a period later, in event order (as
         // `rearm_clocks`): the extra time unit of an odd period goes to the
         // high phase. The reference re-arms at the end of the slot's first
-        // round (`continue_round`); a compiled slot has a single round, as
-        // no kernel it runs resumes in the same slot.
+        // round (`continue_round`), before processes the NBA results wake
+        // resume. On their later rounds the clocks are already armed.
         g.b.switch_to_block(slot_end);
         if let Some((started, clocked)) = started {
             let overflow_exit = g.exit_block(SchedulerExit::ClockOverflow);
@@ -2138,6 +2273,34 @@ impl Plan {
             g.b.seal_block(SIRTerminator::Jump(rearmed, Vec::new()));
             g.b.switch_to_block(rearmed);
         }
+        if waits.iter().any(|(_, wait)| wait.reactive) {
+            // NBA publication can wake data-sensitive kernels in this same
+            // time slot. Their next pass must not evaluate the domains that
+            // just ran a second time: compare against the levels now and
+            // consume the slot's original edge mask before returning to pick.
+            g.check_waits(&checks);
+            let ready = g.load(slots.ready, MAX_KERNELS);
+            let zero = g.constant(0, MAX_KERNELS);
+            let more = g.binary(1, ready, BinaryOp::Ne, zero);
+            let resume = g.b.new_block();
+            let drained = g.b.new_block();
+            g.b.seal_block(SIRTerminator::Branch {
+                cond: more,
+                true_block: (resume, Vec::new()),
+                false_block: (drained, Vec::new()),
+            });
+            g.b.switch_to_block(resume);
+            let mut levels = g.no_levels();
+            for (bit, &event) in tracked.iter().enumerate() {
+                let level = g.level(&self.events[event]);
+                levels = g.with_level(levels, level, bit);
+            }
+            g.store_levels(levels);
+            let zero = g.constant(0, self.event_bits);
+            g.store(slots.exit_arg, self.event_bits, zero);
+            g.b.seal_block(SIRTerminator::Jump(pick, Vec::new()));
+            g.b.switch_to_block(drained);
+        }
         // The run returns after the slot that reaches its budget, or in
         // which its runtime events reach a batch, so that the host drains
         // them before the ring buffer overflows.
@@ -2183,6 +2346,7 @@ impl Plan {
         tracked: &[usize],
         slot_end: celox_sir::BlockId,
         finish_exit: celox_sir::BlockId,
+        checks: &[WaitCheck<'_>],
     ) {
         let slots = g.slots;
         let empty = g.constant(0, self.event_bits);
@@ -2245,6 +2409,19 @@ impl Plan {
 
         // A wave after a commit: the domains not run yet whose clocks moved.
         g.b.switch_to_block(wave);
+        if self
+            .kernels
+            .iter()
+            .flatten()
+            .filter_map(|kernel| kernel.wait.as_ref())
+            .any(|wait| wait.reactive)
+        {
+            // A later derived domain can restore an expression's old value.
+            // Match the reference round: remember the occurrence at this
+            // settle and drain its ready processes after the domain waves.
+            g.check_waits(checks);
+        }
+
         let fired = g.load(slots.exit_arg, self.event_bits);
         let levels = g.load_levels();
         let stable = self.stable_edges(g, tracked, levels);
@@ -2344,6 +2521,7 @@ impl Plan {
         tracked: &[usize],
         slot_end: celox_sir::BlockId,
         finish_exit: celox_sir::BlockId,
+        checks: &[WaitCheck<'_>],
     ) {
         let slots = g.slots;
         let wave = g.b.new_block();
@@ -2403,6 +2581,19 @@ impl Plan {
 
         // A wave after a commit: the domains not run yet whose clocks moved.
         g.b.switch_to_block(wave);
+        if self
+            .kernels
+            .iter()
+            .flatten()
+            .filter_map(|kernel| kernel.wait.as_ref())
+            .any(|wait| wait.reactive)
+        {
+            // A later derived domain can restore an expression's old value.
+            // Match the reference round: remember the occurrence at this
+            // settle and drain its ready processes after the domain waves.
+            g.check_waits(checks);
+        }
+
         let fired = g.load(slots.exit_arg, self.event_bits);
         let levels = g.load_levels();
         let stable = self.stable_edges(g, tracked, levels);
