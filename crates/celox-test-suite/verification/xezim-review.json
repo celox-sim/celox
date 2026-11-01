@@ -955,6 +955,10 @@
       "title": "A default argument of a method that reads a property of the object reads 0 when the call is made on an array element selected by a static property that an earlier default changes",
       "standard": "IEEE 1800-2023 13.5.3"
     },
+    "sv_rand_mode_method_settle": {
+      "title": "Under the suite testbench, an initial block that calls a class method reading rand_mode() has not assigned its later outputs when the testbench samples them at time 0; run alone, the same source assigns them",
+      "standard": "IEEE 1800-2023 18.8, 9.2.1"
+    },
     "sv_parenless_method_chain": {
       "title": "A method called without parentheses on the handle that another parenless method call returns (n.get_peer.get_id) reads unknown bits",
       "standard": "IEEE 1800-2023 13.5.5"
@@ -5375,6 +5379,14 @@
       "classification": "xezim_bug",
       "bug": "sv_container_returns_in_instance_functions",
       "note": "A function returning a container returns its value, so q = make_queue(3) gives three elements and m = make_map() two (13.4.1, 7.10). The pinned xezim, with Top under the suite testbench, returns one queue element and an empty associative array, and a queue built in a method one element short; returning a module-scope queue agrees. The adapter-free source prints [3 20 2] with Top as the top and [1 0 0] with Wrapped; see verification/repros/sv_container_returns_in_instance_functions_xezim.json. Verilator 5.052 passes the shared case, and Celox prints [3 20 2] for both tops."
+    },
+    {
+      "suite": "sv",
+      "name": "operators::one_bit_casts",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_rand_mode_method_settle",
+      "note": "was_rand = f.is_rand(), which returns bit'(value.rand_mode()) of a rand property, reads 0 at time 0: low, odd and picked, assigned before the call, pass. Run alone, xezim prints was_rand = 1 and now_fixed = 1."
     }
   ]
 }
