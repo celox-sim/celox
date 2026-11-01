@@ -145,6 +145,17 @@
     },
     {
       "category": "Operators",
+      "detail": "operators::one_bit_casts at 2374:60: assert_eq was_rand: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "operators::one_bit_casts",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
       "detail": "operators::parameter_size_casts_in_generate_conditions at 993:3: assert_eq signed_test: expected 0x1, got 0x0",
       "expectation": "Simulation",
       "name": "operators::parameter_size_casts_in_generate_conditions",

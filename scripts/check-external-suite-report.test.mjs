@@ -382,6 +382,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "mailboxes::messages_come_out_in_put_order",
                 "mailboxes::strings_and_class_handles",
                 "mailboxes::try_methods_do_not_block",
+                "operators::one_bit_casts",
                 "procedural::dpi_exports_leave_subroutines_unchanged",
                 "references::const_ref_in_a_continuous_assignment",
                 "references::const_ref_reads_the_current_value",
