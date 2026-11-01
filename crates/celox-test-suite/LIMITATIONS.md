@@ -1827,3 +1827,30 @@ IEEE 1800-2023 7.9.9 and 7.9.11 govern the assignment and default value;
 7.8.6 explicitly applies user defaults to unknown-index reads. Only the exact
 observed failures are excluded. Keyed entries and mixed keyed/default literals
 remain unsupported by Celox in this change.
+
+### Mutating fixed string-array elements
+
+Four `string::fixed_array_mutat*` cases check blocking character assignments,
+`putc`, integer conversion methods, multidimensional coordinates, copy
+independence, invalid indices and receiver indices with calls or increments.
+IEEE 1800-2023 6.16.2 defines `putc` as equivalent to a character assignment;
+6.16.11-14 define integer conversion methods. Each authored receiver index is
+evaluated once, before bounds guards and string read/write lowering reuse it.
+Nonblocking character assignments remain explicitly rejected: lowering them
+as whole-string nonblocking assignments would lose independent character updates.
+
+Verilator 5.052 reports an internal ARRAYSEL type error in all three two-state
+cases; the four-state case is a capability skip. The
+[conversion probe](verification/repros/sv_string_array_mutations_methods.sv)
+reproduces the error without an adapter. Icarus 13.0 fails to elaborate all
+four cases, rejecting variable receiver indices, selected `putc` tasks and
+multidimensional string copies. Xezim 0.11.4 passes three cases but evaluates
+receiver calls and a postfix index twice in the fourth: the
+[index probe](verification/repros/sv_string_array_mutations_indices.sv) prints
+`calls=4 index=2 words=ZXQ,12` instead of `calls=2 index=1 words=12,def`.
+Focused raw failures are retained for
+[Verilator](verification/sv/limitations/string-array-mutations-verilator.json),
+[Icarus](verification/sv/limitations/string-array-mutations-icarus.json) and
+[xezim](verification/sv/limitations/string-array-mutations-xezim.json).
+Only the exact observed failures are excluded; passing cases add no historical
+baseline rows.
