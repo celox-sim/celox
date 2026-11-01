@@ -199,6 +199,10 @@ fn updating(
     updating
 }
 
+pub(super) fn has_updates(native: &Declarations, roots: &[ExprId]) -> bool {
+    !updating(native, roots, &mut |_| false).is_empty()
+}
+
 fn unsupported_context() -> AnalyzerError {
     unsupported("assignment, increment or decrement expression in this context")
 }

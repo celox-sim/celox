@@ -1987,3 +1987,24 @@ closed descriptors, output selection order, reference arguments and replay
 of core plus file-handler snapshots. Error codes and descriptions depend on
 the host; tests require zero/nonzero status and text presence rather than a
 particular operating-system errno or wording.
+
+### Strobed output
+
+Shared cases check `$strobe` after NBA publication and Reactive program writes,
+`$fstrobe` to stdout, and binary/octal/hexadecimal variants. Icarus 13.0 and
+xezim 0.11.4 pass all four. Verilator 5.052 passes three, but its suite build
+with VPI/public-signal options prints `reactive=0` for a program output that
+settles to 9. The [standalone probe](verification/repros/sv_strobe_program_output.sv)
+prints `reactive=0` then `settled=9` with the configuration recorded in its
+header; without those options Verilator prints 9 for both. IEEE 1800-2023
+21.2.2 requires the slot's final value, after Reactive writes (24.3.1).
+Only that case is excluded for Verilator, with its
+[exact failure](verification/sv/limitations/strobe-program-verilator.json).
+Passing cases add no historical baseline rows.
+
+Celox API regressions also check zero-delay work, `$sampled`, repeated calls,
+multiple timestamps, captured file descriptors, partial MCD cancellation,
+close/reopen cancellation, native-image execution, differential scheduling,
+core checkpoint bytes and portable state files at quiescent boundaries.
+User subroutine calls, side-effecting arguments and procedural local references
+remain outside the current strobed-output subset and are rejected explicitly.

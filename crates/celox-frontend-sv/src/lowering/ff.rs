@@ -21,6 +21,7 @@ mod references;
 mod scan;
 mod streams;
 mod strings;
+mod strobe;
 mod system;
 
 use super::procedural::*;
@@ -102,6 +103,7 @@ pub(super) struct Ff<'p, 'a> {
     process_control: bool,
     process_predicate: bool,
     frame_locals: Vec<SourceVarId>,
+    postponed_locals: HashSet<SourceVarId>,
     event_probes: Vec<celox_design::ProcessEventProbe<SourceVarId>>,
     unobserved_function_writes: HashSet<SourceVarId>,
     observe_blocking_assignments: bool,
@@ -204,6 +206,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             process_control: false,
             process_predicate: false,
             frame_locals: Vec::new(),
+            postponed_locals: HashSet::default(),
             event_probes: Vec::new(),
             unobserved_function_writes: HashSet::default(),
             observe_blocking_assignments: false,
@@ -3900,6 +3903,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     .m
                     .id(name)
                     .ok_or_else(|| unsupported(format!("local `{name}`")))?;
+                self.postponed_locals.insert(id);
                 if self.forked && self.kernel.is_some() {
                     let slot = match self.frame_locals.iter().position(|&local| local == id) {
                         Some(slot) => slot,
@@ -4046,6 +4050,12 @@ impl<'p, 'a> Ff<'p, 'a> {
         site: Option<&sv::ir::SourceSpan>,
         assertion_site: Option<&celox_design::AssertionSite>,
     ) -> Result<bool, sv::AnalyzerError> {
+        if matches!(
+            task,
+            sv::ir::SystemTask::Strobe(_) | sv::ir::SystemTask::Fstrobe(_)
+        ) {
+            return self.strobe(task, args, site);
+        }
         if let sv::ir::SystemTask::Vcd(operation) = task {
             self.vcd_task(operation, args)?;
             return Ok(true);

@@ -603,6 +603,8 @@ pub enum SystemTask {
     Severity(Severity),
     /// `$display` and its `b`, `o` and `h` variants (21.2.1).
     Display(Radix),
+    /// Display final values at the end of the current time slot (21.2.2).
+    Strobe(Radix),
     /// `$write` and its `b`, `o` and `h` variants (21.2.1).
     Write(Radix),
     /// `$readmemb` and `$readmemh` (21.4).
@@ -614,6 +616,7 @@ pub enum SystemTask {
     /// Flush selected output files or all open files (21.3.6).
     Fflush,
     Fdisplay(Radix),
+    Fstrobe(Radix),
     Fwrite(Radix),
     /// Memory snapshot output (21.5).
     Writemem(MemoryFormat),
@@ -693,7 +696,9 @@ impl SystemTask {
     pub fn is_host_request(self) -> bool {
         matches!(
             self,
-            Self::Fclose
+            Self::Strobe(_)
+                | Self::Fstrobe(_)
+                | Self::Fclose
                 | Self::Fflush
                 | Self::Fdisplay(_)
                 | Self::Fwrite(_)
@@ -715,9 +720,13 @@ impl SystemTask {
             Self::Severity(Severity::Warning) => "$warning",
             Self::Severity(Severity::Info) => "$info",
             Self::Display(Decimal) => "$display",
+            Self::Strobe(Decimal) => "$strobe",
             Self::Display(Binary) => "$displayb",
+            Self::Strobe(Binary) => "$strobeb",
             Self::Display(Octal) => "$displayo",
+            Self::Strobe(Octal) => "$strobeo",
             Self::Display(Hexadecimal) => "$displayh",
+            Self::Strobe(Hexadecimal) => "$strobeh",
             Self::Write(Decimal) => "$write",
             Self::Write(Binary) => "$writeb",
             Self::Write(Octal) => "$writeo",
@@ -725,9 +734,13 @@ impl SystemTask {
             Self::Fclose => "$fclose",
             Self::Fflush => "$fflush",
             Self::Fdisplay(Decimal) => "$fdisplay",
+            Self::Fstrobe(Decimal) => "$fstrobe",
             Self::Fdisplay(Binary) => "$fdisplayb",
+            Self::Fstrobe(Binary) => "$fstrobeb",
             Self::Fdisplay(Octal) => "$fdisplayo",
+            Self::Fstrobe(Octal) => "$fstrobeo",
             Self::Fdisplay(Hexadecimal) => "$fdisplayh",
+            Self::Fstrobe(Hexadecimal) => "$fstrobeh",
             Self::Fwrite(Decimal) => "$fwrite",
             Self::Fwrite(Binary) => "$fwriteb",
             Self::Fwrite(Octal) => "$fwriteo",
@@ -1999,10 +2012,30 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         0,
         None,
     ),
-    unsupported("$strobe", Task),
-    unsupported("$strobeb", Task),
-    unsupported("$strobeo", Task),
-    unsupported("$strobeh", Task),
+    task(
+        SystemTask::Strobe(Radix::Decimal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Strobe(Radix::Binary),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Strobe(Radix::Octal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
+    task(
+        SystemTask::Strobe(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        0,
+        None,
+    ),
     unsupported("$monitor", Task),
     unsupported("$monitorb", Task),
     unsupported("$monitoro", Task),
@@ -2060,10 +2093,30 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
         1,
         None,
     ),
-    unsupported("$fstrobe", Task),
-    unsupported("$fstrobeb", Task),
-    unsupported("$fstrobeo", Task),
-    unsupported("$fstrobeh", Task),
+    task(
+        SystemTask::Fstrobe(Radix::Decimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fstrobe(Radix::Binary),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fstrobe(Radix::Octal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
+    task(
+        SystemTask::Fstrobe(Radix::Hexadecimal),
+        ProceduralAndInitial,
+        1,
+        None,
+    ),
     unsupported("$fmonitor", Task),
     unsupported("$fmonitorb", Task),
     unsupported("$fmonitoro", Task),
