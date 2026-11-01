@@ -5010,6 +5010,94 @@ endmodule"#;
         }
     }
 
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn derived_clock_domains_stop_at_the_same_state_as_the_reference() {
+        for active in [false, true] {
+            for derived in [false, true] {
+                for fatal in [false, true] {
+                    let counter = if derived { "secondary" } else { "primary" };
+                    let stop = if fatal {
+                        "$fatal(1, \"domain stopped\");"
+                    } else {
+                        "$finish;"
+                    };
+                    let condition = format!("if ({counter} == 2) {stop}");
+                    let source = format!(
+                        r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, d = 0, en = 0, q = 0;
+    wire derived = ~clk;
+    int primary = 0, secondary = 0;
+    always #1 clk = !clk;
+    always_latch if (!en) q = d;
+    always @(posedge clk) begin
+        primary <= primary + 1;
+        {blocking}
+        {primary_stop}
+    end
+    always @(posedge derived) begin
+        secondary <= secondary + 1;
+        {derived_stop}
+    end
+    initial #100 $fatal(1, "deadline");
+endmodule"#,
+                        blocking = if active { "d = 1; en <= 1;" } else { "" },
+                        primary_stop = if derived { "" } else { &condition },
+                        derived_stop = if derived { &condition } else { "" },
+                    );
+                    for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+                        for four_state in [false, true] {
+                            let build = |mode| {
+                                crate::Simulation::from_sv_sources(
+                                    vec![(source.as_str(), std::path::Path::new("domain-stop.sv"))],
+                                    "Top",
+                                )
+                                .four_state(four_state)
+                                .opt_level(level)
+                                .scheduler_mode(mode)
+                                .live_signal(Vec::new(), vec!["primary".into()])
+                                .live_signal(Vec::new(), vec!["secondary".into()])
+                                .live_signal(Vec::new(), vec!["clk".into()])
+                                .live_signal(Vec::new(), vec!["derived".into()])
+                                .live_signal(Vec::new(), vec!["d".into()])
+                                .live_signal(Vec::new(), vec!["en".into()])
+                                .live_signal(Vec::new(), vec!["q".into()])
+                                .build_native()
+                                .unwrap()
+                            };
+                            let mut reference = build(crate::SchedulerMode::Reference);
+                            let mut compiled = build(crate::SchedulerMode::DifferentialRuns);
+                            let expected = reference.run_until(100);
+                            let actual = compiled.run_until(100);
+                            assert_eq!(
+                                format!("{actual:?}"),
+                                format!("{expected:?}"),
+                                "active={active}, derived={derived}, fatal={fatal}, level={level:?}, four_state={four_state}"
+                            );
+                            assert_eq!(expected.is_err(), fatal);
+                            assert_eq!(compiled.time(), reference.time());
+                            for name in ["primary", "secondary", "clk", "derived", "d", "en", "q"] {
+                                let expected = reference.signal(name);
+                                let actual = compiled.signal(name);
+                                assert_eq!(compiled.get(actual), reference.get(expected), "{name}");
+                            }
+                            let stats = compiled.scheduler_stats();
+                            assert!(stats.compiled_slots > 0, "{stats:?}");
+                            assert!(stats.checked_steps > 0, "{stats:?}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// A first tier settles before a domain instead of compiling a fused
     /// copy of the settle into the scheduler for it.
     #[test]
