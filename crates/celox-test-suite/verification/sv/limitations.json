@@ -2100,6 +2100,7 @@
         "class::parameter_defaults_bind_where_the_class_is_declared",
         "class::specialization_keys_follow_the_bound_parameters",
         "class::derived_classes_keep_their_declaration_scopes",
+        "class::method_defaults_use_the_object",
         "property_selects::property_selects_of_parameterized_classes",
         "wide_container_elements::wide_elements_of_parameterized_classes"
       ]

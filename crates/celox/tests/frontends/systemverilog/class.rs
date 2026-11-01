@@ -392,6 +392,38 @@ fn waits_read_property_defaults_only_when_omitted() {
     assert!(error.contains("in a wait condition"), "{error}");
 }
 
+/// The defaults of a method use the object it is called on, as the call
+/// evaluated its receiver, also when an argument then assigns the variable
+/// the receiver names (IEEE 1800-2023 13.5.3). Verilator 5.052 reads the
+/// variable again, so this is not a shared case.
+#[test]
+fn method_defaults_use_the_receiver_the_call_evaluated() {
+    let source = r#"
+    module Top(output int r);
+        class Pair;
+            int n;
+            function int f(int x, int y = n); return x + y; endfunction
+        endclass
+        Pair a, b, cur;
+        function automatic int swap(); cur = b; return 0; endfunction
+        initial begin
+            a = new;
+            a.n = 1;
+            b = new;
+            b.n = 2;
+            cur = a;
+            r = cur.f(swap());
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("receiver.sv"))], "Top")
+            .build()
+            .unwrap();
+    let r = sim.signal("r");
+    sim.run_until(0).unwrap();
+    assert_eq!(sim.get(r), BigUint::from(1u8));
+}
+
 #[test]
 fn randomizing_four_state_properties_is_rejected() {
     for (body, want) in [
@@ -1490,6 +1522,7 @@ sv_backends! {
     fn class_new_initializers_of_scoped_and_alias_types(sim) { @case "class::new_initializers_of_scoped_and_alias_types"; }
     fn class_parameter_literals_hide_module_constants(sim) { @case "class::parameter_literals_hide_module_constants"; }
     fn class_static_initializers_run_once_before_time_zero(sim) { @case "class::static_initializers_run_once_before_time_zero"; }
+    fn class_method_defaults_use_the_object(sim) { @case "class::method_defaults_use_the_object"; }
 }
 
 sv_backends! {

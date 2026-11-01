@@ -3742,6 +3742,22 @@ pub(super) fn lower_subroutine(
         // declaration in the method's own lexical scope (8.5, 6.21).
         builder.push_scope();
     }
+    // A method that is not static receives the handle of its object first,
+    // and a constructor returns the handle of the object it initializes.
+    // Its defaults are evaluated in the scope of the method, so they may
+    // use the object (IEEE 1800-2023 13.5.3); the frontend replaces the
+    // handle with the receiver of a call that uses one.
+    let this = handle.clone().filter(|_| !is_static).map(|handle| {
+        (
+            classes::THIS.to_owned(),
+            ParamDirection::Input,
+            handle,
+            None,
+        )
+    });
+    let mut this_name = this
+        .as_ref()
+        .map(|(source, _, r#type, _)| builder.declare(source, r#type.clone()));
     // Defaults bind in the enclosing declaration scope, before
     // any formal can shadow those names (IEEE 1800-2023 13.5.3).
     let defaults = params
@@ -3792,16 +3808,6 @@ pub(super) fn lower_subroutine(
         .collect::<Result<Vec<_>, _>>()?;
     let mut lowered_params = Vec::new();
     let mut formal_types = HashMap::default();
-    // A method that is not static receives the handle of its object first,
-    // and a constructor returns the handle of the object it initializes.
-    let this = handle.clone().filter(|_| !is_static).map(|handle| {
-        (
-            classes::THIS.to_owned(),
-            ParamDirection::Input,
-            handle,
-            None,
-        )
-    });
     let defaults = this
         .iter()
         .map(|_| None)
@@ -3809,7 +3815,10 @@ pub(super) fn lower_subroutine(
         .collect::<Vec<_>>();
     let mut aggregate_formals = Vec::new();
     for ((source, direction, r#type, _), default) in this.into_iter().chain(params).zip(defaults) {
-        let name = builder.declare(&source, r#type.clone());
+        let name = match this_name.take() {
+            Some(name) => name,
+            None => builder.declare(&source, r#type.clone()),
+        };
         if r#type.unpacked_struct().is_some() {
             aggregate_formals.push((lowered_params.len(), r#type.clone()));
         }
