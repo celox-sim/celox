@@ -951,6 +951,10 @@
       "title": "A bit-select of an associative array element as an assignment target writes nothing",
       "standard": "IEEE 1800-2023 11.5.1"
     },
+    "sv_method_default_receiver": {
+      "title": "A default argument of a method that reads a property of the object reads 0 when the call is made on an array element selected by a static property that an earlier default changes",
+      "standard": "IEEE 1800-2023 13.5.3"
+    },
     "sv_pattern_structure_members": {
       "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
       "standard": "IEEE 1800-2023 21.2.1.6"
@@ -1929,6 +1933,14 @@
       "classification": "xezim_bug",
       "bug": "sv_rest-X1",
       "note": "FLAGS is localparam [1:0][3:0] = 8'b10100101, so FLAGS[1][i] is bit i of 4'b1010; xezim takes FLAGS[1] as a single bit (bit 1 = 0), so i=0 gives 0 and i=1..3 give x (expected 1 at i=1). Same X1 select bug in a non-top module (dut)."
+    },
+    {
+      "suite": "sv",
+      "name": "class::method_defaults_use_the_object",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_method_default_receiver",
+      "note": "m1 = ps[Pair::i].f(), whose defaults are x = bump(), which increments Pair::i and returns 0, and y = n, is 0 instead of 1 (ps[0].n); m1 is the first assertion that fails, the earlier ones pass."
     },
     {
       "suite": "sv",

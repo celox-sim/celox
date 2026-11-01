@@ -904,7 +904,13 @@ arguments with ANSI-declared defaults, also between given ones. A name with no
 formal, a formal bound twice, a positional argument after a named one, too
 many arguments, and an omitted argument whose formal has no default are
 compile errors. Defaults are evaluated only when used,
-in the enclosing declaration scope (IEEE 1800-2023 13.5.3). Constant calls use
+in the enclosing declaration scope (IEEE 1800-2023 13.5.3); the default of a
+method that is not static may use the object the method is called on, calling
+its methods (virtual ones through the object's class) and reading its
+properties, of the object the call evaluates. In a function called from an
+`always_comb` or `assign`, such a default evaluates the receiver again, so a
+receiver with effects is rejected there, and so is any receiver when another
+argument evaluated before the default reads the object has effects. Constant calls use
 the same formal names in parameter initializers, ranges and generate conditions;
 generate-local declarations retain their own signatures. Named calls with
 procedural effects in selection indices are rejected.

@@ -310,6 +310,17 @@
     },
     {
       "category": "Types",
+      "detail": "class::method_defaults_use_the_object at 3765:162: assert_eq m1: expected 0x1, got 0x0",
+      "expectation": "Simulation",
+      "name": "class::method_defaults_use_the_object",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "class::method_ranges_of_scope_declarations at 2808:27: assert_eq a: expected 0x8, got 0x1",
       "expectation": "Simulation",
       "name": "class::method_ranges_of_scope_declarations",

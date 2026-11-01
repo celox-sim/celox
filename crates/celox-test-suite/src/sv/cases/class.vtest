@@ -3698,3 +3698,68 @@ module Top(output int a, output int b, output int c, output int d, output int e)
  end
 endmodule"#)
  (top Top) (run_until 3) (assert_eq a 52) (assert_eq b 6) (assert_eq c 22) (assert_eq d 32) (assert_eq e 42))
+
+; IEEE 1800-2023 13.5.3: a default argument is evaluated in the scope of the
+; method at each call that uses it, so it may call non-static methods,
+; virtual ones through the object's class, and read non-static properties of
+; the object the method is called on.
+(case method_defaults_use_the_object
+ (source "top.sv" #"
+class Event #(type T = int);
+ int count;
+ virtual function T get_default_data(); return T'(count + 100); endfunction
+ virtual function int trigger(T data = get_default_data(), int n = count);
+  count++;
+  return data + n;
+ endfunction
+ function int self_call(); return trigger(); endfunction
+ bit [7:0] bits;
+ int idx;
+ function int pick(int x = bits[idx +: 4]); return x; endfunction
+ task wait_and_add(output int r, input int k = get_default_data());
+  #1 r = k;
+ endtask
+endclass
+class Sub extends Event #(int);
+ virtual function int get_default_data(); return 7; endfunction
+endclass
+class Pair;
+ int n;
+ static int i;
+ function int bump(); i++; return 0; endfunction
+ function int f(int x = bump(), int y = n); return x + y; endfunction
+endclass
+module Top(output int a, output int b, output int c, output int d, output int e, output int f, output int g, output int h, output int m1, output int m3);
+ Event #(int) ev;
+ Sub s;
+ Event #(int) arr[2];
+ Pair ps[2];
+ int made;
+ function automatic Pair make(); made++; return ps[1]; endfunction
+ initial begin
+  ev = new;
+  s = new;
+  arr[1] = s;
+  a = ev.trigger();
+  b = ev.trigger(5);
+  c = s.trigger();
+  d = arr[1].trigger();
+  e = ev.self_call();
+  ev.bits = 8'ha5;
+  ev.idx = 4;
+  s.bits = 8'h3c;
+  s.idx = 2;
+  g = ev.pick();
+  h = arr[1].pick();
+  // The method and its defaults use the object the call evaluated once,
+  // also when a default changes what the receiver expression reads.
+  ps[0] = new;
+  ps[0].n = 1;
+  ps[1] = new;
+  ps[1].n = 2;
+  m1 = ps[Pair::i].f();
+  m3 = make().f() + made * 100;
+  ev.wait_and_add(f);
+ end
+endmodule"#)
+ (top Top) (run_until 2) (assert_eq a 100) (assert_eq b 6) (assert_eq c 7) (assert_eq d 8) (assert_eq e 104) (assert_eq f 103) (assert_eq g 10) (assert_eq h 15) (assert_eq m1 1) (assert_eq m3 102))
