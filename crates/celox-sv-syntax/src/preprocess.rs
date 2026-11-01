@@ -130,6 +130,7 @@ pub struct Preprocessor {
     pub options: Options,
     defines: HashMap<String, Macro>,
     context_depth: usize,
+    source_encoding: crate::SourceEncoding,
 }
 
 impl Default for Preprocessor {
@@ -157,6 +158,7 @@ impl Default for Preprocessor {
             sources: SourceMap::default(),
             options: Options::default(),
             context_depth: 0,
+            source_encoding: crate::SourceEncoding::default(),
             defines: constants
                 .into_iter()
                 .map(|(name, value)| {
@@ -190,6 +192,12 @@ impl Preprocessor {
             options,
             ..Self::default()
         }
+    }
+
+    /// Select the encoding policy for included source files.
+    pub fn with_source_encoding(mut self, encoding: crate::SourceEncoding) -> Self {
+        self.source_encoding = encoding;
+        self
     }
 
     /// Define an empty command-line/tool macro without manufacturing a source
@@ -414,7 +422,7 @@ impl Preprocessor {
                                 self.error(origin, format!("include file `{filename}` not found"))
                             );
                         };
-                        let code = std::fs::read_to_string(&path).map_err(|error| {
+                        let code = self.source_encoding.read(&path).map_err(|error| {
                             self.error(
                                 origin,
                                 format!("cannot read include `{}`: {error}", path.display()),
