@@ -741,3 +741,15 @@ input/inout ports remain unsupported. The existing official net-delay case
 keeps its two pass expectations; its verdict does not test waveforms, so no
 new official pass count is claimed. Focused external disagreements are recorded
 in the shared suite's limitations with standalone evidence.
+
+String `$fgets` support updates two reviewed expectations:
+`chapter-21/21.3--fgets.sv` passes in both state modes in a focused official
+runner invocation. This is not a new full-corpus measurement. That case reads
+from a write-only file without checking the return value or contents; the
+shared invalid-descriptor case and Celox's temporary-file regressions provide
+additional status, line-boundary, EOF, pushback, long-line and byte-content
+checks. Destinations include scalar strings, fixed string-array elements and
+automatic reference arguments. Packed buffers remain unsupported. Native image
+and interpreter/tiered/Cranelift/Wasm tests replay file-handler and core snapshots.
+EOF destination policy and NUL-input tool differences are documented in the
+shared suite's limitations, without changing retained failure exclusions.

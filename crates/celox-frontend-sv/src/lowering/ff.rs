@@ -1691,6 +1691,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.fread(args)?,
             Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fgets),
+                args,
+                ..
+            } => self.fgets(args)?,
+            Expr::Call {
                 callee:
                     sv::ir::Callee::System(
                         function @ (sv::ir::SystemFunction::Ftell
