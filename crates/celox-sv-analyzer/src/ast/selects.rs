@@ -11,6 +11,9 @@ pub(super) fn constant_packed_indices_in_range(
     let Some(variable) = dimensions.get(name) else {
         return false;
     };
+    let Some(indices) = indices.get(variable.unpacked.len()..) else {
+        return true;
+    };
     if indices.len() > variable.packed.len().max(1) {
         return false;
     }

@@ -43,6 +43,7 @@ mod comb_retention;
 mod ff;
 mod floating;
 mod hierarchy;
+mod masked;
 mod procedural;
 mod virtual_interfaces;
 
@@ -78,6 +79,8 @@ struct SvVariable {
     width: usize,
     signed: bool,
     is_4state: bool,
+    /// Flat structure storage is selected only through analyzer-checked member windows.
+    is_unpacked_struct: bool,
     packed_ranges: Vec<(i128, i128)>,
     array_dims: Vec<usize>,
     unpacked_ranges: Vec<(i128, i128)>,
@@ -2691,6 +2694,7 @@ fn prepare_external_hierarchy_collecting(
                         width: variable.metadata.width,
                         signed: variable.signed,
                         is_4state: variable.metadata.is_4state,
+                        is_unpacked_struct: false,
                         packed_ranges: variable
                             .packed_dims
                             .iter()
@@ -4373,6 +4377,7 @@ fn lower_module_with_overrides(
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
+            is_unpacked_struct: type_info.is_unpacked_struct,
             packed_ranges: type_info.packed_ranges,
             array_dims: type_info.array_dims,
             unpacked_ranges: type_info.unpacked_ranges,
@@ -4464,6 +4469,7 @@ fn lower_module_with_overrides(
             width: type_info.width,
             signed: type_info.signed,
             is_4state: type_info.is_4state,
+            is_unpacked_struct: type_info.is_unpacked_struct,
             packed_ranges: type_info.packed_ranges,
             array_dims: type_info.array_dims,
             unpacked_ranges: type_info.unpacked_ranges,
@@ -4553,6 +4559,7 @@ fn lower_module_with_overrides(
                 width,
                 signed,
                 is_4state: true,
+                is_unpacked_struct: false,
                 packed_ranges: vec![(width as i128 - 1, 0)],
                 array_dims: Vec::new(),
                 unpacked_ranges: Vec::new(),
@@ -6278,6 +6285,7 @@ fn lower_initial_processes(
                         width,
                         signed: false,
                         is_4state: false,
+                        is_unpacked_struct: false,
                         packed_ranges: vec![(width as i128 - 1, 0)],
                         array_dims: Vec::new(),
                         unpacked_ranges: Vec::new(),
@@ -6933,6 +6941,7 @@ fn ensure_parent_output_signals(
             width: 1,
             signed: false,
             is_4state: true,
+            is_unpacked_struct: false,
             packed_ranges: Vec::new(),
             array_dims: Vec::new(),
             unpacked_ranges: Vec::new(),
@@ -8398,6 +8407,8 @@ struct SvSignalType {
     width: usize,
     signed: bool,
     is_4state: bool,
+    /// Flat structure storage is selected only through analyzer-checked member windows.
+    is_unpacked_struct: bool,
     packed_ranges: Vec<(i128, i128)>,
     array_dims: Vec<usize>,
     unpacked_ranges: Vec<(i128, i128)>,
@@ -8532,6 +8543,7 @@ fn signal_type_from_sv(
         width,
         signed,
         is_4state,
+        is_unpacked_struct: typ.structure_identity().is_some(),
         packed_ranges,
         array_dims,
         unpacked_ranges,
@@ -8737,15 +8749,18 @@ fn dynamic_packed_write(
         true,
         false,
     )?;
-    let window = unpacked_element_width(variable).and_then(|element_width| {
-        runtime_select_window(
-            lsb,
-            element_width,
-            variable.width,
-            constants,
-            parameter_types,
-        )
-    });
+    let window = (!variable.is_unpacked_struct)
+        .then(|| unpacked_element_width(variable))
+        .flatten()
+        .and_then(|element_width| {
+            runtime_select_window(
+                lsb,
+                element_width,
+                variable.width,
+                constants,
+                parameter_types,
+            )
+        });
     (position.width <= variable.width).then_some(DynamicPackedWrite {
         select_width: position.width,
         up: position.up,
@@ -10169,6 +10184,15 @@ fn runtime_select_position(
     let mut window = None;
     let mut whole_array = false;
     let (left, right) = match name_to_id.get(name).and_then(|id| variables.get(id)) {
+        Some(variable) if variable.is_unpacked_struct => {
+            // Whole structures cannot be bit selected in authored SV. These
+            // coordinates come from member selection, which guards each
+            // member's own window before flattening its array indices.
+            if !flat_arrays {
+                return None;
+            }
+            (i128::try_from(variable.width).ok()?.checked_sub(1)?, 0)
+        }
         Some(variable) if !variable.array_dims.is_empty() => {
             // A select the element lowering cannot express, such as a
             // run-time bit of a constant element, addresses the flattened
