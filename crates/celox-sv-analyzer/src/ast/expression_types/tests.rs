@@ -110,6 +110,44 @@ fn queue_range_types_do_not_require_constant_endpoints() {
 }
 
 #[test]
+fn last_queue_elements_keep_the_declared_type() {
+    // IEEE 1800-2023 7.10 and 7.10.1: `$` selects the last element;
+    // neither an empty queue nor a capacity bound changes its element type.
+    for declaration in ["string q[$];", "string q[$:4];"] {
+        let (session, ty) = query(declaration, "q[$]");
+        assert_eq!(session.types.data(ty), &TyData::String);
+    }
+    let (session, ty) = query("string q[$][$];", "q[$][$]");
+    assert_eq!(session.types.data(ty), &TyData::String);
+    let (session, ty) = query("typedef enum { A, B } E; E q[$];", "q[$]");
+    assert!(matches!(
+        session.types.data(ty),
+        TyData::Packed(semantic_types::Packed {
+            element: PackedElement::Enum {
+                decl: Decl::Named(_),
+                array: false
+            },
+            ..
+        })
+    ));
+}
+
+#[test]
+fn last_queue_elements_remain_typed_method_receivers() {
+    let declarations = "class Cell; int value; function int read(); return value; endfunction endclass Cell q[$]; string words[$];";
+    for expression in ["q[$].value", "q[$].read()", "words[$].len()"] {
+        let (session, ty) = query(declarations, expression);
+        let TyData::Packed(packed) = session.types.data(ty) else {
+            panic!("a last-element selection lost its member type")
+        };
+        assert_eq!(packed.bits(), 32);
+        assert!(packed.signed);
+    }
+    let (session, ty) = query(declarations, "words[$].toupper()");
+    assert_eq!(session.types.data(ty), &TyData::String);
+}
+
+#[test]
 fn runtime_queue_slices_preserve_selected_class_receivers() {
     let declarations = "class Cell; int value; function int read(); return value; endfunction endclass Cell q[$]; int lo, hi; function int next_lo(); return lo++; endfunction";
     for bounds in ["lo:hi", "lo:$", "$:hi", "$:$", "next_lo():hi"] {
