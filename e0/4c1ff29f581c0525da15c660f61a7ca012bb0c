@@ -1,1 +1,6 @@
-Stagger the overlapping package task calls so the shared case does not depend on time-0 order; keep retained reports to the new entries (Codex P2)
+Revision history for #2940:
+
+rev 2 (content) 2026-11-01 18:07 UTC — Stagger the overlapping package task calls so the shared case does not depend on time-0 order; keep retained reports to the new entries (Codex P2)
+rev 1 (initial) 2026-11-01 18:07 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2940,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"e9520d81a41317ba4ab28b75c2703e95ed9f8f38","timestamp_iso":"2026-11-01T18:07:56Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"e9520d81a41317ba4ab28b75c2703e95ed9f8f38","new_sha":"e04c1ff29f581c0525da15c660f61a7ca012bb0c","timestamp_iso":"2026-11-01T18:07:56Z","reason":"Stagger the overlapping package task calls so the shared case does not depend on time-0 order; keep retained reports to the new entries (Codex P2)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/e9520d81a41317ba4ab28b75c2703e95ed9f8f38...e04c1ff29f581c0525da15c660f61a7ca012bb0c"}]} -->
