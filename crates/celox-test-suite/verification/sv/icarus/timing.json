@@ -1508,6 +1508,17 @@
     },
     {
       "category": "Sequential",
+      "detail": "Icarus build exit status: 134; see <case>/build.log\n<case>/source_0.sv:13: syntax error\n<case>/source_0.sv:13: error: Malformed statement\n<case>/source_0.sv:19: syntax error\n<case>/source_0.sv:19: error: Malformed statement\n<case>/source_0.sv:20: syntax error\n<case>/source_0.sv:20: error: Invalid module item.\n<case>/source_0.sv:21: syntax error\n<case>/source_0.sv:21: error: Invalid module instantiation\n<case>/source_0.sv:22: error: Invalid module instantiation\n<case>/testbench.sv:11: error: Invalid module item.\n<case>/testbench.sv:24: warning: Static variable initialization requires explicit lifetime in this context.\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n<case>/source_0.sv:16: assert: pform.cc:1478: failed assertion lexical_scope == cur_module\nAborted (core dumped)\n",
+      "expectation": "Simulation",
+      "name": "timing::static_formals_of_package_tasks",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
       "detail": "",
       "expectation": "Simulation",
       "name": "timing::statically_satisfied_waits_preserve_distinct_activation_times",

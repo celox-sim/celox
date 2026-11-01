@@ -774,6 +774,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq was_rand: expected 0x1, got 0x0",
                         ),
+                        ("icarus", "timing::static_formals_of_package_tasks") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("xezim", "timing::static_formals_of_package_tasks") => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq first: expected 0x3, got 0x2",
+                        ),
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

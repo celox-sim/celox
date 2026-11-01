@@ -6292,7 +6292,10 @@ fn automatic_task_nbas_are_illegal_even_in_folded_branches() {
 }
 
 #[test]
-fn scoped_timed_task_static_formals_require_shared_storage() {
+fn scoped_timed_task_static_formals_are_scope_variables() {
+    // Overlapping calls share the static formals of a task (IEEE 1800-2023
+    // 13.3.2), so those of a package or `$unit` task are its variables;
+    // `timing::static_formals_of_package_tasks` checks the sharing.
     for scope in ["package p;", ""] {
         let end_scope = if scope.is_empty() { "" } else { "endpackage" };
         let call = if scope.is_empty() { "t(q)" } else { "p::t(q)" };
@@ -6300,18 +6303,8 @@ fn scoped_timed_task_static_formals_require_shared_storage() {
             let source = format!(
                 "{scope} task {lifetime} t(input int x); #1; endtask {end_scope} module Top; int q; initial {call}; endmodule"
             );
-            let result = analyze_source(&source, Path::new("scoped_timed_task.sv"));
-            if lifetime.is_empty() {
-                let error = result.expect_err("scoped static formals are not shared yet");
-                assert!(
-                    error
-                        .to_string()
-                        .contains("static arguments in a package or compilation-unit timed task"),
-                    "{error}"
-                );
-            } else {
-                result.expect("scoped automatic tasks have per-activation storage");
-            }
+            analyze_source(&source, Path::new("scoped_timed_task.sv"))
+                .unwrap_or_else(|error| panic!("{source}: {error}"));
         }
     }
 }
