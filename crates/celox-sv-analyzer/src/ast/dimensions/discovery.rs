@@ -1275,7 +1275,7 @@ fn settle_scope(
     #[cfg(test)]
     super::SCOPE_SETTLES.with(|count| count.set(count.get() + 1));
     let mut context = input.clone();
-    for (name, binding) in &scope::imported(tree).enum_constants.declarations {
+    for (name, binding) in &scope::imported(tree).constant_types {
         Arc::make_mut(&mut context.constant_types)
             .entry(name.clone())
             .or_insert_with(|| binding.clone());

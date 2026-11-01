@@ -634,7 +634,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
     fn enter_class_scope(&mut self, class: &classes::Class) {
         self.dims.class_scope = Some(class.name.clone());
         let constants =
-            classes::specializations::enum_constants(self.tree, self.session, &class.name);
+            classes::specializations::constant_types(self.tree, self.session, &class.name);
         Arc::make_mut(&mut self.dims.constant_types).extend(constants);
         // The name of a property of unpacked structure type, whose members
         // are properties named by their member paths, is hidden too.

@@ -1205,7 +1205,9 @@ impl Module {
                 &const_env,
                 &type_aliases,
             );
-            packed_dimensions.constant_types = Arc::new(enum_constants.declarations.clone());
+            let mut constant_types = imported.constant_types.clone();
+            constant_types.extend(enum_constants.declarations.clone());
+            packed_dimensions.constant_types = Arc::new(constant_types);
             for parameter in imported.parameters.iter().chain(&parameters) {
                 let bindings = Arc::make_mut(&mut packed_dimensions.constant_types);
                 bindings.remove(parameter.name());
@@ -1770,8 +1772,8 @@ impl Module {
                 .flat_map(|process| process.assignments().iter().cloned())
                 .collect();
             if is_package || export_symbols {
-                enum_constants.declarations.extend(
-                    classes::specializations::export_enum_constants(syntax_tree, session),
+                Arc::make_mut(&mut packed_dimensions.constant_types).extend(
+                    classes::specializations::export_constant_types(syntax_tree, session),
                 );
             }
             // A package keeps its symbols for the scopes that use it.
@@ -1796,6 +1798,7 @@ impl Module {
                     .chain(classes::scope_class_types(syntax_tree))
                     .collect(),
                 enum_constants: enum_constants.clone(),
+                constant_types: (*packed_dimensions.constant_types).clone(),
                 functions: functions.clone(),
                 function_return_types: (*packed_dimensions.function_return_types).clone(),
                 constant_functions: syntax_tree.functions.clone(),
