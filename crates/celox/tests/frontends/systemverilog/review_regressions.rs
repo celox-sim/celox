@@ -5694,7 +5694,7 @@ fn rejects_constructs_that_are_not_yet_lowered() {
         (
             "delayed continuous assignment",
             r#"
-            module Top(input logic a, output wire y); assign #5 y = a; endmodule
+            module Top(input logic a, output wire y); assign #(5,6) y = a; endmodule
         "#,
         ),
         (

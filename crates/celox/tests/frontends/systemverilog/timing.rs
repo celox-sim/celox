@@ -552,7 +552,7 @@ fn unimplemented_timing_features_are_rejected() {
             88,
         ),
         (
-            "bit a, y; assign #1 y = a;",
+            "bit a, y; assign #(1,2) y = a;",
             "delayed continuous assignment",
             444,
         ),
@@ -2188,5 +2188,116 @@ fn blocking_intra_assignment_tag_errors_observe_the_right_time() {
                 check!(builder.build_cranelift());
             }
         }
+    }
+}
+
+timed_cases! {
+    fn continuous_delay_inertial = "timing::continuous_delay_inertial";
+    fn continuous_delay_unchanged_rhs = "timing::continuous_delay_unchanged_rhs";
+    fn continuous_delay_sized_vector = "timing::continuous_delay_sized_vector";
+    fn continuous_delay_four_state = "timing::continuous_delay_four_state";
+}
+
+timed_cases! {
+    fn continuous_delay_selected_drivers = "timing::continuous_delay_selected_drivers";
+    fn continuous_delay_generate_parameters = "timing::continuous_delay_generate_parameters";
+    fn continuous_delay_zero = "timing::continuous_delay_zero";
+    fn continuous_delay_wide_context = "timing::continuous_delay_wide_context";
+}
+
+sv_backends! {
+    fn continuous_delay_checkpoint_restores_pending_updates(sim) {
+        @setup {
+            let source = r#"module Top(input bit a, output wire y);
+                timeunit 1ps / 1ps;
+                assign #10 y = a;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("continuous_checkpoint.sv"))], "Top");
+        sim.run_until(0).unwrap();
+        let a = sim.signal("a"); let y = sim.signal("y");
+        sim.modify(|io| io.set(a, 1u8)).unwrap();
+        sim.run_until(3).unwrap();
+        let bytes = sim.checkpoint().unwrap().to_bytes().unwrap();
+        // SAFETY: bytes were serialized by this simulation.
+        let saved = unsafe { sim.checkpoint_from_bytes(&bytes) }.unwrap();
+        sim.run_until(11).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(1u8));
+        sim.restore(&saved).unwrap();
+        sim.modify(|io| io.set(a, 0u8)).unwrap();
+        sim.run_until(11).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(0u8));
+        sim.restore(&saved).unwrap();
+        sim.run_until(11).unwrap();
+        assert_eq!(sim.get(y), BigUint::from(1u8));
+    }
+}
+
+#[test]
+fn continuous_delay_rounds_time_literals_in_the_declaring_scope() {
+    let source = r#"module Top(output bit same);
+        timeunit 1ns / 100ps;
+        bit a = 1;
+        wire y;
+        assign #1.25ns y = a;
+        initial begin
+            #1.2; same = y == 0;
+            #0.2; same = same && y == 1;
+        end
+    endmodule"#;
+    let mut sim = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("continuous_units.sv"))],
+        "Top",
+    )
+    .build_cranelift()
+    .unwrap();
+    sim.run_until(14).unwrap();
+    assert_eq!(sim.get(sim.signal("same")), BigUint::from(1u8));
+}
+
+#[test]
+fn continuous_delay_unsupported_forms_are_explicit() {
+    for body in [
+        "bit a, y; int d; assign #(d) y = a;",
+        "bit a, y; assign #(-1) y = a;",
+        "bit a, y; assign #(1,2) y = a;",
+        "bit a, y; assign #(1.5) y = a;",
+        "bit a, b, y; assign #1 {y,b} = {a,a};",
+        "bit a; wire [3:0] y; int i; assign #1 y[i] = a;",
+        "bit a, y; function bit f(); a = ~a; return a; endfunction assign #1 y = f();",
+    ] {
+        let source = format!("module Top; {body} endmodule");
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(&source, std::path::Path::new("continuous_unsupported.sv"))],
+            "Top",
+        )
+        .build_cranelift() else {
+            panic!("unsupported delayed assignment accepted: {body}");
+        };
+        assert!(
+            error.to_string().contains("continuous assignment"),
+            "{body}: {error}"
+        );
+    }
+}
+
+sv_backends! {
+    fn continuous_delay_cancelled_timer_leaves_no_future_event(sim) {
+        @setup {
+            let source = r#"module Top(output wire y, output time stopped_at);
+                timeunit 1ps / 1ps;
+                bit a;
+                assign #5 y = a;
+                initial begin #6; a = 1; #2; a = 0; end
+                final stopped_at = $time;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("continuous_cancel.sv"))], "Top");
+        sim.run_slots(64, || false).unwrap();
+        assert_eq!(sim.time(), 8);
+        assert_eq!(sim.next_event_time(), None);
+        sim.finish().unwrap();
+        assert_eq!(sim.get(sim.signal("y")), BigUint::from(0u8));
+        assert_eq!(sim.get(sim.signal("stopped_at")), BigUint::from(8u8));
     }
 }

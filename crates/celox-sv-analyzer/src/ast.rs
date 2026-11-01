@@ -213,6 +213,7 @@ mod casts;
 mod classes;
 pub(crate) use classes::ClassIndex;
 mod comb_process;
+mod continuous_delays;
 mod events;
 mod mailboxes;
 mod processes;
@@ -1603,6 +1604,13 @@ impl Module {
                     )?);
                     (subroutines, comb_processes, ff_processes, initial_processes)
                 };
+            continuous_delays::lower(
+                syntax_tree,
+                &packed_dimensions,
+                &mut signals,
+                &mut comb_processes,
+                &mut initial_processes,
+            )?;
             let (inline_subroutines, inline_randomizations) =
                 procedural::randomization::inline_subroutines(
                     syntax_tree,
@@ -2928,6 +2936,8 @@ impl LValue {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CombProcess {
+    /// Elaborated ticks, consumed by continuous_delays before IR publication.
+    delay: Option<u64>,
     creation_order: usize,
     site: Option<crate::procedural::SourceSpan>,
     /// Where the procedure is written, for an `always @*` that becomes a
@@ -2975,6 +2985,7 @@ impl CombProcess {
             })
             .collect();
         Self {
+            delay: None,
             creation_order: 0,
             site: None,
             process_site: None,
@@ -2988,6 +2999,7 @@ impl CombProcess {
 
     fn procedural(kind: CombProcessKind, condition: Option<ConstExpr>, body: Vec<Stmt>) -> Self {
         Self {
+            delay: None,
             creation_order: 0,
             site: None,
             process_site: None,
