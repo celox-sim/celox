@@ -1,1 +1,6 @@
-Keep the portable fgets error case independent of unspecified destination contents; Verilator clears strings for invalid descriptors, while Celox-specific regressions retain preservation checks.
+Revision history for #2967:
+
+rev 2 (content) 2026-11-01 21:37 UTC — Keep the portable fgets error case independent of unspecified destination contents; Verilator clears strings for invalid descriptors, while Celox-specific regressions retain preservation checks.
+rev 1 (initial) 2026-11-01 21:37 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2967,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"4762b0a814111ceb110b310001ff88fc5969e34c","timestamp_iso":"2026-11-01T21:37:18Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"4762b0a814111ceb110b310001ff88fc5969e34c","new_sha":"bcea3a9457d27f3c94ad0c1e5a4f5ca3b82faf78","timestamp_iso":"2026-11-01T21:37:18Z","reason":"Keep the portable fgets error case independent of unspecified destination contents; Verilator clears strings for invalid descriptors, while Celox-specific regressions retain preservation checks.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/4762b0a814111ceb110b310001ff88fc5969e34c...bcea3a9457d27f3c94ad0c1e5a4f5ca3b82faf78"}]} -->
