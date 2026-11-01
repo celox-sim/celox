@@ -357,3 +357,27 @@ endmodule
   (assert_eq generated_bits 0x40000000000000003ffc0000000000003ff8000000000000)
   (assert_eq math_bits 0x3ff8000000000000)
   (assert_eq selected_bits 0x8000000000000000))
+
+(case real_to_wide_integral_results
+  (source "real_to_wide_integral.sv" #"
+    module Top(input logic [63:0] bits,
+               output logic signed [34:0] narrow,
+               output logic signed [39:0] wide);
+      real value;
+      assign value = $bitstoreal(bits);
+      assign narrow = value;
+      assign wide = value;
+    endmodule
+  "#)
+  (top Top)
+  ; 2**33 + 0.5 rounds upward, retaining bits above bit 31.
+  (modify (set bits 0x4200000000040000))
+  (assert_eq narrow 0x200000001)
+  (assert_eq wide 0x200000001)
+  ; -25.5 rounds away from zero and is truncated to each destination width.
+  (modify (set bits 0xc039800000000000))
+  (assert_eq narrow 0x7ffffffe6)
+  (assert_eq wide 0xffffffffe6)
+  (modify (set bits 0))
+  (assert_eq narrow 0)
+  (assert_eq wide 0))

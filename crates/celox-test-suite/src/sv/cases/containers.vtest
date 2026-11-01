@@ -1622,3 +1622,24 @@ endmodule
 "#)
   (top Top) (run_until 0) (assert_eq done 1)
   (expect_output "2 2 1\n"))
+
+(case queue_40bit_pop_result
+  (source "queue_40bit_pop.sv" #"
+    module Top(input logic clk, input logic [39:0] a, output logic [39:0] y);
+      logic [39:0] q[$];
+      always @(posedge clk) begin
+        q.push_back(a);
+        y = q.pop_front();
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set a 0xabcdef1234))
+  (tick clk)
+  (assert_eq y 0xabcdef1234)
+  (modify (set a 0xffffffffff))
+  (tick clk)
+  (assert_eq y 0xffffffffff)
+  (modify (set a 0))
+  (tick clk)
+  (assert_eq y 0))

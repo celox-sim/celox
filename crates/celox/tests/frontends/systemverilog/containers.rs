@@ -6,6 +6,9 @@ sv_backends! {
     fn associative_default_four_state(sim) { @case "containers::associative_default_four_state"; }
     fn associative_default_wide(sim) { @case "containers::associative_default_wide"; }
 
+    fn queue_40bit_pop_result(sim) {
+        @case "containers::queue_40bit_pop_result";
+    }
     fn queue_slice_runtime_bounds(sim) { @case "containers::queue_slice_runtime_bounds"; }
     fn queue_slice_updates_and_copies(sim) { @case "containers::queue_slice_updates_and_copies"; }
     fn queue_slice_wide_and_unknown_bounds(sim) { @case "containers::queue_slice_wide_and_unknown_bounds"; }
