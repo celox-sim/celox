@@ -1,0 +1,1 @@
+Stagger the overlapping package task calls so the shared case does not depend on time-0 order; keep retained reports to the new entries (Codex P2)
