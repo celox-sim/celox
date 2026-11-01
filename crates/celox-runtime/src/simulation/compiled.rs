@@ -203,6 +203,7 @@ impl<B: SimBackend> SimulationState<B> {
         if self.one_slot_runs() && limit > self.scheduler.time {
             self.sample_values(executor.backend_mut());
         }
+        executor.set_compiled_host_budgets(self.round_budget, self.return_budget);
         let scheduler = self
             .model
             .scheduler
@@ -216,6 +217,7 @@ impl<B: SimBackend> SimulationState<B> {
         // Only hosts that prove their input state settled may enter clean.
         backend.set(scheduler.dirty, 1u8);
         backend.set(scheduler.count, 0u64);
+        let budget = budget.min(backend.compiled_scheduler_budget());
         backend.set(scheduler.budget, budget);
         backend.set(scheduler.runtime_events, 0u64);
         for &(_, waiting) in scheduler.wake.iter().flatten() {
@@ -320,6 +322,9 @@ impl<B: SimBackend> SimulationState<B> {
         }
         let unit = scheduler.unit;
         let result = executor.run_process(unit);
+        self.process_state
+            .nba_queue
+            .extend(executor.take_compiled_nbas());
 
         let scheduler = self
             .model

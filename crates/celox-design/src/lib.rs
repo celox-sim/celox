@@ -878,8 +878,9 @@ pub struct ProcessSlots<A> {
     pub kind: ProcessKind,
     /// This kernel requires Simulation's process scheduler rather than Simulator.
     pub requires_timed_simulation: bool,
-    /// Every delay the kernel suspends for is a constant of at least one
-    /// time unit.
+    /// Every delay after startup is a constant of at least one time unit.
+    /// A compiler-inserted zero-time startup fence is handled by the reference
+    /// loop at time zero, before any compiled slot can start.
     pub const_delays: bool,
     /// For an `initial` procedure of a program instance (IEEE 1800-2023
     /// 24.3), the status slot of that instance's first such kernel, which
@@ -1440,6 +1441,13 @@ pub const SCHEDULER_CLOCKS: usize = 64;
 /// [`SchedulerSlots::cont`], [`SchedulerSlots::dirty`] and every [`SchedulerSlots::waiting`] and
 /// [`SchedulerSlots::baseline`] object.
 pub const SCHEDULER_FLAG_WIDTH: usize = 8;
+/// Width of the private control word at [`SchedulerSlots::defer_limit_settle`].
+/// Its low byte is the defer flag; the other fields are internal to a run.
+pub const SCHEDULER_CONTROL_WIDTH: usize = 128;
+/// Bit position of the private Active-wave continuation byte in that word.
+pub const SCHEDULER_ACTIVE_RESUME_BIT: usize = 8;
+/// Bit position of the borrowed synchronous host-services pointer in that word.
+pub const SCHEDULER_HOST_CONTEXT_BIT: usize = 64;
 
 /// Hidden state objects through which a compiled scheduler and the runtime
 /// exchange a run of time slots. Between runs they hold no state: the
@@ -1467,6 +1475,8 @@ pub struct SchedulerSlots<A> {
     /// testbench) while it runs the scheduler: a run that reaches its limit
     /// then leaves a deferred settle pending instead of settling for the
     /// host.
+    /// Its low byte is the flag. The rest of this private control word holds
+    /// an Active-wave continuation and a borrowed host-services context.
     pub defer_limit_settle: A,
     /// The number of time slots the run ran.
     pub count: A,

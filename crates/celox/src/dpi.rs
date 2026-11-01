@@ -87,7 +87,17 @@ impl DpiSymbols {
         addresses.extend(
             functions
                 .iter()
-                .map(|function| self.address(&function.name))
+                .map(|function| {
+                    #[cfg(feature = "host-runtime")]
+                    if function.name == crate::simulator::native_io::SYMBOL
+                        && function.signature != crate::simulator::native_io::signature()
+                    {
+                        return Err(DpiError::UnresolvedFunction {
+                            name: function.name.clone(),
+                        });
+                    }
+                    self.address(&function.name)
+                })
                 .collect::<Result<Vec<_>, _>>()?,
         );
         Ok(ExternFunctionTable {
@@ -104,6 +114,11 @@ impl DpiSymbols {
     }
 
     fn address(&self, name: &str) -> Result<usize, DpiError> {
+        #[cfg(feature = "host-runtime")]
+        if name == crate::simulator::native_io::SYMBOL {
+            return Ok(crate::simulator::native_io::call as *const () as usize);
+        }
+
         if let Some(&(_, address)) = self.functions.iter().find(|(known, _)| known == name) {
             return Ok(address);
         }
