@@ -1,0 +1,1 @@
+Address review r4436422607: preserve the four-state conditional predicate in integral result types and subsequent casts.
