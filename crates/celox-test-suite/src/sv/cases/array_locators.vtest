@@ -361,3 +361,60 @@ module Top(output bit [4:0] flags);
 endmodule
 "#)
   (top Top) (run_until 0) (assert_eq flags 31))
+
+; `sort` and `rsort` with a with expression order the elements by the values
+; it gives them (IEEE 1800-2023 7.12.2); equal keys keep their order here.
+(case ordering_methods_with_expressions
+  (source "array_locators.sv" #"
+module Top(output int by_key, output int by_name_desc, output int by_magnitude,
+           output int by_remainder, output int by_length, output int property_queue,
+           output int property_handles);
+    class N;
+        int k; string name;
+        function new(int k, string name); this.k = k; this.name = name; endfunction
+        function string get_name(); return name; endfunction
+    endclass
+    class Holder;
+        N list[$];
+        int offsets[$];
+    endclass
+    N q[$];
+    N n;
+    int a[$], d[];
+    string s[$];
+    Holder h;
+    initial begin
+        n = new(3, "c"); q.push_back(n);
+        n = new(1, "b"); q.push_back(n);
+        n = new(2, "a"); q.push_back(n);
+        n = new(1, "d"); q.push_back(n);
+        q.sort with (item.k);
+        by_key = q[0].k * 1000 + q[1].k * 100 + q[2].k * 10 + q[3].k;
+        q.rsort(x) with (x.get_name());
+        by_name_desc = (q[0].name == "d") + 2 * (q[1].name == "c") + 4 * (q[2].name == "b")
+            + 8 * (q[3].name == "a");
+        a = '{5, -2, 7, 0, -9};
+        a.sort with (item < 0 ? -item : item);
+        by_magnitude = (a[0] == 0) + 2 * (a[1] == -2) + 4 * (a[2] == 5) + 8 * (a[3] == 7)
+            + 16 * (a[4] == -9);
+        d = '{4, 1, 3, 2};
+        d.rsort with (item % 3);
+        by_remainder = d[0] * 1000 + d[1] * 100 + d[2] * 10 + d[3];
+        s = '{"pear", "fig", "banana"};
+        s.sort with (item.len());
+        by_length = (s[0] == "fig") + 2 * (s[1] == "pear") + 4 * (s[2] == "banana");
+        h = new;
+        h.offsets = '{30, 10, 20};
+        h.offsets.sort with (item);
+        property_queue = h.offsets[0] * 100 + h.offsets[1] * 10 + h.offsets[2] / 10;
+        n = new(2, "y"); h.list.push_back(n);
+        n = new(1, "x"); h.list.push_back(n);
+        h.list.sort with (item.k);
+        property_handles = h.list[0].k * 10 + h.list[1].k;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq by_key 1123) (assert_eq by_name_desc 15) (assert_eq by_magnitude 31)
+  (assert_eq by_remainder 2413) (assert_eq by_length 7) (assert_eq property_queue 1203)
+  (assert_eq property_handles 12))

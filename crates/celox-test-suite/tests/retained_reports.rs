@@ -805,6 +805,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "assert_eq before_b: expected 0x2, got 0x1",
                         ),
+                        ("icarus", "array_locators::ordering_methods_with_expressions") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }

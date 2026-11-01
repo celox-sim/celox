@@ -286,6 +286,7 @@ test("every retained baseline accepts only its existing failures", () => {
           tool === "icarus"
             ? [
                 "array_locators::array_locator_unique_class_handles",
+                "array_locators::ordering_methods_with_expressions",
                 "class::casts_to_class_properties",
                 "class::constrained_enumerations_and_randc",
                 "class::container_type_aliases_of_classes",
