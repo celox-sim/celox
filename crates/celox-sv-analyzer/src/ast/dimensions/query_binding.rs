@@ -1051,6 +1051,7 @@ mod tests {
         context.function_return_types.insert(
             "f".into(),
             FunctionReturnMetadata {
+                semantic_type: None,
                 arguments: Some(Arc::from([])),
                 width: Some(8),
                 first_packed_dimension_width: Some(2),
