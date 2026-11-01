@@ -159,6 +159,31 @@ pub(in crate::ast) fn classify<'a>(
     for process in std::mem::take(comb) {
         let blocks = requires_process(&process.body, &timed, &definitions);
         if !blocks && !uses_scheduler(&process.body, &scheduled, &definitions) {
+            if process.kind == CombProcessKind::AlwaysLatch && assigns_nonblocking(&process.body) {
+                let wait =
+                    timing::implicit_event_kind(&process.body, &process.sensitivity_body, true);
+                let mut body = process.body;
+                // always_latch executes once at time zero, then rearms its
+                // implicit sensitivity before the queued NBA updates land.
+                body.push(wait);
+                processes.push(InitialProcess {
+                    creation_order: process.creation_order,
+                    site: process.process_site,
+                    condition: process.condition,
+                    body: vec![Stmt::Loop {
+                        kind: LoopKind::Forever,
+                        init: Vec::new(),
+                        condition: None,
+                        step: Vec::new(),
+                        body,
+                    }],
+                    kind: celox_design::ProcessKind::Regular,
+                    validation_body: Vec::new(),
+                    synthetic: false,
+                    repeats: true,
+                });
+                continue;
+            }
             if process.kind == CombProcessKind::AlwaysStar && assigns_nonblocking(&process.body) {
                 return Err(unsupported("nonblocking assignment inside always_comb"));
             }
@@ -277,7 +302,7 @@ fn requires_process(
                     statement,
                     Stmt::Delay { .. }
                         | Stmt::WaitEvent(_)
-                        | Stmt::WaitImplicit(_)
+                        | Stmt::WaitImplicit { .. }
                         | Stmt::Wait(_)
                         | Stmt::AssertionRegion { .. }
                         | Stmt::WaitFork

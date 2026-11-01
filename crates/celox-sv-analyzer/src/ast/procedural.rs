@@ -4597,7 +4597,7 @@ pub(super) fn lower_subroutine(
                         stmt,
                         Stmt::Delay { .. }
                             | Stmt::WaitEvent(_)
-                            | Stmt::WaitImplicit(_)
+                            | Stmt::WaitImplicit { .. }
                             | Stmt::Wait(_)
                             | Stmt::AssertionRegion { .. }
                             | Stmt::WaitFork

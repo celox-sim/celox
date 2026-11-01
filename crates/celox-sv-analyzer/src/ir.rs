@@ -193,7 +193,10 @@ impl Module {
                 .chain(&process.sensitivity_body)
                 .cloned()
                 .collect();
-            let mut body = vec![Stmt::WaitImplicit(reads)];
+            let mut body = vec![Stmt::WaitImplicit {
+                reads,
+                always_comb: false,
+            }];
             body.extend(process.body);
             if defer_rearm {
                 body.push(Stmt::DeferActive);

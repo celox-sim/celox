@@ -16,6 +16,7 @@
     "icarus/increment_decrement.json",
     "icarus/indexed_select.json",
     "icarus/interfaces.json",
+    "icarus/latch.json",
     "icarus/literals.json",
     "icarus/logic_gates.json",
     "icarus/mailboxes.json",
