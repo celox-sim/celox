@@ -1,0 +1,1 @@
+Bind local typedefs through the shared typedef binding (types::bind_alias, parameters::enum_members_of) instead of a separate path, as the coordinator asked after Codex's findings
