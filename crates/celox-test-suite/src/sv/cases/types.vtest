@@ -833,3 +833,25 @@ endmodule"#)
   "#)
   (top Top) (eval) (assert_eq ok 1)
   (assert_eq q 340282366920938463463374607431768211460))
+(case scalar_integral_type_casts
+  (source "scalar_integral_casts.sv" #"
+    module Top(input logic [7:0] a, output logic [7:0] q, output bit b, output logic r);
+      assign q = logic'(a);
+      assign b = bit'(a);
+      assign r = reg'(a);
+    endmodule
+  "#)
+  (top Top) (set a 0xfe) (eval)
+  (assert_eq q 0) (assert_eq b 0) (assert_eq r 0)
+  (set a 0x81) (eval)
+  (assert_eq q 1) (assert_eq b 1) (assert_eq r 1))
+
+(case scalar_integral_type_casts_four_state
+  (source "scalar_integral_casts_xz.sv" #"
+    module Top(output bit ok);
+      logic [7:0] x = 8'b1010000x, z = 8'b0100000z;
+      assign ok = logic'(x) === 1'bx && reg'(z) === 1'bz &&
+                  bit'(x) === 1'b0 && bit'(z) === 1'b0;
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq ok 1))
