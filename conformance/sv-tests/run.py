@@ -120,8 +120,8 @@ def run_case(root, driver, out_dir, test, state_mode):
     input_issues = json.loads((REPO / "conformance/sv-tests/input-issues.json").read_text())["cases"]
     return reporting.annotate({
         "test": test, "state_mode": state_mode, "result": verdict,
-        "mode": meta.get("mode", ""), "tags": meta.get("tags", ""),
-        "group": (meta.get("results_group") or "main") if meta else "unclassified",
+        "mode": meta.get("mode", ""), "tags": meta.get("tags", "") if meta else case_metadata(root / "tests" / test).get("tags", ""),
+        "group": (meta.get("results_group") or "main") if meta else case_group(root / "tests" / test),
         "input_issue": (input_issues.get(test, {}).get("reason", "")
                         if meta.get("rc") == "1" and "include directory is unavailable:" in log else ""),
         "rc": meta.get("rc", ""), "tool_success": meta.get("tool_success", ""),
@@ -153,8 +153,14 @@ def summarize(rows, meta_tags=None):
             executed = counts["pass"] + counts["fail"]
             tags = {}
             modes = {}
+            skipped_tags = Counter()
             for row in selected:
                 if row["result"] == "skip":
+                    case_tags = set(row["tags"].split())
+                    for meta_tag, dependencies in (meta_tags or {}).items():
+                        if not dependencies.isdisjoint(case_tags):
+                            case_tags.add(meta_tag)
+                    skipped_tags.update(case_tags)
                     continue
                 modes.setdefault(row["mode"], Counter())[row["result"]] += 1
                 case_tags = set(row["tags"].split())
@@ -170,6 +176,7 @@ def summarize(rows, meta_tags=None):
                 "pass_percent": round(100 * counts["pass"] / executed, 2) if executed else None,
                 "tags_passed": sum(count["fail"] == 0 for count in tags.values()),
                 "tags_tested": len(tags),
+                "skipped_by_tag": dict(sorted(skipped_tags.items())),
                 "by_tag": {tag: {"passed": count["pass"], "executed": sum(count.values())}
                            for tag, count in sorted(tags.items())},
                 "by_execution_mode": {mode: dict(count) for mode, count in sorted(modes.items())},
@@ -241,6 +248,20 @@ def collect_cases(root, driver, out_dir, tests, modes, jobs):
     return sorted(rows, key=lambda row: (row["test"], row["state_mode"]))
 
 
+def case_metadata(path):
+    """Read reporting annotations only; tools/runner still owns the verdict."""
+    metadata = {}
+    for line in path.read_text().splitlines():
+        match = re.match(r"^:([a-zA-Z_-]+):\s*(.+)", line)
+        if match:
+            metadata[match[1].lower()] = match[2]
+    return metadata
+
+
+def case_group(path):
+    return case_metadata(path).get("results_group") or "main"
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("sv_tests", type=Path, help="pinned sv-tests checkout root")
@@ -248,12 +269,15 @@ def main(argv=None):
     parser.add_argument("--out-dir", type=Path, required=True, help="official logs and temporary directories")
     parser.add_argument("--jobs", type=positive_int, default=1, help="concurrent official runner processes (default: 1)")
     parser.add_argument("--state-mode", choices=(*MODES, "both"), default="both")
+    parser.add_argument("--group", choices=("main", "imported", "cores"), help="select an upstream reporting group")
     parser.add_argument("--expected", type=Path)
     parser.add_argument("--update", action="store_true")
     parser.add_argument("--report", type=Path)
     parser.add_argument("--shard", type=shard,
                         help="INDEX/COUNT: run and compare only that shard of the tests and expectations")
     options = parser.parse_args(argv)
+    if options.group and options.expected:
+        parser.error("--group cannot be combined with --expected")
     if options.update and not options.expected:
         parser.error("--update requires --expected")
     root, driver, out_dir = options.sv_tests.resolve(), options.driver.resolve(), options.out_dir.resolve()
@@ -273,6 +297,8 @@ def main(argv=None):
         stage = "corpus"
         tests = sorted(p.relative_to(root / "tests").as_posix()
                        for p in (root / "tests").rglob("*") if p.is_file() and p.suffix.lower() == ".sv")
+        if options.group:
+            tests = [test for test in tests if case_group(root / "tests" / test) == options.group]
         if not tests:
             raise ValueError("sv-tests checkout contains no .sv tests")
         # Expected tests that the corpus lost belong to a shard too, so that
