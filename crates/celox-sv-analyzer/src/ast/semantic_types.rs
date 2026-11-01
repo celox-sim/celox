@@ -107,6 +107,8 @@ pub(super) enum TyData {
     Real,
     Shortreal,
     String,
+    /// The null literal, before conversion to a handle (6.11.1, 11.4.11).
+    Null,
     /// A handle of a class object (8.4).
     Class(Decl),
     /// A virtual interface, with a modport if one is selected (25.9).
