@@ -1,0 +1,1 @@
+Address review r4433770142: accept compatible struct subarrays as list/default pattern items, retain element declaration identity, and cover array compatibility and X/Z copying.
