@@ -2008,6 +2008,18 @@ pub(super) fn lower_instruction(
             let d_width = ctx.sir_width(dst);
             let lhs_width = ctx.sir_width(lhs);
             let rhs_width = ctx.sir_width(rhs);
+            // With one-bit operands, logical AND/OR have exactly the bitwise
+            // truth table, including X/Z. Operand evaluation is already in
+            // the SIR CFG; this changes only the pure value/mask calculation.
+            let op = match op {
+                BinaryOp::LogicAnd if d_width == 1 && lhs_width == 1 && rhs_width == 1 => {
+                    &BinaryOp::And
+                }
+                BinaryOp::LogicOr if d_width == 1 && lhs_width == 1 && rhs_width == 1 => {
+                    &BinaryOp::Or
+                }
+                _ => op,
+            };
             debug_assert!(lhs_width > 64 || !ctx.wide_regs.contains_key(lhs));
             debug_assert!(rhs_width > 64 || !ctx.wide_regs.contains_key(rhs));
 
@@ -2970,7 +2982,20 @@ pub(super) fn lower_instruction(
         }
 
         SIRInstruction::Concat(dst, args) => {
+            if concat::try_lower_concat_of_bitwise_lanes(
+                ctx, block, *dst, args, sir_block, sir_defs,
+            ) {
+                return;
+            }
+            if transpose::try_lower(ctx, block, *dst, args, sir_block, sir_defs) {
+                return;
+            }
             if try_lower_concat_of_muxes(ctx, block, *dst, args, sir_block, sir_defs) {
+                return;
+            }
+            if concat::try_lower_concat_of_adjacent_slices(
+                ctx, block, *dst, args, sir_block, sir_defs,
+            ) {
                 return;
             }
             if try_lower_repeated_msb_concat(ctx, block, *dst, args) {
