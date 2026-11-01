@@ -256,6 +256,11 @@ fn run_sv(arguments: RunConfig) -> Result<(), String> {
         .signal_access(arguments.design.signal_access.clone())
         .plusargs(arguments.plusargs.iter().cloned())
         .defer_initialization(arguments.save_state.restore_checkpoint.is_some());
+    let builder = if let Some(path) = &arguments.execution.vcd {
+        builder.vcd(path)
+    } else {
+        builder
+    };
     let builder = if signal.is_some() || arguments.save_state.restore_checkpoint.is_some() {
         builder.file_system(|| Box::<checkpoint_fs::CheckpointFs>::default())
     } else {
@@ -315,14 +320,29 @@ fn simulate_sv<B: celox::SimBackend>(
     output: &mut (impl Write + Send),
     report: bool,
 ) -> Result<(), String> {
+    let result = simulate_sv_inner(&mut simulation, max_steps, &mut saves, output, report);
+    simulation
+        .flush_vcd()
+        .map_err(|error| format!("VCD flush failed: {error}"))?;
+    result
+}
+
+#[cfg(feature = "systemverilog")]
+fn simulate_sv_inner<B: celox::SimBackend>(
+    simulation: &mut celox::Simulation<B>,
+    max_steps: u64,
+    saves: &mut StateSaves,
+    output: &mut (impl Write + Send),
+    report: bool,
+) -> Result<(), String> {
     let initial = simulation.eval_comb();
-    drain_sv_output(&mut simulation, output, &mut saves.failed)?;
+    drain_sv_output(simulation, output, &mut saves.failed)?;
     initial.map_err(|error| error.to_string())?;
     if report {
-        report_sv_scheduler(&simulation, "initial", 0, output)?;
+        report_sv_scheduler(simulation, "initial", 0, output)?;
     }
-    saves.start(&mut simulation);
-    saves.service_signal(&mut simulation);
+    saves.start(simulation);
+    saves.service_signal(simulation);
     let mut steps = 0;
     while !simulation.is_finished()
         && let Some(next) = simulation.next_event_time()
@@ -333,26 +353,26 @@ fn simulate_sv<B: celox::SimBackend>(
         // Without state files to save at time steps, slots run in the
         // compiled scheduler where it can.
         if !saves.saves_at_steps()
-            && let Some(run) = run_sv_slots(&mut simulation, max_steps - steps, &mut saves, output)?
+            && let Some(run) = run_sv_slots(simulation, max_steps - steps, saves, output)?
         {
             steps += run;
             continue;
         }
-        saves.before(&mut simulation, next)?;
+        saves.before(simulation, next)?;
         let step = simulation.step();
-        drain_sv_output(&mut simulation, output, &mut saves.failed)?;
+        drain_sv_output(simulation, output, &mut saves.failed)?;
         if step.map_err(|error| error.to_string())?.is_none() {
             break;
         }
-        saves.after_step(&mut simulation)?;
+        saves.after_step(simulation)?;
         steps += 1;
     }
     let finished = simulation.finish();
-    drain_sv_output(&mut simulation, output, &mut saves.failed)?;
+    drain_sv_output(simulation, output, &mut saves.failed)?;
     finished.map_err(|error| error.to_string())?;
-    saves.finish(&mut simulation)?;
+    saves.finish(simulation)?;
     if report {
-        report_sv_scheduler(&simulation, "finished", steps, output)?;
+        report_sv_scheduler(simulation, "finished", steps, output)?;
     }
     if saves.failed {
         return Err("SystemVerilog testbench reported an assertion failure or $error".to_string());
