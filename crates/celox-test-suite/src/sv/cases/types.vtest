@@ -747,3 +747,89 @@ endmodule"#)
   (let z_mask (xmask (get z_value)))
   (assert (== x_mask 7))
   (assert (== z_mask 15)))
+
+(case inline_enum_state_machine
+  (source "inline_enum.sv" #"
+    module Top(input bit clk, reset, output int q, output bit constants_ok);
+      localparam int START = 3;
+      enum int unsigned { IDLE = START, RUN, DONE = RUN + 2 } state;
+      localparam int AFTER = DONE + 1;
+      assign q = state;
+      assign constants_ok = IDLE == 3 && RUN == 4 && DONE == 6 && AFTER == 7;
+      always_ff @(posedge clk)
+        if (reset) state <= IDLE;
+        else case (state)
+          IDLE: state <= RUN;
+          RUN: state <= DONE;
+          default: state <= IDLE;
+        endcase
+    endmodule
+  "#)
+  (top Top) (set clk 0) (set reset 1) (eval)
+  (tick clk) (assert_eq q 3) (assert_eq constants_ok 1)
+  (set reset 0)
+  (tick clk) (assert_eq q 4)
+  (tick clk) (assert_eq q 6)
+  (tick clk) (assert_eq q 3))
+
+(case inline_enum_four_state_constants
+  (source "inline_enum_xz.sv" #"
+    module Top(output bit ok);
+      enum logic [7:0] { BAD = 8'b10xz0011, GOOD = 8'h32 } state;
+      initial begin
+        state = BAD;
+        ok = state === 8'b10xz0011 && BAD === 8'b10xz0011 && GOOD == 8'h32;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq ok 1))
+
+(case inline_enum_wide_unused
+  (source "inline_enum_wide_unused.sv" #"
+    module Top(output bit ok);
+      enum logic [255:0] { HI = 256'h1_00000000_00000000_00000000_00000000 } state;
+      assign ok = 1'b1;
+    endmodule
+  "#)
+  (top Top) (eval) (assert_eq ok 1))
+
+(case inline_enum_wide_constants
+  (source "inline_enum_wide.sv" #"
+    module Top(output logic [255:0] q, output bit ok);
+      enum logic [255:0] {
+        HI = 256'h1_00000000_00000000_00000000_00000000,
+        NEXT,
+        LATER = NEXT + 256'd3,
+        LAST
+      } state;
+      assign q = LAST;
+      assign ok = HI == (256'd1 << 128) &&
+                  NEXT == (256'd1 << 128) + 256'd1 &&
+                  LATER == (256'd1 << 128) + 256'd4;
+    endmodule
+  "#)
+  (top Top) (eval) (assert_eq ok 1)
+  (assert_eq q 340282366920938463463374607431768211461))
+
+; An explicit known value may restart enumeration after a resolved X/Z value.
+(case inline_enum_wide_unknown_explicit_successor
+  (source "inline_enum_wide_unknown_explicit.sv" #"
+    module Top(output bit ok);
+      enum logic [255:0] { A = 256'd1 << 128, B = A / 0, C = 256'd9, D } state;
+      assign ok = B === 256'bx && C == 256'd9 && D == 256'd10;
+    endmodule
+  "#)
+  (four_state) (top Top) (eval) (assert_eq ok 1))
+
+(case inline_enum_wider_expression_initializer
+  (source "inline_enum_wider_expression.sv" #"
+    module Top(output logic [255:0] q, output bit ok);
+      enum logic [255:0] { HI = 512'd1 << 128, NEXT, LATER = NEXT + 512'd2, LAST } state;
+      enum logic signed [255:0] { SIGNED_HI = 512'sd1 << 128, SIGNED_NEXT } signed_state;
+      assign q = LAST;
+      assign ok = NEXT == (256'd1 << 128) + 256'd1 &&
+                  SIGNED_NEXT == (256'd1 << 128) + 256'd1;
+    endmodule
+  "#)
+  (top Top) (eval) (assert_eq ok 1)
+  (assert_eq q 340282366920938463463374607431768211460))
