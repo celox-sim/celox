@@ -139,31 +139,19 @@ fn type_aliases_in_scope(
             }
             BodyItemKind::TypeAlias(id) => {
                 let alias = syntax_tree.declarations().type_alias(*id);
-                let TypeAliasTarget::DataType(id) = alias.target else {
-                    continue;
-                };
-                let Some(base) = type_binding::alias_base_type(
-                    id,
-                    syntax_tree.declarations(),
+                let Some(ty) = bind_alias(
                     syntax_tree,
                     session,
+                    alias,
                     const_env,
                     &aliases,
+                    const_env,
                     defer_class_defaults,
+                    || declaration_name(syntax_tree, alias, generate_scope),
                 )?
                 else {
                     continue;
                 };
-                let context = PackedDimensions::new(HashMap::default(), const_env, &aliases);
-                let mut ty = containers::with_dimensions(
-                    base,
-                    &alias.dimensions,
-                    syntax_tree,
-                    session,
-                    &context,
-                )?;
-                drop(context);
-                ty.name_declaration(|| declaration_name(syntax_tree, alias, generate_scope));
                 aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
             }
             _ => {}
@@ -174,37 +162,80 @@ fn type_aliases_in_scope(
     // A non-negative bound is written as a plain decimal so that it does not
     // widen the index arithmetic of a run-time select to 128 bits.
     for ty in aliases.values_mut() {
-        for range in &mut ty.packed_ranges {
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.functions, &range.left, const_env)
-            {
-                range.left = bound_literal(value);
-            }
-            if let Some(value) =
-                eval_ast_const_expr(&syntax_tree.functions, &range.right, const_env)
-            {
-                range.right = bound_literal(value);
-            }
-        }
-        for range in &mut ty.unpacked_ranges {
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.functions, &range.left, const_env)
-            {
-                range.left = bound_literal(value);
-            }
-            if let Some(value) =
-                eval_ast_const_expr(&syntax_tree.functions, &range.right, const_env)
-            {
-                range.right = bound_literal(value);
-            }
-            if let Some(value) = range
-                .size
-                .as_ref()
-                .and_then(|size| eval_ast_const_expr(&syntax_tree.functions, size, const_env))
-            {
-                range.size = Some(bound_literal(value));
-            }
-        }
+        freeze_bounds(ty, &syntax_tree.functions, const_env);
     }
     Ok(aliases.into_inner())
+}
+
+/// The type typedef `alias` declares, of a module, class, generate scope or
+/// procedural body: its base type bound in `const_env`, named by `name`
+/// before dimensions bound in `dimension_env` hold it, or `None` for a
+/// forward typedef or one whose type is not known yet (IEEE 1800-2023
+/// 6.18).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn bind_alias(
+    syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    alias: &celox_sv_syntax::TypeAlias,
+    const_env: &SharedMap<i128>,
+    aliases: &SharedMap<Type>,
+    dimension_env: &SharedMap<i128>,
+    defer_class_defaults: bool,
+    name: impl FnOnce() -> (String, type_names::TypedefName),
+) -> Converted<Option<Type>> {
+    let TypeAliasTarget::DataType(id) = alias.target else {
+        return Ok(None);
+    };
+    let Some(mut base) = type_binding::alias_base_type(
+        id,
+        syntax_tree.declarations(),
+        syntax_tree,
+        session,
+        const_env,
+        aliases,
+        defer_class_defaults,
+    )?
+    else {
+        return Ok(None);
+    };
+    // The base type's bounds are those of `const_env`, and the declared
+    // type is named before container dimensions hold it as their element.
+    freeze_bounds(&mut base, &syntax_tree.functions, const_env);
+    base.name_declaration(name);
+    let context = PackedDimensions::new(HashMap::default(), dimension_env, aliases);
+    containers::with_dimensions(base, &alias.dimensions, syntax_tree, session, &context).map(Some)
+}
+
+/// `ty` with the bounds of its ranges evaluated in `const_env`, the
+/// environment of the scope that declares it.
+pub(super) fn freeze_bounds(
+    ty: &mut Type,
+    functions: &const_functions::ConstantFunctions,
+    const_env: &HashMap<String, i128>,
+) {
+    for range in &mut ty.packed_ranges {
+        if let Some(value) = eval_ast_const_expr(functions, &range.left, const_env) {
+            range.left = bound_literal(value);
+        }
+        if let Some(value) = eval_ast_const_expr(functions, &range.right, const_env) {
+            range.right = bound_literal(value);
+        }
+    }
+    for range in &mut ty.unpacked_ranges {
+        if let Some(value) = eval_ast_const_expr(functions, &range.left, const_env) {
+            range.left = bound_literal(value);
+        }
+        if let Some(value) = eval_ast_const_expr(functions, &range.right, const_env) {
+            range.right = bound_literal(value);
+        }
+        if let Some(value) = range
+            .size
+            .as_ref()
+            .and_then(|size| eval_ast_const_expr(functions, size, const_env))
+        {
+            range.size = Some(bound_literal(value));
+        }
+    }
 }
 
 /// The name of typedef `alias`, qualified by the module, interface, program

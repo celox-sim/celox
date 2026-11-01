@@ -959,6 +959,10 @@
       "title": "A method called without parentheses on the handle that another parenless method call returns (n.get_peer.get_id) reads unknown bits",
       "standard": "IEEE 1800-2023 13.5.5"
     },
+    "sv_local_typedef_shadowing": {
+      "title": "A typedef in a begin-end block does not shadow a typedef of the enclosing module",
+      "standard": "IEEE 1800-2023 6.18"
+    },
     "sv_pattern_structure_members": {
       "title": "%p of an unpacked structure prints bit-vector members in hexadecimal ('hff), null class handle members as 0, and a structure member of an associative array element (m[5].n) as 0",
       "standard": "IEEE 1800-2023 21.2.1.6"
@@ -3946,6 +3950,14 @@
       "classification": "xezim_bug",
       "bug": "sv_hier-X43",
       "note": "a=10 at time 5 (expected 20): pulse is a static task (module default lifetime), so the second call at t=1 overwrites the shared formal value with 20 before the first call resumes at 5 (13.3.2). xezim gives each overlapping call its own copy of the formals. Reproduced standalone; Icarus gives 20."
+    },
+    {
+      "suite": "sv",
+      "name": "types::local_typedefs",
+      "status": "mismatch",
+      "classification": "xezim_bug",
+      "bug": "sv_local_typedef_shadowing",
+      "note": "In the block that declares typedef bit [7:0] nib_t, n is declared with the module's bit [3:0] nib_t, so b, the first assertion that fails, is 'hf instead of 'hff; a, the result of the method that declares typedefs, is as expected."
     },
     {
       "suite": "sv",

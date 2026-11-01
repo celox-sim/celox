@@ -247,6 +247,15 @@ fn constant(
     dimensions: &PackedDimensions,
 ) -> Option<Arc<EnumDomain>> {
     let value = *dimensions.const_env.get(name)?;
+    // A member of a local enumeration of the body.
+    if let Some(domain) = dimensions.enum_constants.get(name)
+        && domain
+            .members
+            .iter()
+            .any(|member| member.name == name && member.value == value)
+    {
+        return Some(domain.clone());
+    }
     let find = |scope: Option<&str>, member: &str| {
         let mut candidates = dimensions
             .type_aliases

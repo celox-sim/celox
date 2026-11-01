@@ -416,6 +416,7 @@ test("every retained baseline accepts only its existing failures", () => {
                 "tagged_unions::writable_task_arguments",
                 "timing::final_procedure_output_survives_program_completion",
                 "types::chandles_hold_null_and_copies",
+                "types::local_typedefs",
                 "types::unpacked_array_assignments_through_selects_and_calls",
                 "unions::packed_mixed_state",
                 "unions::soft_overlay",
