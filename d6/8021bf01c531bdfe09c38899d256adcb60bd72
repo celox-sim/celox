@@ -1,1 +1,1 @@
-Rebase onto master: take master's enum_constants type, keep both sides of class cases and retained reports
+Rebase onto master: constant_types replaces enum_constants; keep both sides of class cases and retained reports
