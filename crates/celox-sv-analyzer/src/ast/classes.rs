@@ -331,6 +331,28 @@ impl Class {
         false
     }
 
+    /// The classes that [`Self::derives_from`] is true of.
+    fn lineage(
+        &self,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
+        env: &HashMap<String, i128>,
+        aliases: &HashMap<String, Type>,
+    ) -> HashSet<String> {
+        let mut pending = vec![self.name.clone()];
+        let mut seen = HashSet::default();
+        while let Some(name) = pending.pop() {
+            if seen.contains(&name) {
+                continue;
+            }
+            if let Ok(class) = self::class(tree, session, &name, env, aliases) {
+                pending.extend(class.base.iter().chain(&class.interfaces).cloned());
+            }
+            seen.insert(name);
+        }
+        seen
+    }
+
     /// The subroutine that `$cast` to a variable of `class` calls (IEEE
     /// 1800-2023 8.16).
     pub fn cast_name(class: &str) -> String {
@@ -1365,27 +1387,71 @@ fn object_classes(
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<Rc<Class>>> {
+    let concrete = ConcreteClasses::of(tree, session, env, aliases);
     let mut classes = Vec::new();
     let mut ids = HashMap::default();
-    for name in visible_classes(tree, session) {
-        // A class that cannot be laid out has no objects.
-        let Ok(class) = class(tree, session, &name, env, aliases) else {
-            continue;
-        };
-        if class.is_abstract || class.is_interface {
+    for (name, class, lineage) in &concrete.classes {
+        if !lineage.contains(ancestor) {
             continue;
         }
-        if !class.derives_from(tree, session, ancestor, env, aliases) {
-            continue;
-        }
-        if let Some(other) = ids.insert(class.id, name.clone()) {
+        if let Some(other) = ids.insert(class.id, name) {
             return Err(unsupported(format!(
                 "classes `{other}` and `{name}` with the same run-time identifier"
             )));
         }
-        classes.push(class);
+        classes.push(class.clone());
     }
     Ok(classes)
+}
+
+/// The classes of [`visible_classes`] that can be laid out and are neither
+/// abstract nor interface classes, each with the classes it is, derives from
+/// or implements (see [`Class::derives_from`]). A scope keeps them while no
+/// class is laid out or specialized, which is what could change them.
+pub(super) struct ConcreteClasses {
+    syntax_tree: *const SyntaxTree,
+    imported: Arc<scope::ScopeSymbols>,
+    generation: (usize, usize),
+    classes: Vec<(String, Rc<Class>, HashSet<String>)>,
+}
+
+impl ConcreteClasses {
+    fn of(
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
+        env: &HashMap<String, i128>,
+        aliases: &HashMap<String, Type>,
+    ) -> Rc<Self> {
+        let generation =
+            |session: &Session| (session.classes.len(), session.class_specializations.len());
+        if let Some(known) = &session.concrete_classes
+            && std::ptr::eq(known.syntax_tree, tree.syntax_tree)
+            && Arc::ptr_eq(&known.imported, &tree.imported)
+            && known.generation == generation(session)
+        {
+            return known.clone();
+        }
+        let mut classes = Vec::new();
+        for name in visible_classes(tree, session) {
+            // A class that cannot be laid out has no objects.
+            let Ok(class) = class(tree, session, &name, env, aliases) else {
+                continue;
+            };
+            if class.is_abstract || class.is_interface {
+                continue;
+            }
+            let lineage = class.lineage(tree, session, env, aliases);
+            classes.push((name, class, lineage));
+        }
+        let concrete = Rc::new(Self {
+            syntax_tree: tree.syntax_tree,
+            imported: tree.imported.clone(),
+            generation: generation(session),
+            classes,
+        });
+        session.concrete_classes = Some(concrete.clone());
+        concrete
+    }
 }
 
 /// The overrides that dispatcher `Class::dispatcher_name(owner, method)`

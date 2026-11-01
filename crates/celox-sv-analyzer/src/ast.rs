@@ -31,6 +31,9 @@ pub(crate) struct Session {
     generate_items: generate::Memo,
     /// Classes laid out so far, by name.
     classes: HashMap<String, std::rc::Rc<classes::Class>>,
+    /// The classes whose objects dispatchers and `$cast` select from, as
+    /// the scope last saw them.
+    concrete_classes: Option<std::rc::Rc<classes::ConcreteClasses>>,
     /// The constants and types of the scope that declares each class, which
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
     class_declaration_scopes: HashMap<String, (SharedMap<i128>, SharedMap<Type>)>,
