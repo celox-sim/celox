@@ -705,3 +705,45 @@ endmodule"#)
  (assert_eq levels 2)
  (assert_eq bound 3)
  (assert_eq pairs 64))
+
+(case package_enum_unknown_constants
+  (source "package_enum_unknown.sv" #"
+    package commands;
+      typedef enum logic [3:0] {
+        READ = 4'b0101, DESELECT = 4'b1xxx, HIGHZ = 4'bzzzz,
+        MERGED = DESELECT | 4'b0010, ZERO = DESELECT & 4'b0000, NEXT
+      } command_t;
+    endpackage
+    module Top(output logic exact, output logic [3:0] zero_value, next_value);
+      assign exact = (commands::DESELECT === 4'b1xxx)
+                  && (commands::HIGHZ === 4'bzzzz)
+                  && (commands::MERGED === 4'b1x1x);
+      assign zero_value = commands::ZERO;
+      assign next_value = commands::NEXT;
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq exact 1)
+  (assert_eq zero_value 0)
+  (assert_eq next_value 1))
+
+(case package_enum_unknown_storage
+  (four_state)
+  (source "package_enum_unknown_storage.sv" #"
+    package commands;
+      typedef enum logic [3:0] { DESELECT = 4'b1xxx, HIGHZ = 4'bzzzz } command_t;
+    endpackage
+    module Top(output logic [3:0] x_value, z_value, output logic exact);
+      assign x_value = commands::DESELECT;
+      assign z_value = commands::HIGHZ;
+      assign exact = (x_value === 4'b1xxx) && (z_value === 4'bzzzz);
+    endmodule
+  "#)
+  (top Top)
+  (eval)
+  (assert_eq exact 1)
+  (let x_mask (xmask (get x_value)))
+  (let z_mask (xmask (get z_value)))
+  (assert (== x_mask 7))
+  (assert (== z_mask 15)))
