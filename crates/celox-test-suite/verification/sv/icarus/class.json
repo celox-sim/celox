@@ -1605,6 +1605,17 @@
     },
     {
       "category": "Types",
+      "detail": "native testbench failed: signal: 6 (SIGABRT); see runtime.log and protocol.log\ninternal error: 24vvp_fun_signal_object_sa: recv_real(1.000000) not implemented\nvvp: vvp_net.cc:3346: virtual void vvp_net_fun_t::recv_real(vvp_net_ptr_t, double, vvp_context_t): Assertion `0' failed.\ntimeout: the monitored command dumped core\n",
+      "expectation": "Simulation",
+      "name": "class::real_properties",
+      "phase": "execute",
+      "status": "runtime_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid class item.\n<case>/source_0.sv:7: syntax error\nI give up.\n",
       "expectation": "Simulation",
       "name": "class::scoped_typedef_handles",

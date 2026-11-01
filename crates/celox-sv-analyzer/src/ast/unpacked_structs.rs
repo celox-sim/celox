@@ -759,6 +759,9 @@ pub(in crate::ast) fn record(
     let mut fields = Vec::new();
     for leaf in &leaves {
         let mut field = classes::field(functions, &leaf.r#type, env, size)?;
+        if field.real {
+            return Err(unsupported("real member of a structure held in a record"));
+        }
         field.nullable = true;
         size = field.offset + field.storage();
         fields.push(field);
