@@ -731,3 +731,13 @@ continuous updates, inertial cancellation, independent declarators,
 generate-local constants, destination sizing and X/Z. Icarus and xezim pass
 all three; Verilator passes the two two-state cases and skips the four-state
 case as unsupported. Independent net delays remain a separate implementation.
+
+Independent constant net delays now delay scalar and packed-net bits after
+continuous or supported gate drivers. Seven shared cases check per-bit pending
+updates, composed assignment/net delays, mixed declarators, scoped constants,
+selected drivers, nonzero/ascending bounds and wholly/partially undriven Z. Checkpoints retain
+independent pending bits. Instance connections to delayed nets and delayed
+input/inout ports remain unsupported. The existing official net-delay case
+keeps its two pass expectations; its verdict does not test waveforms, so no
+new official pass count is claimed. Focused external disagreements are recorded
+in the shared suite's limitations with standalone evidence.

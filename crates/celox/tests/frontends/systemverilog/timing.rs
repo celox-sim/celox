@@ -2192,6 +2192,13 @@ fn blocking_intra_assignment_tag_errors_observe_the_right_time() {
 }
 
 timed_cases! {
+    fn continuous_delay_net_independent = "timing::continuous_delay_net_independent";
+    fn continuous_delay_net_selected_drivers = "timing::continuous_delay_net_selected_drivers";
+    fn continuous_delay_net_per_bit = "timing::continuous_delay_net_per_bit";
+    fn continuous_delay_net_mixed_generate = "timing::continuous_delay_net_mixed_generate";
+    fn continuous_delay_net_four_state = "timing::continuous_delay_net_four_state";
+    fn continuous_delay_net_partially_undriven = "timing::continuous_delay_net_partially_undriven";
+    fn continuous_delay_net_gate_driver = "timing::continuous_delay_net_gate_driver";
     fn continuous_delay_net_initializer = "timing::continuous_delay_net_initializer";
     fn continuous_delay_net_initializer_generate = "timing::continuous_delay_net_initializer_generate";
     fn continuous_delay_net_initializer_four_state = "timing::continuous_delay_net_initializer_four_state";
@@ -2265,6 +2272,11 @@ fn continuous_delay_unsupported_forms_are_explicit() {
         "bit a; int d; wire #(d) y = a;",
         "bit a; wire #(-1) y = a;",
         "bit a; wire #(1,2) y = a;",
+        "wire #(1,2) y;",
+        "int d; wire #(d) y;",
+        "wire #(-1) y;",
+        "wire #1 y [2];",
+        "wire [3:0] #1 y; bit a; int i; assign y[i]=a;",
         "bit a, y; assign #(-1) y = a;",
         "bit a, y; assign #(1,2) y = a;",
         "bit a, y; assign #(1.5) y = a;",
@@ -2305,5 +2317,68 @@ sv_backends! {
         sim.finish().unwrap();
         assert_eq!(sim.get(sim.signal("y")), BigUint::from(0u8));
         assert_eq!(sim.get(sim.signal("stopped_at")), BigUint::from(8u8));
+    }
+}
+
+sv_backends! {
+    fn continuous_delay_net_checkpoint_restores_each_bit(sim) {
+        @setup {
+            let source = r#"module Top(input bit [1:0] a, output wire [1:0] y);
+                timeunit 1ps / 1ps;
+                wire [1:0] #5 w;
+                assign w=a;
+                assign y=w;
+            endmodule"#;
+        }
+        @build celox::Simulation::from_sv_sources(vec![(source, std::path::Path::new("net_checkpoint.sv"))], "Top");
+        sim.run_until(5).unwrap();
+        let a=sim.signal("a"); let y=sim.signal("y");
+        sim.modify(|io| io.set(a,1u8)).unwrap();
+        sim.run_until(7).unwrap();
+        sim.modify(|io| io.set(a,3u8)).unwrap();
+        sim.run_until(8).unwrap();
+        let bytes=sim.checkpoint().unwrap().to_bytes().unwrap();
+        // SAFETY: this simulation produced these checkpoint bytes.
+        let saved=unsafe {sim.checkpoint_from_bytes(&bytes)}.unwrap();
+        sim.run_until(10).unwrap();
+        assert_eq!(sim.get(y),BigUint::from(1u8));
+        sim.run_until(12).unwrap();
+        assert_eq!(sim.get(y),BigUint::from(3u8));
+        sim.restore(&saved).unwrap();
+        sim.modify(|io| io.set(a,0u8)).unwrap();
+        sim.run_until(12).unwrap();
+        assert_eq!(sim.get(y),BigUint::from(0u8));
+        sim.restore(&saved).unwrap();
+        sim.run_until(10).unwrap();
+        assert_eq!(sim.get(y),BigUint::from(1u8));
+        sim.run_until(12).unwrap();
+        assert_eq!(sim.get(y),BigUint::from(3u8));
+    }
+}
+
+#[test]
+fn continuous_delay_net_boundaries_are_explicit() {
+    for source in [
+        "module Top(a,y); input a; output y; wire #1 a; assign y=a; endmodule",
+        "module Top(io); inout io; wire #1 io; endmodule",
+        "module Child(input bit a); endmodule module Top; wire #1 w; assign w=0; Child c(w); endmodule",
+        "module Child(output wire y); assign y=0; endmodule module Top; wire #1 w; Child c(w); endmodule",
+        "module Child(input wire w); endmodule module Top; wire #1 w; assign w=0; Child c(.w); endmodule",
+        "module Child(input wire w); endmodule module Top; wire #1 w; assign w=0; Child c(.w(w & 1'b1)); endmodule",
+    ] {
+        let Err(error) = celox::Simulation::from_sv_sources(
+            vec![(source, std::path::Path::new("net_boundary.sv"))],
+            "Top",
+        )
+        .build_cranelift() else {
+            panic!("unsupported net delay accepted: {source}");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("independent net delay in an instance connection")
+                || error.to_string().contains("non-ANSI port"),
+            "{source}: {error}"
+        );
     }
 }

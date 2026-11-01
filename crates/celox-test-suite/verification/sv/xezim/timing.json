@@ -1587,6 +1587,30 @@
           "LIMITATIONS.md#systemverilog-suite"
         ]
       }
+    },
+    {
+      "category": "Sequential",
+      "detail": "Xezim 0.11.4 initializes undriven bits of a partially driven delayed vector to X until the net delay elapses: the standalone probe prints xxxx at 1 ns, then zz00 at 4 ns. IEEE 1800-2023 6.7.1 requires bits without drivers to default to Z, so the first value must be zzxx. The wholly undriven scalar net and the other six independent-delay cases pass.",
+      "expectation": "Simulation",
+      "name": "timing::continuous_delay_net_partially_undriven",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_independent_net_undriven_bits",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 initializes undriven bits of a partially driven delayed vector to X until the net delay elapses: the standalone probe prints xxxx at 1 ns, then zz00 at 4 ns. IEEE 1800-2023 6.7.1 requires bits without drivers to default to Z, so the first value must be zzxx. The wholly undriven scalar net and the other six independent-delay cases pass.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/independent-net-delays-xezim.json",
+          "verification/repros/sv_independent_net_delay_partial.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
     }
   ]
 }

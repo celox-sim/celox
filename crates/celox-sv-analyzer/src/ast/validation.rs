@@ -244,14 +244,9 @@ fn validate_body_items(
             BodyItemKind::Net(id)
                 if native
                     .net_declaration(*id)
-                    .variables
-                    .iter()
-                    .any(|variable| variable.value.is_some())
-                    && native
-                        .net_declaration(*id)
-                        .delay
-                        .as_ref()
-                        .is_some_and(|delay| delay.values.len() != 1) =>
+                    .delay
+                    .as_ref()
+                    .is_some_and(|delay| delay.values.len() != 1) =>
             {
                 return Err(unsupported(
                     "delayed continuous assignment with rise/fall/turn-off delays",
