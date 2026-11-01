@@ -1,1 +1,7 @@
-Rebase onto origin/master fcedfea (add/add conflicts in shared test lists and retained reports resolved by keeping both sides)
+Revision history for #2896:
+
+rev 3 (rebase) 2026-11-01 16:16 UTC — Rebase onto origin/master fcedfea (add/add conflicts in shared test lists and retained reports resolved by keeping both sides)
+rev 2 (content) 2026-11-01 13:08 UTC
+rev 1 (initial) 2026-11-01 13:08 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2896,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"b320922a28c650aa8b064dc6652f2063e0f6acb0","timestamp_iso":"2026-11-01T13:08:17Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"b320922a28c650aa8b064dc6652f2063e0f6acb0","new_sha":"1309872bfa71b544482d0556528c80a4e8ee2e85","timestamp_iso":"2026-11-01T13:08:17Z","reason":"","replay_sha":"f119fbb49473f458722442bd8dba948a6b0cdfc3","compare_url":"https://github.com/celox-sim/celox/compare/b320922a28c650aa8b064dc6652f2063e0f6acb0...f119fbb49473f458722442bd8dba948a6b0cdfc3"},{"number":3,"change_type":"rebase","old_sha":"1309872bfa71b544482d0556528c80a4e8ee2e85","new_sha":"a55f451fe26a76694ac3179a737d3d0278242090","timestamp_iso":"2026-11-01T16:16:38Z","reason":"Rebase onto origin/master fcedfea (add/add conflicts in shared test lists and retained reports resolved by keeping both sides)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/1309872bfa71b544482d0556528c80a4e8ee2e85...a55f451fe26a76694ac3179a737d3d0278242090"}]} -->
