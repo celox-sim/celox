@@ -1490,6 +1490,16 @@ impl SimBackend for TieredBackend {
         matches!(self.phase, Phase::Compiled(_))
     }
 
+    fn compiled_scheduler_budget(&self) -> u64 {
+        // A native loop must return periodically so an optimizing image can
+        // replace the baseline while a long simulation is still running.
+        if self.upgrade_receiver.is_some() {
+            1024
+        } else {
+            u64::MAX
+        }
+    }
+
     fn runs_derived_edge_units(&self) -> bool {
         matches!(self.phase, Phase::Compiled(_)) && self.derived_edges_live
     }

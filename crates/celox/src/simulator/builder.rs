@@ -2084,6 +2084,7 @@ mod host {
         injected_components: crate::InjectedComponents,
         frontend_artifact: Option<celox_frontend_sdk::FrontendArtifact>,
         file_dependencies: celox_frontend_veryl::FileDependencyCollector,
+        native_file_calls: bool,
         _marker: std::marker::PhantomData<Target>,
     }
 
@@ -2747,6 +2748,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2769,6 +2771,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2792,6 +2795,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2820,6 +2824,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2847,6 +2852,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -2875,6 +2881,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3057,6 +3064,9 @@ mod host {
             if (self.options.emit_triggers || laid_out.runtime.testbench.is_some())
                 && self.options.scheduler != crate::SchedulerMode::Reference
             {
+                if self.native_file_calls {
+                    crate::scheduler::enable_native_services(&mut laid_out);
+                }
                 crate::scheduler::attach(
                     &mut laid_out,
                     !self.options.native_force_support
@@ -3852,6 +3862,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3874,6 +3885,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: None,
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3898,6 +3910,7 @@ mod host {
                 injected_components: Default::default(),
                 frontend_artifact: Some(artifact),
                 file_dependencies: Default::default(),
+                native_file_calls: false,
                 _marker: std::marker::PhantomData,
             }
         }
@@ -3947,9 +3960,10 @@ mod host {
             all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
         ))]
         pub fn build_native(
-            self,
+            mut self,
         ) -> Result<crate::Simulation<crate::backend::native::NativeBackend>, SimulatorError>
         {
+            self.native_file_calls = true;
             self.build_with_backend(
                 crate::backend::memory_layout::MemoryLayoutMode::ElementStrided,
                 true,
@@ -3969,6 +3983,7 @@ mod host {
         pub fn compile_native(
             mut self,
         ) -> Result<NativeCompilation<crate::Simulation>, SimulatorError> {
+            self.native_file_calls = true;
             self.options.emit_triggers = true;
             let (laid_out, mut warnings, options, vcd_path, injected_components) = self
                 .into_laid_out_program(
@@ -4047,9 +4062,10 @@ mod host {
         /// Builds a timed simulation that starts interpreted and adopts compiled
         /// code at a scheduler safe point once background compilation completes.
         pub fn build_tiered(
-            self,
+            mut self,
         ) -> Result<crate::Simulation<crate::backend::TieredBackend>, SimulatorError> {
             let layout = crate::backend::tiered::tiered_layout_mode(self.vcd_path.is_some());
+            self.native_file_calls = true;
             self.build_with_backend(layout, false, |program, options| {
                 Ok(crate::backend::TieredBackend::new(program, options))
             })
@@ -5337,7 +5353,7 @@ endmodule"#
         )
     ))]
     #[test]
-    fn reactive_wait_cycles_keep_reference_scheduling() {
+    fn reactive_wait_cycles_use_a_bounded_native_work_list() {
         let source = r#"module Top;
             bit a = 0;
             bit b = 0;
@@ -5355,9 +5371,10 @@ endmodule"#
             let stats = simulation.scheduler_stats();
             assert_eq!(stats.kernels.len(), 2, "{stats:?}");
             assert!(
-                stats.kernels.iter().all(|kernel| matches!(kernel,
-                    crate::KernelSchedule::Reference(reason) if reason.contains("cyclic")
-                )),
+                stats
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
                 "{stats:?}"
             );
         }
@@ -5371,7 +5388,7 @@ endmodule"#
         )
     ))]
     #[test]
-    fn reactive_waits_on_active_results_keep_reference_scheduling() {
+    fn reactive_waits_on_active_results_run_before_native_nba_publication() {
         let source = r#"`timescale 1ns/1ns
         module Top;
             bit clk = 0;
@@ -5398,9 +5415,11 @@ endmodule"#
                 assert_eq!(simulation.get(seen), num_bigint::BigUint::from(0u8));
                 let stats = simulation.scheduler_stats();
                 assert!(
-                    stats.kernels.iter().any(|kernel| matches!(kernel,
-                        crate::KernelSchedule::Reference(reason) if reason.contains("Active-region")
-                    )),
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled))
+                        && stats.compiled_slots > 0,
                     "{stats:?}"
                 );
             }
@@ -5579,12 +5598,251 @@ endmodule"#
                 .scheduler_stats()
                 .kernels
                 .iter()
-                .all(|kernel| matches!(kernel,
-                    crate::KernelSchedule::Reference(reason) if reason.contains("cyclic")
-                )),
+                .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
             "{:?}",
             simulation.scheduler_stats()
         );
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn native_file_calls_keep_the_host_return_bound() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int count = 0;
+            always #1 clk = ~clk;
+            always @(posedge clk) count <= count + 1;
+            always @(posedge clk) for (int i = 0; i < 8; i++) $fwrite(1, "bounded");
+        endmodule"#;
+        let shared = source.replace(
+            r#"always @(posedge clk) for (int i = 0; i < 8; i++) $fwrite(1, "bounded");"#,
+            concat!(
+                "always @(posedge clk) repeat (3) $fwrite(1, \"first\"); ",
+                "always @(posedge clk) repeat (3) $fwrite(1, \"second\");",
+            ),
+        );
+        for source in [source, shared.as_str()] {
+            for four_state in [false, true] {
+                let mut results = Vec::new();
+                for mode in [
+                    crate::SchedulerMode::Reference,
+                    crate::SchedulerMode::Compiled,
+                ] {
+                    let mut simulation = crate::Simulation::from_sv_sources(
+                        vec![(source, std::path::Path::new("host-return-bound.sv"))],
+                        "Top",
+                    )
+                    .four_state(four_state)
+                    .scheduler_mode(mode)
+                    .build_native()
+                    .unwrap();
+                    simulation.state.set_slot_budgets(32, 4);
+                    let error = simulation.run_until(2).unwrap_err();
+                    assert!(error.to_string().contains("does not suspend"), "{error}");
+                    results.push((
+                        simulation.time(),
+                        simulation.get(simulation.signal("count")),
+                        simulation.drain_runtime_events(),
+                    ));
+                    if mode == crate::SchedulerMode::Compiled {
+                        assert!(
+                            simulation.scheduler_stats().compiled_slots > 0,
+                            "{:?}",
+                            simulation.scheduler_stats()
+                        );
+                    }
+                }
+                assert_eq!(results[0], results[1]);
+                assert_eq!(results[1].2.len(), 5);
+            }
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn native_file_calls_survive_tiered_adoption() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int count = 0;
+            always #1 clk = ~clk;
+            always @(posedge clk) count <= count + 1;
+            always @(posedge clk) $fdisplay(1, "count:%0d", count);
+        endmodule"#;
+        for four_state in [false, true] {
+            let build = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("tiered-file-call.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let mut reference = build()
+                .scheduler_mode(crate::SchedulerMode::Reference)
+                .build_native()
+                .unwrap();
+            let mut tiered = build()
+                .tier_promotion(crate::TierPromotion::AfterSteps(1))
+                .build_tiered()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut end = 2;
+            loop {
+                reference.run_until(end).unwrap();
+                tiered.run_until(end).unwrap();
+                assert_eq!(
+                    tiered.drain_runtime_events(),
+                    reference.drain_runtime_events()
+                );
+                assert_eq!(
+                    tiered.get(tiered.signal("count")),
+                    reference.get(reference.signal("count"))
+                );
+                if tiered.simulator.is_compiled() && tiered.scheduler_stats().compiled_slots > 0 {
+                    break;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "{:?}",
+                    tiered.simulator.backend.promotion_error()
+                );
+                end += 2;
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            assert!(
+                tiered
+                    .scheduler_stats()
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                "{:?}",
+                tiered.scheduler_stats()
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn native_file_calls_reset_the_bound_after_a_wait() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            bit [69:0] data = 0;
+            always #1 clk = ~clk;
+            always @(posedge clk) data <= data + 1;
+            initial forever begin @(clk or data); repeat (4) $fwrite(1, "bounded"); end
+        endmodule"#;
+        for four_state in [false, true] {
+            let mut results = Vec::new();
+            for mode in [
+                crate::SchedulerMode::Reference,
+                crate::SchedulerMode::Compiled,
+            ] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("host-return-rearm.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+                simulation.state.set_slot_budgets(32, 4);
+                simulation.run_until(2).unwrap();
+                results.push((simulation.time(), simulation.drain_runtime_events()));
+                if mode == crate::SchedulerMode::Compiled {
+                    assert!(
+                        simulation.scheduler_stats().compiled_slots > 0,
+                        "{:?}",
+                        simulation.scheduler_stats()
+                    );
+                }
+            }
+            assert_eq!(results[0], results[1]);
+            assert_eq!(results[1].1.len(), 12);
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn native_loop_checkpoints_continue_without_reference_slots() {
+        let source = r#"`timescale 1ns/1ns
+        module Top;
+            bit clk = 0;
+            int count = 0;
+            always #1 clk = ~clk;
+            initial forever begin @(posedge clk); repeat (65537) count = count + 1; end
+        endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("loop-checkpoint.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+                simulation.run_until(6).unwrap();
+                assert_eq!(
+                    simulation.get(simulation.signal("count")),
+                    num_bigint::BigUint::from(196611u32)
+                );
+                let stats = simulation.scheduler_stats();
+                assert!(
+                    stats.compiled_slots > 0 && stats.checked_steps > 0,
+                    "{stats:?}"
+                );
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .all(|kernel| matches!(kernel, crate::KernelSchedule::Compiled)),
+                    "{stats:?}"
+                );
+                let mut bounded = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("bounded-loop-checkpoint.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .build_native()
+                .unwrap();
+                bounded.state.set_slot_budgets(32, 0);
+                let error = bounded.run_until(2).unwrap_err();
+                assert!(error.to_string().contains("does not suspend"), "{error}");
+                assert!(
+                    bounded.scheduler_stats().compiled_slots > 0,
+                    "{:?}",
+                    bounded.scheduler_stats()
+                );
+            }
+        }
     }
 
     /// A first tier settles before a domain instead of compiling a fused
@@ -5770,6 +6028,81 @@ mod parallel_option_tests {
             let options = builder.optimize_options_for_test();
             assert_eq!(options.parallel_lanes(), 4);
             assert_eq!(options.parallel_partition(), ParallelPartition::Always);
+        }
+    }
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn native_feedback_work_lists_converge_or_report_the_slot_bound() {
+        for four_state in [false, true] {
+            for limit in [Some(8), None] {
+                let body = limit.map_or("b = ~b;".to_string(), |limit| {
+                    format!("if (count < {limit}) begin count = count + 1; b = ~b; end")
+                });
+                let other = limit.map_or("a = ~a;".to_string(), |limit| {
+                    format!("if (count < {limit}) begin count = count + 1; a = ~a; end")
+                });
+                let source = format!(
+                    r#"`timescale 1ns/1ns
+module Top;
+    bit a = 0, b = 0;
+    int count = 0;
+    initial begin #1; a = 1; #20; end
+    initial forever begin @(a); {body} end
+    initial forever begin @(b); {other} end
+endmodule"#
+                );
+                // Ordinary timed activations can outnumber the round limit
+                // without consuming any non-suspending returns.
+                let source = if limit.is_some() {
+                    let independent: String = (0..20).map(|index| format!(
+                        "int extra_{index} = 0; initial begin #1; extra_{index} = 1; #20; end\n"
+                    )).collect();
+                    source.replace("endmodule", &format!("{independent}endmodule"))
+                } else {
+                    source
+                };
+                for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+                    for mode in [
+                        crate::SchedulerMode::Reference,
+                        crate::SchedulerMode::Compiled,
+                    ] {
+                        // The unbounded reference work list is deliberately not
+                        // run: only the native path adds a work-list guard.
+                        if limit.is_none() && mode == crate::SchedulerMode::Reference {
+                            continue;
+                        }
+                        let mut sim = crate::Simulation::from_sv_sources(
+                            vec![(source.as_str(), std::path::Path::new("native-feedback.sv"))],
+                            "Top",
+                        )
+                        .four_state(four_state)
+                        .opt_level(level)
+                        .scheduler_mode(mode)
+                        .build_native()
+                        .unwrap();
+                        sim.state.set_slot_budgets(16, 0);
+                        if limit.is_some() {
+                            sim.run_until(10).unwrap();
+                            assert_eq!(sim.get(sim.signal("count")), 8u8.into());
+                            assert_eq!(sim.get(sim.signal("extra_19")), 1u8.into());
+                        } else {
+                            let error = sim.run_until(10).unwrap_err();
+                            assert!(error.to_string().contains("does not settle"), "{error}");
+                            assert_eq!(sim.time(), 1);
+                        }
+                        if mode == crate::SchedulerMode::Compiled {
+                            assert!(
+                                sim.scheduler_stats().compiled_slots > 0,
+                                "{:?}",
+                                sim.scheduler_stats()
+                            );
+                        }
+                    }
+                }
+            }
         }
     }
 }

@@ -674,6 +674,61 @@ mod tests {
         assert!(sim.scheduler_stats().compiled_slots > 1000);
     }
 
+    /// Stdout file requests bypass RuntimeEvent instructions but must obey
+    /// the same batch boundary and backpressure as ordinary displays.
+    #[test]
+    fn a_paced_drain_takes_every_native_stdout_file_record() {
+        for operation in ["$fwrite(1,", "$fdisplay(1,"] {
+            for four_state in [false, true] {
+                let source = DISPLAYS.replace("$display(", operation);
+                let mut sim = Simulation::from_sv_sources(
+                    vec![(source.as_str(), Path::new("stdout.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .scheduler_mode(SchedulerMode::Compiled)
+                .build_native()
+                .unwrap();
+                let mut drain = sim.runtime_event_drain().expect("a ring buffer");
+                drain.set_backpressure(true);
+                let done = std::sync::atomic::AtomicBool::new(false);
+                let records = std::thread::scope(|scope| {
+                    let reader = scope.spawn(|| {
+                        // Let an unbounded native run exceed the 1,024-record
+                        // queue before the first read, then keep pacing it.
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        let mut records = Vec::new();
+                        loop {
+                            let finished = done.load(std::sync::atomic::Ordering::Acquire);
+                            for event in drain.drain() {
+                                match event {
+                                    crate::RuntimeEvent::Display { message }
+                                    | crate::RuntimeEvent::Write { message } => {
+                                        records.push(message)
+                                    }
+                                    other => panic!("unexpected event {other:?}"),
+                                }
+                            }
+                            if finished {
+                                return records;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                    });
+                    let result = sim.run_until(50_000);
+                    done.store(true, std::sync::atomic::Ordering::Release);
+                    let records = reader.join().unwrap();
+                    result.unwrap();
+                    records
+                });
+                let expected: Vec<Vec<u8>> =
+                    (1..=5000).map(|n| format!("n={n}").into_bytes()).collect();
+                assert_eq!(records, expected, "{operation} four_state={four_state}");
+                assert!(sim.scheduler_stats().compiled_slots > 1000);
+            }
+        }
+    }
+
     /// A paced drain also takes every event of single steps, however slowly
     /// it reads.
     #[test]
@@ -1080,7 +1135,7 @@ mod tests {
     /// twice in a slot: one that stages nonblocking assignments keeps the
     /// reference loop.
     #[test]
-    fn kernels_that_may_run_twice_in_a_slot_stage_no_assignments() {
+    fn kernels_that_may_run_twice_in_a_slot_publish_native_queued_assignments() {
         for waits in ["@(posedge clk); #1;", "@(posedge clk); @(posedge other);"] {
             let source = format!(
                 "`timescale 1ns/1ns
@@ -1097,13 +1152,7 @@ mod tests {
             let kernels = build_in(&source, SchedulerMode::Compiled)
                 .scheduler_stats()
                 .kernels;
-            assert_eq!(
-                kernels[2],
-                crate::KernelSchedule::Reference(
-                    "the process stages nonblocking assignments and may run twice in a slot".into()
-                ),
-                "{waits}"
-            );
+            assert_eq!(kernels[2], crate::KernelSchedule::Compiled, "{waits}");
             let mut reference = build_in(&source, SchedulerMode::Reference);
             reference.run_until(200).unwrap();
             let expected = reference.save_state().unwrap();
@@ -1159,10 +1208,7 @@ mod tests {
                 initial begin q = 1'b0; @(posedge clk); forever q <= ~q; end
             endmodule
         "#;
-        assert_eq!(
-            reasons(spinning),
-            ["the process suspends other than for an edge or a delay"]
-        );
+        assert_eq!(reasons(spinning), ["a nonblocking site queues its values"]);
     }
 
     /// A nonblocking site in a loop runs several times in one run of its
@@ -1172,10 +1218,7 @@ mod tests {
     #[test]
     fn nonblocking_sites_in_loops_keep_the_reference_loop() {
         for (bound, reason) in [
-            (
-                "n",
-                "the process suspends other than for an edge or a delay",
-            ),
+            ("n", "a nonblocking site queues its values"),
             ("2", "a nonblocking site queues its values"),
         ] {
             for tail in ["", "$finish;"] {

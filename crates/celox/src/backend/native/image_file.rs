@@ -11,7 +11,7 @@ use super::backend::NativeProgramImage;
 
 const TRAILER_MAGIC: &[u8; 8] = b"CELOXNPI";
 // Compiled multi-expression waits retain raw value/mask snapshots.
-const CONTAINER_VERSION: u16 = 58;
+const CONTAINER_VERSION: u16 = 59;
 const TRAILER_SIZE: usize = 32;
 // This optional prefix descriptor does not change the Postcard payload. Older
 // readers ignore framing flags and continue to locate the payload at EOF.
