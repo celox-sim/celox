@@ -1,6 +1,8 @@
 use super::*;
 use std::path::Path;
 
+mod values;
+
 fn query(declarations: &str, expression: &str) -> (Session, TyId) {
     query_in(declarations, expression, false)
 }
