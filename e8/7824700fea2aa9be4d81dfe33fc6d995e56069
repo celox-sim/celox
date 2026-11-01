@@ -4,3 +4,5 @@ rev 2 (content) 2026-11-01 15:56 UTC — Address review r4436309773: preserve wi
 rev 1 (initial) 2026-11-01 15:56 UTC
 
 <!-- mergify-revision-data: {"schema_version":1,"pull_number":2922,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"0370e7bc33f5546c5de57aa5d71b713b835eb26e","timestamp_iso":"2026-11-01T15:56:59Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"0370e7bc33f5546c5de57aa5d71b713b835eb26e","new_sha":"e87824700fea2aa9be4d81dfe33fc6d995e56069","timestamp_iso":"2026-11-01T15:56:59Z","reason":"Address review r4436309773: preserve wide inline enum constants as literals, including references and implicit successors; add portable regressions.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/0370e7bc33f5546c5de57aa5d71b713b835eb26e...e87824700fea2aa9be4d81dfe33fc6d995e56069"}]} -->
+
+Address review r4436349446: retain X/Z predecessor state after wide literal substitution, reject implicit successors and two-state initializers, and test legal explicit restart.
