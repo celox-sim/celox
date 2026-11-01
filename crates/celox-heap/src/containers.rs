@@ -1,8 +1,10 @@
 //! Value containers. Published entries are immutable; updates allocate a new
 //! handle so ordinary state stores detect changes and array assignment copies
-//! values. Class handles inside elements retain reference semantics.
+//! values. Persistent trees share unchanged nodes between versions, so retaining
+//! intermediate updates until a heap safepoint does not retain a full copy per
+//! update. Class handles inside elements retain reference semantics.
 
-use std::collections::{BTreeMap, VecDeque};
+use imbl::{OrdMap, Vector};
 use std::sync::Arc;
 
 use crate::{Fault, Handle, Heap, Root};
@@ -240,8 +242,8 @@ pub(crate) enum Key {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) enum Contents {
-    Sequence(VecDeque<Element>),
-    Associative(BTreeMap<Key, Element>),
+    Sequence(Vector<Element>),
+    Associative(OrdMap<Key, Element>),
 }
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Container {
@@ -253,9 +255,9 @@ impl Container {
         Self {
             layout: layout.0,
             contents: if layout.kind() == 2 {
-                Contents::Associative(BTreeMap::new())
+                Contents::Associative(OrdMap::new())
             } else {
-                Contents::Sequence(VecDeque::new())
+                Contents::Sequence(Vector::new())
             },
         }
     }
@@ -493,8 +495,8 @@ impl Heap {
                         return None;
                     };
                     match traversal {
-                        FIRST => v.first_key_value(),
-                        LAST => v.last_key_value(),
+                        FIRST => v.iter().next(),
+                        LAST => v.iter().next_back(),
                         NEXT => v
                             .range((
                                 std::ops::Bound::Excluded(key.clone()),
@@ -549,7 +551,13 @@ impl Heap {
                     let lo = (b as i64).max(0) as usize;
                     let hi = (c as i64).min(src.len() as i64 - 1);
                     if hi >= 0 && lo <= hi as usize {
-                        dst.extend(src.range(lo..=hi as usize).copied().take(layout.capacity()));
+                        dst.extend(
+                            src.iter()
+                                .skip(lo)
+                                .take(hi as usize - lo + 1)
+                                .copied()
+                                .take(layout.capacity()),
+                        );
                     }
                 }
                 return self.publish_container(result, true) as u64;
@@ -589,7 +597,10 @@ impl Heap {
                 let Contents::Sequence(v) = &mut result.contents else {
                     return 0;
                 };
-                v.resize((a as usize).min(layout.capacity()), layout.default());
+                v.extend(std::iter::repeat_n(
+                    layout.default(),
+                    (a as usize).min(layout.capacity()),
+                ));
                 if let Some(Container {
                     contents: Contents::Sequence(source),
                     ..
@@ -616,7 +627,7 @@ impl Heap {
                     return a;
                 };
                 match op {
-                    REVERSE => v.make_contiguous().reverse(),
+                    REVERSE => *v = v.iter().rev().copied().collect(),
                     SORT | RSORT => {
                         let strings = (layout.0 >> 8) & 3 == 1;
                         let sign = if b != 0 && !strings {
@@ -633,13 +644,14 @@ impl Heap {
                             };
                             if op == RSORT { order.reverse() } else { order }
                         };
-                        let values = v.make_contiguous();
+                        let mut values: Vec<_> = v.iter().copied().collect();
                         // X/Z comparisons yield X (11.4.4). Preserve those
                         // elements and sort the fully known runs between them;
                         // Rust's sort requires a total comparison within a run.
                         for known in values.split_mut(|value| value.mask != 0) {
                             known.sort_by(&compare);
                         }
+                        *v = values.into_iter().collect();
                     }
                     SET if index < v.len() => v[index] = value,
                     SET if layout.kind() == 1 && index == v.len() && index < layout.capacity() => {
@@ -680,6 +692,61 @@ mod tests {
     fn call(heap: &mut Heap, op: u64, p: u64, a: u64, b: u64, c: u64) -> u64 {
         heap.call(encode(op, p), a, b, c)
     }
+    #[test]
+    fn retained_updates_share_storage_and_preserve_snapshots() {
+        // No collection: model all the intermediate handles of one time slot.
+        // Count distinct element addresses, not logical lengths (which count
+        // shared nodes repeatedly). A full copy per update exceeds this bound.
+        for kind in [1, 2] {
+            let mut heap = Heap::new();
+            let p = parameter(32, false, 0, kind, 0, false, false, false);
+            let mut handle = 0;
+            let mut snapshots = Vec::new();
+            for i in 0..1024 {
+                handle = call(
+                    &mut heap,
+                    if kind == 1 { INSERT } else { SET },
+                    p,
+                    handle,
+                    i,
+                    i,
+                );
+                handle = call(&mut heap, SET_MASK, p, handle, i, i & 1);
+                snapshots.push(handle);
+            }
+            let mut addresses = fxhash::FxHashSet::default();
+            for (i, &handle) in snapshots.iter().enumerate() {
+                assert_eq!(call(&mut heap, LEN, p, handle, 0, 0), i as u64 + 1);
+                assert_eq!(call(&mut heap, GET, p, handle, i as u64, 0), i as u64);
+                assert_eq!(
+                    call(&mut heap, GET_MASK, p, handle, i as u64, 0),
+                    i as u64 & 1
+                );
+                match &heap.containers[&(handle as Handle)].contents {
+                    Contents::Sequence(v) => {
+                        addresses.extend(v.iter().map(|e| e as *const Element))
+                    }
+                    Contents::Associative(v) => {
+                        addresses.extend(v.values().map(|e| e as *const Element))
+                    }
+                }
+            }
+            assert!(
+                addresses.len() < 1024 * 256,
+                "{} distinct elements",
+                addresses.len()
+            );
+            let original = heap.containers[&(handle as Handle)].clone();
+            if kind == 1 {
+                let json = serde_json::to_string(original.as_ref()).unwrap();
+                let restored: Container = serde_json::from_str(&json).unwrap();
+                assert_eq!(*original, restored);
+            }
+            heap.collect([Root::object(handle as Handle)]);
+            assert_eq!(heap.containers.len(), 1);
+        }
+    }
+
     #[test]
     fn completed_updates_intern_values_and_collection_releases_lookup_entries() {
         let mut heap = Heap::new();

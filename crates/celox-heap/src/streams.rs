@@ -374,7 +374,7 @@ impl Heap {
                     .unwrap_or_else(|| Container::empty(layout));
                 if let Contents::Sequence(v) = &mut container.contents {
                     if v.len() < low + count {
-                        v.resize(low + count, layout.default());
+                        v.extend(std::iter::repeat_n(layout.default(), low + count - v.len()));
                     }
                     for (index, element) in Self::elements(layout, &bits).into_iter().enumerate() {
                         v[low + index] = element;
