@@ -66,7 +66,13 @@ fn resolve(
     let id = ungroup(id, native);
     if matches!(
         native.expression(id).kind,
-        ExprKind::Literal(_) | ExprKind::Unary { .. } | ExprKind::Binary { .. }
+        ExprKind::Literal(_)
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Conditional { .. }
+            | ExprKind::Cast { .. }
+            | ExprKind::Copy(_)
+            | ExprKind::Assignment { .. }
     ) {
         return values::resolve(tree, session, id, native, dims);
     }
@@ -293,17 +299,7 @@ fn select(
     // those and any discovery caches in a disposable session: only the value
     // of the bound expression may escape this query. Resolved declarations
     // and the semantic-table prefix retain the caller's identities.
-    let mut constants = Session {
-        foreign: session.foreign.clone(),
-        classes: session.classes.clone(),
-        class_declaration_scopes: session.class_declaration_scopes.clone(),
-        class_declarations_repeated: session.class_declarations_repeated.clone(),
-        class_specializations: session.class_specializations.clone(),
-        class_specializations_frozen: true,
-        virtual_interfaces: session.virtual_interfaces.clone(),
-        types: session.types.clone(),
-        ..Session::default()
-    };
+    let mut constants = constant_session(session);
     let mut constant = |id| {
         let value = constant_binding::bind_in(id, native, tree, &mut constants, dims).ok()??;
         eval_ast_const_expr(&tree.functions, &value, &dims.const_env)
@@ -377,5 +373,22 @@ pub(super) fn class_name(table: &semantic_types::TyTable, id: TyId) -> Option<St
     match table.data(id) {
         TyData::Class(Decl::Class(name)) => Some(name.to_string()),
         _ => None,
+    }
+}
+
+/// Constant size/range queries may bind a constant function in an isolated
+/// session. Only its evaluated integer escapes; runtime call identities and
+/// temporary declaration/type caches never enter the caller's session.
+fn constant_session(session: &Session) -> Session {
+    Session {
+        foreign: session.foreign.clone(),
+        classes: session.classes.clone(),
+        class_declaration_scopes: session.class_declaration_scopes.clone(),
+        class_declarations_repeated: session.class_declarations_repeated.clone(),
+        class_specializations: session.class_specializations.clone(),
+        class_specializations_frozen: true,
+        virtual_interfaces: session.virtual_interfaces.clone(),
+        types: session.types.clone(),
+        ..Session::default()
     }
 }
