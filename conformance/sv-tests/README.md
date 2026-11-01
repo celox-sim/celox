@@ -713,3 +713,13 @@ sequences, copies and selected nested receivers. Celox-specific tests check
 process RNG seeding and serialized checkpoint replay without imposing one
 simulator's permutation on the external tools. Fixed-array ordering remains
 unsupported.
+
+Single constant delays on continuous assignment statements update two reviewed
+expectations: `chapter-10/10.3.3--cont-assignment-delay.sv` passes in both state
+modes in a focused official-runner invocation. This is not a full-corpus
+measurement; the official case checks elaboration without checking waveforms.
+Shared regressions additionally exercise inertial pulse rejection, unchanged
+RHS deadlines, destination sizing, independent selected drivers, X/Z,
+generate-local constants and zero delays. Celox API tests check scope precision,
+checkpoint replay and removal of cancelled timers. Delay lists, dynamic amounts,
+complex targets and net-declaration delays remain outside the supported subset.
