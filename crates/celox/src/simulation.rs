@@ -316,7 +316,8 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
         // Waveforms record, the heap collects, deferred assertions mature
         // and a slot observer looks at every slot boundary.
         let vcd = &self.sv_vcd;
-        if self.deferred_assertions
+        if self.postponed_output
+            || self.deferred_assertions
             || self.slot_observer.is_some()
             || self.vcd_writer.is_some()
             || vcd.path.is_some()
@@ -372,7 +373,8 @@ impl<B: SimBackend> HostBoundary for Simulator<B> {
     /// Final deferred assertions mature in Postponed, after Reactive activity.
     fn try_end_time_slot(&mut self, _timestamp: u64) -> Result<(), Halt> {
         self.mature_deferred_assertion_region(celox_design::AssertionDeferral::Final)
-            .map_err(Halt::Error)
+            .map_err(Halt::Error)?;
+        self.run_strobes(_timestamp)
     }
 
     fn try_finish_timed_step(&mut self, timestamp: u64) -> Result<(), Halt> {

@@ -1453,6 +1453,25 @@ optional start and count operands select the range. Packed destinations ignore
 those operands. Partial reads preserve bits that received no input, including
 X/Z bits. The return value is the number of bytes read, or zero on an I/O error.
 
+### Strobed output
+
+`$strobe` and `$fstrobe`, including their `b`, `o` and `h` variants, schedule
+output without blocking the caller (IEEE 1800-2023 21.2.2, 21.3.2). Display
+expressions are evaluated after the current time slot's NBA and Reactive work
+has settled. Formatting follows `$display` / `$fdisplay`; `$sampled` still reads
+the Preponed value.
+
+`$fstrobe` captures its 32-bit FD/MCD at the call. `$fclose` cancels pending
+output to the selected files; for an MCD, other selected channels remain.
+Reopening the same descriptor does not revive cancelled output.
+
+The current subset uses module/static expressions in scheduled processes.
+Calls inside subroutines, procedural locals, unrolled loop-variable references,
+updates and user/effectful calls in arguments are rejected explicitly. Core
+checkpoints include pending output (internal checkpoint format v4). Portable
+state files require a boundary without pending output. External file state for
+`$fstrobe` remains the host's separate snapshot responsibility.
+
 ### File error status
 
 `$ferror(fd, str)` returns a signed 32-bit error code and description for the
