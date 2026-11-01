@@ -1,0 +1,1 @@
+Address #2817 latch-settle review: preserve intermediate Active settles for stateful combinational consumers, reproduce the missing dependency without probe hints, refresh the hidden-slot MIR offsets, and rebase onto current master after #2816 merged.
