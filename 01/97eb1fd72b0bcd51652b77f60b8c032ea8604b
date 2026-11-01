@@ -1,1 +1,6 @@
-Rebase onto origin/master 2916371 (master's casts to bit/logic/reg superseded this stack's; A13 keeps only its test, retyped test(sv); add/add conflicts in reports and cases kept both)
+Revision history for #2939:
+
+rev 2 (content) 2026-11-01 20:49 UTC — Rebase onto origin/master 2916371 (master's casts to bit/logic/reg superseded this stack's; A13 keeps only its test, retyped test(sv); add/add conflicts in reports and cases kept both)
+rev 1 (initial) 2026-11-01 20:49 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2939,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"f977c9034cc6a8bd9abda9538925e0eec845da75","timestamp_iso":"2026-11-01T20:49:22Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"f977c9034cc6a8bd9abda9538925e0eec845da75","new_sha":"0197eb1fd72b0bcd51652b77f60b8c032ea8604b","timestamp_iso":"2026-11-01T20:49:22Z","reason":"Rebase onto origin/master 2916371 (master's casts to bit/logic/reg superseded this stack's; A13 keeps only its test, retyped test(sv); add/add conflicts in reports and cases kept both)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/f977c9034cc6a8bd9abda9538925e0eec845da75...0197eb1fd72b0bcd51652b77f60b8c032ea8604b"}]} -->
