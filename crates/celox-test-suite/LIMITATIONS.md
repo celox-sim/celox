@@ -522,6 +522,17 @@ including its positive check that changing the argument does wake the procedures
 The [standalone comparison](verification/repros/wildcard_task_sensitivity_verilator.json)
 records both executions. Only this Verilator case is excluded for this reason.
 
+The packed-structure array case `packed_structs::packed_struct_array_dynamic_members`
+passes its valid-index checks but Verilator 5.052 writes element 0 when the NBA
+destination index is 4 for an array declared `[3:0]`. Icarus 13.0 rejects that
+case and `packed_structs::packed_struct_array_unknown_indices` during compilation,
+requiring a constant index and aborting in `collapse_array_indices`. The
+[standalone observations](verification/repros/packed_struct_array_selection.json)
+retain these failures. IEEE 1800-2023 7.4.6 permits variable element indices and
+gives the out-of-range write no storage; 10.4.2 preserves the NBA destination.
+Only the listed tool/case pairs are excluded. The constant-index ascending case
+passes both tools, and Celox passes all original assertions.
+
 The SystemVerilog suite's exclusions are listed in [`verification/sv/limitations.json`](verification/sv/limitations.json), with the failures observed before them in [`verification/sv/limitations/`](verification/sv/limitations). A case is excluded for a tool only when the expected value follows IEEE 1800 and the tool either cannot run the design or disagrees with the standard; where the two tools disagree with each other, the entry says so. A case tagged with an expectation stronger than SV (see the [tag table](README.md)) may also be excluded for a tool whose state model cannot produce it.
 
 The interface-array connection cases cover packed distribution, unpacked

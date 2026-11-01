@@ -4568,5 +4568,42 @@
         "containers::shuffle_nested_receivers"
       ]
     }
+  },
+  {
+    "id": "sv_verilator_packed_struct_array_oob_nba",
+    "category": "simulator_disagreement",
+    "phase": "execute",
+    "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+    "reason": "A nonblocking member write through index 4 of a packed structure array [3:0] changes element 0 in Verilator: 1234ab78 becomes 1234abff. IEEE 1800-2023 7.4.6 gives an out-of-range packed-array index no element to write; 10.4.2 preserves the evaluated destination. The adapter-free source passes its preceding valid-index checks and reproduces the same bad write. Celox preserves 1234ab78.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/packed_struct_array_selection.json",
+      "verification/repros/packed_struct_array_dynamic_members.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "verilator": [
+        "packed_structs::packed_struct_array_dynamic_members"
+      ]
+    }
+  },
+  {
+    "id": "sv_icarus_dynamic_packed_structure_array_members",
+    "category": "simulator_support",
+    "phase": "compile",
+    "observed_version": "Icarus Verilog version 13.0",
+    "reason": "Icarus rejects a variable element index before a packed structure member with a reference to index is not allowed in a constant expression and Array index expressions must be constant here, then aborts in collapse_array_indices. Both shared sources and an adapter-free source reproduce the compiler failure. IEEE 1800-2023 7.4.6 permits these variable indices of packed array variables; these are not indices of hierarchical instance scopes. The constant-index ascending case passes.",
+    "upstream": [],
+    "evidence": [
+      "verification/repros/packed_struct_array_selection.json",
+      "verification/repros/packed_struct_array_dynamic_members.sv",
+      "LIMITATIONS.md#systemverilog-suite"
+    ],
+    "cases": {
+      "icarus": [
+        "packed_structs::packed_struct_array_dynamic_members",
+        "packed_structs::packed_struct_array_unknown_indices"
+      ]
+    }
   }
 ]
