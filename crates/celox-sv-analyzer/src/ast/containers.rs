@@ -1476,18 +1476,30 @@ mod method_call_tests {
 
     #[test]
     fn ordering_with_clauses_are_not_silently_ignored() {
+        // `reverse` and `shuffle` take no with clause (IEEE 1800-2023 7.12.2), and the
+        // ordering methods of a fixed array take none yet.
         for call in [
-            "a.sort with (-item)",
-            "a.rsort(x) with (x)",
             "a.reverse with (item)",
             "a.shuffle with (item)",
+            "f.sort with (-item)",
+            "m.sort with (item)",
         ] {
-            let source = format!("module Top; int a[]; initial {call}; endmodule");
+            let source = format!("module Top; int a[], f[4], m[int]; initial {call}; endmodule");
             assert!(
                 crate::analyze_source(&source, Path::new("ordering-with.sv")).is_err(),
                 "{call}"
             );
         }
+    }
+
+    #[test]
+    fn ordering_with_receivers_are_read_once() {
+        // The sort reads and updates its array many times.
+        let source = "module Top; class H; int q[$]; endclass H h;
+             function H get(); return h; endfunction
+             initial get().q.sort with (item); endmodule";
+        let error = crate::analyze_source(source, Path::new("ordering-receiver.sv")).unwrap_err();
+        assert!(error.to_string().contains("side effect"), "{error}");
     }
 
     #[test]

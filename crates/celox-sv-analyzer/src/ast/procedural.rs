@@ -13,6 +13,7 @@ mod effects;
 mod final_procedures;
 mod foreach;
 mod intra_assignment;
+mod ordering;
 use foreach::ForeachLoop;
 pub(super) mod randomization;
 pub(super) mod references;
@@ -2095,6 +2096,11 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             StatementKind::Expression(id) => {
                 if let Some(stmts) = self.update_statement(*id)? {
                     return Ok(stmts);
+                }
+                if let Some(stmts) = self.ordering_with_statement(*id)? {
+                    let mut effects = self.effects(&[*id])?;
+                    effects.extend(stmts);
+                    return Ok(effects);
                 }
                 let mut stmts = self.effects(&[*id])?;
                 stmts.extend(self.subroutine_call_statement(*id)?);
