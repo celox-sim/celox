@@ -2257,3 +2257,44 @@
   (assert_eq q 0)
   (modify (set value 7))
   (assert_eq q 7))
+
+(case wide_parameter_index_bounds
+  (source "wide_parameter_index_bounds.sv" #"
+    module Top(input logic [3:0][7:0] data, output logic [7:0] q,
+               output logic [3:0][7:0] permuted);
+      function automatic bit [8:0][15:0] positions();
+        bit [8:0][15:0] result;
+        result = '0;
+        for (int i=0; i<9; i++) result[i] = (i+1)%4;
+        return result;
+      endfunction
+      localparam bit [8:0][15:0] POS = positions();
+      assign q = data[POS[8]];
+      always_comb begin
+        permuted = '0;
+        for (int i=0; i<4; i++) permuted[POS[i]] = data[i];
+      end
+    endmodule
+  "#)
+  (top Top) (set data 0x44332211) (eval)
+  (assert_eq q 0x22) (assert_eq permuted 0x33221144)
+  (set data 0x01020304) (eval)
+  (assert_eq q 3) (assert_eq permuted 0x02030401))
+
+(case wide_parameter_unknown_index_bounds
+  (source "wide_parameter_unknown_index_bounds.sv" #"
+    module Top(output logic [7:0] q, known, output logic [15:0] written);
+      localparam logic [8:0][15:0] POS = {16'hxxxx, 128'd0};
+      logic [1:0][7:0] data = 16'h1234;
+      // Case equality makes loss of the parameter's X mask change the index.
+      assign q = data[POS[8] === 16'hxxxx];
+      assign known = data[POS[7]];
+      always_comb begin
+        written = 16'h1234;
+        written[(POS[8] === 16'hxxxx)*8 +: 8] = 8'hff;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0)
+  (assert_eq q 0x12) (assert_eq known 0x34)
+  (assert_eq written 0xff34))
