@@ -1,5 +1,126 @@
 (group containers (category types))
 
+(case shuffle_integral
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  int values[] = {1, 2, 3, 4, 5}, copy[];
+  int bounded[$:5] = {1, 2, 3, 4, 5}, empty[$], single[$] = {17};
+  int count;
+  initial begin
+    copy = values;
+    same = 1;
+    repeat (8) begin
+      values.shuffle;
+      bounded.shuffle();
+      same = same && values.size() == 5 && bounded.size() == 5;
+      for (int key = 1; key <= 5; key++) begin
+        count = 0;
+        foreach (values[i]) if (values[i] == key) count++;
+        same = same && count == 1;
+        count = 0;
+        foreach (bounded[i]) if (bounded[i] == key) count++;
+        same = same && count == 1;
+      end
+    end
+    empty.shuffle(); single.shuffle;
+    same = same && copy[0] == 1 && copy[4] == 5
+      && empty.size() == 0 && single.size() == 1 && single[0] == 17;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case shuffle_four_state
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  logic [3:0] values[$] = {4'b10xz, 4'bz001, 4'bxxxx, 4'h3}, copy[$];
+  int a, b, c, d;
+  initial begin
+    copy = values;
+    values.shuffle();
+    foreach (values[i]) begin
+      a += values[i] === 4'b10xz; b += values[i] === 4'bz001;
+      c += values[i] === 4'bxxxx; d += values[i] === 4'h3;
+    end
+    same = values.size() == 4 && a == 1 && b == 1 && c == 1 && d == 1
+      && copy[0] === 4'b10xz && copy[1] === 4'bz001;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case shuffle_handles
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  class Cell;
+    int value;
+    function new(int n); value = n; endfunction
+  endclass
+  Cell first, second, values[$], copy[$];
+  string words[] = {"alpha", "beta", "gamma"};
+  int a, b, c;
+  initial begin
+    first = new(11); second = new(22);
+    values.push_back(first); values.push_back(second); values.push_back(null); copy = values;
+    values.shuffle(); words.shuffle;
+    first = null; second = null;
+    #1;
+    foreach (values[i]) begin
+      if (values[i] == null) c++;
+      else if (values[i].value == 11) a++;
+      else if (values[i].value == 22) b++;
+    end
+    words.sort();
+    same = a == 1 && b == 1 && c == 1 && copy[0].value == 11 && copy[1].value == 22
+      && words[0] == "alpha" && words[1] == "beta" && words[2] == "gamma";
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case shuffle_wide
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  bit [128:0] values[], copy[];
+  int count;
+  initial begin
+    values = new[4];
+    for (int i = 0; i < 4; i++) values[i] = 129'h100000000000000000000000000000000 + i;
+    copy = values;
+    values.shuffle();
+    #1;
+    same = values.size() == 4;
+    for (int key = 0; key < 4; key++) begin
+      count = 0;
+      foreach (values[i]) if (values[i] == 129'h100000000000000000000000000000000 + key) count++;
+      same = same && count == 1;
+    end
+    same = same && copy[0] == 129'h100000000000000000000000000000000
+      && copy[3] == 129'h100000000000000000000000000000003;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+(case shuffle_nested_receivers
+  (source "shuffle.sv" #"
+module Top(output bit same);
+  typedef int queue_t[$];
+  queue_t rows[int];
+  int calls, total;
+  function automatic int next_row(); calls++; return 7; endfunction
+  initial begin
+    rows[7] = {3, 5, 7};
+    rows[next_row()].shuffle();
+    #1;
+    for (int i = 0; i < rows[7].size(); i++) total += rows[7][i];
+    same = calls == 1 && rows[7].size() == 3 && total == 15;
+  end
+endmodule
+"#)
+  (top Top) (run_until 1) (assert_eq same 1))
+
+
 (case associative_default_strings
   (source "assoc_defaults.sv" #"
 module Top(output bit same);

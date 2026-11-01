@@ -1052,6 +1052,7 @@ pub struct Locator {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ContainerOp {
+    Shuffle,
     Reverse,
     Sort,
     Rsort,
@@ -1105,7 +1106,8 @@ impl ContainerOp {
     pub fn mutates(self) -> bool {
         matches!(
             self,
-            Self::Reverse
+            Self::Shuffle
+                | Self::Reverse
                 | Self::Sort
                 | Self::Rsort
                 | Self::Set
