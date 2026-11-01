@@ -1,0 +1,1 @@
+Fix PR #2961 NAPI WASM CI failure: gate scheduler-only instrumentation with host-runtime, matching its caller; validate host-free and WASI configurations.
