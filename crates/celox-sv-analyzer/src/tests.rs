@@ -3563,10 +3563,6 @@ fn rejects_unimplemented_timing_constructs() {
             "event e; logic c; initial @(e or posedge c);",
             "event control mixing named events with other events",
         ),
-        (
-            "logic a, b; initial a <= #1 b;",
-            "nonblocking intra-assignment timing control",
-        ),
         ("initial begin : b disable b; end", "disable statement"),
         (
             "logic a, y; always_latch y <= a;",

@@ -227,6 +227,7 @@ pub struct TermRefs {
 /// A nonblocking assignment site.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct NbaSiteRefs {
+    pub delay: u64,
     pub target: SignalRef,
     pub lsb: usize,
     pub width: usize,
@@ -436,10 +437,16 @@ pub struct ProcessState {
     pub waiters: Waiters,
     /// Processes ready to run in the active region of the current time.
     pub ready: std::collections::BTreeSet<usize>,
+    /// Runnable continuations placed after other work of their current region.
+    #[serde(default)]
+    pub deferred_ready: std::collections::BTreeSet<usize>,
     /// Processes that resume in the inactive region (`#0`).
     pub inactive: std::collections::BTreeSet<usize>,
     /// Queued nonblocking assignments, in issue order.
     pub nba_queue: Vec<NbaUpdate>,
+    /// Future NBA and Re-NBA updates, in issue order at each time.
+    #[serde(default)]
+    pub delayed_nba: std::collections::BTreeMap<u64, Vec<(bool, NbaUpdate)>>,
     /// Program processes ready to run in the Reactive region of the current
     /// time (IEEE 1800-2023 4.4.2.6).
     pub reactive: std::collections::BTreeSet<usize>,

@@ -1126,9 +1126,18 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         expr: &sv::ir::Expr,
     ) -> Result<Option<(BigUint, usize)>, sv::AnalyzerError> {
+        self.eval_const_with_width(expr, None)
+    }
+
+    fn eval_const_with_width(
+        &mut self,
+        expr: &sv::ir::Expr,
+        width: Option<usize>,
+    ) -> Result<Option<(BigUint, usize)>, sv::AnalyzerError> {
         if self.m.calls(expr) {
             return Ok(None);
         }
+        let signed = width.map(|_| self.expr_signed(expr));
         let expr = self.propagate(&expr_for_state_mode(expr, self.m.four_state));
         let mut arena = SLTNodeArena::new();
         let Some((node, _)) = lower_expr_with_context(
@@ -1142,6 +1151,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             None,
         ) else {
             return Ok(None);
+        };
+        let node = if let Some(signed) = signed {
+            coerce_node_width(&mut arena, node, width, signed).map_err(slt_error)?
+        } else {
+            node
         };
         Ok(slt_const(&arena, &mut ConstCache::default(), node))
     }
@@ -3720,6 +3734,45 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Err(unsupported("timed task call outside a suspendable process"));
         }
         match stmt {
+            sv::ir::Stmt::DeferActive => {
+                self.with_kernel(ProcessKernelBuilder::defer_active)
+                    .map_err(kernel_error)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                let sv::ir::Stmt::Delay {
+                    amount,
+                    ticks_per_unit,
+                    ..
+                } = control.as_ref()
+                else {
+                    return Err(unsupported("nonblocking intra-assignment event control"));
+                };
+                let delay = self
+                    .eval_const_with_width(amount, Some(PROCESS_DELAY_WIDTH))?
+                    .and_then(|(value, _)| u64::try_from(value).ok())
+                    .and_then(|value| value.checked_mul(*ticks_per_unit))
+                    .ok_or_else(|| {
+                        unsupported("nonconstant or overflowing nonblocking assignment delay")
+                    })?;
+                match assignment.as_ref() {
+                    sv::ir::Stmt::Assign {
+                        lhs,
+                        rhs,
+                        nonblocking: true,
+                    } => self.nonblocking_delayed(std::slice::from_ref(lhs), rhs, delay)?,
+                    sv::ir::Stmt::AssignConcat {
+                        parts,
+                        rhs,
+                        nonblocking: true,
+                    } => self.nonblocking_delayed(parts, rhs, delay)?,
+                    _ => return Err(unsupported("nonblocking delayed assignment target")),
+                }
+                Ok(true)
+            }
             sv::ir::Stmt::Assign {
                 lhs,
                 rhs,
@@ -6597,6 +6650,15 @@ impl Ff<'_, '_> {
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        self.nonblocking_delayed(parts, rhs, 0)
+    }
+
+    fn nonblocking_delayed(
+        &mut self,
+        parts: &[sv::ir::LValue],
+        rhs: &sv::ir::Expr,
+        delay: u64,
+    ) -> Result<(), sv::AnalyzerError> {
         let mut targets = Vec::with_capacity(parts.len());
         for part in parts {
             let part = self.propagate_lvalue(part);
@@ -6683,6 +6745,7 @@ impl Ff<'_, '_> {
                 width: self.m.temp("nba_width", NBA_POSITION_WIDTH, false, false).0,
             });
             let site = NbaSite {
+                delay,
                 process: self.process,
                 target: id,
                 lsb,
@@ -8142,7 +8205,87 @@ fn concurrent_monitor_clock(body: &[sv::ir::Stmt]) -> Option<Clock> {
 }
 
 /// `expr` with the identifiers in `renames` replaced.
-fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::ir::Expr {
+pub(super) fn rename_const_idents(
+    expr: &sv::ir::ConstExpr,
+    renames: &HashMap<String, String>,
+) -> sv::ir::ConstExpr {
+    rename_const_idents_with_sampling(expr, renames, false)
+}
+
+fn rename_const_idents_with_sampling(
+    expr: &sv::ir::ConstExpr,
+    renames: &HashMap<String, String>,
+    sampling: bool,
+) -> sv::ir::ConstExpr {
+    if sampling
+        && matches!(expr, sv::ir::ConstExpr::Function { callee: sv::ir::Callee::System(function), .. } if function.reads_sampled_values())
+    {
+        return expr.clone();
+    }
+    use sv::ir::ConstExpr;
+    let go =
+        |expr: &ConstExpr| Box::new(rename_const_idents_with_sampling(expr, renames, sampling));
+    match expr {
+        ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
+        ConstExpr::Literal(_) => expr.clone(),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: go(expr),
+            msb: go(msb),
+            lsb: go(lsb),
+            signed: *signed,
+        },
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: go(expr),
+            bit: go(bit),
+        },
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee: callee.clone(),
+            site: *site,
+            args: args
+                .iter()
+                .map(|arg| rename_const_idents_with_sampling(arg, renames, sampling))
+                .collect(),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: go(expr),
+            width: *width,
+            signed: *signed,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op: *op,
+            expr: go(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: go(left),
+            op: *op,
+            right: go(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: go(condition),
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
+    }
+}
+
+/// `expr` with the identifiers in `renames` replaced.
+pub(super) fn rename_idents(
+    expr: &sv::ir::Expr,
+    renames: &HashMap<String, String>,
+) -> sv::ir::Expr {
     rename_idents_with_sampling(expr, renames, false)
 }
 
@@ -8153,73 +8296,6 @@ fn rename_idents_with_sampling(
     renames: &HashMap<String, String>,
     sampling: bool,
 ) -> sv::ir::Expr {
-    fn constant(
-        expr: &sv::ir::ConstExpr,
-        renames: &HashMap<String, String>,
-        sampling: bool,
-    ) -> sv::ir::ConstExpr {
-        if sampling
-            && matches!(expr, sv::ir::ConstExpr::Function { callee: sv::ir::Callee::System(function), .. } if function.reads_sampled_values())
-        {
-            return expr.clone();
-        }
-        use sv::ir::ConstExpr;
-        let go = |expr: &ConstExpr| Box::new(constant(expr, renames, sampling));
-        match expr {
-            ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
-            ConstExpr::Literal(_) => expr.clone(),
-            ConstExpr::SelectRange {
-                expr,
-                msb,
-                lsb,
-                signed,
-            } => ConstExpr::SelectRange {
-                expr: go(expr),
-                msb: go(msb),
-                lsb: go(lsb),
-                signed: *signed,
-            },
-            ConstExpr::Select { expr, bit } => ConstExpr::Select {
-                expr: go(expr),
-                bit: go(bit),
-            },
-            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
-                callee: callee.clone(),
-                site: *site,
-                args: args
-                    .iter()
-                    .map(|arg| constant(arg, renames, sampling))
-                    .collect(),
-            },
-            ConstExpr::Resize {
-                expr,
-                width,
-                signed,
-            } => ConstExpr::Resize {
-                expr: go(expr),
-                width: *width,
-                signed: *signed,
-            },
-            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
-                op: *op,
-                expr: go(expr),
-            },
-            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
-                left: go(left),
-                op: *op,
-                right: go(right),
-            },
-            ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => ConstExpr::Mux {
-                condition: go(condition),
-                then_expr: go(then_expr),
-                else_expr: go(else_expr),
-            },
-        }
-    }
     if sampling
         && matches!(expr, sv::ir::Expr::Call { callee: sv::ir::Callee::System(function), .. } if function.reads_sampled_values())
     {
@@ -8237,8 +8313,8 @@ fn rename_idents_with_sampling(
             signed,
         } => Expr::Select {
             expr: go(expr),
-            msb: constant(msb, renames, sampling),
-            lsb: constant(lsb, renames, sampling),
+            msb: rename_const_idents_with_sampling(msb, renames, sampling),
+            lsb: rename_const_idents_with_sampling(lsb, renames, sampling),
             signed: *signed,
         },
         Expr::Concat(parts) => Expr::Concat(
@@ -8248,7 +8324,7 @@ fn rename_idents_with_sampling(
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
-            count: constant(count, renames, sampling),
+            count: rename_const_idents_with_sampling(count, renames, sampling),
             parts: parts
                 .iter()
                 .map(|part| rename_idents_with_sampling(part, renames, sampling))

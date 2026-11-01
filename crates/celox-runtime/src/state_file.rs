@@ -54,12 +54,13 @@
 //! builds read too. Static-only process schedules retain version 2; graphs
 //! and reactive queues require version 3. Pending Observed assertion evaluations
 //! require version 4, and a heap section version 5. Versions 1 through 4
-//! remain readable.
+//! remain readable. Version 6 adds future NBA updates after the Observed queue;
+//! older versions remain readable and are still written when sufficient.
 
 use std::io::{self, Read, Write};
 
 const MAGIC: &[u8; 8] = b"CXSTATE\0";
-const VERSION: u16 = 5;
+const VERSION: u16 = 6;
 
 mod activations;
 use activations::*;
@@ -148,10 +149,13 @@ pub struct ProcessRecord {
     pub waiters: Vec<WaiterRecord>,
     /// Processes ready in the active region of the current time.
     pub ready: Vec<ProcessRef>,
+    pub deferred_ready: Vec<ProcessRef>,
     /// Processes resuming in the inactive region of the current time.
     pub inactive: Vec<ProcessRef>,
     /// Queued nonblocking assignments, in issue order.
     pub nba_queue: Vec<NbaRecord>,
+    /// Future updates: due time, Re-NBA region, captured assignment.
+    pub delayed_nba: Vec<(u64, bool, NbaRecord)>,
     /// Counter values each counted domain last triggered on, by counted
     /// signal, in changes/rises/falls order.
     pub domain_counters: Vec<(String, [u32; 3])>,
@@ -259,7 +263,9 @@ impl StateFile {
             .map(|schedule| &schedule.processes)
             .filter(|processes| **processes != ProcessRecord::default());
         let version = processes.map_or(1, |p| {
-            if !p.observed.is_empty() {
+            if !p.delayed_nba.is_empty() || !p.deferred_ready.is_empty() {
+                6
+            } else if !p.observed.is_empty() {
                 4
             } else if needs_v3(p) {
                 3
@@ -270,7 +276,7 @@ impl StateFile {
         // A heap section needs version 5, which always lists processes.
         let empty = ProcessRecord::default();
         let (version, processes) = match (self.next_object, &self.schedule) {
-            (Some(_), Some(_)) => (5, Some(processes.unwrap_or(&empty))),
+            (Some(_), Some(_)) => (version.max(5), Some(processes.unwrap_or(&empty))),
             (Some(_), None) => (5, processes),
             (None, _) => (version, processes),
         };
@@ -633,6 +639,19 @@ fn put_processes(w: &mut impl Write, processes: &ProcessRecord, version: u16) ->
     if version >= 4 {
         put_process_list(w, &processes.observed, version)?;
     }
+    if version >= 6 {
+        put_len(w, processes.delayed_nba.len())?;
+        for (time, program, update) in &processes.delayed_nba {
+            put_u64(w, *time)?;
+            w.write_all(&[u8::from(*program)])?;
+            put_str(w, &update.target)?;
+            put_u64(w, update.lsb)?;
+            put_u64(w, update.width)?;
+            put_bytes(w, &update.value)?;
+            put_bytes(w, &update.mask)?;
+        }
+        put_process_list(w, &processes.deferred_ready, version)?;
+    }
     Ok(())
 }
 
@@ -726,6 +745,24 @@ fn get_processes(r: &mut impl Read, version: u16) -> Result<ProcessRecord, State
     }
     if version >= 4 {
         result.observed = get_process_list(r, version)?;
+    }
+    if version >= 6 {
+        result.delayed_nba = (0..get_u32(r)?)
+            .map(|_| {
+                Ok((
+                    get_u64(r)?,
+                    get_flag(r)?,
+                    NbaRecord {
+                        target: get_str(r)?,
+                        lsb: get_u64(r)?,
+                        width: get_u64(r)?,
+                        value: get_len_bytes(r)?,
+                        mask: get_len_bytes(r)?,
+                    },
+                ))
+            })
+            .collect::<Result<_, StateFileError>>()?;
+        result.deferred_ready = get_process_list(r, version)?;
     }
     Ok(result)
 }
@@ -876,6 +913,17 @@ mod tests {
         file.schedule = None;
         let mut bytes = Vec::new();
         file.write_to(&mut bytes).unwrap();
+        assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
+    }
+
+    #[test]
+    fn deferred_active_continuations_keep_their_queue_in_version_six() {
+        let mut file = sample();
+        file.schedule.as_mut().unwrap().processes.deferred_ready =
+            vec!["$process[4].status".into()];
+        let mut bytes = Vec::new();
+        file.write_to(&mut bytes).unwrap();
+        assert_eq!(bytes[8..10], 6u16.to_le_bytes());
         assert_eq!(StateFile::read_from(bytes.as_slice()).unwrap(), file);
     }
 

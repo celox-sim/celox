@@ -452,7 +452,8 @@ pub enum ProcessStatus {
     /// ran no statement and waits at the same site.
     Pending,
     /// The process staged one nonblocking assignment. The delay slot holds
-    /// the index of its [`NbaSite`]. The runtime queues the staged value and
+    /// the index of its [`NbaSite`]. The runtime queues the staged value for
+    /// the site's update time and
     /// resumes the process at once.
     Nba,
     /// The process returned so the runtime can charge its time-slot budget.
@@ -482,6 +483,9 @@ pub enum ProcessStatus {
     AssertionObserved,
     /// Resume an assertion action in Reactive after every Observed predicate.
     AssertionReactive,
+    /// Continue in the same Active/Reactive region after other runnable work.
+    /// This is an implementation scheduling boundary, not an HDL wait (4.7).
+    DeferActive,
 }
 
 impl ProcessStatus {
@@ -507,6 +511,7 @@ impl ProcessStatus {
             Self::EventProbe => 16,
             Self::AssertionObserved => 17,
             Self::AssertionReactive => 18,
+            Self::DeferActive => 19,
         }
     }
 
@@ -530,6 +535,7 @@ impl ProcessStatus {
             16 => Some(Self::EventProbe),
             17 => Some(Self::AssertionObserved),
             18 => Some(Self::AssertionReactive),
+            19 => Some(Self::DeferActive),
             _ => None,
         }
     }
@@ -1117,6 +1123,9 @@ impl<A: Copy> WaitSite<A> {
 /// sites in its delay slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NbaSite<A> {
+    /// Global precision ticks from evaluation to the NBA update.
+    #[serde(default)]
+    pub delay: u64,
     /// Index of the process in [`RuntimeSchema::processes`].
     pub process: usize,
     /// The assigned object and the static part of the assigned bit range.
@@ -1147,6 +1156,7 @@ pub struct NbaSite<A> {
 impl<A: Copy> NbaSite<A> {
     pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> NbaSite<B> {
         NbaSite {
+            delay: self.delay,
             process: self.process,
             target: map(self.target),
             lsb: self.lsb,
