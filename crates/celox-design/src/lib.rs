@@ -704,6 +704,10 @@ impl ProcessOp {
 /// A resumed suspended level wait must check its predicate immediately.
 pub const PROCESS_LEVEL_WAIT: u64 = 1 << 63;
 
+/// The lowest bit of the edge index in a [`SchedulerSlots::baseline`] byte,
+/// above the level (`edges::LEVEL_UNKNOWN` and the value bit).
+pub const BASELINE_TERM_SHIFT: u32 = 2;
+
 /// A state slot exchanged with a synchronous host operation.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostRequestValue<A> {
@@ -1472,11 +1476,15 @@ pub struct SchedulerSlots<A> {
     /// kernel order.
     pub ready: A,
     /// The time each process kernel resumes at, in kernel order, valid
-    /// where [`Self::waiting`] is set.
+    /// where [`Self::waiting`] is set and the kernel's status is a delay.
     pub wake: Vec<A>,
-    /// Whether each process kernel waits for its wake time or event.
+    /// Whether each process kernel waits for its wake time or event; a
+    /// kernel that does both waits for the one its status names.
     pub waiting: Vec<A>,
-    /// The level a kernel waiting for an event last saw its signal at.
+    /// The level a kernel waiting for an event last saw its signal at, in
+    /// the bits below [`BASELINE_TERM_SHIFT`], and above them the edge it
+    /// waits for, as an index into
+    /// [`schedule::ProcessModel::wait_terms`].
     pub baseline: Vec<A>,
     /// The time of each host clock's next edge, one element per entry of
     /// [`SchedulerSchema::clocks`], valid where [`Self::clock_armed`] is set.

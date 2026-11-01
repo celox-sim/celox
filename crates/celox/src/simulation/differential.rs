@@ -960,6 +960,142 @@ mod tests {
         assert_eq!(sim.time(), time);
     }
 
+    /// `source`'s kernels all run in the compiled scheduler, and its slots
+    /// agree with the reference's in two and four states.
+    fn compiles_and_agrees(source: &str, end: u64) {
+        for four_state in [false, true] {
+            let build = |mode| {
+                Simulation::from_sv_sources(vec![(source, Path::new("top.sv"))], "Top")
+                    .scheduler_mode(mode)
+                    .four_state(four_state)
+                    .build()
+                    .unwrap()
+            };
+            let kernels = build(SchedulerMode::Compiled).scheduler_stats().kernels;
+            assert!(
+                kernels
+                    .iter()
+                    .all(|kernel| *kernel == crate::KernelSchedule::Compiled),
+                "{kernels:?}"
+            );
+            let mut reference = build(SchedulerMode::Reference);
+            reference.run_until(end).unwrap();
+            let expected = reference.save_state().unwrap();
+            for mode in MODES {
+                let mut sim = build(mode);
+                sim.run_until(end).unwrap();
+                assert_eq!(sim.save_state().unwrap(), expected, "{four_state} {mode:?}");
+                let stats = sim.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{four_state} {mode:?}: {stats:?}");
+            }
+        }
+    }
+
+    /// A testbench that waits for both edges of its clock and delays in
+    /// between, writing what the design samples and reading what it
+    /// computes.
+    #[test]
+    fn kernels_waiting_for_several_edges_and_delays_compile() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] seen);
+                logic clk = 1'b0;
+                logic [7:0] d = 8'd0;
+                logic [7:0] q = 8'd0;
+                logic [7:0] acc = 8'd0;
+                always #5 clk = ~clk;
+                always_ff @(posedge clk) q <= q + d;
+                initial begin
+                    repeat (2) @(posedge clk);
+                    forever begin
+                        @(posedge clk);
+                        #1;
+                        acc = acc * 8'd3 ^ q;
+                        d = d + 8'd1;
+                        @(negedge clk);
+                        acc = acc + q;
+                    end
+                end
+                assign seen = acc;
+            endmodule
+        "#;
+        compiles_and_agrees(source, 1000);
+    }
+
+    /// Waits for the edges of two clocks of different periods, and delays
+    /// that end in the slot of an edge: a kernel declared before the clocks
+    /// resumes from its delay, waits, and is woken again in that slot.
+    #[test]
+    fn kernels_waiting_for_several_signals_compile() {
+        let source = r#"
+            `timescale 1ns/1ns
+            module Top(output logic [7:0] seen);
+                logic a = 1'b0;
+                logic b = 1'b0;
+                logic [7:0] log = 8'd0;
+                logic [7:0] n = 8'd0;
+                initial forever begin
+                    #5;
+                    @(posedge a);
+                    n = n + 8'd1;
+                end
+                always #5 a = ~a;
+                always #7 b = ~b;
+                initial forever begin
+                    @(posedge a);
+                    log = log * 8'd3 + 8'd1;
+                    @(negedge b);
+                    log = log * 8'd5 + 8'd2;
+                    #3;
+                    log = log + n;
+                    @(b);
+                    log = log ^ 8'h5a;
+                end
+                assign seen = log + n;
+            endmodule
+        "#;
+        compiles_and_agrees(source, 1000);
+    }
+
+    /// A kernel that delays, or waits for edges of two signals, may run
+    /// twice in a slot: one that stages nonblocking assignments keeps the
+    /// reference loop.
+    #[test]
+    fn kernels_that_may_run_twice_in_a_slot_stage_no_assignments() {
+        for waits in ["@(posedge clk); #1;", "@(posedge clk); @(posedge other);"] {
+            let source = format!(
+                "`timescale 1ns/1ns
+                module Top(output logic [7:0] sum);
+                    logic clk = 1'b0;
+                    logic other = 1'b0;
+                    logic [7:0] stim = 8'd0;
+                    always #5 clk = ~clk;
+                    always #3 other = ~other;
+                    initial forever begin {waits} stim <= stim + 8'd3; end
+                    always_ff @(posedge clk) sum <= stim;
+                endmodule"
+            );
+            let kernels = build_in(&source, SchedulerMode::Compiled)
+                .scheduler_stats()
+                .kernels;
+            assert_eq!(
+                kernels[2],
+                crate::KernelSchedule::Reference(
+                    "the process stages nonblocking assignments and may run twice in a slot".into()
+                ),
+                "{waits}"
+            );
+            let mut reference = build_in(&source, SchedulerMode::Reference);
+            reference.run_until(200).unwrap();
+            let expected = reference.save_state().unwrap();
+            for mode in MODES {
+                let mut sim = build_in(&source, mode);
+                sim.run_until(200).unwrap();
+                assert_eq!(sim.save_state().unwrap(), expected, "{waits} {mode:?}");
+            }
+        }
+    }
+
     /// Compiled kernels declared after more than 64 others keep their own
     /// bits in the ready mask.
     #[test]
@@ -1006,7 +1142,7 @@ mod tests {
         "#;
         assert_eq!(
             reasons(spinning),
-            ["the process suspends other than for one edge"]
+            ["the process suspends other than for an edge or a delay"]
         );
     }
 
@@ -1017,7 +1153,10 @@ mod tests {
     #[test]
     fn nonblocking_sites_in_loops_keep_the_reference_loop() {
         for (bound, reason) in [
-            ("n", "the process suspends other than for one edge"),
+            (
+                "n",
+                "the process suspends other than for an edge or a delay",
+            ),
             ("2", "a nonblocking site queues its values"),
         ] {
             for tail in ["", "$finish;"] {

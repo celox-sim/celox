@@ -212,11 +212,13 @@ impl<B: SimBackend> SimulationState<B> {
         // The scheduler's waiting kernels wait in its slots during the run,
         // with the level each wait last saw.
         for (process, slots) in scheduler.waits.iter().enumerate() {
-            let Some((waiting, baseline)) = *slots else {
+            let Some((waiting, baseline, site_terms)) = slots else {
                 continue;
             };
+            let (waiting, baseline) = (*waiting, *baseline);
             // The edge level of the one-bit signal: its value bit, and its
-            // mask bit, which a two-state image lacks.
+            // mask bit, which a two-state image lacks; above them the index
+            // of the edge the wait site waits for.
             let level = match self.process_state.waiters.get(process) {
                 Some(waiter) => match waiter.baselines.first() {
                     Some(Baseline::Raw(raw)) => {
@@ -229,10 +231,19 @@ impl<B: SimBackend> SimulationState<B> {
                     _ => return Err(SimulatorErrorCode::InternalError.into()),
                 },
                 None => {
+                    // A kernel that also delays may wait for its wake time,
+                    // which the wakeups below set.
                     backend.set(waiting, 0u8);
                     continue;
                 }
             };
+            let term = self
+                .process_state
+                .waiters
+                .get(process)
+                .and_then(|waiter| site_terms.get(waiter.site))
+                .ok_or(SimulatorErrorCode::InternalError)?;
+            let level = level | (*term as u8) << celox_design::BASELINE_TERM_SHIFT;
             backend.set(waiting, 1u8);
             backend.set(baseline, level);
             self.process_state.waiters.remove(process);
@@ -335,21 +346,40 @@ impl<B: SimBackend> SimulationState<B> {
         };
         let pending =
             |process: usize| !complete && (process as u64 == current || is_ready(process));
+        // A waiting kernel waits for its wake time or its edge, as its
+        // status says.
+        let status = |process: usize| {
+            celox_design::ProcessStatus::from_code(
+                backend.get_as::<u8>(self.model.processes[process].status),
+            )
+        };
         for (process, wake) in scheduler.wake.iter().enumerate() {
             let Some((wake, waiting)) = *wake else {
                 continue;
             };
-            if pending(process) || backend.get_as::<u8>(waiting) == 0 {
+            if pending(process)
+                || backend.get_as::<u8>(waiting) == 0
+                || !matches!(
+                    status(process),
+                    Some(
+                        celox_design::ProcessStatus::Delay
+                            | celox_design::ProcessStatus::InactiveDelay
+                    )
+                )
+            {
                 continue;
             }
             let time: u64 = backend.get_as(wake);
             self.process_wakeups.push(Reverse((time, process)));
         }
         for (process, slots) in scheduler.waits.iter().enumerate() {
-            let Some((waiting, baseline)) = *slots else {
+            let Some((waiting, baseline, _)) = *slots else {
                 continue;
             };
-            if pending(process) || backend.get_as::<u8>(waiting) == 0 {
+            if pending(process)
+                || backend.get_as::<u8>(waiting) == 0
+                || status(process) != Some(celox_design::ProcessStatus::Wait)
+            {
                 continue;
             }
             let site = (backend.get_as::<u64>(self.model.processes[process].delay)
