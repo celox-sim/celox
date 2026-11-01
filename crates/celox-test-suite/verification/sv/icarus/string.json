@@ -219,6 +219,98 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutating_methods",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_array_mutations",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-array-mutations-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutation_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_array_mutations",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-array-mutations-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutations",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_array_mutations",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-array-mutations-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutations_invalid_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_icarus_fixed_string_array_mutations",
+        "category": "simulator_disagreement",
+        "phase": "compile",
+        "observed_version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+        "reason": "Icarus 13.0 rejects dynamic indices in string-array method receivers with Scope index expression is not constant, cannot elaborate selected putc tasks, and rejects the multidimensional string-array copy. The four exact cases retain their compiler diagnostics. IEEE 1800-2023 6.16.2 and 6.16.11-14 apply the methods to selected string variables.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-array-mutations-icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 rejects the array-valued default and replicated row items in this multidimensional string-array assignment pattern with syntax errors. IEEE 1800-2023 10.9.1 permits array-valued subarray items, defaults and whole-dimension replication. Verilator passes the case.",
       "expectation": "Simulation",
       "name": "string::fixed_array_pattern_rows",

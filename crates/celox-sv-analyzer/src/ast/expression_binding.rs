@@ -49,8 +49,8 @@ pub(super) use streams::{
     unpack as stream_unpack,
 };
 pub(super) use strings::{
-    call as string_call, method as string_method, native_string, string_value,
-    to_string as string_operand,
+    call as string_call, fixed_array_element as fixed_string_array_element,
+    method as string_method, native_string, string_value, to_string as string_operand,
 };
 fn disagreement() -> AnalyzerError {
     AnalyzerError::Parse("invalid native expression ownership".into())

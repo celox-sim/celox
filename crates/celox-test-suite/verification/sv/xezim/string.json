@@ -114,6 +114,30 @@
     },
     {
       "category": "Types",
+      "detail": "Xezim 0.11.4 evaluates each of the two authored select_word() calls twice and also increments a postfix array index twice while updating string-array elements. The standalone probe prints calls=4 index=2 words=ZXQ,12 instead of calls=2 index=1 words=12,def. IEEE 1800-2023 6.16.2 makes putc equivalent to a character assignment; lowering its read and write must preserve the effects of evaluating the selected destination.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_mutation_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_fixed_string_array_mutations",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 evaluates each of the two authored select_word() calls twice and also increments a postfix array index twice while updating string-array elements. The standalone probe prints calls=4 index=2 words=ZXQ,12 instead of calls=2 index=1 words=12,def. IEEE 1800-2023 6.16.2 makes putc equivalent to a character assignment; lowering its read and write must preserve the effects of evaluating the selected destination.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-array-mutations-xezim.json",
+          "verification/repros/sv_string_array_mutations_indices.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "Xezim 0.11.4 returns 0 instead of 1 for the checks after copying existing rows into multidimensional string-array assignment patterns. The case exercises row-valued items, an array-valued default, row replication and singleton rows. IEEE 1800-2023 10.9.1 evaluates each item as an assignment to its corresponding element or subarray type. Celox and Verilator pass the case.",
       "expectation": "Simulation",
       "name": "string::fixed_array_pattern_rows",

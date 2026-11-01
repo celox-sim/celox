@@ -1887,6 +1887,70 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             self.rename_expr(&mut store);
             return Ok(Stmt::Eval(store));
         }
+        if expression_binding::fixed_string_array_element(self.tree, string, native, &self.dims) {
+            if nonblocking {
+                return Err(unsupported(
+                    "nonblocking assignment to a string array character",
+                ));
+            }
+            // Capture authored indices before flattening repeats them in bounds
+            // and range guards. The method's arguments may change those indices.
+            let mut indices = Vec::new();
+            let mut base = string;
+            while let celox_sv_syntax::ExprKind::Select {
+                expression,
+                dimension,
+            } = &native
+                .expression(expression_binding::ungroup(base, native))
+                .kind
+            {
+                let celox_sv_syntax::DimensionKind::Index(index) = dimension.kind else {
+                    return Err(unsupported("string mutation of a subarray"));
+                };
+                indices.push(index);
+                base = *expression;
+            }
+            let saved = self.dims.effect_values.clone();
+            let mut body = Vec::new();
+            for index in indices.into_iter().rev() {
+                let mut value =
+                    expression_binding::value(index, native, self.tree, self.session, &self.dims)?;
+                let ty = dimensions::bound_bits_type(self.tree, &value, &self.dims)
+                    .ok_or_else(|| unsupported("string array index type"))?;
+                let (source, unique) = self.hidden(vector_type(ty.width, ty.signed));
+                self.rename_expr(&mut value);
+                body.push(Stmt::Assign {
+                    lhs: LValue::Ident(unique),
+                    rhs: value,
+                    nonblocking: false,
+                });
+                Arc::make_mut(&mut self.dims.effect_values).insert(index, Expr::Ident(source));
+            }
+            let target = self.native_lvalue(string, false);
+            self.dims.effect_values = saved;
+            let (written, _) = target?;
+            let receiver = (op == StringOp::Putc).then(|| {
+                expression_binding::string_call(
+                    StringOp::FromHandle,
+                    vec![expr_from_lvalue(self.tree, &written, &self.dims)],
+                )
+            });
+            let mut rhs =
+                expression_binding::string_call(op, receiver.into_iter().chain(args).collect());
+            let mut lhs = written;
+            self.rename_lvalue(&mut lhs);
+            self.rename_expr(&mut rhs);
+            body.push(Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking,
+            });
+            return Ok(Stmt::If {
+                condition: Expr::Literal("1'b1".into()),
+                then_body: body,
+                else_body: Vec::new(),
+            });
+        }
         let (written, lhs) = self.native_lvalue(string, false)?;
         let LValue::Ident(name) = &written else {
             return Err(unsupported(format!(
