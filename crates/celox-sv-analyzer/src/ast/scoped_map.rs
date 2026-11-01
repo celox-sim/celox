@@ -110,6 +110,10 @@ impl<V: Clone> Extend<(String, V)> for ScopedMap<V> {
 
 impl<V: PartialEq> PartialEq for ScopedMap<V> {
     fn eq(&self, other: &Self) -> bool {
+        // A clone shares both tables.
+        if self.identity() == other.identity() {
+            return true;
+        }
         self.iter()
             .all(|(name, value)| other.get(name) == Some(value))
             && self.iter().count() == other.iter().count()
