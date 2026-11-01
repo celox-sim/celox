@@ -523,6 +523,14 @@ included, which order numerically by the signedness of the index type (7.8.4),
 `num` / `size`, `exists`, `delete`, and `first` / `last` / `next` / `prev`
 (7.8–7.10). The locator methods that return indices (`find_index` and the
 like) are not supported for integral keys wider than 64 bits.
+A default-only literal, such as `string words[int] = '{default: "hello"}`,
+sets the value read for a missing or unknown index (7.8.6, 7.9.11). The value
+is captured by the assignment, preserved by array copies and `delete()`, and
+does not create entries for `num()`, `exists()` or traversal. Assigning an array
+without a user default restores the element type's normal default. Explicit
+index entries and mixtures of index entries with `default:` in associative
+array literals remain unsupported.
+
 Traversal leaves its index unchanged when no key is found. A container
 declared with several dynamic dimensions, `T m[a][b]`, holds containers as
 elements: `m[a][b] = v` updates the inner container of `m[a]`, which reads as

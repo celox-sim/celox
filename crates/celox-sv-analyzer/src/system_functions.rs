@@ -1066,6 +1066,8 @@ pub enum ContainerOp {
     CaseEqual,
     New,
     Literal,
+    /// Empty associative array with the supplied default element.
+    WithDefault,
     Convert,
     /// A new sequence of the elements of the sequence in the first argument
     /// and then those of the one in the second.

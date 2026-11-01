@@ -57,6 +57,8 @@ pub const CONCAT: u64 = 102;
 /// `slice(a, b, c)`: a new queue with the inclusive, signed bounds b..c,
 /// clipped to the source queue (IEEE 1800-2023 7.10.1).
 pub const SLICE: u64 = 103;
+/// An empty associative array with default payload b and X/Z mask c.
+pub const WITH_DEFAULT: u64 = 104;
 
 /// The operation parameter encodes the element width (bits 0..6), whether
 /// it is two-state (7), its handle kind (8..9: none/string/object), container
@@ -248,12 +250,15 @@ pub(crate) enum Contents {
 #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub(crate) struct Container {
     layout: u64,
+    #[serde(default)]
+    default: Option<Element>,
     pub(crate) contents: Contents,
 }
 impl Container {
     pub(crate) fn empty(layout: Layout) -> Self {
         Self {
             layout: layout.0,
+            default: None,
             contents: if layout.kind() == 2 {
                 Contents::Associative(OrdMap::new())
             } else {
@@ -268,7 +273,7 @@ impl Container {
         }
     }
     pub(crate) fn size(&self) -> usize {
-        self.len() * std::mem::size_of::<Element>()
+        (self.len() + usize::from(self.default.is_some())) * std::mem::size_of::<Element>()
             + match &self.contents {
                 Contents::Associative(v) => v
                     .keys()
@@ -284,7 +289,7 @@ impl Container {
 
 impl Heap {
     pub(crate) fn publish_container(&mut self, container: Container, complete: bool) -> Handle {
-        if container.len() == 0 {
+        if container.len() == 0 && container.default.is_none() {
             return 0;
         }
         let handle = self.next_object;
@@ -339,6 +344,7 @@ impl Heap {
             kind,
             handle: element.value as Handle,
         };
+        roots.extend(container.default.iter().map(root));
         match &container.contents {
             Contents::Sequence(v) => roots.extend(v.iter().map(root)),
             Contents::Associative(v) => roots.extend(v.values().map(root)),
@@ -411,6 +417,9 @@ impl Heap {
         let layout = Layout(parameter);
         let key = layout.key(self, b);
         let existing = self.containers.get(&(a as Handle));
+        let default = existing
+            .and_then(|entry| entry.default)
+            .unwrap_or_else(|| layout.default());
         let get = || {
             existing
                 .and_then(|entry| match &entry.contents {
@@ -418,7 +427,7 @@ impl Heap {
                     Contents::Associative(v) => v.get(&key),
                 })
                 .copied()
-                .unwrap_or_else(|| layout.default())
+                .unwrap_or(default)
         };
         match op {
             EQUAL | CASE_EQUAL => {
@@ -468,18 +477,10 @@ impl Heap {
             }
             LEN => return existing.map_or(0, |v| v.len() as u64),
             GET => {
-                return if c == 0 {
-                    get().value
-                } else {
-                    layout.default().value
-                };
+                return if c == 0 { get().value } else { default.value };
             }
             GET_MASK => {
-                return if c == 0 {
-                    get().mask
-                } else {
-                    layout.default().mask
-                };
+                return if c == 0 { get().mask } else { default.mask };
             }
             EXISTS => {
                 return existing.is_some_and(|entry| match &entry.contents {
@@ -487,7 +488,19 @@ impl Heap {
                     _ => false,
                 }) as u64;
             }
-            CLEAR => return 0,
+            WITH_DEFAULT => {
+                let mut result = Container::empty(layout);
+                result.default = Some(Element {
+                    value: b & layout.bits(),
+                    mask: c & layout.bits(),
+                });
+                return self.publish_container(result, true) as u64;
+            }
+            CLEAR => {
+                let mut result = Container::empty(layout);
+                result.default = existing.and_then(|entry| entry.default);
+                return self.publish_container(result, true) as u64;
+            }
             FIRST | LAST | NEXT | PREV | ITER_VALID => {
                 let traversal = if op == ITER_VALID { c } else { op };
                 let found = existing.and_then(|entry| {
@@ -692,6 +705,55 @@ mod tests {
     fn call(heap: &mut Heap, op: u64, p: u64, a: u64, b: u64, c: u64) -> u64 {
         heap.call(encode(op, p), a, b, c)
     }
+    #[test]
+    fn associative_defaults_survive_updates_and_clear_without_creating_entries() {
+        let mut heap = Heap::new();
+        let p = parameter(4, false, 0, 2, 0, false, false, false);
+        let original = call(&mut heap, WITH_DEFAULT, p, 0, 0b1001, 0b0011);
+        assert_ne!(original, 0);
+        assert_eq!(
+            call(&mut heap, WITH_DEFAULT, p, 0, 0b1001, 0b0011),
+            original
+        );
+        assert_eq!(call(&mut heap, LEN, p, original, 0, 0), 0);
+        assert_eq!(call(&mut heap, EXISTS, p, original, 7, 0), 0);
+        assert_eq!(call(&mut heap, ITER_VALID, p, original, 0, FIRST), 0);
+        assert_eq!(call(&mut heap, GET, p, original, 7, 0), 0b1001);
+        assert_eq!(call(&mut heap, GET_MASK, p, original, 7, 1), 0b0011);
+        let changed = call(&mut heap, SET, p, original, 7, 5);
+        let changed = call(&mut heap, SET_MASK, p, changed, 7, 0);
+        assert_eq!(call(&mut heap, GET, p, changed, 7, 0), 5);
+        assert_eq!(call(&mut heap, GET, p, changed, 8, 0), 0b1001);
+        assert_eq!(call(&mut heap, DELETE, p, changed, 7, 0), original);
+        assert_eq!(call(&mut heap, CLEAR, p, changed, 0, 0), original);
+        assert_eq!(call(&mut heap, GET, p, original, 7, 0), 0b1001);
+        let data = serde_json::to_string(heap.containers[&(original as Handle)].as_ref()).unwrap();
+        let restored: Container = serde_json::from_str(&data).unwrap();
+        assert_eq!(restored, *heap.containers[&(original as Handle)]);
+        // Existing serialized containers have no explicit default field.
+        let mut data: serde_json::Value = serde_json::from_str(&data).unwrap();
+        data.as_object_mut().unwrap().remove("default");
+        let restored: Container = serde_json::from_value(data).unwrap();
+        assert!(restored.default.is_none());
+    }
+
+    #[test]
+    fn empty_associative_defaults_keep_string_and_nested_container_roots_alive() {
+        let mut heap = Heap::new();
+        let text = heap.intern(b"captured default");
+        let strings = parameter(32, true, 1, 2, 0, false, false, false);
+        let inner = call(&mut heap, WITH_DEFAULT, strings, 0, text as u64, 0);
+        let objects = parameter(32, true, 2, 2, 0, false, false, false);
+        let outer = call(&mut heap, WITH_DEFAULT, objects, 0, inner, 0);
+        heap.collect([Root::object(outer as Handle)]);
+        assert_eq!(call(&mut heap, GET, objects, outer, 7, 0), inner);
+        let read = call(&mut heap, GET, strings, inner, 8, 0);
+        assert_eq!(heap.string(read as Handle), b"captured default");
+        assert_eq!(heap.containers.len(), 2);
+        heap.collect([]);
+        assert!(heap.containers.is_empty());
+    }
+
     #[test]
     fn retained_updates_share_storage_and_preserve_snapshots() {
         // No collection: model all the intermediate handles of one time slot.
