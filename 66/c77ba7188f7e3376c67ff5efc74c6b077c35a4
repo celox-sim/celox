@@ -1,1 +1,6 @@
-Address review r4433770142: accept compatible struct subarrays as list/default pattern items, retain element declaration identity, and cover array compatibility and X/Z copying.
+Revision history for #2820:
+
+rev 2 (content) 2026-11-01 00:16 UTC — Address review r4433770142: accept compatible struct subarrays as list/default pattern items, retain element declaration identity, and cover array compatibility and X/Z copying.
+rev 1 (initial) 2026-11-01 00:16 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2820,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"04ee20505bc5bbcdd62e4cd108cf925102f25601","timestamp_iso":"2026-11-01T00:16:12Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"04ee20505bc5bbcdd62e4cd108cf925102f25601","new_sha":"66c77ba7188f7e3376c67ff5efc74c6b077c35a4","timestamp_iso":"2026-11-01T00:16:12Z","reason":"Address review r4433770142: accept compatible struct subarrays as list/default pattern items, retain element declaration identity, and cover array compatibility and X/Z copying.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/04ee20505bc5bbcdd62e4cd108cf925102f25601...66c77ba7188f7e3376c67ff5efc74c6b077c35a4"}]} -->
