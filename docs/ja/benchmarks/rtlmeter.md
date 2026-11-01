@@ -2,7 +2,9 @@
 
 [RTLMeter ダッシュボード](./index.md?tab=rtlmeter)で、Celox・Verilator・xezim の
 2-state / 4-state 比較を確認できます。対象は固定した RTLMeter の
-XuanTie-E902 / E906 の `hello` です。
+XuanTie-E902 / E906 と HummingbirdV2-E203 の `hello` です。
+E203 は上流の `default` 構成（フリップフロップの `#1` 遅延を含む）を使用し、
+assertion を有効にした通常の共有変数の意味論で実行します。
 
 測定値は、同じ VM・論理 CPU 上で順番を入れ替えて実行した 3 回の中央値です。
 HDL の読み込みからコンパイル、起動、実行完了までを含みます。Verilator には

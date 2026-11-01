@@ -7,15 +7,17 @@ import { rtlmeterMetrics } from "./publish-rtlmeter-bench.mjs";
 const manifest = JSON.parse(readFileSync(new URL("../benchmarks/rtlmeter/manifest.json", import.meta.url)));
 const locked = JSON.parse(readFileSync(new URL("../flake.lock", import.meta.url))).nodes.xezim;
 const commit = 'a'.repeat(40);
-function report() {
+function report(name = "e902") {
+  const spec = manifest.cases[name];
   const inputSha256 = Object.fromEntries([
-    ...Array.from({ length: 110 }, (_, i) => `designs/XuanTie-E902/src/${i}.v`),
-    'designs/XuanTie-E902/descriptor.yaml', 'designs/XuanTie-E902/tests/hello/case.pat',
+    ...Array.from({ length: 110 }, (_, i) => `designs/${spec.design}/src/${i}.v`),
+    `designs/${spec.design}/descriptor.yaml`,
+    ...(spec.inputFiles ?? ["tests/hello/case.pat"]).map(file => `designs/${spec.design}/${file}`),
     'rtl/__rtlmeter_utils.sv', 'rtl/__rtlmeter_top_include.vh',
   ].sort().map(path => [path, 'b'.repeat(64)]));
-  return { schemaVersion: 1, contract: manifest.contract, case: 'e902', status: 'completed',
+  return { schemaVersion: 1, contract: manifest.contract, case: name, caseSpec: spec, status: 'completed',
     rtlmeterRevision: manifest.revision, celoxCommit: commit, dirty: false,
-    requestedSamples: 3, maxCycles: manifest.cases.e902.maxCycles, host: { architecture: 'x86_64', cpu: 'test CPU', affinityCpu: 0 },
+    requestedSamples: 3, maxCycles: spec.maxCycles, host: { architecture: 'x86_64', cpu: 'test CPU', affinityCpu: 0 },
     xezimRelease: locked.original.ref, xezimRevision: locked.locked.rev,
     versions: { celox: 'celox 0.12.0', verilator: 'Verilator 5.052', xezim: `xezim version ${locked.original.ref.replace(/^v/, '')}\ngit unknown` },
     binarySha256: { celox: 'a'.repeat(64), verilator: 'b'.repeat(64), xezim: 'c'.repeat(64) },
@@ -73,11 +75,22 @@ test('RTLMeter runs daily/manual with locked tools, raw failures and master-only
   assert.doesNotMatch(workflow, /^\s+(pull_request|push|merge_group):/m);
   assert.match(workflow, /cancel-in-progress: false/);
   assert.match(workflow, /fail-fast: false/);
-  assert.match(workflow, /case: \[e902, e906\]/);
+  assert.match(workflow, /case: \[e902, e906, e203\]/);
   assert.match(workflow, /nix build --no-update-lock-file \.#xezim/);
   assert.match(workflow, /revision: ea338be98e1e838d3518809ce8899f85a009963c/);
   assert.match(workflow, /needs: comparison\n    if: github.ref == 'refs\/heads\/master'/);
   assert.doesNotMatch(workflow, /continue-on-error|--no-verify/);
   assert.match(workflow, /if: always\(\)[\s\S]+retention-days: 30/);
   assert.ok(workflow.indexOf('--validate-only') < workflow.lastIndexOf('node scripts/publish-rtlmeter-bench.mjs'));
+});
+
+test('E203 publishes the default hello workload and rejects altered options or image identities', () => {
+  const r = report('e203');
+  assert.ok(rtlmeterMetrics(r, commit).every(metric => metric.name.includes('rtlmeter_e203_hello_v1_')));
+  const wrongOptions = structuredClone(r);
+  wrongOptions.caseSpec.configuration = 'nodelay';
+  assert.throws(() => rtlmeterMetrics(wrongOptions, commit));
+  delete r.inputSha256['designs/HummingbirdV2-E203/tests/hello/program.hex'];
+  r.sourceSha256 = createHash('sha256').update(JSON.stringify(r.inputSha256)).digest('hex');
+  assert.throws(() => rtlmeterMetrics(r, commit), /Missing input identity:.*program\.hex/);
 });

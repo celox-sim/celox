@@ -13,6 +13,8 @@ const positive = value => Number.isSafeInteger(value) && value > 0;
 
 export function rtlmeterMetrics(report, commit) {
   assert.ok(manifest.cases[report.case], "Unknown RTLMeter case");
+  const spec = manifest.cases[report.case];
+  assert.deepEqual(report.caseSpec, spec, "Workload options must match the manifest");
   assert.equal(report.schemaVersion, 1);
   assert.equal(report.contract, manifest.contract);
   assert.equal(report.status, "completed");
@@ -42,7 +44,7 @@ export function rtlmeterMetrics(report, commit) {
     Object.fromEntries(Object.entries(report.inputSha256).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)),
   )).digest("hex"));
   const design = manifest.cases[report.case].design;
-  for (const path of [`designs/${design}/descriptor.yaml`, `designs/${design}/tests/hello/case.pat`,
+  for (const path of [`designs/${design}/descriptor.yaml`, ...((spec.inputFiles ?? ["tests/hello/case.pat"]).map(file => `designs/${design}/${file}`)),
     "rtl/__rtlmeter_utils.sv", "rtl/__rtlmeter_top_include.vh"]) {
     assert.ok(digest(report.inputSha256[path]), `Missing input identity: ${path}`);
   }
@@ -84,7 +86,7 @@ export function rtlmeterMetrics(report, commit) {
     const times = row.samples.map(sample => sample.processNs).sort((a, b) => a - b);
     return { name: `rtlmeter-${row.engine}/rtlmeter_${report.case}_hello_v1_x64_${row.stateModel}_total`,
       unit: "us", value: times[Math.floor(times.length / 2)] / 1000,
-      extra: JSON.stringify({ contract: report.contract, rtlmeter: report.rtlmeterRevision,
+      extra: JSON.stringify({ caseSpec: report.caseSpec, contract: report.contract, rtlmeter: report.rtlmeterRevision,
         state: row.stateModel, cycles: row.samples[0].cycles, maxCycles: report.maxCycles, samples: times,
         configuration: report.configuration, versions: report.versions,
         binarySha256: report.binarySha256, sourceSha256: report.sourceSha256, run }) };

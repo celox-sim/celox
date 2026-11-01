@@ -428,10 +428,14 @@ function shortDate(epoch: number): string {
   return `${d.getMonth() + 1}/${d.getDate()}`;
 }
 
+function rtlmeterDesignName(name: string): string {
+  return name === "e203" ? "HummingbirdV2-E203" : `XuanTie-${name.toUpperCase()}`;
+}
+
 /** Format chart title from benchName */
 function formatChartTitle(benchName: string): string {
-  const rtlmeter = benchName.match(/^rtlmeter_(e902|e906)_hello_v1_x64_(two-state|four-state)_total$/);
-  if (rtlmeter) return `XuanTie-${rtlmeter[1].toUpperCase()} hello · cold source-to-finish`;
+  const rtlmeter = benchName.match(/^rtlmeter_(e902|e906|e203)_hello_v1_x64_(two-state|four-state)_total$/);
+  if (rtlmeter) return `${rtlmeterDesignName(rtlmeter[1])} hello · cold source-to-finish`;
   let s = benchName;
   const rica = s.match(/^collection_rica_(kernel-[a-z-]+)_([a-f0-9]+)_(x64|arm64)_total$/);
   if (rica) return `rica ${rica[1]} · total · ${rica[3]} · workload ${rica[2]}`;
@@ -902,7 +906,7 @@ onBeforeUnmount(() => {
           <a :href="withBase('/benchmarks/rtlmeter.html')">Measurement details</a>.
         </p>
         <div v-for="entry in rtlmeterStatuses" :key="entry.rtlmeter!.case" class="bench-methodology">
-          <h3>XuanTie-{{ entry.rtlmeter!.case.toUpperCase() }} · latest qualification</h3>
+          <h3>{{ rtlmeterDesignName(entry.rtlmeter!.case) }} · latest qualification</h3>
           <p><a :href="entry.rtlmeter!.run">Raw logs and versions</a> · {{ entry.cpu }} · {{ new Date(entry.date).toLocaleDateString() }}</p>
           <table>
             <thead><tr><th>Simulator</th><th>State</th><th>Status</th><th>Details</th></tr></thead>
