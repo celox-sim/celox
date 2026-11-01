@@ -138,10 +138,11 @@ impl Parser<'_> {
         Ok(id)
     }
 
-    /// Keep temporal property syntax opaque until its automaton is supported.
-    /// A Boolean expression must not accidentally consume a sequence operator.
+    /// Boolean properties and one top-level, single-cycle overlapped
+    /// implication need no temporal automaton. Keep other sequences opaque.
     fn boolean_property_header(&self) -> bool {
         let mut depth = 0usize;
+        let mut implication = false;
         for offset in 0..self.indices.len().saturating_sub(self.at) {
             match self.nth(offset) {
                 "(" => depth += 1,
@@ -151,6 +152,7 @@ impl Parser<'_> {
                         return true;
                     }
                 }
+                "|->" if depth == 1 && !implication => implication = true,
                 "##" | "|->" | "|=>" | "throughout" | "within" | "intersect" | "until"
                 | "s_until" | "until_with" | "s_until_with" | "implies" | "iff"
                     if self.nth(offset.saturating_sub(1)) != "disable" =>
@@ -1190,11 +1192,17 @@ impl Parser<'_> {
                                 } else {
                                     None
                                 };
-                                let condition = self.expression(0)?;
+                                let first = self.expression(0)?;
+                                let (antecedent, condition) = if self.eat("|->") {
+                                    (Some(first), self.expression(0)?)
+                                } else {
+                                    (None, first)
+                                };
                                 self.expect(")")?;
                                 Some(AssertionHeader::Concurrent {
                                     clock,
                                     disable,
+                                    antecedent,
                                     condition,
                                     module_item: false,
                                     tokens: self.range(start),

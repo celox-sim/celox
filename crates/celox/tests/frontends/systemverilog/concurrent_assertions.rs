@@ -1,4 +1,6 @@
 sv_backends! {
+fn overlapped_boolean_implication(sim) { @case "concurrent_assertions::overlapped_boolean_implication"; }
+fn overlapped_unknown_antecedent(sim) { @case "concurrent_assertions::overlapped_unknown_antecedent"; }
 fn sampled_history_while_disabled(sim) { @case "concurrent_assertions::sampled_history_while_disabled"; }
 fn sampled_history_predicates(sim) { @case "concurrent_assertions::sampled_history_predicates"; }
 fn sampled_history_gates_and_indices(sim) { @case "concurrent_assertions::sampled_history_gates_and_indices"; }
