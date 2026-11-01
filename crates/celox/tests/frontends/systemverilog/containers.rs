@@ -1,7 +1,17 @@
 use super::*;
 
 sv_backends! {
+    fn queue_slice_runtime_bounds(sim) { @case "containers::queue_slice_runtime_bounds"; }
+    fn queue_slice_updates_and_copies(sim) { @case "containers::queue_slice_updates_and_copies"; }
+    fn queue_slice_wide_and_unknown_bounds(sim) { @case "containers::queue_slice_wide_and_unknown_bounds"; }
     fn class_container_inheritance_static(sim) { @case "containers::class_container_inheritance_static"; }
+    fn nested_container_foreach(sim) { @case "containers::nested_container_foreach"; }
+    fn multidimensional_foreach_break(sim) { @case "containers::multidimensional_foreach_break"; }
+    fn nested_container_foreach_skipped_index(sim) { @case "containers::nested_container_foreach_skipped_index"; }
+    fn wide_associative_keys(sim) { @case "containers::wide_associative_keys"; }
+    fn wide_signed_associative_keys(sim) { @case "containers::wide_signed_associative_keys"; }
+    fn wide_associative_keys_with_unknown_bits(sim) { @case "containers::wide_associative_keys_with_unknown_bits"; }
+    fn package_scoped_container_methods(sim) { @case "containers::package_scoped_container_methods"; }
     fn nested_containers_and_class_keys(sim) { @case "containers::nested_containers_and_class_keys"; }
     fn methods_of_nested_container_elements(sim) { @case "containers::methods_of_nested_container_elements"; }
     fn nested_updates_evaluate_indices_once(sim) { @case "containers::nested_updates_evaluate_indices_once"; }
@@ -43,6 +53,9 @@ sv_backends! {
     fn associative_string_keys(sim) { @case "containers::associative_string_keys"; }
     fn four_state_elements_and_indices(sim) { @case "containers::four_state_elements_and_indices"; }
     fn declaration_initializers_and_locals(sim) { @case "containers::declaration_initializers_and_locals"; }
+    fn compound_element_assignments(sim) { @case "containers::compound_element_assignments"; }
+    fn string_indices_from_calls(sim) { @case "containers::string_indices_from_calls"; }
+    fn array_items_in_concatenations(sim) { @case "containers::array_items_in_concatenations"; }
 }
 
 sv_backends! {
@@ -106,6 +119,52 @@ sv_backends! {
         let error = sim.run_until(0).unwrap_err().to_string();
         assert!(error.contains("negative dynamic array size"), "{error}");
     }
+}
+
+#[test]
+fn dollar_indices_reject_receivers_with_side_effects() {
+    // `$` reads the queue's size through the receiver again; with a call in
+    // the receiver, the two reads could name different queues.
+    for read in ["m[next_index()][$]", "m[next_index()][$ - 1]"] {
+        let source = format!(
+            "module Top; int m[int][$]; int calls; int v;
+                function automatic int next_index(); calls++; return calls; endfunction
+                initial v = {read};
+            endmodule"
+        );
+        let error = celox::Simulation::from_sv_sources(
+            vec![(source.as_str(), Path::new("dollar-receiver.sv"))],
+            "Top",
+        )
+        .build_cranelift()
+        .err()
+        .unwrap_or_else(|| panic!("`{read}` must be rejected"))
+        .to_string();
+        assert!(
+            error.contains("`$` index of a queue read through"),
+            "{read}: {error}"
+        );
+    }
+    // An explicit size query is a read of its own: both calls are made.
+    let source = r#"module Top(output int value);
+        int m[int][$];
+        int calls;
+        int v;
+        function automatic int next_index(); calls++; return calls; endfunction
+        initial begin
+            m[1] = '{10, 11, 12};
+            m[2] = '{20, 21};
+            v = m[next_index()][m[next_index()].size() - 1];
+            value = calls;
+        end
+    endmodule"#;
+    let mut sim =
+        celox::Simulation::from_sv_sources(vec![(source, Path::new("explicit.sv"))], "Top")
+            .build_cranelift()
+            .unwrap();
+    sim.run_until(0).unwrap();
+    let value = sim.signal("value");
+    assert_eq!(sim.get(value), BigUint::from(2u8));
 }
 
 #[test]

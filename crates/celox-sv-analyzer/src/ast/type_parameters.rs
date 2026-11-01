@@ -67,16 +67,16 @@ pub(super) fn bind(
 /// Freeze every dimension in the caller's environment before crossing the
 /// instance boundary. A child's parameters must not reinterpret caller names.
 pub(super) fn resolve(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     mut ty: Type,
     env: &HashMap<String, i128>,
 ) -> Option<Type> {
     fn bound(
-        state: &AnalysisState,
+        functions: &const_functions::ConstantFunctions,
         expr: &ConstExpr,
         env: &HashMap<String, i128>,
     ) -> Option<ConstExpr> {
-        let value = eval_ast_const_expr(state, expr, env)?;
+        let value = eval_ast_const_expr(functions, expr, env)?;
         Some(if value >= 0 {
             ConstExpr::Literal(value.to_string())
         } else {
@@ -84,19 +84,19 @@ pub(super) fn resolve(
         })
     }
     for range in &mut ty.packed_ranges {
-        range.left = bound(state, &range.left, env)?;
-        range.right = bound(state, &range.right, env)?;
+        range.left = bound(functions, &range.left, env)?;
+        range.right = bound(functions, &range.right, env)?;
     }
     for range in &mut ty.unpacked_ranges {
-        range.left = bound(state, &range.left, env)?;
-        range.right = bound(state, &range.right, env)?;
+        range.left = bound(functions, &range.left, env)?;
+        range.right = bound(functions, &range.right, env)?;
         if let Some(size) = &range.size {
-            range.size = Some(bound(state, size, env)?);
+            range.size = Some(bound(functions, size, env)?);
         }
     }
     let mut members = Vec::new();
     for member in ty.members {
-        let resolved = resolve(state, member.r#type().clone(), env)?;
+        let resolved = resolve(functions, member.r#type().clone(), env)?;
         members.push(member.with_type(|_| resolved));
     }
     ty.members = members;

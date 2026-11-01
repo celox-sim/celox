@@ -1,0 +1,59 @@
+name: Setup Verilator from source
+description: Build a fixed upstream commit on the runner and cache the native installation
+inputs:
+  version:
+    description: Expected release version, for example 5.052
+    required: true
+  revision:
+    description: Full immutable upstream Verilator commit
+    required: true
+outputs:
+  cache-hit:
+    description: Whether the installation was restored from the exact cache key
+    value: ${{ steps.cache.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Install build and runtime dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends ca-certificates autoconf bison flex g++ git help2man make perl python3 libfl-dev zlib1g-dev liblz4-dev libjemalloc-dev numactl ccache mold
+    - name: Identify native build cache
+      id: identity
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        REVISION: ${{ inputs.revision }}
+      run: |
+        [[ "$VERSION" =~ ^[0-9]+\.[0-9]{3}$ && "$REVISION" =~ ^[0-9a-f]{40}$ ]]
+        source /etc/os-release
+        [[ "$ID" == ubuntu ]]
+        abi=$( { g++ --version; ldd --version; } | sha256sum | cut -d' ' -f1)
+        recipe=$(cat "$GITHUB_ACTION_PATH/action.yml" "$GITHUB_ACTION_PATH/build.sh" "$GITHUB_ACTION_PATH/verify.sh" | sha256sum | cut -d' ' -f1)
+        key="verilator-${ID}-${VERSION_ID}-$(uname -m)-${REVISION}-${abi}-${recipe}"
+        echo "key=$key" >> "$GITHUB_OUTPUT"
+        echo "prefix=$RUNNER_TOOL_CACHE/celox-verilator/$key" >> "$GITHUB_OUTPUT"
+    - uses: actions/cache@v6
+      id: cache
+      with:
+        path: ${{ steps.identity.outputs.prefix }}
+        key: ${{ steps.identity.outputs.key }}
+    - name: Build Verilator on this runner
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        REVISION: ${{ inputs.revision }}
+        PREFIX: ${{ steps.identity.outputs.prefix }}
+      run: bash "$GITHUB_ACTION_PATH/build.sh" "$VERSION" "$REVISION" "$PREFIX" 2
+    - name: Verify and expose installation
+      shell: bash
+      env:
+        VERSION: ${{ inputs.version }}
+        REVISION: ${{ inputs.revision }}
+        PREFIX: ${{ steps.identity.outputs.prefix }}
+      run: |
+        bash "$GITHUB_ACTION_PATH/verify.sh" "$VERSION" "$REVISION" "$PREFIX"
+        echo "$PREFIX/bin" >> "$GITHUB_PATH"
+        echo "VERILATOR_ROOT=$PREFIX/share/verilator" >> "$GITHUB_ENV"

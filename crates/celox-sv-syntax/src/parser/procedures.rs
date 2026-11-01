@@ -739,24 +739,27 @@ impl Parser<'_> {
         }
     }
 
-    fn timing_range(&mut self) -> Result<(TokenRange, Option<TimingControlId>)> {
+    fn timing_range(&mut self) -> Result<(TokenRange, Option<TimingControlId>, Option<ExprId>)> {
         let start = self.at;
-        let event = match self.peek() {
+        let mut repeat_count = None;
+        let control = match self.peek() {
             "repeat" => {
                 self.at += 1;
-                self.parentheses()?;
+                self.expect("(")?;
+                repeat_count = Some(self.expression(0)?);
+                self.expect(")")?;
                 if !matches!(self.peek(), "@" | "@*") {
                     return Err(self.error("expected event control after repeat count"));
                 }
                 Some(self.typed_timing_control()?)
             }
-            "@" | "@*" => Some(self.typed_timing_control()?),
+            "#" | "@" | "@*" => Some(self.typed_timing_control()?),
             _ => {
                 self.timing_atom()?;
                 None
             }
         };
-        Ok((self.range(start), event))
+        Ok((self.range(start), control, repeat_count))
     }
 
     fn timing_atom(&mut self) -> Result<()> {
@@ -1301,11 +1304,31 @@ impl Parser<'_> {
                                 self.statement_node(header, StatementKind::ProceduralAssign(id))?,
                             );
                         }
-                        "disable" | "->" | "->>" | "force" | "release" | "deassign" | "##" => {
+                        "->" | "->>" => {
+                            // event_trigger (IEEE 1800-2023 A.6.5)
+                            self.at += 1;
+                            let nonblocking = word == "->>";
+                            let control = if nonblocking && matches!(self.peek(), "#" | "@" | "@*")
+                            {
+                                Some(self.typed_timing_control()?)
+                            } else {
+                                None
+                            };
+                            let target = self.expression(0)?;
+                            self.expect(";")?;
+                            values.push(self.statement_node(
+                                header,
+                                StatementKind::EventTrigger {
+                                    nonblocking,
+                                    control,
+                                    target,
+                                },
+                            )?);
+                        }
+                        "disable" | "force" | "release" | "deassign" | "##" => {
                             let tokens = self.semicolon_range()?;
                             let kind = match word.as_str() {
                                 "disable" => StatementKind::Disable(tokens),
-                                "->" | "->>" => StatementKind::EventTrigger(tokens),
                                 "##" => StatementKind::Unconverted {
                                     category: "clocking drive".into(),
                                     tokens,
@@ -1358,12 +1381,13 @@ impl Parser<'_> {
                                 let operator = self.peek().to_owned();
                                 let nonblocking = operator == "<=";
                                 self.at += 1;
-                                let (timing, event_control) =
+                                let (timing, timing_control, repeat_count) =
                                     if matches!(self.peek(), "#" | "@" | "@*" | "repeat" | "##") {
-                                        let (tokens, event) = self.timing_range()?;
-                                        (Some(tokens), event)
+                                        let (tokens, control, repeat_count) =
+                                            self.timing_range()?;
+                                        (Some(tokens), control, repeat_count)
                                     } else {
-                                        (None, None)
+                                        (None, None, None)
                                     };
                                 let right = self.expression(0)?;
                                 self.expect(";")?;
@@ -1375,7 +1399,8 @@ impl Parser<'_> {
                                         right,
                                         nonblocking,
                                         timing,
-                                        event_control,
+                                        timing_control,
+                                        repeat_count,
                                     },
                                 )?);
                             } else {

@@ -134,6 +134,13 @@ pub trait HostBoundary: UnitExecutor {
         CompiledSlots::None
     }
 
+    /// Called before every step of the reference loop and every run of the
+    /// compiled scheduler: a host whose runtime events another thread
+    /// drains waits here until that thread has taken them all, so that the
+    /// next step's fit the ring buffer (a compiled run records at most a
+    /// batch before it returns, plus its last slot's).
+    fn await_runtime_event_room(&mut self) {}
+
     /// Live values kept in dynamic process frames, outside backend state memory.
     fn retain_process_values(&mut self, _values: &[(crate::SignalRef, crate::timing::Value)]) {}
 

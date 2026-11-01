@@ -1,3 +1,10 @@
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_macros,
+        reason = "thread-local specialization observations exist only in unit tests"
+    )
+)]
 //! SystemVerilog frontend adapter for Celox.
 
 mod lowering;

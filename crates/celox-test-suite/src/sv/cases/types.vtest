@@ -525,3 +525,72 @@
   (assert_eq state 2)
   (tick clk)
   (assert_eq state 0))
+(case unpacked_array_assignments_through_selects_and_calls
+  (source "top.sv" #"
+module Sub;
+    int b[2] = '{7, 8};
+endmodule
+module Top(output int sum);
+    typedef enum {A, B} e_t;
+    typedef int ia_t[2];
+    Sub u();
+    int a[4], c[2], d[2], h[2];
+    e_t ea[2], eb[2];
+    bit signed [31:0] w[2];
+    bit s;
+    function ia_t f();
+        return d;
+    endfunction
+    function int g(int p[2] = d);
+        return p[0] + p[1];
+    endfunction
+    initial begin
+        d = '{1, 2};
+        a = '{1, 2, 3, 4};
+        a[0:1] = a[2:3];
+        c = a[1+:2];
+        w = c;
+        s = 1;
+        h = s ? c : d;
+        eb = '{B, A};
+        ea = eb;
+        c = f();
+        h[1] = u.b[1];
+        sum = a[0] + 10 * c[0] + 100 * w[1] + 1000 * h[0] + 10000 * c[1] + 100000 * g()
+            + 1000000 * h[1] + 10000000 * ea[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 18324313))
+
+; IEEE 1800-2023 6.14: a chandle starts as null, compares with another
+; chandle or null, tests as a Boolean, and can be copied, kept in a class,
+; an associative array, and passed to and returned from subroutines.
+(case chandles_hold_null_and_copies
+  (source "chandles_hold_null_and_copies.sv" #"
+    module Top(output int checks);
+      class Holder;
+        local chandle h;
+        function void set(chandle x); h = x; endfunction
+        function bit is_null(); return h == null; endfunction
+      endclass
+      chandle a, b;
+      chandle lookup[string];
+      function automatic chandle pass(chandle h); return h; endfunction
+      initial begin
+        automatic Holder holder = new;
+        automatic chandle c = null;
+        checks = 0;
+        if (a == null && a === b && !a) checks++;
+        b = pass(a);
+        lookup["k"] = b;
+        c = lookup["k"];
+        if (c == a && !(c != null) && !(a || b)) checks++;
+        holder.set(c);
+        if (holder.is_null() && lookup.num() == 1) checks++;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 1)
+  (assert_eq checks 3))

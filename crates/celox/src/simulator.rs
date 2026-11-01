@@ -150,8 +150,19 @@ mod host {
         // Temporarily detached while advancing the simulator. Keep the queue
         // in place instead of copying its entire state at every clock edge.
         pub(crate) component_simulation: Option<Box<celox_runtime::SimulationState<B>>>,
+        /// Generated TB scheduler unit runs, host edge batches and host
+        /// statement services, which tests take.
+        #[cfg(test)]
+        pub(crate) tb_counters: (usize, usize, usize),
         runtime_event_read_seq: Arc<AtomicU64>,
         runtime_event_drain_active: Arc<AtomicBool>,
+        /// Set while the active drain paces the simulation
+        /// ([`RuntimeEventDrain::set_backpressure`]).
+        runtime_event_backpressure: Arc<AtomicBool>,
+        /// Whether a runtime-event site records heap handles
+        /// (`sites_record_handles`).
+        runtime_event_handles: bool,
+        runtime_event_pacing: Arc<DrainPacing>,
         pub(super) comb_observer_snapshots: Vec<crate::comb_activation::ObserverSnapshot>,
         /// Storage reused for the next snapshot.
         comb_observer_scratch: Vec<crate::comb_activation::ObserverSnapshot>,
@@ -321,26 +332,108 @@ mod host {
         read_seq: u64,
         shared_read_seq: Arc<AtomicU64>,
         active: Arc<AtomicBool>,
+        backpressure: Arc<AtomicBool>,
+        /// Whether a site records heap handles (`sites_record_handles`).
+        handles: bool,
+        pacing: Arc<DrainPacing>,
+    }
+
+    /// The threads of a simulation and of the drain that paces it, which
+    /// wake each other instead of spinning while one waits for the other.
+    #[derive(Default)]
+    pub(crate) struct DrainPacing {
+        simulation: std::sync::Mutex<Option<std::thread::Thread>>,
+        drain: std::sync::Mutex<Option<std::thread::Thread>>,
+    }
+
+    impl DrainPacing {
+        /// Make the calling thread the one `slot` wakes.
+        fn register(slot: &std::sync::Mutex<Option<std::thread::Thread>>) {
+            let current = std::thread::current();
+            let mut thread = slot.lock().unwrap();
+            if thread
+                .as_ref()
+                .is_none_or(|thread| thread.id() != current.id())
+            {
+                *thread = Some(current);
+            }
+        }
+
+        fn wake(slot: &std::sync::Mutex<Option<std::thread::Thread>>) {
+            if let Some(thread) = slot.lock().unwrap().as_ref() {
+                thread.unpark();
+            }
+        }
+    }
+
+    /// Whether a site of `sites` records heap handles, which only the
+    /// simulation's thread can resolve.
+    fn sites_record_handles(sites: &[RuntimeEventSite]) -> bool {
+        sites
+            .iter()
+            .any(|site| site.arg_is_handle.iter().any(|&handle| handle))
     }
 
     impl RuntimeEventDrain {
+        /// While `enabled`, the simulation waits before each step until
+        /// this drain has taken every event, so that none of a step's, up to
+        /// the ring buffer's capacity, is lost while another thread keeps
+        /// draining. A drain
+        /// that stops draining then stalls the simulation until it drains
+        /// again or is dropped. When the design records heap handles (such
+        /// as `string` arguments), the simulation's thread moves the records
+        /// out of the ring buffer before each step, resolving the handles,
+        /// and the drain takes only those.
+        pub fn set_backpressure(&self, enabled: bool) {
+            self.backpressure.store(enabled, Ordering::Release);
+            // A simulation waiting for room goes on when no longer paced.
+            if !enabled {
+                DrainPacing::wake(&self.pacing.simulation);
+            }
+        }
+
         pub fn drain(&mut self) -> Vec<RuntimeEvent> {
             self.drain_with_context(RuntimeFormatContext::default())
         }
 
+        /// Block the calling thread until the simulation waits for this
+        /// drain to take events (see [`Self::set_backpressure`]), or until
+        /// `timeout` passes or the thread is unparked. Returns at once when
+        /// events are waiting to be taken.
+        pub fn wait(&self, timeout: std::time::Duration) {
+            DrainPacing::register(&self.pacing.drain);
+            // Check after registering: a simulation waiting from then on
+            // wakes this thread.
+            if !self.pending_host_events.lock().unwrap().events.is_empty()
+                // Records with handles wait in the ring for the simulation.
+                || (!self.sites.is_empty()
+                    && !(self.handles && self.backpressure.load(Ordering::Acquire))
+                    && self.buffer.load_atomic_u64(0, Ordering::Acquire)
+                        > self.shared_read_seq.load(Ordering::Acquire))
+            {
+                return;
+            }
+            std::thread::park_timeout(timeout);
+        }
+
         pub fn drain_with_context(&mut self, ctx: RuntimeFormatContext<'_>) -> Vec<RuntimeEvent> {
             let mut pending = self.pending_host_events.lock().unwrap();
-            self.read_seq = self.shared_read_seq.load(Ordering::Acquire);
-            let events = drain_raw_runtime_events_from_buffer(
-                &self.buffer,
-                &self.layout,
-                &self.sites,
-                &mut self.read_seq,
-            );
-            self.shared_read_seq.store(self.read_seq, Ordering::Release);
-            pending.extend(events, self.layout.runtime_event_capacity);
+            // Handles left in the ring are the simulation's to resolve.
+            if !(self.handles && self.backpressure.load(Ordering::Acquire)) {
+                self.read_seq = self.shared_read_seq.load(Ordering::Acquire);
+                let events = drain_raw_runtime_events_from_buffer(
+                    &self.buffer,
+                    &self.layout,
+                    &self.sites,
+                    &mut self.read_seq,
+                );
+                self.shared_read_seq.store(self.read_seq, Ordering::Release);
+                pending.extend(events, self.layout.runtime_event_capacity);
+            }
             let events = pending.drain();
             drop(pending);
+            // A simulation waiting for room goes on.
+            DrainPacing::wake(&self.pacing.simulation);
             events
                 .into_iter()
                 .filter_map(|raw| render_raw_runtime_event(raw, &self.sites, ctx))
@@ -351,7 +444,9 @@ mod host {
 
     impl Drop for RuntimeEventDrain {
         fn drop(&mut self) {
+            self.backpressure.store(false, Ordering::Release);
             self.active.store(false, Ordering::Release);
+            DrainPacing::wake(&self.pacing.simulation);
         }
     }
 
@@ -1257,6 +1352,8 @@ mod host {
                         .push((observer.activation_group, observer.site_id as usize));
                 }
             }
+            let runtime_event_handles =
+                sites_record_handles(&program.runtime_schema.runtime_event_sites);
             let mut sim = Self {
                 backend,
                 program,
@@ -1286,8 +1383,13 @@ mod host {
                 sample_shadows,
                 components: Default::default(),
                 component_simulation: None,
+                #[cfg(test)]
+                tb_counters: (0, 0, 0),
                 runtime_event_read_seq: Arc::new(AtomicU64::new(0)),
                 runtime_event_drain_active: Arc::new(AtomicBool::new(false)),
+                runtime_event_backpressure: Arc::new(AtomicBool::new(false)),
+                runtime_event_handles,
+                runtime_event_pacing: Arc::default(),
                 comb_observer_snapshots: Vec::new(),
                 comb_observer_scratch: Vec::new(),
                 comb_observer_reads,
@@ -1395,6 +1497,26 @@ mod host {
             self.program
                 .design
                 .restore_initial_state(initial_memory_values);
+        }
+
+        /// Set the simulation's plusargs (IEEE 1800-2023 21.6). The tool's
+        /// command line, which UVM reads through `uvm_dpi_get_next_arg_c`,
+        /// is the program name followed by them, each with the leading `+`
+        /// that UVM recognizes plusargs by and that the builder lets callers
+        /// leave out.
+        pub(crate) fn set_plusargs(&mut self, plusargs: Vec<String>) {
+            self.backend.heap_mut().set_tool_arguments(
+                std::iter::once("celox".to_owned())
+                    .chain(plusargs.iter().map(|argument| {
+                        if argument.starts_with('+') {
+                            argument.clone()
+                        } else {
+                            format!("+{argument}")
+                        }
+                    }))
+                    .collect(),
+            );
+            self.plusargs = celox_runtime::plusargs::Plusargs(plusargs);
         }
 
         pub(crate) fn run_plusargs_request(
@@ -1643,6 +1765,75 @@ mod host {
                 })
                 .map(|event| untimed_report(event, self.timed, ctx))
                 .collect()
+        }
+
+        /// Drain runtime events as [`Self::drain_runtime_events_deferred_with_context`]
+        /// does, with the site of each. A record of `marker` gives the events
+        /// recorded before it, since the previous marker, the simulation time
+        /// of its argument; later events have the time of `ctx`.
+        pub(crate) fn drain_marked_runtime_events(
+            &mut self,
+            ctx: RuntimeFormatContext<'_>,
+            marker: usize,
+        ) -> Vec<(Option<usize>, RuntimeEvent)> {
+            assert!(
+                !self.runtime_event_drain_active.load(Ordering::Acquire),
+                "cannot use Simulator::drain_runtime_events while a RuntimeEventDrain is active",
+            );
+            if !self.program.runtime_schema.comb_observers.is_empty() && self.dirty {
+                self.eval_comb_for_runtime_event_drain().unwrap();
+            }
+            let queue = Arc::clone(&self.pending_host_events);
+            let mut pending = queue.lock().unwrap();
+            if pending.events.is_empty()
+                && pending.missed == 0
+                && pending.deferred.waiting.is_empty()
+                && self.runtime_event_read_seq.load(Ordering::Acquire)
+                    == self.runtime_event_write_seq()
+            {
+                return Vec::new();
+            }
+            pending.extend(
+                self.collect_backend_runtime_events(),
+                self.backend.layout().runtime_event_capacity,
+            );
+            pending.resolve_deferred_handles(self.backend.heap());
+            let raw = pending.drain();
+            drop(pending);
+            let sites = &self.program.runtime_schema.runtime_event_sites;
+            let mut events = Vec::with_capacity(raw.len());
+            let mut unmarked = Vec::new();
+            for raw in raw {
+                let site = match &raw {
+                    RawRuntimeEvent::Event { site_id, args } if *site_id == marker => {
+                        let time = args
+                            .first()
+                            .and_then(|time| time.values.first().copied())
+                            .unwrap_or(0);
+                        let marked = RuntimeFormatContext {
+                            tb_time: Some(time),
+                            ..ctx
+                        };
+                        for (site, raw) in unmarked.drain(..) {
+                            events
+                                .extend(render_raw_runtime_event(raw, sites, marked).map(
+                                    |event| (site, untimed_report(event, self.timed, marked)),
+                                ));
+                        }
+                        continue;
+                    }
+                    RawRuntimeEvent::Event { site_id, .. } => Some(*site_id),
+                    _ => None,
+                };
+                unmarked.push((site, raw));
+            }
+            for (site, raw) in unmarked {
+                events.extend(
+                    render_raw_runtime_event(raw, sites, ctx)
+                        .map(|event| (site, untimed_report(event, self.timed, ctx))),
+                );
+            }
+            events
         }
 
         fn queue_host_runtime_event(
@@ -2001,6 +2192,11 @@ mod host {
             }
         }
 
+        /// Whether a [`RuntimeEventDrain`] is active.
+        pub(crate) fn runtime_event_drain_active(&self) -> bool {
+            self.runtime_event_drain_active.load(Ordering::Acquire)
+        }
+
         pub fn runtime_event_drain(&mut self) -> Option<RuntimeEventDrain> {
             let buffer = self.backend.runtime_event_buffer()?;
             self.runtime_event_drain_active
@@ -2015,7 +2211,42 @@ mod host {
                 read_seq: self.runtime_event_read_seq.load(Ordering::Acquire),
                 shared_read_seq: Arc::clone(&self.runtime_event_read_seq),
                 active: Arc::clone(&self.runtime_event_drain_active),
+                backpressure: Arc::clone(&self.runtime_event_backpressure),
+                handles: self.runtime_event_handles,
+                pacing: Arc::clone(&self.runtime_event_pacing),
             })
+        }
+
+        /// Wait until a drain that paces the simulation has taken every
+        /// record (see [`RuntimeEventDrain::set_backpressure`]), those in the
+        /// ring buffer and those the host moved into its bounded queue, so
+        /// that the step keeps every record up to the buffer's capacity.
+        pub(crate) fn await_runtime_event_room(&mut self) {
+            let pacing = Arc::clone(&self.runtime_event_pacing);
+            let mut registered = false;
+            while self.runtime_event_backpressure.load(Ordering::Acquire)
+                && self.runtime_event_drain_active.load(Ordering::Acquire)
+            {
+                // The drain takes records with handles from the host queue
+                // once this thread resolved them there.
+                if self.runtime_event_handles {
+                    self.stash_runtime_events();
+                }
+                let queued = self.pending_host_events.lock().unwrap().events.len();
+                let read = self.runtime_event_read_seq.load(Ordering::Acquire);
+                if queued == 0 && self.runtime_event_write_seq() <= read {
+                    break;
+                }
+                // The drain wakes this thread once it took events or ended;
+                // check again after registering, so that no wakeup is missed.
+                if !registered {
+                    DrainPacing::register(&pacing.simulation);
+                    registered = true;
+                    continue;
+                }
+                DrainPacing::wake(&pacing.drain);
+                std::thread::park();
+            }
         }
 
         /// Returns a reference to the compiled SIR program.
@@ -2173,7 +2404,10 @@ mod host {
             };
             f(&mut ctx);
             self.dirty = true;
-            if self.runtime_event_drain_active.load(Ordering::Acquire) {
+            // Without a scheduler, nothing else settles the write for a
+            // drain on another thread; a timed simulation's next step does,
+            // and handles a fatal assertion there.
+            if !self.timed && self.runtime_event_drain_active.load(Ordering::Acquire) {
                 self.eval_comb_for_runtime_event_drain()?;
                 self.end_untimed_slot()?;
             }
@@ -2616,9 +2850,11 @@ mod host {
             self.begin_host_slot()?;
             if let Some(Some(unit)) = self.derived_units.get(event.id()).copied()
                 && !self.finish_sites
-                && self.backend.runs_derived_edge_units()
             {
-                return self.edge_unit(event, info, edge, unit);
+                self.backend.request_derived_edge_units();
+                if self.backend.runs_derived_edge_units() {
+                    return self.edge_unit(event, info, edge, unit);
+                }
             }
             let plans = std::sync::Arc::clone(&self.derived_ticks);
             let plan = plans.get(event.id()).and_then(Option::as_ref);

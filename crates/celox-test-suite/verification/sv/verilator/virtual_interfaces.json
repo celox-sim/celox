@@ -1,0 +1,258 @@
+{
+  "cases": [
+    {
+      "category": "Hierarchy",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "virtual_interfaces::four_state_members",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/sv_virtual_interface_event_verilator.json",
+          "verification/repros/sv_virtual_interface_wait_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_virtual_interface_wait",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+        "upstream": []
+      },
+      "name": "virtual_interfaces::member_pulses_within_one_activation",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/sv_virtual_interface_event_verilator.json",
+          "verification/repros/sv_virtual_interface_wait_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_virtual_interface_wait",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+        "upstream": []
+      },
+      "name": "virtual_interfaces::mixed_event_controls",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:15:13: Operator ASSIGN expected 'bus_if' interface on Assign RHS but 'o' is a different interface ('other_if').\n                                : ... note: In instance 'Top'\n   15 |         v = o;\n      |             ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_another_interface",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:10:17: Operator ASSIGN expected 'bus_if' interface on Assign RHS but 'number' is not an interface.\n                                : ... note: In instance 'Top'\n   10 |     initial v = number();\n      |                 ^~~~~~\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_call_results_of_other_types",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:15:15: Virtual interface argument 'x' requires a compatible interface type, parameters, and modport.\n                                : ... note: In instance 'Top'\n   15 |         d.set(1);\n      |               ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_integers_as_class_call_arguments",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:13:21: Virtual interface argument 'x' requires a compatible interface type, parameters, and modport.\n                                : ... note: In instance 'Top'\n   13 |     initial d = new(1);\n      |                     ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_integers_as_constructor_arguments",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:7:26: Operator ASSIGN expected 'bus_if' interface on Assign RHS but '?32?sh1' is not an interface.\n                               : ... note: In instance 'Top'\n    7 |     initial handles[0] = 1;\n      |                          ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_integers_in_arrays_of_virtual_interfaces",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:8:31: Incompatible types of operands of condition operator: BASICDTYPE 'bit' and BASICDTYPE 'bit'\n                               : ... note: In instance 'Top'\n    8 |     initial handles[0] = flag ? 1 : null;\n      |                               ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:8:31: Operator ASSIGN expected 'bus_if' interface on Assign RHS but '' is not an interface.\n                               : ... note: In instance 'Top'\n    8 |     initial handles[0] = flag ? 1 : null;\n      |                               ^\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_integers_in_conditional_array_elements",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:8:17: Operator ASSIGN expected no interface modport on Assign RHS but got 'mon' modport.\n                               : ... note: In instance 'Top.child'\n    8 |     initial v = p;\n      |                 ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_modport_ports_to_full_interface",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:9:17: Operator ASSIGN expected no interface modport on Assign RHS but got 'mon' modport.\n                               : ... note: In instance 'Top'\n    9 |     initial v = m;\n      |                 ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: Exiting due to 1 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_modport_to_full_interface",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator build exit status: 1; see <case>/build.log\n%Error: <case>/source_0.sv:10:19: Ref argument requires matching types; port 'x' requires 'bit[31:0]' but connection is 'IFACEREFDTYPE'.\n                                : ... note: In instance 'Top'\n   10 |     initial forge(v);\n      |                   ^\n        ... See the manual at https://verilator.org/verilator_doc.html?v=5.052 for more assistance.\n%Error: <case>/source_0.sv:10:19: Operator TASKREF 'forge' expected non-interface on Function Argument but 'v' is an interface.\n                                : ... note: In instance 'Top'\n   10 |     initial forge(v);\n      |                   ^\n%Error: Exiting due to 2 error(s)\n",
+      "expectation": "CompilationError",
+      "name": "virtual_interfaces::rejects_virtual_interfaces_as_integral_references",
+      "phase": "compile",
+      "status": "rejected",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/sv_virtual_interface_event_verilator.json",
+          "verification/repros/sv_virtual_interface_wait_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_virtual_interface_wait",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+        "upstream": []
+      },
+      "name": "virtual_interfaces::retargets_with_ordinary_events",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/sv_virtual_interface_event_verilator.json",
+          "verification/repros/sv_virtual_interface_wait_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_virtual_interface_wait",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+        "upstream": []
+      },
+      "name": "virtual_interfaces::waits_on_member_edges",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/sv_virtual_interface_event_verilator.json",
+          "verification/repros/sv_virtual_interface_wait_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_virtual_interface_wait",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+        "upstream": []
+      },
+      "name": "virtual_interfaces::waits_on_member_levels",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Hierarchy",
+      "detail": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_runtime_limitation",
+        "evidence": [
+          "verification/repros/sv_virtual_interface_event_verilator.json",
+          "verification/repros/sv_virtual_interface_wait_verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_virtual_interface_wait",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "execute",
+        "reason": "Verilator 5.052 aborts with \"Null pointer dereferenced\" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait. IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Celox passes the cases.",
+        "upstream": []
+      },
+      "name": "virtual_interfaces::waits_with_guards_signed_members_and_automatic_tasks",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

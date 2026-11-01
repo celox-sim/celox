@@ -46,10 +46,20 @@ produce a patch version while the changelog still displays a title containing
 
 ## Automated release train
 
-Release Please maintains one release pull request against `master`. Every Monday
-(and on manual dispatch), the release workflow requests Mergify queueing.
-`release:hold` prevents queueing and merging. While the open release PR carries
-`merge-ready` or `queued`, Release Please freezes its head for the queue.
+On each `master` push, Release Please calculates the next version and release
+notes and updates a single **Celox release tracker** issue. This planning step
+creates no branch or pull request, so ordinary changes do not trigger release
+PR CI. The planner uses the pinned dependency in `scripts/release-please/`;
+update its package and lockfile together when upgrading Release Please.
+
+Every Monday at 12:00 JST (and on manual dispatch), the release workflow creates
+or updates the release pull request against `master` and requests Mergify queueing.
+It closes the tracker with a link to the PR once preparation succeeds.
+`release:hold` on the tracker postpones PR creation and queueing. After a PR
+exists, put `release:hold` on that PR to prevent queueing and merging. While the
+open release PR carries `merge-ready` or `queued`, Release Please freezes its
+head for the queue. The push workflow only updates the issue, including while a
+release PR is open; it never rewrites that PR.
 
 The release PR uses the lightweight merge queue. After it merges,
 `stage-release-candidate.yml` advances `release` to that exact merge commit.

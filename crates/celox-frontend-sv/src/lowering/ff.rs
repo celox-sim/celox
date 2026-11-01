@@ -10,13 +10,16 @@
 //! four-state semantics identical to the combinational lowering.
 
 mod containers;
+mod dpi_builtins;
 mod file_io;
 mod format;
 mod fread;
+mod locators;
 mod objects;
 mod process;
 mod references;
 mod scan;
+mod streams;
 mod strings;
 
 use super::procedural::*;
@@ -237,26 +240,8 @@ impl<'p, 'a> Ff<'p, 'a> {
         let [Some(operand)] = args else {
             return Err(unsupported("operand of `$sampled`"));
         };
-        // A sampled value function in the operand would read the sampled
-        // copies instead of its history.
-        let mut nested = Vec::new();
-        collect_calls(operand, &mut nested);
-        if nested.iter().any(|(callee, _)| {
-            matches!(
-                callee,
-                sv::ir::Callee::System(
-                    sv::ir::SystemFunction::Past
-                        | sv::ir::SystemFunction::Rose
-                        | sv::ir::SystemFunction::Fell
-                        | sv::ir::SystemFunction::Stable
-                        | sv::ir::SystemFunction::Changed
-                )
-            )
-        }) {
-            return Err(unsupported(
-                "`$sampled` of an operand that calls a sampled value function",
-            ));
-        }
+        // Sampled-value calls resolve their own current/history operands.
+        // Sampling their arguments again would bypass that history mapping.
         let operand = self.propagate(operand);
         let mut names = HashSet::default();
         expr_idents(&operand, &mut names);
@@ -273,7 +258,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             }
             renames.insert(name, self.m.sampled_copy(id));
         }
-        Ok(rename_idents(&operand, &renames))
+        Ok(rename_idents_with_sampling(&operand, &renames, true))
     }
 
     /// Declare the `$past` histories that the sampled value functions of
@@ -512,6 +497,11 @@ impl<'p, 'a> Ff<'p, 'a> {
     /// process's clock: each history moves one tick back and takes the
     /// sampled value, where its gate holds at the tick.
     fn update_history(&mut self) -> Result<bool, sv::AnalyzerError> {
+        let stmts = self.history_updates();
+        self.exec_block(&stmts)
+    }
+
+    fn history_updates(&self) -> Vec<sv::ir::Stmt> {
         use sv::ir::{Expr, LValue, Stmt};
         let sampled = |expr: Expr| Expr::Call {
             callee: sv::ir::Callee::System(sv::ir::SystemFunction::Sampled),
@@ -520,7 +510,7 @@ impl<'p, 'a> Ff<'p, 'a> {
         };
         let mut stmts = Vec::new();
         if self.history.is_empty() {
-            return Ok(true);
+            return stmts;
         }
         for history in &self.history {
             let mut updates: Vec<Stmt> = history
@@ -589,7 +579,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                 else_body: Vec::new(),
             }];
         }
-        self.exec_block(&stmts)
+        stmts
     }
 
     /// Evaluate the gate of each `$past` history before the body runs. The
@@ -935,9 +925,16 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
                 | sv::ir::Callee::Checked { .. }
-                | sv::ir::Callee::Lookup { .. } => continue,
+                | sv::ir::Callee::Lookup { .. }
+                | sv::ir::Callee::Stream(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
+            if let Some(import) = self.m.dpi_imports.get(&name) {
+                for lvalue in written_dpi_arguments(import, &args) {
+                    self.record_target(&lvalue, true);
+                }
+                continue;
+            }
             let Some(subroutine) = self.m.subroutine(&name).cloned() else {
                 continue;
             };
@@ -1010,7 +1007,7 @@ impl<'p, 'a> Ff<'p, 'a> {
             .get(node)
             .map_addr(node, arena, &mut mapped_arena, &mut cache, &map)
             .map_err(slt_error)?;
-        let lowerer = SLTToSIRLowerer::new(self.m.four_state)
+        let mut lowerer = SLTToSIRLowerer::new(self.m.four_state)
             .with_unpacked_input_types(&mapped_arena, &self.element_widths);
         let mut lower_cache = HashMap::default();
         Ok(lowerer.lower(&mut self.b, mapped, &mapped_arena, &mut lower_cache))
@@ -1129,9 +1126,18 @@ impl<'p, 'a> Ff<'p, 'a> {
         &mut self,
         expr: &sv::ir::Expr,
     ) -> Result<Option<(BigUint, usize)>, sv::AnalyzerError> {
+        self.eval_const_with_width(expr, None)
+    }
+
+    fn eval_const_with_width(
+        &mut self,
+        expr: &sv::ir::Expr,
+        width: Option<usize>,
+    ) -> Result<Option<(BigUint, usize)>, sv::AnalyzerError> {
         if self.m.calls(expr) {
             return Ok(None);
         }
+        let signed = width.map(|_| self.expr_signed(expr));
         let expr = self.propagate(&expr_for_state_mode(expr, self.m.four_state));
         let mut arena = SLTNodeArena::new();
         let Some((node, _)) = lower_expr_with_context(
@@ -1145,6 +1151,11 @@ impl<'p, 'a> Ff<'p, 'a> {
             None,
         ) else {
             return Ok(None);
+        };
+        let node = if let Some(signed) = signed {
+            coerce_node_width(&mut arena, node, width, signed).map_err(slt_error)?
+        } else {
+            node
         };
         Ok(slt_const(&arena, &mut ConstCache::default(), node))
     }
@@ -1204,12 +1215,13 @@ impl<'p, 'a> Ff<'p, 'a> {
 
     /// Run `then_f` and `else_f` where the arms of a conditional operator
     /// are evaluated; an ambiguous condition evaluates both (IEEE 1800-2023
-    /// 11.4.11).
-    fn mux_arms<A, B>(
+    /// 11.4.11). Both arms are passed `state`.
+    fn mux_arms<S, A, B>(
         &mut self,
         condition: &sv::ir::Expr,
-        then_f: impl FnOnce(&mut Self) -> Result<A, sv::AnalyzerError>,
-        else_f: impl FnOnce(&mut Self) -> Result<B, sv::AnalyzerError>,
+        state: &mut S,
+        then_f: impl FnOnce(&mut Self, &mut S) -> Result<A, sv::AnalyzerError>,
+        else_f: impl FnOnce(&mut Self, &mut S) -> Result<B, sv::AnalyzerError>,
     ) -> Result<(A, B), sv::AnalyzerError> {
         if self.m.four_state {
             let mut arena = SLTNodeArena::new();
@@ -1222,8 +1234,8 @@ impl<'p, 'a> Ff<'p, 'a> {
             let else_cond = slt_or(&mut arena, &mut consts, not_truth, unknown)?;
             let then_cond = self.lower_slt(&arena, then_cond)?;
             let else_cond = self.lower_slt(&arena, else_cond)?;
-            let then_result = self.when(then_cond, then_f)?;
-            let else_result = self.when(else_cond, else_f)?;
+            let then_result = self.when(then_cond, |this| then_f(this, state))?;
+            let else_result = self.when(else_cond, |this| else_f(this, state))?;
             return Ok((then_result, else_result));
         }
         let (truth, _) = self.eval_truth(condition)?;
@@ -1236,10 +1248,10 @@ impl<'p, 'a> Ff<'p, 'a> {
             false_block: (else_block, Vec::new()),
         });
         self.b.switch_to_block(then_block);
-        let then_result = then_f(self)?;
+        let then_result = then_f(self, state)?;
         self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.b.switch_to_block(else_block);
-        let else_result = else_f(self)?;
+        let else_result = else_f(self, state)?;
         self.b.seal_block(SIRTerminator::Jump(join, Vec::new()));
         self.b.switch_to_block(join);
         Ok((then_result, else_result))
@@ -1381,11 +1393,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                         }
                         // `calls` is shared by both arms, which run one after
                         // the other.
-                        let calls = std::cell::RefCell::new(calls);
                         self.mux_arms(
                             &operand(&condition)?,
-                            |this| this.hoist_const(then_expr, &mut calls.borrow_mut()),
-                            |this| this.hoist_const(else_expr, &mut calls.borrow_mut()),
+                            calls,
+                            |this, calls| this.hoist_const(then_expr, calls),
+                            |this, calls| this.hoist_const(else_expr, calls),
                         )?
                     } else {
                         ((**then_expr).clone(), (**else_expr).clone())
@@ -1601,9 +1613,19 @@ impl<'p, 'a> Ff<'p, 'a> {
                 callee: sv::ir::Callee::System(sv::ir::SystemFunction::Process(op)),
                 args,
                 ..
+            } if op.is_mailbox() => self.mailbox_call(*op, args)?,
+            Expr::Call {
+                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Process(op)),
+                args,
+                ..
             } => self.process_call(*op, args)?,
             Expr::Call {
-                callee: sv::ir::Callee::Checked { width, signed },
+                callee:
+                    sv::ir::Callee::Checked {
+                        width,
+                        signed,
+                        check,
+                    },
                 args,
                 ..
             } => {
@@ -1614,9 +1636,7 @@ impl<'p, 'a> Ff<'p, 'a> {
                     sv::ir::SystemTask::Assert,
                     &[
                         sv::ir::SystemTaskArg::Expr(condition.clone()),
-                        sv::ir::SystemTaskArg::Str(
-                            "tagged union member does not match the active tag".into(),
-                        ),
+                        sv::ir::SystemTaskArg::Str(check.message().into()),
                     ],
                     None,
                     None,
@@ -1695,6 +1715,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                 sv::ir::ObjectOp::Container { op, layout } => {
                     self.container_call(*op, *layout, args)?
                 }
+                sv::ir::ObjectOp::Locator(locator) => self.locator(*locator, args)?,
+                sv::ir::ObjectOp::Pattern(pattern) => self.aggregate_pattern(*pattern, args)?,
+                sv::ir::ObjectOp::Concat(concat) => self.container_concat(concat, args)?,
+                sv::ir::ObjectOp::Stream(op) => self.stream_call(op, args)?,
                 _ => self.object_call(op, args)?,
             },
             Expr::Call {
@@ -1810,6 +1834,10 @@ impl<'p, 'a> Ff<'p, 'a> {
                     r#type.is_signed(),
                     r#type.is_4state(),
                 );
+                if r#type == sv::ir::DpiType::String {
+                    self.m.variables.get_mut(&temp).unwrap().value_kind =
+                        celox_design::ValueKind::StrRef;
+                }
                 self.store(temp, SIROffset::Static(0), r#type.width(), result);
                 Expr::Ident(temp_name)
             }
@@ -1871,8 +1899,9 @@ impl<'p, 'a> Ff<'p, 'a> {
                 let condition = self.hoist(condition)?;
                 let (then_expr, else_expr) = self.mux_arms(
                     &condition,
-                    |this| this.hoist(then_expr),
-                    |this| this.hoist(else_expr),
+                    &mut (),
+                    |this, ()| this.hoist(then_expr),
+                    |this, ()| this.hoist(else_expr),
                 )?;
                 Expr::Mux {
                     condition: Box::new(condition),
@@ -1988,6 +2017,11 @@ impl<'p, 'a> Ff<'p, 'a> {
                 args.len(),
                 import.arguments().len()
             )));
+        }
+        if let Some(builtin) = import.builtin() {
+            // Keeps a process whose only effect is the call (see `extern_calls`).
+            self.m.extern_calls += 1;
+            return self.builtin_dpi_call(import, builtin, args, arg_order);
         }
         let mut registers = vec![None; args.len()];
         let positions: Vec<_> = if arg_order.is_empty() {
@@ -3700,6 +3734,45 @@ impl<'p, 'a> Ff<'p, 'a> {
             return Err(unsupported("timed task call outside a suspendable process"));
         }
         match stmt {
+            sv::ir::Stmt::DeferActive => {
+                self.with_kernel(ProcessKernelBuilder::defer_active)
+                    .map_err(kernel_error)?;
+                Ok(true)
+            }
+            sv::ir::Stmt::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                let sv::ir::Stmt::Delay {
+                    amount,
+                    ticks_per_unit,
+                    ..
+                } = control.as_ref()
+                else {
+                    return Err(unsupported("nonblocking intra-assignment event control"));
+                };
+                let delay = self
+                    .eval_const_with_width(amount, Some(PROCESS_DELAY_WIDTH))?
+                    .and_then(|(value, _)| u64::try_from(value).ok())
+                    .and_then(|value| value.checked_mul(*ticks_per_unit))
+                    .ok_or_else(|| {
+                        unsupported("nonconstant or overflowing nonblocking assignment delay")
+                    })?;
+                match assignment.as_ref() {
+                    sv::ir::Stmt::Assign {
+                        lhs,
+                        rhs,
+                        nonblocking: true,
+                    } => self.nonblocking_delayed(std::slice::from_ref(lhs), rhs, delay)?,
+                    sv::ir::Stmt::AssignConcat {
+                        parts,
+                        rhs,
+                        nonblocking: true,
+                    } => self.nonblocking_delayed(parts, rhs, delay)?,
+                    _ => return Err(unsupported("nonblocking delayed assignment target")),
+                }
+                Ok(true)
+            }
             sv::ir::Stmt::Assign {
                 lhs,
                 rhs,
@@ -6290,6 +6363,53 @@ impl Ff<'_, '_> {
         final_process: bool,
     ) -> Result<KernelUnit, sv::AnalyzerError> {
         self.process = process;
+        let monitored;
+        let body = if let Some(clock) = concurrent_monitor_clock(body) {
+            self.inferred_clock = Some(clock);
+            self.declare_history(body)?;
+            if self.history.is_empty() {
+                body
+            } else {
+                use sv::ir::{BinaryOp, Expr, LValue, Stmt};
+                let mut gates = Vec::new();
+                for index in 0..self.history.len() {
+                    let Some(gate) = self.history[index].gate.clone() else {
+                        continue;
+                    };
+                    let (_, name) = self.m.temp("assertion_history_gate", 1, false, true);
+                    gates.push(Stmt::Assign {
+                        lhs: LValue::Ident(name.clone()),
+                        rhs: Expr::Binary {
+                            left: Box::new(gate),
+                            op: BinaryOp::Ne,
+                            right: Box::new(Expr::Literal("1'b0".into())),
+                        },
+                        nonblocking: false,
+                    });
+                    self.history[index].gate_value = Some(name);
+                }
+                let mut owned = body.to_vec();
+                let [
+                    Stmt::Loop {
+                        body: repeated,
+                        step,
+                        ..
+                    },
+                ] = owned.as_mut_slice()
+                else {
+                    unreachable!("a canonical monitor loop")
+                };
+                // Capture gates immediately after the clock wait, in Active,
+                // before the predicate yields to Observed and the actions to
+                // Reactive. Advance history after either action or disable.
+                repeated.splice(1..1, gates);
+                step.extend(self.history_updates());
+                monitored = owned;
+                &monitored[..]
+            }
+        } else {
+            body
+        };
         let starts_with_event_wait = slots.requires_timed_simulation;
         let first_created = self.m.created.len();
         fn has_fork(
@@ -6530,6 +6650,15 @@ impl Ff<'_, '_> {
         parts: &[sv::ir::LValue],
         rhs: &sv::ir::Expr,
     ) -> Result<(), sv::AnalyzerError> {
+        self.nonblocking_delayed(parts, rhs, 0)
+    }
+
+    fn nonblocking_delayed(
+        &mut self,
+        parts: &[sv::ir::LValue],
+        rhs: &sv::ir::Expr,
+        delay: u64,
+    ) -> Result<(), sv::AnalyzerError> {
         let mut targets = Vec::with_capacity(parts.len());
         for part in parts {
             let part = self.propagate_lvalue(part);
@@ -6616,6 +6745,7 @@ impl Ff<'_, '_> {
                 width: self.m.temp("nba_width", NBA_POSITION_WIDTH, false, false).0,
             });
             let site = NbaSite {
+                delay,
                 process: self.process,
                 target: id,
                 lsb,
@@ -7863,8 +7993,8 @@ fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     let mut defaults = HashSet::default();
     loop {
         while let Some(expr) = pending.pop() {
-            let found = std::cell::RefCell::new(None);
-            expr_calls(&expr, &|callee| {
+            let mut found = None;
+            expr_calls(&expr, &mut |callee| {
                 if let sv::ir::Callee::Object(op) = callee
                     && matches!(
                         **op,
@@ -7873,11 +8003,11 @@ fn heap_read(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                             | sv::ir::ObjectOp::ConstraintModeGet(_)
                     )
                 {
-                    found.borrow_mut().get_or_insert(op.to_string());
+                    found.get_or_insert(op.to_string());
                 }
                 false
             });
-            if let Some(op) = found.into_inner() {
+            if let Some(op) = found {
                 return Some(op);
             }
             collect_calls(&expr, &mut calls);
@@ -7919,12 +8049,12 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     let mut pending = vec![expr.clone()];
     let mut visited = HashSet::default();
     while let Some(expr) = pending.pop() {
-        let callees = std::cell::RefCell::new(Vec::new());
-        expr_calls(&expr, &|callee| {
-            callees.borrow_mut().push(callee.clone());
+        let mut callees = Vec::new();
+        expr_calls(&expr, &mut |callee| {
+            callees.push(callee.clone());
             false
         });
-        for callee in callees.into_inner() {
+        for callee in callees {
             let name = match callee {
                 sv::ir::Callee::System(function) => {
                     if function.reads_simulation_state() {
@@ -7933,7 +8063,9 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
                     continue;
                 }
                 // A string operation or lookup is a value of its operands.
-                sv::ir::Callee::String(_) | sv::ir::Callee::Lookup { .. } => continue,
+                sv::ir::Callee::String(_)
+                | sv::ir::Callee::Lookup { .. }
+                | sv::ir::Callee::Stream(_) => continue,
                 // Container contents are immutable: reading an element is a
                 // value of the container handle and index, unlike a class
                 // property that can change without its handle changing.
@@ -8021,65 +8153,156 @@ fn impure_call(pm: &ProcModule<'_>, expr: &sv::ir::Expr) -> Option<String> {
     None
 }
 
+/// The single edge clock of a module-level Boolean concurrent monitor.
+/// General timed procedures and multi-event/derived clocks keep their existing
+/// restrictions; a monitor's history advances once per completed iteration.
+fn concurrent_monitor_clock(body: &[sv::ir::Stmt]) -> Option<Clock> {
+    use sv::ir::{EventEdge, Expr, LoopKind, Stmt};
+    let [
+        Stmt::Loop {
+            kind: LoopKind::Forever,
+            init,
+            condition: None,
+            step,
+            body,
+        },
+    ] = body
+    else {
+        return None;
+    };
+    if !init.is_empty() || !step.is_empty() {
+        return None;
+    }
+    let [
+        Stmt::WaitEvent(items),
+        Stmt::AssertionRegion { reactive: false },
+        ..,
+    ] = body.as_slice()
+    else {
+        return None;
+    };
+    let [item] = items.as_slice() else {
+        return None;
+    };
+    // An iff expression is itself a clock expression: temporal calls there
+    // require a separate explicit clock, which this subset does not support.
+    if item.iff.is_some() {
+        return None;
+    }
+    let Expr::Ident(signal) = &item.expr else {
+        return None;
+    };
+    let rising = match item.edge {
+        EventEdge::Pos => true,
+        EventEdge::Neg => false,
+        _ => return None,
+    };
+    Some(Clock {
+        signal: signal.clone(),
+        rising,
+        alone: true,
+    })
+}
+
 /// `expr` with the identifiers in `renames` replaced.
-fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::ir::Expr {
-    fn constant(expr: &sv::ir::ConstExpr, renames: &HashMap<String, String>) -> sv::ir::ConstExpr {
-        use sv::ir::ConstExpr;
-        let go = |expr: &ConstExpr| Box::new(constant(expr, renames));
-        match expr {
-            ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
-            ConstExpr::Literal(_) => expr.clone(),
-            ConstExpr::SelectRange {
-                expr,
-                msb,
-                lsb,
-                signed,
-            } => ConstExpr::SelectRange {
-                expr: go(expr),
-                msb: go(msb),
-                lsb: go(lsb),
-                signed: *signed,
-            },
-            ConstExpr::Select { expr, bit } => ConstExpr::Select {
-                expr: go(expr),
-                bit: go(bit),
-            },
-            ConstExpr::Function { callee, args, site } => ConstExpr::Function {
-                callee: callee.clone(),
-                site: *site,
-                args: args.iter().map(|arg| constant(arg, renames)).collect(),
-            },
-            ConstExpr::Resize {
-                expr,
-                width,
-                signed,
-            } => ConstExpr::Resize {
-                expr: go(expr),
-                width: *width,
-                signed: *signed,
-            },
-            ConstExpr::Unary { op, expr } => ConstExpr::Unary {
-                op: *op,
-                expr: go(expr),
-            },
-            ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
-                left: go(left),
-                op: *op,
-                right: go(right),
-            },
-            ConstExpr::Mux {
-                condition,
-                then_expr,
-                else_expr,
-            } => ConstExpr::Mux {
-                condition: go(condition),
-                then_expr: go(then_expr),
-                else_expr: go(else_expr),
-            },
-        }
+pub(super) fn rename_const_idents(
+    expr: &sv::ir::ConstExpr,
+    renames: &HashMap<String, String>,
+) -> sv::ir::ConstExpr {
+    rename_const_idents_with_sampling(expr, renames, false)
+}
+
+fn rename_const_idents_with_sampling(
+    expr: &sv::ir::ConstExpr,
+    renames: &HashMap<String, String>,
+    sampling: bool,
+) -> sv::ir::ConstExpr {
+    if sampling
+        && matches!(expr, sv::ir::ConstExpr::Function { callee: sv::ir::Callee::System(function), .. } if function.reads_sampled_values())
+    {
+        return expr.clone();
+    }
+    use sv::ir::ConstExpr;
+    let go =
+        |expr: &ConstExpr| Box::new(rename_const_idents_with_sampling(expr, renames, sampling));
+    match expr {
+        ConstExpr::Ident(name) => ConstExpr::Ident(renames.get(name).unwrap_or(name).clone()),
+        ConstExpr::Literal(_) => expr.clone(),
+        ConstExpr::SelectRange {
+            expr,
+            msb,
+            lsb,
+            signed,
+        } => ConstExpr::SelectRange {
+            expr: go(expr),
+            msb: go(msb),
+            lsb: go(lsb),
+            signed: *signed,
+        },
+        ConstExpr::Select { expr, bit } => ConstExpr::Select {
+            expr: go(expr),
+            bit: go(bit),
+        },
+        ConstExpr::Function { callee, args, site } => ConstExpr::Function {
+            callee: callee.clone(),
+            site: *site,
+            args: args
+                .iter()
+                .map(|arg| rename_const_idents_with_sampling(arg, renames, sampling))
+                .collect(),
+        },
+        ConstExpr::Resize {
+            expr,
+            width,
+            signed,
+        } => ConstExpr::Resize {
+            expr: go(expr),
+            width: *width,
+            signed: *signed,
+        },
+        ConstExpr::Unary { op, expr } => ConstExpr::Unary {
+            op: *op,
+            expr: go(expr),
+        },
+        ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
+            left: go(left),
+            op: *op,
+            right: go(right),
+        },
+        ConstExpr::Mux {
+            condition,
+            then_expr,
+            else_expr,
+        } => ConstExpr::Mux {
+            condition: go(condition),
+            then_expr: go(then_expr),
+            else_expr: go(else_expr),
+        },
+    }
+}
+
+/// `expr` with the identifiers in `renames` replaced.
+pub(super) fn rename_idents(
+    expr: &sv::ir::Expr,
+    renames: &HashMap<String, String>,
+) -> sv::ir::Expr {
+    rename_idents_with_sampling(expr, renames, false)
+}
+
+/// When sampling, leave sampled-value calls to resolve their own operands.
+/// Ordinary renames (notably history reads) still descend through those calls.
+fn rename_idents_with_sampling(
+    expr: &sv::ir::Expr,
+    renames: &HashMap<String, String>,
+    sampling: bool,
+) -> sv::ir::Expr {
+    if sampling
+        && matches!(expr, sv::ir::Expr::Call { callee: sv::ir::Callee::System(function), .. } if function.reads_sampled_values())
+    {
+        return expr.clone();
     }
     use sv::ir::Expr;
-    let go = |expr: &Expr| Box::new(rename_idents(expr, renames));
+    let go = |expr: &Expr| Box::new(rename_idents_with_sampling(expr, renames, sampling));
     match expr {
         Expr::Ident(name) => Expr::Ident(renames.get(name).unwrap_or(name).clone()),
         Expr::Literal(_) => expr.clone(),
@@ -8090,21 +8313,21 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             signed,
         } => Expr::Select {
             expr: go(expr),
-            msb: constant(msb, renames),
-            lsb: constant(lsb, renames),
+            msb: rename_const_idents_with_sampling(msb, renames, sampling),
+            lsb: rename_const_idents_with_sampling(lsb, renames, sampling),
             signed: *signed,
         },
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .iter()
-                .map(|part| rename_idents(part, renames))
+                .map(|part| rename_idents_with_sampling(part, renames, sampling))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
-            count: constant(count, renames),
+            count: rename_const_idents_with_sampling(count, renames, sampling),
             parts: parts
                 .iter()
-                .map(|part| rename_idents(part, renames))
+                .map(|part| rename_idents_with_sampling(part, renames, sampling))
                 .collect(),
         },
         Expr::Resize {
@@ -8142,7 +8365,10 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             callee: callee.clone(),
             args: args
                 .iter()
-                .map(|arg| arg.as_ref().map(|arg| rename_idents(arg, renames)))
+                .map(|arg| {
+                    arg.as_ref()
+                        .map(|arg| rename_idents_with_sampling(arg, renames, sampling))
+                })
                 .collect(),
             arg_order: arg_order.clone(),
         },
@@ -8150,7 +8376,9 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
             expr: go(expr),
             items: items
                 .iter()
-                .map(|item| item.map(&mut |operand| rename_idents(operand, renames)))
+                .map(|item| {
+                    item.map(&mut |operand| rename_idents_with_sampling(operand, renames, sampling))
+                })
                 .collect(),
         },
     }
@@ -8158,14 +8386,12 @@ fn rename_idents(expr: &sv::ir::Expr, renames: &HashMap<String, String>) -> sv::
 
 /// The names of the user subroutines `expr` calls.
 fn collect_call_names(expr: &sv::ir::Expr, names: &mut Vec<String>) {
-    let called = std::cell::RefCell::new(Vec::new());
-    expr_calls(expr, &|callee| {
+    expr_calls(expr, &mut |callee| {
         if let Some(name) = callee.subroutine() {
-            called.borrow_mut().push(name.to_string());
+            names.push(name.to_string());
         }
         false
     });
-    names.extend(called.into_inner());
 }
 
 fn kernel_error(error: ProcessKernelError) -> sv::AnalyzerError {

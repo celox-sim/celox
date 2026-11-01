@@ -57,6 +57,24 @@ impl Cones<'_> {
     }
 }
 
+/// Generate the testbench unit again in place, after the shared scheduler's
+/// unit it inlines changed.
+pub(super) fn regenerate(program: &mut LaidOutProgram, deferred: bool) {
+    let Some(tb) = program.runtime.testbench.clone() else {
+        return;
+    };
+    let Some(meta) = tb.scheduler() else {
+        return;
+    };
+    let (Some(entry), Some(schema)) =
+        (meta.entry, program.runtime.runtime_schema.scheduler.clone())
+    else {
+        return;
+    };
+    let unit = generate(program, &tb, meta, &schema.slots, deferred);
+    program.sir.processes[entry] = unit;
+}
+
 fn put(g: &mut Generator<'_>, a: AbsoluteAddr, value: u64) {
     let value = g.constant(value, 64);
     g.store(a, 64, value);
@@ -86,6 +104,9 @@ fn dispatch(
     }
     jump(g, default);
 }
+/// `control[TB_PHASE]` after a published time step: the run resumes
+/// after its edges.
+const PUBLISHED: u64 = u64::MAX - 1;
 // TBs can have more continuation sites than the timed scheduler's 8-bit
 // continuation selector. Keep their dispatch in the TB's own 64-bit slot.
 fn settle_then(g: &mut Generator<'_>, m: &Meta, target: BlockId) {
@@ -131,17 +152,31 @@ fn choose(g: &mut Generator<'_>, cond: RegisterId, yes: RegisterId, no: Register
     g.b.emit(SIRInstruction::Mux(r, cond, yes, no));
     r
 }
+/// Whether some process waits on clock `c`: the generator's enable.
+fn waited_on(g: &mut Generator<'_>, c: &[AbsoluteAddr; 4]) -> RegisterId {
+    let waiters = g.load(c[3], 64);
+    let idle = g.equals(waiters, 0);
+    g.equals(idle, 0)
+}
+
+/// A process starts waiting on `clock`. The generator finishes a whole
+/// period before it looks at its enable again, so the next rise is at the
+/// later of now and the previous rise plus the period.
+fn wait_on_clock(g: &mut Generator<'_>, m: &Meta, clock: usize) {
+    let c = m.clocks[clock];
+    let now = g.load(m.control[TB_NOW], 64);
+    let next = g.load(c[0], 64);
+    let late = g.binary(1, next, BinaryOp::LtU, now);
+    let next = choose(g, late, now, next);
+    g.store(c[0], 64, next);
+    let waiters = g.load(c[3], 64);
+    let one = g.constant(1, 64);
+    let waiters = g.binary(64, waiters, BinaryOp::Add, one);
+    g.store(c[3], 64, waiters);
+}
+
 fn equals_slot(g: &mut Generator<'_>, a: AbsoluteAddr, value: u64) -> RegisterId {
     let r = g.load(a, 64);
-    g.equals(r, value)
-}
-fn equals_slot_width(
-    g: &mut Generator<'_>,
-    a: AbsoluteAddr,
-    width: usize,
-    value: u64,
-) -> RegisterId {
-    let r = g.load(a, width);
     g.equals(r, value)
 }
 fn copy(g: &mut Generator<'_>, program: &LaidOutProgram, from: AbsoluteAddr, to: AbsoluteAddr) {
@@ -191,6 +226,298 @@ fn sites<'a>(
     }
 }
 
+type Expr = ExprBytecode<StateLocation<AbsoluteAddr>>;
+
+/// Run the compiled kernel of `expr` and load its value.
+fn evaluate(
+    g: &mut Generator<'_>,
+    program: &LaidOutProgram,
+    slots: &SchedulerSlots<AbsoluteAddr>,
+    expr: &Expr,
+) -> RegisterId {
+    let expr = expr.kernel().expect("lowered testbench expression");
+    g.b.inline_execution_unit(&program.sir.processes[expr.entry]);
+    if !expr.writes.is_empty() {
+        let dirty = g.constant(1, 8);
+        g.store(slots.dirty, 8, dirty);
+    }
+    if !expr.four_state {
+        return g.load_at(expr.result.address, expr.result.byte_offset * 8, expr.width);
+    }
+    // A result with unknown bits keeps them in a logic register.
+    let result = g.b.alloc_logic(expr.width);
+    g.b.emit(SIRInstruction::Load(
+        result,
+        stable(expr.result.address),
+        SIROffset::Static(expr.result.byte_offset * 8),
+        expr.width,
+    ));
+    result
+}
+
+fn is_logic(g: &Generator<'_>, value: RegisterId) -> bool {
+    matches!(g.b.register(&value), celox_sir::RegisterType::Logic { .. })
+}
+
+/// Whether `value` is true as a condition: it has a known one bit, whatever
+/// its unknown bits (IEEE 1800-2023 12.4, 16.3).
+fn truth(g: &mut Generator<'_>, value: RegisterId) -> RegisterId {
+    if !is_logic(g, value) {
+        let width = g.b.register(&value).width();
+        let zero = g.constant(0, width);
+        return g.binary(1, value, BinaryOp::Ne, zero);
+    }
+    let any = g.b.alloc_logic(1);
+    g.b.emit(SIRInstruction::Unary(any, celox_design::UnaryOp::Or, value));
+    two_state(g, any)
+}
+
+/// `value` with its unknown bits read as 0 (IEEE 1800-2023 6.11.2).
+fn two_state(g: &mut Generator<'_>, value: RegisterId) -> RegisterId {
+    if !is_logic(g, value) {
+        return value;
+    }
+    let result = g.b.alloc_bit(g.b.register(&value).width(), false);
+    g.b.emit(SIRInstruction::Unary(
+        result,
+        celox_design::UnaryOp::ToTwoState,
+        value,
+    ));
+    result
+}
+
+/// `value` at `width` bits: truncated, or extended with zeros as the host
+/// writes an event argument. Unknown bits stay unknown.
+fn resize(g: &mut Generator<'_>, value: RegisterId, width: usize) -> RegisterId {
+    let source = g.b.register(&value).width();
+    let result = if is_logic(g, value) {
+        g.b.alloc_logic(width)
+    } else {
+        g.b.alloc_bit(width, false)
+    };
+    if width < source {
+        g.b.emit(SIRInstruction::Slice(result, value, 0, width));
+    } else {
+        g.b.emit(SIRInstruction::Unary(
+            result,
+            celox_design::UnaryOp::Ident,
+            value,
+        ));
+    }
+    result
+}
+
+/// The DUT storage `expr` loads.
+fn dut_reads(program: &LaidOutProgram, expr: &Expr) -> Vec<AbsoluteAddr> {
+    let mut reads: Vec<_> = expr
+        .ops()
+        .iter()
+        .filter_map(|op| match op {
+            ExprOpcode::LoadU64 { location, .. }
+            | ExprOpcode::LoadWide { location, .. }
+            | ExprOpcode::LoadIndexed { location, .. }
+            | ExprOpcode::LoadBitSelect { location, .. }
+            | ExprOpcode::LoadString { location, .. } => program
+                .runtime
+                .rtl_accesses
+                .contains(&location.address)
+                .then_some(location.address),
+            _ => None,
+        })
+        .collect();
+    reads.sort_unstable();
+    reads.dedup();
+    reads
+}
+
+/// The arguments of a message, or `None` when one is a string: compiled
+/// code holds those as heap handles, which the host formats.
+fn message_args(
+    message: &Option<AssertMessage<SemanticArgument<AbsoluteAddr>>>,
+) -> Option<&[SemanticArgument<AbsoluteAddr>]> {
+    let args = match message {
+        None => &[][..],
+        Some(AssertMessage::Formatted { args, .. } | AssertMessage::DynamicArgs(args)) => args,
+    };
+    (!args.iter().any(|arg| arg.is_string)).then_some(args)
+}
+
+/// The simulation time the host formats the reports of a run with when it
+/// ends here.
+fn report_time(g: &mut Generator<'_>, m: &Meta) -> RegisterId {
+    if m.processes.len() == 1 && m.clocks.len() <= 1 {
+        g.load(m.control[TB_TICKS], 64)
+    } else {
+        g.load(m.control[TB_REPORT_TIME], 64)
+    }
+}
+
+/// Give the runtime events recorded since the last marker the current
+/// report time.
+fn mark(g: &mut Generator<'_>, m: &Meta) {
+    let Some(site_id) = m.marker_site else {
+        return;
+    };
+    let time = report_time(g, m);
+    g.b.emit(SIRInstruction::RuntimeEvent {
+        site_id,
+        args: vec![time],
+    });
+    put(g, m.control[TB_UNMARKED], 0);
+    let pending = g.load(m.control[TB_PENDING], 64);
+    let one = g.constant(1, 64);
+    let pending = g.binary(64, pending, BinaryOp::Add, one);
+    g.store(m.control[TB_PENDING], 64, pending);
+}
+
+/// Whether the host should drain the runtime events before the ring
+/// buffer can overflow. The events of a time step or statement are recorded
+/// before the next check: leave room for nearly a whole buffer of them, as
+/// when every time step's events were drained.
+fn drain_due(g: &mut Generator<'_>, m: &Meta, capacity: usize) -> RegisterId {
+    let pending = g.load(m.control[TB_PENDING], 64);
+    let limit = g.constant((capacity / 8).max(1) as u64, 64);
+    g.binary(1, pending, BinaryOp::GeU, limit)
+}
+
+/// Settle what a statement observes before it runs, as the host does:
+/// everything for a message, otherwise what `expr` reads.
+fn settle_for(
+    g: &mut Generator<'_>,
+    m: &Meta,
+    cones: &mut Cones<'_>,
+    deferred: bool,
+    reads: Vec<AbsoluteAddr>,
+    everything: bool,
+    finish: BlockId,
+) {
+    if !everything && reads.is_empty() {
+        return;
+    }
+    let after = g.b.new_block();
+    match (deferred && !everything)
+        .then(|| cones.cone(&reads))
+        .flatten()
+    {
+        Some(units) => {
+            let dirty = g.load(g.slots.dirty, 8);
+            let clean = g.equals(dirty, 0);
+            let compute = g.b.new_block();
+            branch(g, clean, after, compute);
+            g.b.switch_to_block(compute);
+            for unit in &units {
+                g.inline(unit, finish);
+            }
+            jump(g, after);
+        }
+        None => settle_then(g, m, after),
+    }
+    g.b.switch_to_block(after);
+}
+
+/// Yield to the host to run statement of process `i` there.
+fn host_statement(g: &mut Generator<'_>, m: &Meta, i: usize) {
+    put(g, m.control[TB_PHASE], 2 + 2 * i as u64);
+    put(g, m.control[TB_EXIT], TB_HOST);
+    g.b.seal_block(SIRTerminator::Return);
+}
+
+/// Resume process `i` after a statement that recorded runtime events,
+/// draining them in the host first when the buffer fills.
+fn resume_after_events(g: &mut Generator<'_>, m: &Meta, i: usize, run: BlockId, capacity: usize) {
+    mark(g, m);
+    let due = drain_due(g, m, capacity);
+    let drain = g.b.new_block();
+    branch(g, due, drain, run);
+    g.b.switch_to_block(drain);
+    put(g, m.control[TB_PHASE], 2 + 2 * i as u64);
+    put(g, m.control[TB_EXIT], TB_DRAIN);
+    g.b.seal_block(SIRTerminator::Return);
+}
+
+/// Account for the edges of the time step in `control[TB_NOW]`: count
+/// the tick, schedule each fired clock's next edges and count down the
+/// processes waiting on it.
+fn account_edges(g: &mut Generator<'_>, m: &Meta, overflow: BlockId) {
+    let now = g.load(m.control[TB_NOW], 64);
+    let ticks = g.load(m.control[TB_TICKS], 64);
+    let limit = g.load(m.control[TB_LIMIT], 64);
+    let active = g.binary(1, ticks, BinaryOp::LtU, limit);
+    let running = equals_slot(g, m.control[TB_STOPPED], 0);
+    let active = g.binary(1, active, BinaryOp::And, running);
+    let mut rising = g.constant(0, 1);
+    for (clock, c) in m.clocks.iter().enumerate() {
+        let enabled = waited_on(g, c);
+        let next = g.load(c[0], 64);
+        let due = g.binary(1, next, BinaryOp::Eq, now);
+        let due = g.binary(1, due, BinaryOp::And, enabled);
+        let due = g.binary(1, due, BinaryOp::And, active);
+        rising = g.binary(1, rising, BinaryOp::Or, due);
+        let fall = g.load(c[1], 64);
+        let falling = g.binary(1, fall, BinaryOp::Eq, now);
+        let armed = g.load(c[2], 64);
+        let not_due = g.equals(falling, 0);
+        let zero = g.constant(0, 64);
+        let remain = choose(g, not_due, armed, zero);
+        g.store(c[2], 64, remain);
+        let fire = g.b.new_block();
+        let skip = g.b.new_block();
+        branch(g, due, fire, skip);
+        g.b.switch_to_block(fire);
+        let period = g.constant(m.periods[clock], 64);
+        let next = g.binary(64, now, BinaryOp::Add, period);
+        let wraps = g.binary(1, next, BinaryOp::LtU, now);
+        let valid = g.b.new_block();
+        branch(g, wraps, overflow, valid);
+        g.b.switch_to_block(valid);
+        g.store(c[0], 64, next);
+        let half = g.constant(m.periods[clock] - m.periods[clock] / 2, 64);
+        let fall = g.binary(64, now, BinaryOp::Add, half);
+        g.store(c[1], 64, fall);
+        put(g, c[2], 1);
+        for p in &m.processes {
+            let waiting = equals_slot(g, p[0], 1);
+            let this = equals_slot(g, p[2], clock as u64);
+            let waiting = g.binary(1, waiting, BinaryOp::And, this);
+            let decrement = g.b.new_block();
+            let after = g.b.new_block();
+            branch(g, waiting, decrement, after);
+            g.b.switch_to_block(decrement);
+            let left = g.load(p[1], 64);
+            let one = g.constant(1, 64);
+            let left = g.binary(64, left, BinaryOp::Sub, one);
+            g.store(p[1], 64, left);
+            let last = g.equals(left, 0);
+            let release = g.b.new_block();
+            branch(g, last, release, after);
+            g.b.switch_to_block(release);
+            put(g, p[0], 3);
+            g.store(p[3], 64, next);
+            let waiters = g.load(c[3], 64);
+            let waiters = g.binary(64, waiters, BinaryOp::Sub, one);
+            g.store(c[3], 64, waiters);
+            jump(g, after);
+            g.b.switch_to_block(after);
+        }
+        jump(g, skip);
+        g.b.switch_to_block(skip);
+    }
+    let one = g.constant(1, 64);
+    let zero = g.constant(0, 64);
+    let add = choose(g, rising, one, zero);
+    let ticks = g.binary(64, ticks, BinaryOp::Add, add);
+    g.store(m.control[TB_TICKS], 64, ticks);
+}
+
+/// Store `value` to a one-signal reset and mark the design dirty.
+fn write_reset(g: &mut Generator<'_>, signal: &SemanticSignal<AbsoluteAddr>, value: u8) {
+    let width = signal.width.max(1);
+    let value = g.constant(u64::from(value), width);
+    g.store(signal.address, width, value);
+    let dirty = g.constant(1, 8);
+    g.store(g.slots.dirty, 8, dirty);
+}
+
 fn generate(
     program: &LaidOutProgram,
     tb: &TestbenchProgram<AbsoluteAddr>,
@@ -198,6 +525,7 @@ fn generate(
     slots: &SchedulerSlots<AbsoluteAddr>,
     deferred: bool,
 ) -> Unit {
+    let capacity = program.layout().runtime_event_capacity;
     let mut b = Builder::new();
     let comb = b.new_block();
     let reads = HashSet::default();
@@ -238,11 +566,25 @@ fn generate(
         continuations: vec![],
         eager: None,
         eager_continuations: vec![],
+        four_state: program
+            .layout()
+            .four_state
+            .then_some(&program.layout().is_4states),
+        // The unit judges no event masks; they keep the slot's width.
+        event_bits: program
+            .layout()
+            .widths
+            .get(&slots.levels)
+            .copied()
+            .unwrap_or(SCHEDULER_TIME_WIDTH),
+        // The unit drains its own events (`resume_after_events`).
+        event_batch: None,
     };
     let initialize = g.b.new_block();
     let start = g.b.new_block();
     let edge = g.b.new_block();
     let after_edges = g.b.new_block();
+    let accounted = g.b.new_block();
     let end = g.b.new_block();
     let done = g.b.new_block();
     let limited = g.b.new_block();
@@ -267,6 +609,10 @@ fn generate(
         SIRSwitchCase {
             value: 1u64.into(),
             target: after_edges,
+        },
+        SIRSwitchCase {
+            value: PUBLISHED.into(),
+            target: accounted,
         },
     ];
     for (i, &r) in run.iter().enumerate() {
@@ -317,10 +663,42 @@ fn generate(
         branch(&mut g, release, wake_block, released[i]);
         g.b.switch_to_block(wake_block);
         put(&mut g, p[0], 0);
+        let mut statements = vec![];
+        sites(tb.processes().nth(i).unwrap(), &mut statements);
+        // Release the reset a `rst.assert` asserted: its request, plus one.
+        let releases: Vec<_> = kernel
+            .requests
+            .iter()
+            .enumerate()
+            .filter_map(|(index, request)| match request {
+                KernelRequest::Statement(site) => match statements[*site] {
+                    SemanticStatement::ResetAssert {
+                        reset_signal,
+                        deassert_value,
+                        ..
+                    } => Some((index, reset_signal, *deassert_value, g.b.new_block())),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
         let reset = g.load(p[4], 64);
-        let has_reset = g.equals(reset, 0);
+        let mut cases = vec![SIRSwitchCase {
+            value: 0u64.into(),
+            target: released[i],
+        }];
+        cases.extend(releases.iter().map(|&(index, _, _, target)| SIRSwitchCase {
+            value: (index as u64 + 1).into(),
+            target,
+        }));
         let reset_host = g.b.new_block();
-        branch(&mut g, has_reset, released[i], reset_host);
+        dispatch(&mut g, reset, cases, reset_host);
+        for (_, signal, value, target) in releases {
+            g.b.switch_to_block(target);
+            write_reset(&mut g, signal, value);
+            put(&mut g, p[4], 0);
+            jump(&mut g, released[i]);
+        }
         g.b.switch_to_block(reset_host);
         put(&mut g, m.control[TB_CURRENT], i as u64);
         put(&mut g, m.control[TB_PHASE], 3 + 2 * i as u64);
@@ -377,9 +755,7 @@ fn generate(
             })
             .collect();
         dispatch(&mut g, request_value, cases, overflow);
-        let mut statements = vec![];
-        sites(tb.processes().nth(i).unwrap(), &mut statements);
-        for (request, block) in kernel.requests.iter().zip(requests) {
+        for (request_index, (request, block)) in kernel.requests.iter().zip(requests).enumerate() {
             g.b.switch_to_block(block);
             match request {
                 KernelRequest::Settle { reads } => {
@@ -470,20 +846,168 @@ fn generate(
                     g.store(p[1], 64, count);
                     put(&mut g, p[0], 1);
                     put(&mut g, p[2], clock as u64);
-                    let enabled = equals_slot(&mut g, m.clocks[clock][3], 0);
-                    let activate = g.b.new_block();
-                    branch(&mut g, enabled, activate, save[i]);
-                    g.b.switch_to_block(activate);
-                    put(&mut g, m.clocks[clock][3], 1);
-                    let now = g.load(m.control[TB_NOW], 64);
-                    g.store(m.clocks[clock][0], 64, now);
+                    wait_on_clock(&mut g, m, clock);
                     jump(&mut g, save[i]);
                 }
-                _ => {
-                    put(&mut g, m.control[TB_PHASE], 2 + 2 * i as u64);
-                    put(&mut g, m.control[TB_EXIT], TB_HOST);
-                    g.b.seal_block(SIRTerminator::Return);
-                }
+                KernelRequest::Statement(site) => match statements[*site] {
+                    SemanticStatement::Assert {
+                        expr,
+                        site_id,
+                        continue_on_fail,
+                        message,
+                        ..
+                    } if message_args(message).is_some() => {
+                        // The host records passing assertions itself, and
+                        // settles when observers watch the design.
+                        let record = equals_slot(&mut g, m.control[TB_RECORD], 0);
+                        let native = equals_slot(&mut g, m.control[TB_NATIVE_SETTLE], 1);
+                        let native = g.binary(1, record, BinaryOp::And, native);
+                        let evaluate_block = g.b.new_block();
+                        let host = g.b.new_block();
+                        branch(&mut g, native, evaluate_block, host);
+                        g.b.switch_to_block(host);
+                        host_statement(&mut g, m, i);
+                        g.b.switch_to_block(evaluate_block);
+                        let mut reads = dut_reads(program, expr);
+                        if let Some(args) = message_args(message) {
+                            for arg in args {
+                                reads.extend(dut_reads(program, &arg.expr));
+                            }
+                        }
+                        settle_for(
+                            &mut g,
+                            m,
+                            &mut cones,
+                            deferred,
+                            reads,
+                            message.is_some(),
+                            finish,
+                        );
+                        let value = evaluate(&mut g, program, slots, expr);
+                        let passed = truth(&mut g, value);
+                        // A passing assertion does not format its message,
+                        // but what its arguments write still happens.
+                        let effects: Vec<_> = message_args(message)
+                            .unwrap()
+                            .iter()
+                            .filter(|arg| arg.expr.writes_state())
+                            .collect();
+                        let pass = if effects.is_empty() {
+                            run[i]
+                        } else {
+                            g.b.new_block()
+                        };
+                        let failed = g.b.new_block();
+                        branch(&mut g, passed, pass, failed);
+                        if !effects.is_empty() {
+                            g.b.switch_to_block(pass);
+                            for arg in effects {
+                                evaluate(&mut g, program, slots, &arg.expr);
+                            }
+                            jump(&mut g, run[i]);
+                        }
+                        g.b.switch_to_block(failed);
+                        let site =
+                            &program.runtime.runtime_schema.runtime_event_sites[*site_id as usize];
+                        let widths = site.arg_widths.clone();
+                        let args = message_args(message)
+                            .unwrap()
+                            .iter()
+                            .zip(widths)
+                            .map(|(arg, width)| {
+                                let value = evaluate(&mut g, program, slots, &arg.expr);
+                                resize(&mut g, value, width.max(1))
+                            })
+                            .collect();
+                        g.b.emit(SIRInstruction::RuntimeEvent {
+                            site_id: *site_id,
+                            args,
+                        });
+                        if *continue_on_fail {
+                            resume_after_events(&mut g, m, i, run[i], capacity);
+                        } else {
+                            mark(&mut g, m);
+                            put(&mut g, m.control[TB_PHASE], 2 + 2 * i as u64);
+                            put(&mut g, m.control[TB_EXIT], TB_FAILED);
+                            g.b.seal_block(SIRTerminator::Return);
+                        }
+                    }
+                    SemanticStatement::Display { message, .. }
+                        if let Some(&(_, site_id)) =
+                            kernel.display_sites.iter().find(|(s, _)| s == site) =>
+                    {
+                        let native = equals_slot(&mut g, m.control[TB_NATIVE_SETTLE], 1);
+                        let evaluate_block = g.b.new_block();
+                        let host = g.b.new_block();
+                        branch(&mut g, native, evaluate_block, host);
+                        g.b.switch_to_block(host);
+                        host_statement(&mut g, m, i);
+                        g.b.switch_to_block(evaluate_block);
+                        settle_for(&mut g, m, &mut cones, deferred, vec![], true, finish);
+                        let site =
+                            &program.runtime.runtime_schema.runtime_event_sites[site_id as usize];
+                        let widths = site.arg_widths.clone();
+                        let args = message_args(message)
+                            .unwrap_or_default()
+                            .iter()
+                            .zip(widths)
+                            .map(|(arg, width)| {
+                                let value = evaluate(&mut g, program, slots, &arg.expr);
+                                resize(&mut g, value, width.max(1))
+                            })
+                            .collect();
+                        g.b.emit(SIRInstruction::RuntimeEvent { site_id, args });
+                        resume_after_events(&mut g, m, i, run[i], capacity);
+                    }
+                    SemanticStatement::Finish => {
+                        // A lone process on one clock ends the run; any
+                        // other process stops every process at this time.
+                        if m.processes.len() == 1 && m.clocks.len() <= 1 {
+                            jump(&mut g, finished);
+                        } else {
+                            put(&mut g, m.control[TB_STOPPED], 1);
+                            put(&mut g, p[0], 2);
+                            jump(&mut g, save[i]);
+                        }
+                    }
+                    SemanticStatement::ResetAssert {
+                        reset_signal,
+                        clock_event,
+                        duration,
+                        assert_value,
+                        ..
+                    } => {
+                        let clock = m.events.iter().position(|a| a == clock_event).unwrap();
+                        let count = match duration {
+                            ClockCount::Static(n) => g.constant((*n).max(1), 64),
+                            ClockCount::Dynamic(expr) => {
+                                let native = equals_slot(&mut g, m.control[TB_NATIVE_SETTLE], 1);
+                                let evaluate_block = g.b.new_block();
+                                let host = g.b.new_block();
+                                branch(&mut g, native, evaluate_block, host);
+                                g.b.switch_to_block(host);
+                                host_statement(&mut g, m, i);
+                                g.b.switch_to_block(evaluate_block);
+                                settle_for(&mut g, m, &mut cones, deferred, vec![], true, finish);
+                                let value = evaluate(&mut g, program, slots, expr);
+                                let value = two_state(&mut g, value);
+                                let count = resize(&mut g, value, 64);
+                                let zero = g.equals(count, 0);
+                                let one = g.constant(1, 64);
+                                choose(&mut g, zero, one, count)
+                            }
+                        };
+                        write_reset(&mut g, reset_signal, *assert_value);
+                        g.store(p[1], 64, count);
+                        put(&mut g, p[0], 1);
+                        put(&mut g, p[2], clock as u64);
+                        put(&mut g, p[4], request_index as u64 + 1);
+                        wait_on_clock(&mut g, m, clock);
+                        jump(&mut g, save[i]);
+                    }
+                    _ => host_statement(&mut g, m, i),
+                },
+                _ => host_statement(&mut g, m, i),
             }
         }
         g.b.switch_to_block(save[i]);
@@ -497,6 +1021,7 @@ fn generate(
     // Its continuation is independent of TB process continuations.
     g.b.switch_to_block(edge);
     let host_edges = g.b.new_block();
+    let publish = g.b.new_block();
     let schema = program.runtime.runtime_schema.scheduler.as_ref().unwrap();
     let positions: Option<Vec<_>> = m
         .events
@@ -512,11 +1037,18 @@ fn generate(
         // the edges it and this unit judge need the levels of the event
         // signals: compute those (the part of the settle they need, or the
         // settle), or require a settled design.
+        let events = &program.design.events;
         let mut allowed = if deferred {
+            // Only the sources' baselines are compared below.
             let levels: Vec<AbsoluteAddr> = schema
                 .events
                 .iter()
-                .chain(m.baselines.iter().map(|(source, _)| source))
+                .chain(
+                    m.baselines
+                        .iter()
+                        .map(|(source, _)| source)
+                        .filter(|&&source| events.canonical(source) == source),
+                )
                 .copied()
                 .collect();
             let judge = g.b.new_block();
@@ -535,15 +1067,62 @@ fn generate(
                 None => settle_then(&mut g, m, judge),
             }
             g.b.switch_to_block(judge);
-            equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1)
+            let host = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 0);
+            let one = g.constant(1, 1);
+            g.binary(1, host, BinaryOp::Xor, one)
         } else {
-            let allowed = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 1);
-            let clean = equals_slot_width(&mut g, slots.dirty, 8, 0);
-            g.binary(1, allowed, BinaryOp::And, clean)
+            // Settle what the TB wrote here, as the host would before the
+            // edges, unless observers keep the edges in the host.
+            let host = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], 0);
+            let settle = g.b.new_block();
+            branch(&mut g, host, host_edges, settle);
+            g.b.switch_to_block(settle);
+            let judge = g.b.new_block();
+            settle_then(&mut g, m, judge);
+            g.b.switch_to_block(judge);
+            g.constant(1, 1)
         };
-        for &(source, saved) in &m.baselines {
-            let before = g.load(saved, 1);
-            let current = g.load(source, 1);
+        // A TB write that moves an event shows in its own signal, derived
+        // clocks included. An alias, such as a port copying a clock, only
+        // follows it, and while a settle is pending its baseline was saved
+        // before the copy caught up.
+        let offsets = &program.layout().offsets;
+        // The resets the TB wrote since the baselines: their writes become
+        // edges of their clock slots, applied with the clocks due now.
+        let mut resets = vec![];
+        for &(source, saved) in m
+            .baselines
+            .iter()
+            .filter(|(source, _)| events.canonical(*source) == *source)
+        {
+            let before = g.signal_level(saved);
+            let current = g.signal_level(source);
+            let reset = (!m
+                .events
+                .iter()
+                .any(|e| offsets.get(e) == offsets.get(&source)))
+            .then(|| {
+                schema
+                    .clocks
+                    .iter()
+                    .position(|a| offsets.get(a) == offsets.get(&source))
+            })
+            .flatten();
+            if let Some(bit) = reset {
+                let moved = g.binary(1, before, BinaryOp::Ne, current);
+                // A reset that moves to or from an unknown level keeps its
+                // edges in the host: a clock slot has known levels only.
+                let (_, unknown_before) = g.level_planes(before);
+                let (current, unknown_current) = g.level_planes(current);
+                if let (Some(a), Some(b)) = (unknown_before, unknown_current) {
+                    let unknown = g.binary(1, a, BinaryOp::Or, b);
+                    let unknown = g.binary(1, unknown, BinaryOp::And, moved);
+                    let known = g.equals(unknown, 0);
+                    allowed = g.binary(1, allowed, BinaryOp::And, known);
+                }
+                resets.push((source, saved, moved, current, bit));
+                continue;
+            }
             let same = g.binary(1, before, BinaryOp::Eq, current);
             allowed = g.binary(1, allowed, BinaryOp::And, same);
         }
@@ -563,7 +1142,7 @@ fn generate(
         let mut armed = g.constant(0, 64);
         let mut values = g.constant(0, 64);
         for (c, &bit) in m.clocks.iter().zip(&positions) {
-            let enabled = equals_slot(&mut g, c[3], 1);
+            let enabled = waited_on(&mut g, c);
             let next = g.load(c[0], 64);
             let rise = g.binary(1, next, BinaryOp::Eq, now);
             let rise = g.binary(1, rise, BinaryOp::And, enabled);
@@ -581,14 +1160,32 @@ fn generate(
             let two = g.constant(2, 64);
             g.store_at(slots.clock_period, bit * 64, 64, two);
         }
-        let any = g.equals(armed, 0);
+        for &(_, _, moved, current, bit) in &resets {
+            let set = g.bit(moved, bit);
+            armed = g.binary(64, armed, BinaryOp::Or, set);
+            let rises = g.binary(1, moved, BinaryOp::And, current);
+            let set = g.bit(rises, bit);
+            values = g.binary(64, values, BinaryOp::Or, set);
+            g.store_at(slots.clock_next, bit * 64, 64, now);
+            let two = g.constant(2, 64);
+            g.store_at(slots.clock_period, bit * 64, 64, two);
+        }
+        // Without an edge due, the moved events were judged above: the
+        // time step has nothing more to evaluate.
+        let none = g.equals(armed, 0);
         let invoke = g.b.new_block();
-        branch(&mut g, any, host_edges, invoke);
+        branch(&mut g, none, publish, invoke);
         g.b.switch_to_block(invoke);
+        // The slot sees each moved reset at its level before the write.
+        for &(source, saved, ..) in &resets {
+            copy(&mut g, program, saved, source);
+        }
         g.store(slots.clock_armed, 64, armed);
         g.store(slots.clock_value, 64, values);
         g.store(slots.limit, 64, now);
         put(&mut g, slots.count, 0);
+        put(&mut g, slots.budget, u64::MAX);
+        put(&mut g, slots.events, 0);
         put(&mut g, slots.ready, 0);
         let zero = g.constant(0, 8);
         g.store(slots.exit, 8, zero);
@@ -602,7 +1199,19 @@ fn generate(
         let limit = g.equals(exit, SchedulerExit::Limit as u64);
         let finished = g.equals(exit, SchedulerExit::Finish as u64);
         let ok = g.binary(1, limit, BinaryOp::Or, finished);
-        branch(&mut g, ok, after_edges, overflow);
+        branch(&mut g, ok, publish, overflow);
+        // A waveform records each time step: the host dumps it once the
+        // step's edges are accounted for, so that its reports and a
+        // `$finish` see this step's tick, then the run continues.
+        g.b.switch_to_block(publish);
+        let record = equals_slot(&mut g, m.control[TB_NATIVE_EDGES], TB_EDGES_PUBLISHED);
+        let dump = g.b.new_block();
+        branch(&mut g, record, dump, after_edges);
+        g.b.switch_to_block(dump);
+        account_edges(&mut g, m, overflow);
+        put(&mut g, m.control[TB_PHASE], PUBLISHED);
+        put(&mut g, m.control[TB_EXIT], TB_PUBLISH);
+        g.b.seal_block(SIRTerminator::Return);
     } else {
         jump(&mut g, host_edges);
     }
@@ -611,72 +1220,16 @@ fn generate(
     put(&mut g, m.control[TB_EXIT], TB_EDGES);
     g.b.seal_block(SIRTerminator::Return);
     g.b.switch_to_block(after_edges);
-    let now = g.load(m.control[TB_NOW], 64);
-    let ticks = g.load(m.control[TB_TICKS], 64);
-    let limit = g.load(m.control[TB_LIMIT], 64);
-    let active = g.binary(1, ticks, BinaryOp::LtU, limit);
-    let running = equals_slot(&mut g, m.control[TB_STOPPED], 0);
-    let active = g.binary(1, active, BinaryOp::And, running);
-    let mut rising = g.constant(0, 1);
-    for (clock, c) in m.clocks.iter().enumerate() {
-        let enabled = equals_slot(&mut g, c[3], 1);
-        let next = g.load(c[0], 64);
-        let due = g.binary(1, next, BinaryOp::Eq, now);
-        let due = g.binary(1, due, BinaryOp::And, enabled);
-        let due = g.binary(1, due, BinaryOp::And, active);
-        rising = g.binary(1, rising, BinaryOp::Or, due);
-        let fall = g.load(c[1], 64);
-        let falling = g.binary(1, fall, BinaryOp::Eq, now);
-        let armed = g.load(c[2], 64);
-        let not_due = g.equals(falling, 0);
-        let zero = g.constant(0, 64);
-        let remain = choose(&mut g, not_due, armed, zero);
-        g.store(c[2], 64, remain);
-        let fire = g.b.new_block();
-        let skip = g.b.new_block();
-        branch(&mut g, due, fire, skip);
-        g.b.switch_to_block(fire);
-        let period = g.constant(m.periods[clock], 64);
-        let next = g.binary(64, now, BinaryOp::Add, period);
-        let wraps = g.binary(1, next, BinaryOp::LtU, now);
-        let valid = g.b.new_block();
-        branch(&mut g, wraps, overflow, valid);
-        g.b.switch_to_block(valid);
-        g.store(c[0], 64, next);
-        let half = g.constant(m.periods[clock] - m.periods[clock] / 2, 64);
-        let fall = g.binary(64, now, BinaryOp::Add, half);
-        g.store(c[1], 64, fall);
-        put(&mut g, c[2], 1);
-        for p in &m.processes {
-            let waiting = equals_slot(&mut g, p[0], 1);
-            let this = equals_slot(&mut g, p[2], clock as u64);
-            let waiting = g.binary(1, waiting, BinaryOp::And, this);
-            let decrement = g.b.new_block();
-            let after = g.b.new_block();
-            branch(&mut g, waiting, decrement, after);
-            g.b.switch_to_block(decrement);
-            let left = g.load(p[1], 64);
-            let one = g.constant(1, 64);
-            let left = g.binary(64, left, BinaryOp::Sub, one);
-            g.store(p[1], 64, left);
-            let last = g.equals(left, 0);
-            let release = g.b.new_block();
-            branch(&mut g, last, release, after);
-            g.b.switch_to_block(release);
-            put(&mut g, p[0], 3);
-            g.store(p[3], 64, next);
-            jump(&mut g, after);
-            g.b.switch_to_block(after);
-        }
-        jump(&mut g, skip);
-        g.b.switch_to_block(skip);
-    }
-    let one = g.constant(1, 64);
-    let zero = g.constant(0, 64);
-    let add = choose(&mut g, rising, one, zero);
-    let ticks = g.binary(64, ticks, BinaryOp::Add, add);
-    g.store(m.control[TB_TICKS], 64, ticks);
-    jump(&mut g, end);
+    account_edges(&mut g, m, overflow);
+    jump(&mut g, accounted);
+    g.b.switch_to_block(accounted);
+    // A `$finish` the design recorded in the edges ends the run after this
+    // time's edges, for the host to drain it.
+    let design_finished = g.load(slots.finish, 8);
+    let zero = g.constant(0, 8);
+    g.store(slots.finish, 8, zero);
+    let design_finished = g.binary(1, design_finished, BinaryOp::Ne, zero);
+    branch(&mut g, design_finished, finish, end);
     g.b.switch_to_block(end);
     let stopped = equals_slot(&mut g, m.control[TB_STOPPED], 1);
     let check_done = g.b.new_block();
@@ -698,7 +1251,7 @@ fn generate(
     let mut next = g.constant(u64::MAX, 64);
     let mut pending = g.constant(0, 1);
     for c in &m.clocks {
-        let enabled = equals_slot(&mut g, c[3], 1);
+        let enabled = waited_on(&mut g, c);
         let enabled = g.binary(1, enabled, BinaryOp::And, active);
         let rise = g.load(c[0], 64);
         let earlier = g.binary(1, rise, BinaryOp::LtU, next);
@@ -723,13 +1276,25 @@ fn generate(
     let advance = g.b.new_block();
     branch(&mut g, pending, advance, limited);
     g.b.switch_to_block(advance);
+    // Give the events of this time its report time before the next one,
+    // and let the host drain them before the buffer can overflow.
+    let unmarked = equals_slot(&mut g, m.control[TB_UNMARKED], 0);
+    let marked = g.b.new_block();
+    let label = g.b.new_block();
+    branch(&mut g, unmarked, marked, label);
+    g.b.switch_to_block(label);
+    mark(&mut g, m);
+    jump(&mut g, marked);
+    g.b.switch_to_block(marked);
     g.store(m.control[TB_NOW], 64, next);
     put(&mut g, m.control[TB_PHASE], 0);
+    let due = drain_due(&mut g, m, capacity);
     let budget = g.load(m.control[TB_BUDGET], 64);
     let one = g.constant(1, 64);
     let budget = g.binary(64, budget, BinaryOp::Sub, one);
     g.store(m.control[TB_BUDGET], 64, budget);
     let exhausted = g.equals(budget, 0);
+    let exhausted = g.binary(1, exhausted, BinaryOp::Or, due);
     branch(&mut g, exhausted, safe, start);
     for (block, code) in [
         (done, TB_DONE),
@@ -745,35 +1310,54 @@ fn generate(
     }
     emit_settle(&mut g, m, &program.sir.eval_comb, finish, overflow);
     let mut unit = g.finish();
+    // Count the events each record leaves for a marker and for the host's
+    // next drain. Markers count themselves.
     let mut next = unit.register_map.keys().map(|r| r.0).max().unwrap_or(0) + 1;
-    for block in unit.blocks.values_mut() {
-        let old = std::mem::take(&mut block.instructions);
+    let mut register = |unit: &mut Unit| {
+        let r = RegisterId(next);
+        next += 1;
+        unit.register_map.insert(
+            r,
+            celox_sir::RegisterType::Bit {
+                width: 64,
+                signed: false,
+            },
+        );
+        r
+    };
+    let ids: Vec<_> = unit.blocks.keys().copied().collect();
+    for id in ids {
+        let old = std::mem::take(&mut unit.blocks.get_mut(&id).unwrap().instructions);
+        let mut instructions = Vec::with_capacity(old.len());
         for instruction in old {
-            let event = matches!(instruction, SIRInstruction::RuntimeEvent { .. });
-            block.instructions.push(instruction);
+            let event = matches!(&instruction, SIRInstruction::RuntimeEvent { site_id, .. }
+                if Some(*site_id) != m.marker_site);
+            instructions.push(instruction);
             if event {
-                let one = RegisterId(next);
-                next += 1;
-                unit.register_map.insert(
-                    one,
-                    celox_sir::RegisterType::Bit {
-                        width: 64,
-                        signed: false,
-                    },
-                );
-                block
-                    .instructions
-                    .push(SIRInstruction::Imm(one, SIRValue::new(1u64)));
-                block.instructions.push(SIRInstruction::Store(
-                    stable(m.control[TB_BUDGET]),
-                    SIROffset::Static(0),
-                    64,
-                    one,
-                    vec![],
-                    vec![],
-                ));
+                let one = register(&mut unit);
+                instructions.push(SIRInstruction::Imm(one, SIRValue::new(1u64)));
+                for slot in [m.control[TB_UNMARKED], m.control[TB_PENDING]] {
+                    let count = register(&mut unit);
+                    let sum = register(&mut unit);
+                    instructions.push(SIRInstruction::Load(
+                        count,
+                        stable(slot),
+                        SIROffset::Static(0),
+                        64,
+                    ));
+                    instructions.push(SIRInstruction::Binary(sum, count, BinaryOp::Add, one));
+                    instructions.push(SIRInstruction::Store(
+                        stable(slot),
+                        SIROffset::Static(0),
+                        64,
+                        sum,
+                        vec![],
+                        vec![],
+                    ));
+                }
             }
         }
+        unit.blocks.get_mut(&id).unwrap().instructions = instructions;
     }
     unit
 }

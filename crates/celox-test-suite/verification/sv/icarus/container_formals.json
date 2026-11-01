@@ -1,0 +1,234 @@
+{
+  "cases": [
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::container_formals_forwarded_and_read_from_properties",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::container_formals_of_class_handles_copy_the_container",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::container_formals_of_class_methods",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::inout_container_is_copied_in_and_back",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::input_container_changes_are_not_seen_by_the_caller",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::input_container_from_an_empty_concatenation",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::input_container_from_container_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::output_container_starts_empty_and_is_copied_back",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::static_subroutine_container_formals",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_container_formals.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_container_formals",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation (\"draw_eval_function_argument: Assertion `0' failed.\"), a function's output or inout gives \"Function arguments must be input ports\", and a task's \"elaborate.cc:4342: failed assertion 0\"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument.",
+        "upstream": []
+      },
+      "name": "container_formals::task_copies_containers_back_when_it_returns",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

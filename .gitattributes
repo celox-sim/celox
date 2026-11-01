@@ -1,5 +1,7 @@
-# These symlinks point to generated NAPI build outputs, absent from source archives.
-# Exclude them so GitHub Actions can extract this repository for $/ local actions.
+# These links point to generated NAPI outputs, absent in a source checkout.
+# Same-repository ($/) Actions download a source archive before builds run;
+# omit the dangling links so the runner can extract that archive. Git checkout
+# retains them for playground builds.
 packages/playground/public/celox.wasi-browser.js export-ignore
 packages/playground/public/celox.wasm32-wasi.wasm export-ignore
 packages/playground/public/wasi-worker-browser.mjs export-ignore

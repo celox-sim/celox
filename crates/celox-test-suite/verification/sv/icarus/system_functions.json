@@ -1665,6 +1665,141 @@
       },
       "phase": "skip",
       "status": "ignored"
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "verification/repros/sv_typename_scopes.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_typename_operands",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_aggregates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "verification/repros/sv_typename_scopes.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_typename_operands",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_class_parameters",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "verification/repros/sv_typename_scopes.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_typename_operands",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_elaboration_constant",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "verification/repros/sv_typename_scopes.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_typename_operands",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_vectors_and_arrays",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Functions",
+      "detail": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_typename_vectors.json",
+          "verification/repros/sv_typename_aggregates.json",
+          "verification/repros/sv_typename_classes.json",
+          "verification/repros/sv_typename_constant.json",
+          "verification/repros/sv_typename_scopes.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_typename_operands",
+        "observed_version": "Icarus Verilog 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects a data type operand of $typename (\"Type names are not valid expressions here.\" and an internal error for PETypename), a class-scoped type operand such as $typename(Holder::T), and the parameter port lists class resource #(type T = int) and class Counted #(typename_scope_pkg::count_t N = 3) (syntax errors), and an unpacked structure (\"sorry: Unpacked structs not supported.\"). IEEE 1800-2023 20.6.1 accepts a data_type argument, 8.23 and 8.25 define class-scoped types and parameterized classes, and 7.2 defines unpacked structures; xezim 0.11.3 compiles the cases.",
+        "upstream": []
+      },
+      "name": "system_functions::typename_scopes_and_string_operands",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

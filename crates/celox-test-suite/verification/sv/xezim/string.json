@@ -68,6 +68,75 @@
     },
     {
       "category": "Types",
+      "detail": "Xezim 0.11.4 evaluates words[1][0][1] of a multidimensional string array containing \"BC\" as 1 instead of character \"C\" (67), and returns unknown bits when comparing an out-of-bounds string-array element to the empty string. IEEE 1800-2023 6.16 defines string character indexing and 7.4.5 specifies the empty string for an invalid array index. Array copies and slices satisfy their assertions before the character check fails.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_invalid_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_fixed_string_array_selects",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 evaluates words[1][0][1] of a multidimensional string array containing \"BC\" as 1 instead of character \"C\" (67), and returns unknown bits when comparing an out-of-bounds string-array element to the empty string. IEEE 1800-2023 6.16 defines string character indexing and 7.4.5 specifies the empty string for an invalid array index. Array copies and slices satisfy their assertions before the character check fails.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-arrays-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 evaluates words[1][0][1] of a multidimensional string array containing \"BC\" as 1 instead of character \"C\" (67), and returns unknown bits when comparing an out-of-bounds string-array element to the empty string. IEEE 1800-2023 6.16 defines string character indexing and 7.4.5 specifies the empty string for an invalid array index. Array copies and slices satisfy their assertions before the character check fails.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_multidimensional_slices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_fixed_string_array_selects",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 evaluates words[1][0][1] of a multidimensional string array containing \"BC\" as 1 instead of character \"C\" (67), and returns unknown bits when comparing an out-of-bounds string-array element to the empty string. IEEE 1800-2023 6.16 defines string character indexing and 7.4.5 specifies the empty string for an invalid array index. Array copies and slices satisfy their assertions before the character check fails.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-arrays-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 returns 0 instead of 1 for the checks after copying existing rows into multidimensional string-array assignment patterns. The case exercises row-valued items, an array-valued default, row replication and singleton rows. IEEE 1800-2023 10.9.1 evaluates each item as an assignment to its corresponding element or subarray type. Celox and Verilator pass the case.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_pattern_rows",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_string_array_row_patterns",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 returns 0 instead of 1 for the checks after copying existing rows into multidimensional string-array assignment patterns. The case exercises row-valued items, an array-valued default, row replication and singleton rows. IEEE 1800-2023 10.9.1 evaluates each item as an assignment to its corresponding element or subarray type. Celox and Verilator pass the case.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-array-review-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "string::methods",

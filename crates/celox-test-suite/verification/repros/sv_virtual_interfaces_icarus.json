@@ -1,0 +1,15 @@
+{
+  "tool": "icarus",
+  "version": "Icarus Verilog version 13.0 (stable) (v13_0)",
+  "source": "sv_virtual_interfaces_icarus.sv",
+  "standard": "IEEE 1800-2023 25.9",
+  "command": "iverilog -g2012 sv_virtual_interfaces_icarus.sv",
+  "expected_output": "5a",
+  "observations": [
+    {
+      "exit_code": 2,
+      "output": "sv_virtual_interfaces_icarus.sv:7: syntax error\nsv_virtual_interfaces_icarus.sv:7: error: Invalid module item.\n"
+    }
+  ],
+  "note": "Icarus 13.0 does not parse virtual interface declarations (syntax error at `virtual bus_if v;`), so no virtual interface case compiles. Verilator 5.052 and Celox print 5a."
+}

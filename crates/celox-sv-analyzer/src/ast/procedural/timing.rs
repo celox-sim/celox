@@ -5,7 +5,10 @@ use celox_sv_syntax::{
 };
 
 impl BodyBuilder<'_, '_, '_> {
-    pub(super) fn native_timing_control(&self, id: TimingControlId) -> Result<Stmt, AnalyzerError> {
+    pub(super) fn native_timing_control(
+        &mut self,
+        id: TimingControlId,
+    ) -> Result<Stmt, AnalyzerError> {
         let control = self.tree.declarations().timing_control(id);
         match &control.kind {
             TimingControlKind::Delay {
@@ -32,6 +35,42 @@ impl BodyBuilder<'_, '_, '_> {
             TimingControlKind::Event(event) => {
                 self.allow_timing("event control")?;
                 match event {
+                    EventControl::Items(items)
+                        if items.iter().any(|item| {
+                            events::is_handle(
+                                self.tree,
+                                self.session,
+                                item.expression,
+                                self.tree.declarations(),
+                                &self.dims,
+                            )
+                        }) =>
+                    {
+                        // `@(e1 or e2)` waits for a trigger of either event
+                        // (IEEE 1800-2023 15.5.2).
+                        let mut handles = Vec::with_capacity(items.len());
+                        for item in items {
+                            if item.edge != TimingEdge::Any
+                                || item.iff.is_some()
+                                || !events::is_handle(
+                                    self.tree,
+                                    self.session,
+                                    item.expression,
+                                    self.tree.declarations(),
+                                    &self.dims,
+                                )
+                            {
+                                return Err(unsupported(
+                                    "event control mixing named events with other events",
+                                ));
+                            }
+                            handles.push(self.native_value(item.expression)?);
+                        }
+                        Ok(Stmt::Eval(events::call(
+                            celox_design::ProcessOp::WaitEvent,
+                            handles,
+                        )))
+                    }
                     EventControl::Items(items) => {
                         let mut result = Vec::with_capacity(items.len());
                         for item in items {
@@ -44,17 +83,172 @@ impl BodyBuilder<'_, '_, '_> {
                             result.push(EventItemBase {
                                 edge,
                                 expr: self.native_value(item.expression)?,
-                                iff: item.iff.map(|iff| self.native_value(iff)).transpose()?,
+                                iff: item
+                                    .iff
+                                    .map(|iff| self.native_chandle_value(iff))
+                                    .transpose()?,
                             });
                         }
                         Ok(Stmt::WaitEvent(result))
                     }
-                    EventControl::Named(_) => Err(unsupported("named event")),
+                    EventControl::Named(id)
+                        if events::is_handle(
+                            self.tree,
+                            self.session,
+                            *id,
+                            self.tree.declarations(),
+                            &self.dims,
+                        ) =>
+                    {
+                        let event = self.native_value(*id)?;
+                        Ok(Stmt::Eval(events::call(
+                            celox_design::ProcessOp::WaitEvent,
+                            vec![event],
+                        )))
+                    }
+                    // `@c` is `@(c)` (9.4.2).
+                    EventControl::Named(id) => Ok(Stmt::WaitEvent(vec![EventItemBase {
+                        edge: EventEdge::Any,
+                        expr: self.native_value(*id)?,
+                        iff: None,
+                    }])),
                     // The statement it controls gives its event expression.
                     EventControl::Wildcard => Err(crate::ast::timing::disagreement()),
                 }
             }
         }
+    }
+
+    /// An event control whose events are members of interface instances
+    /// that virtual interfaces denote, `@(posedge vif.clk)` (IEEE 1800-2023
+    /// 25.9). Each member item selects the member of the instance its
+    /// handle denotes, so the handle is an operand of its event expression
+    /// (9.4.2): retargeting the handle is an event when the selection changes
+    /// as the item's edge requires. The items keep their own edges, counts
+    /// and `iff` gates. The handle becoming `null` also wakes the process,
+    /// which checks the handles after every wake and so reports the access
+    /// through `null` rather than an edge of the selection it ends. A handle that an automatic
+    /// variable, an argument or a class property holds is unsupported.
+    pub(super) fn virtual_event_control(
+        &mut self,
+        id: TimingControlId,
+    ) -> Result<Option<Vec<Stmt>>, AnalyzerError> {
+        let native = self.tree.declarations();
+        let control = native.timing_control(id);
+        let TimingControlKind::Event(EventControl::Items(items)) = &control.kind else {
+            return Ok(None);
+        };
+        if !items.iter().any(|item| {
+            virtual_interfaces::native_member(
+                self.tree,
+                self.session,
+                item.expression,
+                native,
+                &self.dims,
+            )
+            .is_some()
+        }) {
+            return Ok(None);
+        }
+        self.allow_timing("event control")?;
+        let mut handles: Vec<Expr> = Vec::new();
+        let mut events = Vec::with_capacity(items.len());
+        for item in items {
+            let edge = match item.edge {
+                TimingEdge::Any => EventEdge::Any,
+                TimingEdge::Pos => EventEdge::Pos,
+                TimingEdge::Neg => EventEdge::Neg,
+                TimingEdge::Both => EventEdge::Both,
+            };
+            // The member is read below without the binder.
+            expression_binding::check_chandle_read(
+                item.expression,
+                self.tree,
+                native,
+                &self.dims,
+                self.session,
+            )?;
+            let iff = item
+                .iff
+                .map(|iff| self.native_chandle_value(iff))
+                .transpose()?;
+            let expr = match virtual_interfaces::native_member(
+                self.tree,
+                self.session,
+                item.expression,
+                native,
+                &self.dims,
+            ) {
+                Some((handle, ty, member)) => {
+                    let handle = self.native_value(handle)?;
+                    if !self.watched_handle(&handle) {
+                        return Err(unsupported_watch());
+                    }
+                    if !handles.contains(&handle) {
+                        handles.push(handle.clone());
+                    }
+                    // A write of the selected member is an event at the
+                    // write; a change of the selection, at the change.
+                    for (signal, denotes) in
+                        virtual_interfaces::watched_writes(self.session, &handle, &ty, &member)?
+                    {
+                        events.push(EventItemBase {
+                            edge,
+                            expr: signal,
+                            iff: Some(match &iff {
+                                Some(iff) => Expr::Binary {
+                                    left: Box::new(denotes),
+                                    op: BinaryOp::LogicAnd,
+                                    right: Box::new(iff.clone()),
+                                },
+                                None => denotes,
+                            }),
+                        });
+                    }
+                    virtual_interfaces::watched(self.tree, self.session, handle, &ty, &member)?
+                }
+                None => self.native_value(item.expression)?,
+            };
+            events.push(EventItemBase { edge, expr, iff });
+        }
+        events.extend(handles.iter().map(|handle| EventItemBase {
+            edge: EventEdge::Pos,
+            expr: virtual_interfaces::is_null(handle),
+            iff: None,
+        }));
+        let checks = handles
+            .iter()
+            .map(|handle| Stmt::Eval(virtual_interfaces::null_check(handle)))
+            .collect::<Vec<_>>();
+        let mut stmts = checks.clone();
+        stmts.push(Stmt::WaitEvent(events));
+        stmts.extend(checks);
+        Ok(Some(vec![virtual_interfaces::event_block(stmts)]))
+    }
+
+    /// `wait (condition)` (IEEE 1800-2023 9.4.3), whose condition may read
+    /// members of interface instances that virtual interfaces denote; see
+    /// [`Self::virtual_event_control`] for how it is sensitive to them.
+    pub(super) fn wait_statements(&mut self, condition: Expr) -> Result<Vec<Stmt>, AnalyzerError> {
+        let mut handles = Vec::new();
+        virtual_interfaces::read_handles(&condition, &mut handles);
+        if handles.is_empty() {
+            return Ok(vec![Stmt::Wait(condition)]);
+        }
+        if !handles.iter().all(|handle| self.watched_handle(handle)) {
+            return Err(unsupported_watch());
+        }
+        // The process evaluates the condition, so a read through `null`
+        // fails only where the condition's guards let it be evaluated.
+        Ok(vec![Stmt::Wait(condition)])
+    }
+
+    /// Whether a wait can watch handle `handle`, of a virtual interface or a
+    /// named event, for changes: whether a variable of the design, not a
+    /// local or an argument of the subroutine, holds it.
+    pub(super) fn watched_handle(&self, handle: &Expr) -> bool {
+        matches!(handle, Expr::Ident(name)
+            if !self.state.locals.iter().any(|local| &local.name == name))
     }
 
     /// Whether `id` is `@*` (or `@(*)`), whose event expression the
@@ -74,15 +268,22 @@ impl BodyBuilder<'_, '_, '_> {
         Ok(true)
     }
 
-    fn native_delay(&self, mut value: ExprId, parenthesized: bool) -> Result<Expr, AnalyzerError> {
+    fn native_delay(
+        &mut self,
+        mut value: ExprId,
+        parenthesized: bool,
+    ) -> Result<Expr, AnalyzerError> {
         let native = self.tree.declarations();
         if parenthesized {
             value = expression_binding::ungroup(value, native);
             if let ExprKind::MinTypMax { typical, .. } = native.expression(value).kind {
                 value = typical;
             }
+        }
+        if parenthesized {
             return self.native_value(value);
         }
+        expression_binding::check_chandle_read(value, self.tree, native, &self.dims, self.session)?;
         match &native.expression(value).kind {
             ExprKind::Literal(text) if text.chars().all(|c| c.is_ascii_digit() || c == '_') => {
                 Ok(Expr::Literal(text.replace('_', "")))
@@ -141,5 +342,20 @@ impl BodyBuilder<'_, '_, '_> {
 /// a combinational `always @*` its sensitivity, so both count the same
 /// reads, the defaults of omitted subroutine arguments included.
 pub(super) fn implicit_event(body: &[Stmt], removed: &[Stmt]) -> Stmt {
-    Stmt::WaitImplicit(body.iter().chain(removed).cloned().collect())
+    // The reads of a nested event control through a virtual interface are
+    // its timing, not reads of the statements.
+    Stmt::WaitImplicit(
+        body.iter()
+            .chain(removed)
+            .map(virtual_interfaces::without_event_blocks)
+            .collect(),
+    )
+}
+
+/// A wait through a virtual interface that is not a static variable.
+fn unsupported_watch() -> AnalyzerError {
+    unsupported(
+        "wait on a member through a virtual interface held by an automatic variable, \
+         an argument or a class property",
+    )
 }

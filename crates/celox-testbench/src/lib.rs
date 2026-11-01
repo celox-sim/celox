@@ -310,9 +310,9 @@ pub type SemanticStatement<A> = TestbenchStatement<
 pub type SemanticComponentBinding<A> =
     ComponentBinding<A, SemanticSignal<A>, ExprBytecode<StateLocation<A>>>;
 
-/// A `$tb::clock_gen` instance: a clock that runs from time 0, rising at
-/// multiples of `period` and falling `ceil(period / 2)` after each rise,
-/// whether or not a process waits on it.
+/// A `$tb::clock_gen` instance: a clock that starts low and rises only
+/// while some process waits on it, a period apart, falling
+/// `ceil(period / 2)` after each rise.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TestbenchClock<Event> {
     pub event: Event,
@@ -341,6 +341,10 @@ pub struct TestbenchKernel<A> {
     pub status: A,
     pub request: A,
     pub requests: Vec<KernelRequest<A>>,
+    /// The runtime event site of each `$display` statement, by statement
+    /// site.
+    #[serde(default)]
+    pub display_sites: Vec<(usize, u32)>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -576,6 +580,17 @@ impl<A> TestbenchProgram<A> {
 pub enum ExprOpcode<L = usize> {
     ConstU64(u64),
     ConstWide(BigUint),
+    /// A `width`-bit constant with unknown bits: a set `mask` bit is X where
+    /// the `payload` bit is 0 and Z where it is 1. A two-state build reads
+    /// the unknown bits as 0 (IEEE 1800-2023 6.11.2).
+    ConstLogic {
+        payload: BigUint,
+        mask: BigUint,
+        width: usize,
+    },
+    /// Read the unknown bits of the top value as 0, as a cast to a two-state
+    /// type does (IEEE 1800-2023 6.11.2).
+    ToTwoState,
     LoadU64 {
         location: L,
         byte_size: usize,
@@ -715,6 +730,17 @@ impl<L> ExprBytecode<L> {
         &self.ops
     }
 
+    /// Whether evaluating the expression writes state, as a function call
+    /// that assigns a variable does.
+    pub fn writes_state(&self) -> bool {
+        self.ops.iter().any(|op| {
+            matches!(
+                op,
+                ExprOpcode::StoreU64 { .. } | ExprOpcode::StoreString { .. }
+            )
+        })
+    }
+
     pub fn is_empty(&self) -> bool {
         self.ops.is_empty()
     }
@@ -729,6 +755,10 @@ pub struct ExpressionKernel<L> {
     pub width: usize,
     pub is_string: bool,
     pub writes: Vec<(L, usize)>,
+    /// The result slot holds a mask plane after its value plane: the
+    /// unknown bits of the result in a four-state build.
+    #[serde(default)]
+    pub four_state: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -913,6 +943,16 @@ impl<L> ExprBytecode<L> {
                 },
                 ExprOpcode::ConstU64(value) => ExprOpcode::ConstU64(value),
                 ExprOpcode::ConstWide(value) => ExprOpcode::ConstWide(value),
+                ExprOpcode::ConstLogic {
+                    payload,
+                    mask,
+                    width,
+                } => ExprOpcode::ConstLogic {
+                    payload,
+                    mask,
+                    width,
+                },
+                ExprOpcode::ToTwoState => ExprOpcode::ToTwoState,
                 ExprOpcode::LoadU64 {
                     location,
                     byte_size,
@@ -1025,6 +1065,7 @@ impl<L> ExprBytecode<L> {
                         .into_iter()
                         .map(|(location, size)| Ok((map(location)?, size)))
                         .collect::<Result<_, E>>()?,
+                    four_state: kernel.four_state,
                 })
             })
             .transpose()?;

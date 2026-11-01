@@ -717,25 +717,31 @@ fn package_structure_members_are_written_through_the_package_scope() {
 
 #[test]
 fn rejects_unsupported_package_state() {
-    for (source, expected) in [
-        (
-            "package p; nettype logic nt; nt shared; endpackage
-             module Top(output logic [7:0] y); assign y = 0; endmodule",
-            "package net `p::shared`",
-        ),
-        (
-            "package p; logic [7:0] a = 8'd1; endpackage
-             package q; logic [7:0] b = p::a; endpackage
-             module Top(output logic [7:0] y); assign y = q::b; endmodule",
-            "package variable initializer that is not constant in package `q`",
-        ),
-    ] {
-        let error =
-            Simulator::from_sv_sources(vec![(source, std::path::Path::new("state.sv"))], "Top")
-                .build()
-                .expect_err(expected);
-        assert!(format!("{error:?}").contains(expected), "{error:?}");
-    }
+    let source = "package p; nettype logic nt; nt shared; endpackage
+         module Top(output logic [7:0] y); assign y = 0; endmodule";
+    let expected = "package net `p::shared`";
+    let error = Simulator::from_sv_sources(vec![(source, std::path::Path::new("state.sv"))], "Top")
+        .build()
+        .expect_err(expected);
+    assert!(format!("{error:?}").contains(expected), "{error:?}");
+}
+
+/// A package variable initializer that is not constant runs once, before
+/// any procedure starts (IEEE 1800-2023 6.8).
+#[test]
+fn package_variable_initializers_run_before_time_zero() {
+    let source = "package p; logic [7:0] a = 8'd1; endpackage
+         package q; logic [7:0] b = p::a + 8'd2; endpackage
+         module Top(output logic [7:0] y); assign y = q::b; endmodule";
+    let mut simulation = celox::Simulation::from_sv_sources(
+        vec![(source, std::path::Path::new("packages.sv"))],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+    simulation.run_until(1).unwrap();
+    let y = simulation.signal("y");
+    assert_eq!(u64::try_from(simulation.get(y)).unwrap(), 3);
 }
 
 #[test]

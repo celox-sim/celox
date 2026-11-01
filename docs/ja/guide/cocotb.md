@@ -252,6 +252,22 @@ cocotbからの書き込みは現在時刻のブロッキング代入です。�
 一時停止への対応は[#1886](https://github.com/celox-sim/celox/issues/1886)で
 扱っています。
 
+## SystemVerilogのコンパイル単位
+
+既定では、指定順のソース群を一つのコンパイル単位として処理します。
+ソースやヘッダーのマクロ定義、`undef、コンパイラ指令、コンパイル単位の宣言が
+後続ファイルに引き継がれます。`--separate-units`、または `celox.toml` の
+ルート・ターゲットに `single_unit = false` を指定すると、ファイルごとに分離します。
+`--single-unit` はプロジェクトの分離設定を上書きします。
+両方式は IEEE 1800-2023 3.12.1 に従いますが、仕様は既定方式を定めていません。
+この設定は `run` と `vpi build` で使えます。Rust のソース一覧 API はファイル単位の
+スコープを維持し、`celox_sv_analyzer::syntax::preprocess_sources` で単一単位の
+前処理を明示できます。
+
+```sh
+celox run -f rtlmeter.f --top tb --four-state
+```
+
 ## cocotbを実行する
 
 たとえば`test/test_top.py`にcocotbテストがある場合、そのモジュールをimportできる
@@ -284,9 +300,15 @@ build/top-sim \
 
 ## 現在の互換範囲
 
-cocotb 2.0で使われるモジュール・信号の探索、immediate/deposit/force/release書き込み、
-スカラー・ベクター値、シミュレーション時刻、およびStart、ReadWrite、ReadOnly、
-NextTimeStep、Timer、ValueChange、Endの各コールバック領域に対応しています。
+cocotb 2.0 / 2.1 のモジュール・信号の探索、拡張識別子、スカラー・ベクター値、
+packed bit handle、unpacked array の要素、real 値、string のバイト列に対応しています。
+immediate deposit とゼロ遅延 inertial 更新を利用できます。packed 変数ではベクター全体の
+force/release と、force 中のビットへの deposit に対応しています。string の force/release と
+遅延 VPI 書き込みは未対応です。Start、ReadWrite、ReadOnly、NextTimeStep、Timer、
+ValueChange、End の各コールバック領域に対応しています。
 
-packed bit handle、遅延VPI書き込み、unpacked arrayのインデックス参照、
-派生・カスケードクロックのスケジューリングにはまだ対応していません。
+[upstream 回帰テストの実行手順](https://github.com/celox-sim/celox/tree/master/conformance/cocotb)から、
+固定したバージョンの未改変 cocotb テストを生成バイナリで実行できます。
+デフォルトの23構成で534件成功、upstream のスキップ5件を確認しています。
+bridge スレッドからの時刻取得、force/release、2種類の inertial-write 設定を含みます。
+残りの upstream グループと未対応項目は実行手順の一覧で追跡しています。

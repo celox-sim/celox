@@ -1,0 +1,84 @@
+name: rica Benchmark
+
+on:
+  schedule:
+    - cron: "47 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rica-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  rica:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v7
+      - uses: $/.github/actions/setup-rust
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+      - name: Test rica tooling
+        run: |
+          node --test scripts/tiered-benchmark.test.mjs scripts/publish-rica-bench.test.mjs
+          bash scripts/tests/run-rica-native-tb.sh
+      - name: Install pinned kernel toolchain
+        run: |
+          rustup toolchain install 1.98.1 --profile minimal --component rust-src
+          # Upstream kernel builders use --offline with build-std=core.
+          sysroot="$(rustup run 1.98.1 rustc --print sysroot)"
+          RUSTC_BOOTSTRAP=1 rustup run 1.98.1 cargo fetch --locked --manifest-path "$sysroot/lib/rustlib/src/rust/library/Cargo.toml"
+          sudo apt-get update
+          sudo apt-get install -y llvm-20
+      - name: Build runners
+        run: |
+          cargo build --release --locked -p celox-vpi --bin celox
+          cargo build --release --locked -p celox-bench --bin celox-rica --bin veryl-heliodor
+      - name: Prepare pinned rica kernels
+        run: bash scripts/run-rica-bench.sh prepare
+      # Both engines and all kernels run sequentially on the same host. The
+      # runner checks mailbox negative controls and matching cycles/commits.
+      - name: Measure paired tiered execution
+        env:
+          RICA_BUILD_CELOX_RUNNER: "0"
+          RICA_HARNESS: tiered
+          RICA_REPEAT: "3"
+        run: |
+          bash scripts/run-rica-bench.sh run
+          cp work/rica/results/native-tb.*/comparison/results.json work/rica/results.json
+      - name: Retain raw comparisons and failures
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: rica-results
+          path: |
+            work/rica/results
+            work/rica/results.json
+          retention-days: 14
+          if-no-files-found: warn
+
+  publish:
+    needs: rica
+    if: github.ref == 'refs/heads/master'
+    runs-on: ubuntu-26.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 26
+      - uses: actions/download-artifact@v8
+        with:
+          name: rica-results
+          path: artifacts/rica
+      - name: Publish qualified rica history
+        run: node scripts/publish-rica-bench.mjs artifacts/rica/results.json

@@ -5,6 +5,8 @@
 //! adds it removes the exclusion. Supported cases run on every backend,
 //! and natively also from a serialized native image.
 
+use num_bigint::BigUint;
+
 macro_rules! timed_cases {
     () => {};
     (
@@ -54,6 +56,52 @@ macro_rules! timed_cases {
         }
         timed_cases! { $($rest)* }
     };
+}
+
+timed_cases! {
+    fn wildcard_blocks_with_crossing_output_dependencies = "timing::wildcard_blocks_with_crossing_output_dependencies";
+    fn wildcard_blocks_in_a_converging_feedback_loop = "timing::wildcard_blocks_in_a_converging_feedback_loop";
+    fn nonblocking_intra_assignment_delays = "timing::nonblocking_intra_assignment_delays";
+    fn nonblocking_intra_assignment_positions = "timing::nonblocking_intra_assignment_positions";
+    fn nonblocking_intra_assignment_four_state = "timing::nonblocking_intra_assignment_four_state";
+    fn nonblocking_intra_assignment_flip_flop = "timing::nonblocking_intra_assignment_flip_flop";
+    fn nonblocking_intra_assignment_outlives_caller = "timing::nonblocking_intra_assignment_outlives_caller";
+    fn blocking_intra_assignment_tag_checks = "timing::blocking_intra_assignment_tag_checks";
+    fn blocking_intra_assignment_rejects_net = "timing::blocking_intra_assignment_rejects_net";
+    fn blocking_intra_assignment_rejects_net_port_select = "timing::blocking_intra_assignment_rejects_net_port_select";
+    fn blocking_intra_assignment_rejects_task_net_write = "timing::blocking_intra_assignment_rejects_task_net_write";
+    fn blocking_intra_assignment_net_shadow_is_variable = "timing::blocking_intra_assignment_net_shadow_is_variable";
+    fn blocking_intra_assignment_late_target = "timing::blocking_intra_assignment_late_target";
+    fn blocking_intra_assignment_repeat_events = "timing::blocking_intra_assignment_repeat_events";
+    fn blocking_intra_assignment_delays = "timing::blocking_intra_assignment_delays";
+    fn blocking_intra_assignment_events = "timing::blocking_intra_assignment_events";
+    fn blocking_intra_assignment_nonpositive_unknown_repeat = "timing::blocking_intra_assignment_nonpositive_unknown_repeat";
+    fn blocking_intra_assignment_four_state = "timing::blocking_intra_assignment_four_state";
+    fn blocking_intra_assignment_automatic_tasks = "timing::blocking_intra_assignment_automatic_tasks";
+}
+
+timed_cases! {
+    fn comb_startup_ignores_final_two_state = "timing::comb_startup_ignores_final_two_state";
+    fn comb_startup_ignores_final_four_state = "timing::comb_startup_ignores_final_four_state";
+}
+
+// Static locals of tasks (IEEE 1800-2023 6.21, 13.3.1).
+timed_cases! {
+    fn timed_task_static_locals_are_shared = "timing::timed_task_static_locals_are_shared";
+    fn timed_task_declared_static_locals_are_shared = "timing::timed_task_declared_static_locals_are_shared";
+    fn timed_task_static_locals_take_nonblocking_updates_and_waits = "timing::timed_task_static_locals_take_nonblocking_updates_and_waits";
+    fn timed_task_static_locals_follow_their_scope = "timing::timed_task_static_locals_follow_their_scope";
+    fn timed_task_static_locals_in_forked_children = "timing::timed_task_static_locals_in_forked_children";
+}
+
+#[test]
+fn comb_startup_ignores_final_interpreter() {
+    for case in [
+        "timing::comb_startup_ignores_final_two_state",
+        "timing::comb_startup_ignores_final_four_state",
+    ] {
+        crate::suite::run_case(case, "interpreter");
+    }
 }
 
 // Program blocks (IEEE 1800-2023 Clause 24) and the reactive region set.
@@ -478,20 +526,14 @@ fn event_expressions_with_effects_are_rejected() {
 #[test]
 fn unimplemented_timing_features_are_rejected() {
     for (body, construct, issue) in [
-        ("event e; initial -> e;", "named event", 88),
         (
-            "bit a, b; initial a = #1 b;",
-            "intra-assignment timing control",
+            "event e; initial ->> #1 e;",
+            "delayed nonblocking event trigger",
             88,
         ),
         (
-            "bit a, b; initial a <= #1 b;",
-            "intra-assignment timing control",
-            88,
-        ),
-        (
-            "bit a, b, c; initial a = @(posedge c) b;",
-            "intra-assignment timing control",
+            "bit a, b; int d; initial a <= #(d) b;",
+            "nonconstant or overflowing nonblocking assignment delay",
             88,
         ),
         (
@@ -507,11 +549,6 @@ fn unimplemented_timing_features_are_rejected() {
         (
             "bit a; function automatic bit f(); a = ~a; return a; endfunction initial @(f());",
             "impure call `f` in an event expression",
-            88,
-        ),
-        (
-            "bit q; task t(); int s = 1; #1 q = s; endtask initial t();",
-            "static local in a timed task",
             88,
         ),
         (
@@ -893,6 +930,56 @@ fn runtime_error_before_a_commit_leaves_no_held_writes() {
         } else {
             check!(builder.build_cranelift());
         }
+    }
+}
+
+#[test]
+fn delayed_nonblocking_updates_survive_checkpoint_and_state_file() {
+    let source = r#"
+        module Top(output logic [7:0] q);
+            timeunit 1ns / 1ns;
+            initial begin
+                q=0; q <= #3 8'h11; q <= #6 8'h22;
+                // IEEE 1800-2023 9.4.1: negative delays use the time width.
+                q <= #(4'shf) 8'hee;
+                q <= #(-1) 8'hff;
+            end
+        endmodule
+    "#;
+    for four_state in [false, true] {
+        let build = || {
+            celox::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("delayed_state.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .build()
+            .unwrap()
+        };
+        let mut sim = build();
+        let q = sim.signal("q");
+        sim.run_until(1).unwrap();
+        let saved = sim.checkpoint().unwrap();
+        let mut bytes = Vec::new();
+        sim.save_state().unwrap().write_to(&mut bytes).unwrap();
+        let file = celox::StateFile::read_from(bytes.as_slice()).unwrap();
+        let pending = &file.schedule.as_ref().unwrap().processes.delayed_nba;
+        assert_eq!(
+            pending.iter().map(|(time, _, _)| *time).collect::<Vec<_>>(),
+            [3, 6, u64::MAX, u64::MAX]
+        );
+        let mut loaded = build();
+        loaded.load_state(&file).unwrap();
+        let loaded_q = loaded.signal("q");
+        for (time, expected) in [(4, 0x11u8), (7, 0x22)] {
+            sim.run_until(time).unwrap();
+            loaded.run_until(time).unwrap();
+            assert_eq!(sim.get(q), BigUint::from(expected));
+            assert_eq!(loaded.get(loaded_q), BigUint::from(expected));
+        }
+        sim.restore(&saved).unwrap();
+        sim.run_until(4).unwrap();
+        assert_eq!(sim.get(q), BigUint::from(0x11u8));
     }
 }
 
@@ -1590,6 +1677,26 @@ timed_cases! {
 timed_cases! { fn fork_four_state_automatic_values_survive_fork_suspension = "fork::four_state_automatic_values_survive_fork_suspension"; }
 
 timed_cases! {
+    fn events_trigger_unblocks_processes_already_waiting = "events::trigger_unblocks_processes_already_waiting";
+    fn events_triggered_state_lasts_until_time_advances = "events::triggered_state_lasts_until_time_advances";
+    fn events_event_controls_wait_for_any_listed_event = "events::event_controls_wait_for_any_listed_event";
+    fn events_events_of_class_objects = "events::events_of_class_objects";
+}
+
+timed_cases! {
+    fn mailboxes_messages_come_out_in_put_order = "mailboxes::messages_come_out_in_put_order";
+    fn mailboxes_get_and_bounded_put_block = "mailboxes::get_and_bounded_put_block";
+    fn mailboxes_try_methods_do_not_block = "mailboxes::try_methods_do_not_block";
+    fn mailboxes_strings_and_class_handles = "mailboxes::strings_and_class_handles";
+}
+
+timed_cases! {
+    fn semaphores_one_key_admits_one_process_at_a_time = "semaphores::one_key_admits_one_process_at_a_time";
+    fn semaphores_try_get_takes_only_available_keys = "semaphores::try_get_takes_only_available_keys";
+    fn semaphores_get_waits_until_enough_keys_are_put = "semaphores::get_waits_until_enough_keys_are_put";
+}
+
+timed_cases! {
     fn fork_control_no_children_does_not_suspend = "fork_control::no_children_does_not_suspend";
     fn fork_control_wait_in_task_includes_earlier_forks = "fork_control::wait_in_task_includes_earlier_forks";
     fn fork_control_wait_excludes_descendants_of_completed_children = "fork_control::wait_excludes_descendants_of_completed_children";
@@ -1954,6 +2061,10 @@ timed_cases! {
 }
 
 timed_cases! {
+ fn process_handles_index_associative_arrays = "fork_control::process_handles_index_associative_arrays";
+}
+
+timed_cases! {
  fn process_suspend_and_resume_waits = "fork_control::process_suspend_and_resume_waits";
  fn process_self_suspend_and_await = "fork_control::process_self_suspend_and_await";
  fn process_status_wait_and_disable = "fork_control::process_status_wait_and_disable";
@@ -1990,4 +2101,84 @@ timed_cases! {
  fn process_nested_calls_preserve_level_wait_resume = "fork_control::process_nested_calls_preserve_level_wait_resume";
  fn process_resume_resamples_automatic_event_expression = "fork_control::process_resume_resamples_automatic_event_expression";
  fn process_resume_after_program_exit_is_noop = "fork_control::process_resume_after_program_exit_is_noop";
+}
+
+#[test]
+fn blocking_intra_assignment_tag_errors_observe_the_right_time() {
+    for backend in [
+        "native",
+        "cranelift",
+        "wasm",
+        "native-parallel",
+        "cranelift-parallel",
+    ] {
+        for (declarations, setup, write, invalidate, delayed) in [
+            (
+                "union tagged packed {void Empty; logic [7:0] Full;} item;",
+                "item=tagged Full 8'd0;",
+                "item.Full = #4 8'hff;",
+                "item=tagged Empty;",
+                true,
+            ),
+            (
+                "union tagged packed {void Empty; logic [7:0] Full;} item, src;",
+                "item=tagged Full 8'd0; src=tagged Empty;",
+                "item.Full = #4 src.Full;",
+                "src=tagged Full 8'd1;",
+                false,
+            ),
+            (
+                "typedef union tagged packed {void Empty; logic [7:0] Full;} I; union tagged packed {I Nested; logic [15:0] Word;} item;",
+                "item=tagged Nested (tagged Full 8'd0);",
+                "item.Nested.Full = #4 8'hff;",
+                "item=tagged Word 16'd0;",
+                true,
+            ),
+            (
+                "typedef union tagged packed {void Empty; logic [7:0] Full;} I; union tagged packed {I Nested; logic [15:0] Word;} item;",
+                "item=tagged Nested (tagged Full 8'd0);",
+                "item.Nested.Full = #4 8'hff;",
+                "item=tagged Nested (tagged Empty);",
+                true,
+            ),
+        ] {
+            let source = format!(
+                "module Top; timeunit 1ps / 1ps; {declarations} initial begin {setup} {write} end initial begin #2 {invalidate} end endmodule"
+            );
+            let builder = celox::Simulation::from_sv_sources(
+                vec![(&source, std::path::Path::new("intra_tag_error.sv"))],
+                "Top",
+            )
+            .four_state(true);
+            let builder = if backend.ends_with("-parallel") {
+                builder
+                    .threads(4)
+                    .parallel_partition(celox::ParallelPartition::Always)
+            } else {
+                builder
+            };
+            macro_rules! check {
+                ($sim:expr) => {{
+                    let mut sim = $sim.unwrap();
+                    if delayed {
+                        sim.run_until(3).unwrap();
+                    }
+                    let error = sim
+                        .run_until(if delayed { 4 } else { 0 })
+                        .expect_err(&format!("{backend}: delayed={delayed}: {source}"));
+                    assert!(
+                        error.to_string().contains("tagged union member"),
+                        "{backend}: {error}"
+                    );
+                }};
+            }
+            if backend.starts_with("native") {
+                check!(builder.build_native());
+            } else if backend == "wasm" {
+                check!(builder.build_wasm());
+            } else {
+                check!(builder.build_cranelift());
+            }
+        }
+    }
 }

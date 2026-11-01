@@ -1,0 +1,28 @@
+{
+  "case": "class::specialized_scope_typedef_properties",
+  "source": "src/sv/cases/class.vtest",
+  "standard": "IEEE 1800-2023 8.23, 8.25.1: a class scope may name a typedef of a class, and a static property reached through it is the property of the specialization the typedef names, so Obj::type_id::count is Registry #(Obj)::count.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters (verilator --binary, iverilog -g2012 -s Top, xezim -s Top, and the Celox sv_tests driver in simulation mode).",
+  "reduced_source": "package p;\n class Registry #(type T = int);\n  static int count;\n  static function T create(); T object = new; count++; return object; endfunction\n endclass\n class Obj; typedef Registry #(Obj) type_id; endclass\n class Impl #(type T = int); typedef Registry #(Impl #(T)) type_id; endclass\nendpackage\nmodule Top;\n import p::*;\n initial begin\n  automatic Obj o = Obj::type_id::create();\n  automatic Impl #(byte) b = Impl #(byte)::type_id::create();\n  $display(\"[%0d %0d %0d %0d]\", Obj::type_id::count, p::Obj::type_id::count, Impl #(byte)::type_id::count, Registry #(Obj)::count);\n end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "[1 1 1 1]\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stderr": "xz1.sv:2: syntax error\nI give up.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "[x x 0 1]\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "[1 1 1 1]\n"
+    }
+  ]
+}

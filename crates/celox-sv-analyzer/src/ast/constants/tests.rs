@@ -2,7 +2,9 @@ use super::*;
 use std::{fmt::Write, path::Path};
 
 fn environment(count: usize) -> HashMap<String, i128> {
-    let state = &crate::ast::AnalysisState::default();
+    let session = &mut Session::default();
+    let syntax = crate::source_tree::SourceTree::empty();
+    let tree = AnalysisContext::unspecialized(&syntax);
     let mut parameter = Parameter::new(
         "P".into(),
         Some(parameters::const_expr_from_i128(-2)),
@@ -16,7 +18,7 @@ fn environment(count: usize) -> HashMap<String, i128> {
         ConstExpr::Literal("7".into()),
         ConstExpr::Literal("0".into()),
     ));
-    let mut env = const_env_from_parameters(state, &[parameter]);
+    let mut env = const_env_from_parameters(&tree, session, &[parameter]);
     env.insert("W".into(), 3);
     env.insert("Q".into(), 9);
     for i in 0..count {
@@ -125,6 +127,7 @@ fn concat_slice_indices_accept_dynamic_array_elements() {
 
 #[test]
 fn native_constant_calls_preserve_contextual_operand_shapes() {
+    let session = &mut Session::default();
     let tree = crate::source_tree::parse_source(
         "module M;parameter N=f(P[0+:W],byte_t'(P),$bits(P));endmodule",
         Path::new("native-call-context.sv"),
@@ -151,12 +154,8 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
         .expression_nodes()
         .find_map(|(id, expr)| match expr.kind {
             celox_sv_syntax::ExprKind::Call { expression, .. }
-                if expression_binding::native_name(
-                    &tree.state,
-                    expression,
-                    tree.declarations(),
-                )
-                .as_deref()
+                if expression_binding::native_name(&tree, expression, tree.declarations())
+                    .as_deref()
                     == Some("f") =>
             {
                 Some(id)
@@ -164,7 +163,7 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
             _ => None,
         })
         .unwrap();
-    let value = constant_binding::bind(root, &tree, &context)
+    let value = constant_binding::bind(root, &tree, session, &context)
         .unwrap()
         .unwrap();
     let ConstExpr::Function { callee, args, .. } = value else {
@@ -184,5 +183,8 @@ fn native_constant_calls_preserve_contextual_operand_shapes() {
             .width,
         8
     );
-    assert_eq!(eval_ast_const_expr(&tree.state, &args[2], &env), Some(8));
+    assert_eq!(
+        eval_ast_const_expr(&tree.functions, &args[2], &env),
+        Some(8)
+    );
 }

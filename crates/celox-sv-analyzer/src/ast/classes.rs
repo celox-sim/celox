@@ -187,6 +187,7 @@ impl Class {
             }
             if (property.rand || property.randc)
                 && (property.field.handle.is_some()
+                    || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none()))
             {
                 return Err(unsupported(
@@ -309,6 +310,7 @@ impl Class {
     pub fn derives_from(
         &self,
         tree: &AnalysisContext<'_>,
+        session: &mut Session,
         ancestor: &str,
         env: &HashMap<String, i128>,
         aliases: &HashMap<String, Type>,
@@ -322,7 +324,7 @@ impl Class {
             if !seen.insert(name.clone()) {
                 continue;
             }
-            if let Ok(class) = self::class(tree, &name, env, aliases) {
+            if let Ok(class) = self::class(tree, session, &name, env, aliases) {
                 pending.extend(class.base.iter().chain(&class.interfaces).cloned());
             }
         }
@@ -360,11 +362,12 @@ impl Class {
 
 /// The declaration of class `name`, or of the class it specializes, if one
 /// exists.
-fn declaration<'a>(
+pub(super) fn declaration<'a>(
     tree: &'a AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
 ) -> Option<&'a celox_sv_syntax::ClassDeclaration> {
-    let name = specializations::generic(tree, name);
+    let name = specializations::generic(session, name);
     tree.declarations()
         .classes
         .iter()
@@ -410,17 +413,24 @@ pub(super) fn scope_declarations<'a>(
 
 /// The classes the current scope declares, as they have been laid out, for
 /// the scopes that use it (see `scope::ScopeSymbols::classes`).
-pub(super) fn scope_classes(tree: &AnalysisContext<'_>, env: &HashMap<String, i128>) -> Vec<Class> {
-    let laid_out = tree.state.classes.borrow();
-    scope_declarations(tree)
-        .flat_map(|declaration| specializations_of(tree, declaration))
+pub(super) fn scope_classes(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    env: &HashMap<String, i128>,
+) -> Vec<Class> {
+    let names = scope_declarations(tree)
+        .flat_map(|declaration| specializations_of(tree, session, declaration))
+        .collect::<Vec<_>>();
+    names
+        .into_iter()
         .filter_map(|name| {
-            let mut class = Class::clone(laid_out.get(&name)?);
+            let mut class = Class::clone(session.classes.get(&name)?);
             // The types are fixed in the scope that declares the class,
             // whose names another scope does not see.
-            let (env, _) = specializations::scope(tree, &name, env, &HashMap::default());
+            let (env, _) = specializations::scope(session, &name, env, &HashMap::default());
             let resolve = |ty: &mut Type| {
-                if let Some(resolved) = type_parameters::resolve(&tree.state, ty.clone(), &env) {
+                if let Some(resolved) = type_parameters::resolve(&tree.functions, ty.clone(), &env)
+                {
                     *ty = resolved;
                 }
             };
@@ -454,8 +464,12 @@ pub(super) fn scope_class_types(tree: &AnalysisContext<'_>) -> Vec<(String, Type
 /// scope sees it: one the scope declares, or else one the compilation unit
 /// declares (IEEE 1800-2023 3.12.1). Classes of packages are seen through
 /// imports, as types.
-pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> {
-    if tree.state.foreign.contains(name) {
+pub(super) fn resolve(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    name: &str,
+) -> Option<String> {
+    if session.foreign.contains(name) {
         return Some(name.to_owned());
     }
     let native = tree.declarations();
@@ -477,7 +491,7 @@ pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> 
         }
     }
     // A class an import makes visible (IEEE 1800-2023 26.3).
-    let imported = scope::imported(&tree.state);
+    let imported = scope::imported(tree);
     if let Some(alias) = imported.aliases.get(name) {
         let class = imported
             .type_aliases
@@ -485,7 +499,7 @@ pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> 
             .and_then(Type::class)
             .unwrap_or(alias);
         if imported.classes.iter().any(|known| known.name == class)
-            || tree.state.foreign.contains(class)
+            || session.foreign.contains(class)
         {
             return Some(class.to_owned());
         }
@@ -502,12 +516,16 @@ pub(super) fn resolve(tree: &AnalysisContext<'_>, name: &str) -> Option<String> 
                 .and_then(Type::class)
                 .map(str::to_owned)
         })
-        .or_else(|| (name == "process").then(|| super::processes::CLASS.to_owned()))
+        .or_else(|| match name {
+            "process" => Some(super::processes::CLASS.to_owned()),
+            "semaphore" => Some(super::semaphores::CLASS.to_owned()),
+            _ => None,
+        })
 }
 
 /// Whether class `name` is declared in the source of the current scope.
-pub(super) fn is_declared(tree: &AnalysisContext<'_>, name: &str) -> bool {
-    declaration(tree, name).is_some()
+pub(super) fn is_declared(tree: &AnalysisContext<'_>, session: &mut Session, name: &str) -> bool {
+    declaration(tree, session, name).is_some()
 }
 
 /// The innermost module, interface, program or package of `native` whose
@@ -523,15 +541,19 @@ pub(super) fn enclosing_unit(
 }
 
 /// Whether `name` is an interface class (IEEE 1800-2023 8.26).
-pub(super) fn is_interface(tree: &AnalysisContext<'_>, name: &str) -> bool {
-    declaration(tree, name).is_some_and(|declaration| declaration.interface)
+pub(super) fn is_interface(tree: &AnalysisContext<'_>, session: &mut Session, name: &str) -> bool {
+    declaration(tree, session, name).is_some_and(|declaration| declaration.interface)
 }
 
 /// Whether `name` is a class declared with a parameter port list (IEEE
 /// 1800-2023 8.25).
-pub(super) fn is_parameterized(tree: &AnalysisContext<'_>, name: &str) -> bool {
-    declaration(tree, name).is_some_and(|class| class.parameter_ports.is_some())
-        || tree.state.foreign.contains(name)
+pub(super) fn is_parameterized(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    name: &str,
+) -> bool {
+    declaration(tree, session, name).is_some_and(|class| class.parameter_ports.is_some())
+        || session.foreign.contains(name)
 }
 
 /// The classes and interface classes that body item `item` declares: of a
@@ -540,6 +562,7 @@ pub(super) fn is_parameterized(tree: &AnalysisContext<'_>, name: &str) -> bool {
 pub(super) fn item_classes(
     item: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
 ) -> Vec<String> {
     let native = tree.declarations();
     let item = native.body_item(item);
@@ -553,7 +576,7 @@ pub(super) fn item_classes(
         .filter(|class| {
             item.tokens.start <= class.tokens.start && class.tokens.end <= item.tokens.end
         })
-        .flat_map(|class| specializations_of(tree, class))
+        .flat_map(|class| specializations_of(tree, session, class))
         .collect()
 }
 
@@ -561,11 +584,12 @@ pub(super) fn item_classes(
 /// when it has no parameter port list.
 pub(super) fn specializations_of(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     declaration: &celox_sv_syntax::ClassDeclaration,
 ) -> Vec<String> {
     let name = declared_name(tree, declaration);
     if declaration.parameter_ports.is_some() {
-        specializations::of(tree, &name)
+        specializations::of(session, &name)
     } else {
         vec![name]
     }
@@ -577,9 +601,10 @@ pub(super) fn specializations_of(
 /// whether it is static.
 pub(super) fn declared_methods(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
 ) -> Converted<Vec<(celox_sv_syntax::SubroutineId, bool)>> {
-    let Some(declaration) = declaration(tree, name) else {
+    let Some(declaration) = declaration(tree, session, name) else {
         return Ok(Vec::new());
     };
     let native = tree.declarations();
@@ -610,13 +635,14 @@ pub(super) fn declared_methods(
 pub(super) fn item_statics(
     item: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Vec<StaticProperty> {
-    item_classes(item, tree)
+    item_classes(item, tree, session)
         .into_iter()
         .filter_map(|name| {
-            let class = class(tree, &name, env, aliases).ok()?;
+            let class = class(tree, session, &name, env, aliases).ok()?;
             Some(
                 class
                     .statics
@@ -634,23 +660,40 @@ pub(super) fn item_statics(
 /// constructor of its base (IEEE 1800-2023 8.17).
 pub(super) fn base_arguments<'a>(
     tree: &'a AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
 ) -> Option<&'a [celox_sv_syntax::Argument]> {
-    declaration(tree, name)?.base.as_ref()?.arguments.as_deref()
+    declaration(tree, session, name)?
+        .base
+        .as_ref()?
+        .arguments
+        .as_deref()
+}
+
+/// Whether class `name` is a built-in class whose objects the scheduler owns:
+/// `process` (IEEE 1800-2023 9.7), `semaphore` (15.3), `mailbox` (15.4) or
+/// the type of named events (15.5).
+pub(super) fn builtin(name: &str) -> bool {
+    matches!(
+        name,
+        super::processes::CLASS | super::events::CLASS | super::semaphores::CLASS
+    ) || super::mailboxes::is_class(name)
 }
 
 /// The handle type of class `name`, if it is a class.
-pub(super) fn handle_type(tree: &AnalysisContext<'_>, name: &str) -> Option<Type> {
-    (name == super::processes::CLASS
-        || declaration(tree, name).is_some()
-        || imported(tree, name).is_some())
-    .then(|| handle(name))
+pub(super) fn handle_type(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    name: &str,
+) -> Option<Type> {
+    (builtin(name) || declaration(tree, session, name).is_some() || imported(tree, name).is_some())
+        .then(|| handle(name))
 }
 
 /// Class `name` as the scope that declares it laid it out, when the current
 /// scope uses that scope (see `scope::ScopeSymbols::classes`).
 fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
-    scope::imported(&tree.state)
+    scope::imported(tree)
         .classes
         .iter()
         .find(|class| class.name == name)
@@ -659,11 +702,11 @@ fn imported(tree: &AnalysisContext<'_>, name: &str) -> Option<Rc<Class>> {
 
 /// The classes whose objects the current scope may see: those it declares
 /// and those of the scopes it uses.
-pub(super) fn visible_classes(tree: &AnalysisContext<'_>) -> Vec<String> {
+pub(super) fn visible_classes(tree: &AnalysisContext<'_>, session: &mut Session) -> Vec<String> {
     let mut names = scope_declarations(tree)
-        .flat_map(|declaration| specializations_of(tree, declaration))
+        .flat_map(|declaration| specializations_of(tree, session, declaration))
         .collect::<Vec<_>>();
-    for class in &scope::imported(&tree.state).classes {
+    for class in &scope::imported(tree).classes {
         if !names.contains(&class.name) {
             names.push(class.name.clone());
         }
@@ -673,11 +716,16 @@ pub(super) fn visible_classes(tree: &AnalysisContext<'_>) -> Vec<String> {
 
 /// The handle type of class `name`.
 pub(super) fn handle(name: &str) -> Type {
-    let mut ty = Type::new(if name == super::processes::CLASS {
-        TypeKind::Process
-    } else {
-        TypeKind::Object
-    });
+    let mut ty = Type::new(
+        // A semaphore is a heap object, which collection reclaims.
+        if name == super::processes::CLASS {
+            TypeKind::Process
+        } else if name == super::events::CLASS {
+            TypeKind::Event
+        } else {
+            TypeKind::Object
+        },
+    );
     ty.packed_ranges.push(PackedRange::new(
         ConstExpr::Literal((HANDLE_WIDTH - 1).to_string()),
         ConstExpr::Literal("0".into()),
@@ -689,42 +737,68 @@ pub(super) fn handle(name: &str) -> Type {
 /// The class `name`, laid out with its bases.
 pub(super) fn class(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Rc<Class>> {
-    if let Some(class) = tree.state.classes.borrow().get(name) {
+    if let Some(class) = session.classes.get(name) {
+        return Ok(class.clone());
+    }
+    shared_class(
+        tree,
+        name,
+        &SharedMap::from(env.clone()),
+        &SharedMap::from(aliases.clone()),
+        session,
+    )
+}
+
+/// [`class`] in shared tables, which the scope of the class and of its
+/// bases share instead of copying.
+pub(super) fn shared_class(
+    tree: &AnalysisContext<'_>,
+    name: &str,
+    env: &SharedMap<i128>,
+    aliases: &SharedMap<Type>,
+    session: &mut Session,
+) -> Converted<Rc<Class>> {
+    if let Some(class) = session.classes.get(name) {
         return Ok(class.clone());
     }
     // A class of another scope is laid out in its own scope, where the
     // names it uses are declared.
-    let declaration = declaration(tree, name).filter(|declaration| {
+    let declaration = declaration(tree, session, name).filter(|declaration| {
         let native = tree.declarations();
         enclosing_unit(native, declaration.tokens).map(|unit| unit.tokens)
             == tree.root_unit().ok().map(|unit| unit.tokens)
     });
     let Some(declaration) = declaration else {
         let class = imported(tree, name).ok_or_else(|| unsupported(format!("class `{name}`")))?;
-        tree.state
-            .classes
-            .borrow_mut()
-            .insert(name.to_owned(), class.clone());
+        session.classes.insert(name.to_owned(), class.clone());
         return Ok(class);
     };
-    let (env, aliases) = specializations::scope(tree, name, env, aliases);
-    let (env, aliases) = (&env, &aliases);
+    let (scope_env, scope_aliases) = specializations::shared_scope(session, name, env, aliases);
+    // The types of the class are bound in one context of its scope.
+    let context = PackedDimensions {
+        const_env: scope_env.clone(),
+        type_aliases: scope_aliases.clone(),
+        ..PackedDimensions::default()
+    };
+    let (env, aliases) = (&*scope_env, &*scope_aliases);
     let native = tree.declarations();
     // The specialization of an interface class named the interface classes
     // it extends where its header is, as a class names its base below.
     let recorded = declaration
         .interface
-        .then(|| specializations::lookup(tree, name))
+        .then(|| specializations::lookup(session, name))
         .flatten()
         .map(|specialization| specialization.bases.clone())
         .filter(|bases| {
             bases.len() == declaration.interfaces.len()
                 && bases.iter().all(|base| {
-                    self::declaration(tree, base).is_some_and(|declaration| declaration.interface)
+                    self::declaration(tree, session, base)
+                        .is_some_and(|declaration| declaration.interface)
                 })
         });
     let interfaces = match recorded {
@@ -732,26 +806,34 @@ pub(super) fn class(
         None => declaration
             .interfaces
             .iter()
-            .map(|&interface| interface_name(tree, interface, env, aliases))
+            .map(|&interface| interface_name(tree, session, interface, env, aliases))
             .collect::<Converted<Vec<_>>>()?,
     };
     if declaration.interface {
-        return interface_class(tree, name, declaration, interfaces, env, aliases);
+        return interface_class(tree, session, name, declaration, interfaces, env, &context);
     }
     let base = match &declaration.base {
         None => None,
         Some(base) => {
             // The specialization named its base where the class header is,
             // before the declarations it inherits could hide those names.
-            let recorded = specializations::lookup(tree, name)
+            let recorded = specializations::lookup(session, name)
                 .and_then(|specialization| specialization.bases.first().cloned());
             let ty = match recorded {
                 Some(ty) => ty,
-                None => type_binding::procedural_type(base.data_type, native, tree, env, aliases)?
-                    .and_then(|ty| ty.class().map(str::to_owned))
-                    .ok_or_else(|| unsupported("base class type"))?,
+                None => {
+                    type_binding::binding::bind_in(base.data_type, native, tree, session, &context)?
+                        .and_then(|ty| ty.class().map(str::to_owned))
+                        .ok_or_else(|| unsupported("base class type"))?
+                }
             };
-            Some(class(tree, &ty, env, aliases)?)
+            Some(shared_class(
+                tree,
+                &ty,
+                &scope_env,
+                &scope_aliases,
+                session,
+            )?)
         }
     };
     let mut properties = base
@@ -777,12 +859,12 @@ pub(super) fn class(
         {
             return Err(unsupported("static random class property"));
         }
-        let ty = type_binding::procedural_type(
+        let ty = type_binding::binding::bind_in(
             property.declaration.data_type,
             native,
             tree,
-            env,
-            aliases,
+            session,
+            &context,
         )?
         .ok_or_else(|| unsupported("class property type"))?;
         for variable in &property.declaration.variables {
@@ -790,7 +872,8 @@ pub(super) fn class(
                 ty.clone(),
                 &variable.dimensions,
                 tree,
-                &PackedDimensions::new(HashMap::default(), env, aliases),
+                session,
+                &context,
             )?;
             if !ty.unpacked_ranges.is_empty() {
                 return Err(unsupported("class property with unpacked dimensions"));
@@ -831,7 +914,7 @@ pub(super) fn class(
                     });
                 }
                 for leaf in aggregate.leaves() {
-                    let field = field(&tree.state, &leaf.r#type, env, size)?;
+                    let field = field(&tree.functions, &leaf.r#type, env, size)?;
                     size = field.offset + field.storage();
                     properties.push(Property {
                         name: leaf.name(&property_name),
@@ -839,7 +922,7 @@ pub(super) fn class(
                         constant: false,
                         local: property.qualifiers.local,
                         protected: property.qualifiers.protected,
-                        r#type: leaf.r#type,
+                        r#type: procedural::scoped_type(leaf.r#type, env),
                         field,
                         rand: false,
                         randc: false,
@@ -863,7 +946,7 @@ pub(super) fn class(
             }
             let owner = name.to_owned();
             let name = property_name;
-            let field = field(&tree.state, &ty, env, size)?;
+            let field = field(&tree.functions, &ty, env, size)?;
             size = field.offset + field.storage();
             properties.push(Property {
                 name,
@@ -871,7 +954,9 @@ pub(super) fn class(
                 constant: property.declaration.constant,
                 local: property.qualifiers.local,
                 protected: property.qualifiers.protected,
-                r#type: ty.clone(),
+                // Its ranges keep their meaning outside the class, which
+                // may name its parameters.
+                r#type: procedural::scoped_type(ty.clone(), env),
                 field,
                 rand: property.qualifiers.rand,
                 randc: property.qualifiers.randc,
@@ -914,7 +999,7 @@ pub(super) fn class(
             method.subroutine
         };
         methods.retain(|known| known.name != method_name);
-        let (formals, result) = signature(tree, native_id, env, aliases);
+        let (formals, result) = signature(tree, session, native_id, &context);
         methods.push(Method {
             name: method_name,
             owner: name.to_owned(),
@@ -933,7 +1018,7 @@ pub(super) fn class(
     let mut required = Vec::new();
     for interface in &interfaces {
         required.extend(
-            class(tree, interface, env, aliases)?
+            class(tree, session, interface, env, aliases)?
                 .methods
                 .iter()
                 .map(|method| (method.name.clone(), method.result.clone())),
@@ -990,7 +1075,7 @@ pub(super) fn class(
             .and_then(|expressions| {
                 expressions
                     .iter()
-                    .map(|&id| constraints::bind(id, tree, &properties, env))
+                    .map(|&id| constraints::bind(id, tree, session, &properties, env))
                     .collect()
             });
         // Constraint indices survive overrides, including calls via base handles.
@@ -1018,10 +1103,7 @@ pub(super) fn class(
         declarations: Vec::new(),
         size: size.max(1),
     });
-    tree.state
-        .classes
-        .borrow_mut()
-        .insert(name.to_owned(), class.clone());
+    session.classes.insert(name.to_owned(), class.clone());
     Ok(class)
 }
 
@@ -1029,18 +1111,19 @@ pub(super) fn class(
 /// interface class's `extends` list names (IEEE 1800-2023 8.26).
 fn interface_name(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     interface: celox_sv_syntax::TypeId,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<String> {
     let native = tree.declarations();
-    let name = type_binding::procedural_type(interface, native, tree, env, aliases)?
+    let name = type_binding::procedural_type(interface, native, tree, session, env, aliases)?
         .and_then(|ty| ty.class().map(str::to_owned))
         .ok_or_else(|| unsupported("implemented interface class type"))?;
     // An interface class of another scope is known by its layout.
     let interface = match imported(tree, &name) {
         Some(class) => class.is_interface,
-        None => declaration(tree, &name).is_some_and(|declaration| declaration.interface),
+        None => declaration(tree, session, &name).is_some_and(|declaration| declaration.interface),
     };
     if !interface {
         return Err(unsupported(format!(
@@ -1055,12 +1138,14 @@ fn interface_name(
 /// 8.26). A handle of it refers to an object of a class implementing it.
 fn interface_class(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
     declaration: &celox_sv_syntax::ClassDeclaration,
     interfaces: Vec<String>,
     env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    context: &PackedDimensions,
 ) -> Converted<Rc<Class>> {
+    let aliases = &*context.type_aliases;
     let native = tree.declarations();
     // The parameters and typedefs it declares hide inherited ones; those it
     // inherits from one interface class in several ways are one (8.26.6.3).
@@ -1071,7 +1156,7 @@ fn interface_class(
     let own = declarations.len();
     let mut methods: Vec<Method> = Vec::new();
     for interface in &interfaces {
-        let interface = class(tree, interface, env, aliases)?;
+        let interface = class(tree, session, interface, env, aliases)?;
         for method in &interface.methods {
             methods.retain(|known| known.name != method.name);
             methods.push(method.clone());
@@ -1102,15 +1187,11 @@ fn interface_class(
         // A method whose types cannot be resolved, such as one using a
         // type parameter or a typedef of the interface class, leaves the
         // interface class without a layout; it is lowered only when used.
-        type_binding::subroutine_formals(
-            subroutine,
-            tree,
-            &PackedDimensions::new(HashMap::default(), env, aliases),
-        )?;
-        return_type(tree, method.subroutine, env, aliases)?;
+        type_binding::subroutine_formals(subroutine, tree, session, context)?;
+        return_type(tree, session, method.subroutine, context)?;
         let method_name = instances::normalize_identifier(&subroutine.name.spelling);
         methods.retain(|known| known.name != method_name);
-        let (formals, result) = signature(tree, method.subroutine, env, aliases);
+        let (formals, result) = signature(tree, session, method.subroutine, context);
         methods.push(Method {
             name: method_name,
             owner: name.to_owned(),
@@ -1139,10 +1220,7 @@ fn interface_class(
         declarations,
         size: 1,
     });
-    tree.state
-        .classes
-        .borrow_mut()
-        .insert(name.to_owned(), class.clone());
+    session.classes.insert(name.to_owned(), class.clone());
     Ok(class)
 }
 
@@ -1171,9 +1249,9 @@ fn own_declarations(
 /// The formal names and the return type of method `id`, see [`Method`].
 fn signature(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::SubroutineId,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    context: &PackedDimensions,
 ) -> (Vec<Option<String>>, Option<Option<Type>>) {
     let formals = tree
         .declarations()
@@ -1187,22 +1265,22 @@ fn signature(
                 .map(|name| instances::normalize_identifier(&name.spelling))
         })
         .collect();
-    let result = return_type(tree, id, env, aliases)
-        .ok()
-        .map(|ty| ty.and_then(|ty| type_parameters::resolve(&tree.state, ty, env)));
+    let result = return_type(tree, session, id, context).ok().map(|ty| {
+        ty.and_then(|ty| type_parameters::resolve(&tree.functions, ty, &context.const_env))
+    });
     (formals, result)
 }
 
 /// The return type of subroutine `id`, `None` for a task or `void`.
 fn return_type(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: celox_sv_syntax::SubroutineId,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    context: &PackedDimensions,
 ) -> Converted<Option<Type>> {
     let native = tree.declarations();
     match native.subroutine(id).return_type {
-        Some(ty) => type_binding::procedural_type(ty, native, tree, env, aliases),
+        Some(ty) => type_binding::binding::bind_in(ty, native, tree, session, context),
         None => Ok(None),
     }
 }
@@ -1230,7 +1308,7 @@ fn out_of_block_definition(
 /// The layout of a property of type `ty` at the first aligned offset at or
 /// after `offset`.
 pub(super) fn field(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     ty: &Type,
     env: &HashMap<String, i128>,
     offset: u32,
@@ -1242,13 +1320,10 @@ pub(super) fn field(
         _ if ty.container.is_some() => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
         TypeKind::String => (HANDLE_WIDTH, false, Some(HandleProperty::String)),
         TypeKind::Object => (HANDLE_WIDTH, false, Some(HandleProperty::Object)),
-        TypeKind::Process => (HANDLE_WIDTH, false, None),
+        TypeKind::Process | TypeKind::Event => (HANDLE_WIDTH, false, None),
         TypeKind::Bit | TypeKind::Logic | TypeKind::Reg | TypeKind::Implicit => {
-            let shape = casts::expr_type_from_type(state, ty, env)
+            let shape = casts::expr_type_from_type(functions, ty, env)
                 .ok_or_else(|| unsupported("class property type"))?;
-            if shape.width > 64 {
-                return Err(unsupported("class property wider than 64 bits"));
-            }
             (shape.width, shape.signed, None)
         }
         TypeKind::Real | TypeKind::Shortreal => {
@@ -1285,21 +1360,22 @@ fn class_id(name: &str) -> u32 {
 /// 1800-2023 8.16), laid out.
 fn object_classes(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     ancestor: &str,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<Rc<Class>>> {
     let mut classes = Vec::new();
     let mut ids = HashMap::default();
-    for name in visible_classes(tree) {
+    for name in visible_classes(tree, session) {
         // A class that cannot be laid out has no objects.
-        let Ok(class) = class(tree, &name, env, aliases) else {
+        let Ok(class) = class(tree, session, &name, env, aliases) else {
             continue;
         };
         if class.is_abstract || class.is_interface {
             continue;
         }
-        if !class.derives_from(tree, ancestor, env, aliases) {
+        if !class.derives_from(tree, session, ancestor, env, aliases) {
             continue;
         }
         if let Some(other) = ids.insert(class.id, name.clone()) {
@@ -1317,13 +1393,14 @@ fn object_classes(
 /// or implementing `owner` and not abstract, whose objects run it.
 pub(super) fn dispatch_targets(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     owner: &str,
     method: &str,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<(String, Vec<u32>)>> {
     let mut targets: Vec<(String, Vec<u32>)> = Vec::new();
-    for class in object_classes(tree, owner, env, aliases)? {
+    for class in object_classes(tree, session, owner, env, aliases)? {
         let Some(implementation) = class.method(method) else {
             continue;
         };
@@ -1340,11 +1417,12 @@ pub(super) fn dispatch_targets(
 /// to a variable of class `name` (IEEE 1800-2023 8.16).
 pub(super) fn cast_targets(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     name: &str,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
 ) -> Converted<Vec<u32>> {
-    Ok(object_classes(tree, name, env, aliases)?
+    Ok(object_classes(tree, session, name, env, aliases)?
         .iter()
         .map(|class| class.id)
         .collect())

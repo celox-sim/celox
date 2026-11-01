@@ -10,6 +10,36 @@ impl<V> SharedMap<V> {
     pub fn identity(&self) -> usize {
         Arc::as_ptr(&self.0) as usize
     }
+
+    /// Whether another snapshot shares the entries, which an edit copies.
+    #[cfg(test)]
+    pub fn is_shared(&self) -> bool {
+        Arc::strong_count(&self.0) > 1
+    }
+
+    /// A handle to this snapshot that does not keep its entries alive but
+    /// keeps its identity from being reused.
+    pub fn downgrade(&self) -> std::sync::Weak<HashMap<String, V>> {
+        Arc::downgrade(&self.0)
+    }
+}
+
+/// A table given to a context that keeps it: a shared table is shared
+/// again, and a borrowed one is copied.
+pub(super) trait ToShared<V> {
+    fn to_shared(self) -> SharedMap<V>;
+}
+
+impl<V> ToShared<V> for &SharedMap<V> {
+    fn to_shared(self) -> SharedMap<V> {
+        SharedMap(Arc::clone(&self.0))
+    }
+}
+
+impl<V: Clone> ToShared<V> for &HashMap<String, V> {
+    fn to_shared(self) -> SharedMap<V> {
+        self.clone().into()
+    }
 }
 
 impl<V> Default for SharedMap<V> {
@@ -41,6 +71,13 @@ impl<V: Clone> DerefMut for SharedMap<V> {
 impl<V> FromIterator<(String, V)> for SharedMap<V> {
     fn from_iter<I: IntoIterator<Item = (String, V)>>(values: I) -> Self {
         HashMap::from_iter(values).into()
+    }
+}
+
+impl<V: Clone> SharedMap<V> {
+    /// The entries, copied only when another snapshot shares them.
+    pub fn into_inner(self) -> HashMap<String, V> {
+        Arc::unwrap_or_clone(self.0)
     }
 }
 

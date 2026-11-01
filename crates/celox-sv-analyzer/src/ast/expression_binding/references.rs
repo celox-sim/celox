@@ -12,6 +12,7 @@ pub(super) fn check_actual(
     actual: ExprId,
     native: &Declarations,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
 ) -> Converted<()> {
     if !dimensions
@@ -48,14 +49,16 @@ pub(super) fn check_actual(
                         "a constant is not a variable (IEEE 1800-2023 13.5.2)",
                     ));
                 }
-                None => property_shape(tree, actual, native, dimensions)?,
+                None => property_shape(tree, session, actual, native, dimensions)?,
             }
         }
-        ExprKind::Member { .. } => match property_shape(tree, actual, native, dimensions)? {
+        ExprKind::Member { .. } => match property_shape(tree, session, actual, native, dimensions)?
+        {
             Some(shape) => Some(shape),
             // A member of a variable of unpacked structure type is a
             // variable of its own (see `unpacked_structs`).
-            None if let (parts, None) = direct::path(actual, native, tree, dimensions)?
+            None if let (parts, None) =
+                direct::path(actual, native, tree, session, dimensions)?
                 && let [variable] = parts.as_slice()
                 && let Some(shape) = dimensions.get(variable)
                 && !dimensions.const_env.contains_key(variable) =>
@@ -64,7 +67,7 @@ pub(super) fn check_actual(
             }
             // A static property is a variable of its class's scope.
             None if let Some(variable) =
-                objects::static_property(tree, actual, native, dimensions)? =>
+                objects::static_property(tree, session, actual, native, dimensions)? =>
             {
                 match dimensions.get(&variable) {
                     Some(shape) => Some(shape.clone()),
@@ -121,6 +124,7 @@ pub(super) fn check_actual(
             array_compatibility::selected_unpacked_shape(&variable, indices, dimensions).or_else(
                 || {
                     (indices == array.unpacked.len()).then(|| VariableDimensions {
+                        declared: type_names::Declared::default(),
                         unpacked: Vec::new(),
                         ..array.clone()
                     })
@@ -157,8 +161,7 @@ pub(super) fn check_actual(
             "ref argument of `{name}` binding queues with different bounds"
         )));
     }
-    if formal.is_some_and(|formal| !equivalent(&tree.state, formal, &shape, &dimensions.const_env))
-    {
+    if formal.is_some_and(|formal| !equivalent(tree, formal, &shape, &dimensions.const_env)) {
         return Err(invalid(
             "the actual's type is not equivalent to the formal's (IEEE 1800-2023 6.22.2)",
         ));
@@ -169,16 +172,18 @@ pub(super) fn check_actual(
 /// The shape of class property `actual`, also of unpacked structure type.
 fn property_shape(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     actual: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<VariableDimensions>> {
-    if let Some((property, _)) = objects::property(tree, actual, native, dimensions)? {
+    if let Some((property, _)) = objects::property(tree, session, actual, native, dimensions)? {
         return Ok(Some(procedural::dimensions_from_type(&property.r#type)));
     }
     // `objects::aggregate_load` rejects a receiver that calls a subroutine,
     // which each member would evaluate again.
-    let Some((aggregate, _, _)) = objects::aggregate_property(tree, actual, native, dimensions)?
+    let Some((aggregate, _, _)) =
+        objects::aggregate_property(tree, session, actual, native, dimensions)?
     else {
         return Ok(None);
     };
@@ -188,14 +193,20 @@ fn property_shape(
 /// Whether variables of shapes `a` and `b` have equivalent types (IEEE
 /// 1800-2023 6.22.2). Integral types compare by total width, signedness and
 /// state count; an enumeration only by its members; an unpacked structure
-/// only with the same structure type.
+/// only with the same structure type; a virtual interface only with one of
+/// the same interface and modport (25.9), not with its number.
 fn equivalent(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     a: &VariableDimensions,
     b: &VariableDimensions,
     env: &HashMap<String, i128>,
 ) -> bool {
-    let count = |width: &ConstExpr| eval_ast_const_expr(state, width, env);
+    let functions = &tree.functions;
+    // A chandle is equivalent only to a chandle (IEEE 1800-2023 6.14).
+    if a.virtual_interface != b.virtual_interface || a.chandle != b.chandle {
+        return false;
+    }
+    let count = |width: &ConstExpr| eval_ast_const_expr(functions, width, env);
     match (&a.container, &b.container) {
         (None, None) => {}
         (Some(a), Some(b)) => {
@@ -206,7 +217,7 @@ fn equivalent(
                 (ContainerKind::Associative { .. }, ContainerKind::Associative { .. }) => {
                     match (&a.key, &b.key) {
                         (Some(x), Some(y)) => equivalent(
-                            state,
+                            tree,
                             &procedural::dimensions_from_type(x),
                             &procedural::dimensions_from_type(y),
                             env,
@@ -219,7 +230,7 @@ fn equivalent(
             };
             return same_kind
                 && equivalent(
-                    state,
+                    tree,
                     &procedural::dimensions_from_type(&a.element),
                     &procedural::dimensions_from_type(&b.element),
                     env,

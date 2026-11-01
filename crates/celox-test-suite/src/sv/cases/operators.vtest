@@ -2195,3 +2195,151 @@ endmodule
   (top Top)
   (assert_eq folded (fourstate 0xab0100cdab00ffcdab00ffcd 0x000000000000010000000000))
   (assert_eq elaborated (fourstate 0xab0100cdab00ffcdab00ffcd 0x000000000000010000000000)))
+
+
+(case assignment_expression_values
+  (source "assignment_expression_values.sv" #"
+module Top(output bit [9:0] flags);
+  int a,b,c,d, calls;
+  logic [3:0] n;
+  logic signed [3:0] sn;
+  logic [7:0] packed_value;
+  string s,t;
+  real r,rr;
+  typedef enum logic [1:0] {ONE=1,TWO=2} E;
+  E e1,e2;
+  function automatic int choose(); calls++; return 3; endfunction
+  initial begin
+    a=(b=(c=5)); flags[0]=a==5 && b==5 && c==5;
+    d=(a+=3); flags[1]=a==8 && d==8;
+    d=(n=8'hab); flags[2]=n==11 && d==11;
+    d=(sn=4'hf); flags[3]=sn==-1 && d==-1;
+    d=(n+=6); flags[4]=n==1 && d==1;
+    packed_value=0;
+    d=(packed_value[5:2]=8'hb7); flags[5]=packed_value==8'h1c && d==7;
+    t=(s="hello"); flags[6]=s=="hello" && t=="hello";
+    rr=(r=1.25); rr=(r+=0.5); flags[7]=r==1.75 && rr==1.75;
+    e2=(e1=TWO); flags[8]=e1==TWO && e2==TWO;
+    d=(a=choose()); flags[9]=a==3 && d==3 && calls==1;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 1023))
+
+(case assignment_expression_compound_operators
+  (source "assignment_expression_operators.sv" #"
+module Top(output bit [10:0] flags);
+  int a,b,d;
+  initial begin
+    a=6; d=(a*=3); flags[0]=a==18 && d==18;
+    d=(a/=2); flags[1]=a==9 && d==9;
+    d=(a%=4); flags[2]=a==1 && d==1;
+    d=(a|=10); flags[3]=a==11 && d==11;
+    d=(a&=7); flags[4]=a==3 && d==3;
+    d=(a^=1); flags[5]=a==2 && d==2;
+    d=(a<<=3); flags[6]=a==16 && d==16;
+    d=(a>>=2); flags[7]=a==4 && d==4;
+    a=-16; d=(a>>>=2); flags[8]=a==-4 && d==-4;
+    d=(a<<<=1); flags[9]=a==-8 && d==-8;
+    a=3; b=2; d=(a+=(b+=1)+1); flags[10]=a==7 && b==3 && d==7;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 2047))
+
+(case assignment_expression_guards_and_loops
+  (source "assignment_expression_guards.sv" #"
+module Top(output bit [8:0] flags);
+  int a,b,c,d,i,sum;
+  initial begin
+    if(0 && (a=1)) b=99;
+    flags[0]=a==0 && b==0;
+    if(1 || (a=2)) b=1;
+    flags[1]=a==0 && b==1;
+    d=0 ? (a=3) : (b=4); flags[2]=a==0 && b==4 && d==4;
+    i=0; sum=0;
+    while((i+=1)<4) sum+=i;
+    flags[3]=i==4 && sum==6;
+    sum=0;
+    for(i=0;(a=i)<3;i++) sum+=a;
+    flags[4]=a==3 && sum==3;
+    sum=0; repeat((c=2)) sum++;
+    flags[5]=c==2 && sum==2;
+    b=((i=1) ? (a=9) : (a=8)); flags[6]=i==1 && a==9 && b==9;
+    d=(a=(b=7)+1); flags[7]=a==8 && b==7 && d==8;
+    a=0; sum=0;
+    do sum++; while((a+=1)<2);
+    flags[8]=a==2 && sum==2;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 511))
+
+(case assignment_expression_four_state
+  (four_state)
+  (source "assignment_expression_four_state.sv" #"
+module Top(output bit [4:0] flags);
+  logic [3:0] n,a,b,d;
+  bit [3:0] two;
+  bit [7:0] bit_vector;
+  logic [7:0] wide;
+  initial begin
+    wide=(n=4'b10xz); flags[0]=(wide===8'b000010xz) && (n===4'b10xz);
+    wide=(two=4'b10xz); flags[1]=(wide===8'h08) && two==8;
+    wide=(bit_vector[3:0]=4'bz0x1); flags[2]=(wide===8'h01) && bit_vector==1;
+    d=1'bx ? (a=4'b1010) : (b=4'b1000);
+    flags[3]=(d===4'b10x0) && a==10 && b==8;
+    a=0;
+    if(1'bx && (a=3)) b=99;
+    flags[4]=a==3 && b==8;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 31))
+
+
+(case assignment_expression_concat_value
+  (source "assignment_expression_concat.sv" #"
+module Top(output bit [2:0] flags);
+  bit [3:0] hi,lo;
+  logic signed [3:0] a,b;
+  logic [7:0] data;
+  int d;
+  initial begin
+    d=({hi,lo}=12'h1f2); flags[0]=hi==15 && lo==2 && d==242;
+    d=({a,b}=8'hfe); flags[1]=a==-1 && b==-2 && d==254;
+    data=0;
+    d=({data[7:4],data[1:0]}=8'hff); flags[2]=data==8'hf3 && d==63;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 7))
+
+
+(case assignment_expression_selected_index_once
+  (source "assignment_expression_selected_index.sv" #"
+module Top(output bit [2:0] flags);
+  int mem[4],i,d;
+  initial begin
+    i=0; d=(mem[i++]=9); flags[0]=i==1 && mem[0]==9 && d==9;
+    i=1; mem[1]=5; d=(mem[i]+=3); flags[1]=i==1 && mem[1]==8 && d==8;
+    i=2; mem[3]=7; d=(mem[++i]-=1); flags[2]=i==3 && mem[3]==6 && d==6;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq flags 7))
+
+
+(case assignment_expression_stacked_results
+  (source "assignment_expression_stacked_results.sv" #"
+module Top(output int sum, output bit final_value_ok);
+  int a;
+  initial begin
+    sum=(a=5)+(a=7);
+    final_value_ok=a==5 || a==7;
+  end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq sum 12)
+  (assert_eq final_value_ok 1))

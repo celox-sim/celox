@@ -30,6 +30,7 @@ pub(super) fn state_type() -> Type {
 /// The built-in scope, also available unambiguously through std (26.7).
 pub(super) fn scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -46,8 +47,8 @@ pub(super) fn scope(
             if dimensions.get(&name).is_some() {
                 return false;
             }
-            !scope::imported(&tree.state).package_scopes.contains(&name)
-                && classes::resolve(tree, &name).as_deref() == Some(CLASS)
+            !scope::imported(tree).package_scopes.contains(&name)
+                && classes::resolve(tree, session, &name).as_deref() == Some(CLASS)
         }
         ExprKind::Member {
             expression,
@@ -62,6 +63,28 @@ pub(super) fn scope(
     }
 }
 
+/// The type of a name of a built-in class the scheduler owns: `std::process`,
+/// `std::semaphore`, `std::process::state` or `mailbox #(T)`. Boxed and kept
+/// out of line, so that the frame of the recursive type binder stays small.
+#[inline(never)]
+pub(super) fn builtin_type(
+    path: &[celox_sv_syntax::TypeSegment],
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    context: &PackedDimensions,
+) -> Converted<Option<Box<Type>>> {
+    if let Some(ty) = qualified_type(path) {
+        return Ok(Some(Box::new(ty)));
+    }
+    if path
+        .last()
+        .is_some_and(|part| part.name.spelling == "mailbox")
+    {
+        return super::mailboxes::named_type(path, tree, session, context);
+    }
+    Ok(None)
+}
+
 pub(super) fn qualified_type(path: &[celox_sv_syntax::TypeSegment]) -> Option<Type> {
     if path.iter().any(|part| part.arguments.is_some()) {
         return None;
@@ -69,6 +92,11 @@ pub(super) fn qualified_type(path: &[celox_sv_syntax::TypeSegment]) -> Option<Ty
     match path {
         [std, process] if std.name.spelling == "std" && process.name.spelling == "process" => {
             Some(classes::handle(CLASS))
+        }
+        [std, semaphore]
+            if std.name.spelling == "std" && semaphore.name.spelling == "semaphore" =>
+        {
+            Some(classes::handle(super::semaphores::CLASS))
         }
         [std, process, state]
             if std.name.spelling == "std"
@@ -85,6 +113,7 @@ pub(super) fn qualified_type(path: &[celox_sv_syntax::TypeSegment]) -> Option<Ty
 /// constant of that type or the result of `status()` of a process handle.
 pub(super) fn state(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -107,12 +136,14 @@ pub(super) fn state(
         "::" => {
             !called
                 && STATES.contains(&member.as_str())
-                && scope(tree, *receiver, native, dimensions)
+                && scope(tree, session, *receiver, native, dimensions)
         }
         "." => {
             member == "status"
-                && expression_binding::object_native_class(tree, *receiver, native, dimensions)
-                    .as_deref()
+                && expression_binding::object_native_class(
+                    tree, session, *receiver, native, dimensions,
+                )
+                .as_deref()
                     == Some(CLASS)
         }
         _ => false,
@@ -122,6 +153,7 @@ pub(super) fn state(
 
 pub(super) fn value(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     root: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -142,9 +174,10 @@ pub(super) fn value(
     else {
         return Ok(None);
     };
-    let static_receiver = separator == "::" && scope(tree, *receiver, native, dimensions);
+    let static_receiver = separator == "::" && scope(tree, session, *receiver, native, dimensions);
     let handle_receiver = separator == "."
-        && expression_binding::object_native_class(tree, *receiver, native, dimensions).as_deref()
+        && expression_binding::object_native_class(tree, session, *receiver, native, dimensions)
+            .as_deref()
             == Some(CLASS);
     if !static_receiver && !handle_receiver {
         return Ok(None);
@@ -193,7 +226,7 @@ pub(super) fn value(
     let mut bound = Vec::new();
     if op != ProcessOp::SelfHandle {
         bound.push(Some(expression_binding::value(
-            *receiver, native, tree, dimensions,
+            *receiver, native, tree, session, dimensions,
         )?));
     }
     for arg in args {
@@ -214,6 +247,7 @@ pub(super) fn value(
             arg.value.unwrap(),
             native,
             tree,
+            session,
             dimensions,
         )?));
     }

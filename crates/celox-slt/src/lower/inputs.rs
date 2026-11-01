@@ -6,7 +6,7 @@ impl SLTToSIRLowerer {
     pub(super) fn lower_compacted_input<
         A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
     >(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         variable: &A,
@@ -47,7 +47,7 @@ impl SLTToSIRLowerer {
     pub(super) fn lower_input_for_node<
         A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display,
     >(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         id: &A,
@@ -82,7 +82,7 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn lower_input<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         id: &A,
         index: &[crate::SLTIndex],
@@ -241,7 +241,7 @@ impl SLTToSIRLowerer {
     }
 
     fn build_dynamic_offset<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         arena: &SLTNodeArena<A>,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
@@ -300,7 +300,7 @@ impl SLTToSIRLowerer {
     }
 
     fn rebuild_override_range<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         arena: &SLTNodeArena<A>,
@@ -408,7 +408,7 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn lookup_override<A: Hash + Eq + Clone + std::fmt::Debug + std::fmt::Display>(
-        &self,
+        &mut self,
         builder: &mut SIRBuilder<A>,
         node: NodeId,
         arena: &SLTNodeArena<A>,

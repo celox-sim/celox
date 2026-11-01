@@ -1,6 +1,13 @@
 use super::*;
 
 sv_backends! {
+    fn assignment_expression_stacked_results(sim) { @case "operators::assignment_expression_stacked_results"; }
+    fn assignment_expression_selected_index_once(sim) { @case "operators::assignment_expression_selected_index_once"; }
+    fn assignment_expression_concat_value(sim) { @case "operators::assignment_expression_concat_value"; }
+    fn assignment_expression_values(sim) { @case "operators::assignment_expression_values"; }
+    fn assignment_expression_compound_operators(sim) { @case "operators::assignment_expression_compound_operators"; }
+    fn assignment_expression_guards_and_loops(sim) { @case "operators::assignment_expression_guards_and_loops"; }
+    fn assignment_expression_four_state(sim) { @case "operators::assignment_expression_four_state"; }
     fn constant_function_conditional_types(sim) { @case "operators::constant_function_conditional_types"; }
     fn constant_function_conditional_unknown_types(sim) { @case "operators::constant_function_conditional_unknown_types"; }
 

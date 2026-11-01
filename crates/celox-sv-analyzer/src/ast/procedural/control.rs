@@ -15,6 +15,8 @@ struct CaseState {
     index: usize,
     kind: CaseKind,
     selector: Expr,
+    /// Whether the statement compares chandles (6.14).
+    chandles: bool,
     items: Vec<CaseItemBase<Expr, LValue>>,
     default: Option<Vec<Stmt>>,
 }
@@ -56,6 +58,9 @@ enum Job {
         kind: LoopKind<Expr>,
         init: Vec<Stmt>,
         condition: Option<Expr>,
+        /// Statements that start each iteration (see
+        /// [`BodyBuilder::loop_condition`]).
+        prologue: Vec<Stmt>,
         step: Vec<Stmt>,
         scope: bool,
         start: usize,
@@ -116,11 +121,11 @@ impl BodyBuilder<'_, '_, '_> {
                 pending.extend(kind.children());
             }
         }
-        let depth = self.scopes.len();
+        let depth = self.names.scopes.len();
         let result = self.native_body_machine(ids);
         // Restore lexical bindings on every diagnostic path, just as the old
         // recursive block/for wrappers did; no native failure is retried.
-        while self.scopes.len() > depth {
+        while self.names.scopes.len() > depth {
             self.pop_scope();
         }
         result
@@ -245,11 +250,22 @@ impl BodyBuilder<'_, '_, '_> {
                         branches: Vec::new(),
                     })),
                     StatementKind::Loop { kind, body } => {
+                        let mut prologue = Vec::new();
                         let (kind, condition, scope) = match kind {
-                            LoopSyntax::While(value) => {
-                                (LoopKind::While, Some(self.native_value(*value)?), false)
-                            }
+                            LoopSyntax::While(value) => match self.loop_condition(*value)? {
+                                Some(stmts) => {
+                                    prologue = stmts;
+                                    (LoopKind::For, None, false)
+                                }
+                                None => (
+                                    LoopKind::While,
+                                    Some(self.native_chandle_value(*value)?),
+                                    false,
+                                ),
+                            },
                             LoopSyntax::Repeat(value) => {
+                                // The count is evaluated once (12.7.2).
+                                output.extend(self.effects(&[*value])?);
                                 (LoopKind::Repeat(self.native_value(*value)?), None, false)
                             }
                             LoopSyntax::Forever => (LoopKind::Forever, None, false),
@@ -263,12 +279,13 @@ impl BodyBuilder<'_, '_, '_> {
                             }
                             LoopSyntax::For(header) => {
                                 self.push_scope();
-                                let (init, condition, step) = self.for_header(header)?;
+                                let header = self.for_header(header)?;
                                 jobs.push(Job::Loop {
                                     kind: LoopKind::For,
-                                    init,
-                                    condition,
-                                    step,
+                                    init: header.init,
+                                    condition: header.condition,
+                                    prologue: header.prologue,
+                                    step: header.steps,
                                     scope: true,
                                     start: output.len(),
                                 });
@@ -290,6 +307,7 @@ impl BodyBuilder<'_, '_, '_> {
                             kind,
                             init: Vec::new(),
                             condition,
+                            prologue,
                             step: Vec::new(),
                             scope,
                             start: output.len(),
@@ -300,10 +318,42 @@ impl BodyBuilder<'_, '_, '_> {
                         keyword,
                         mode,
                         expression: Some(value),
+                        arms,
                         ..
                     } if keyword != "randcase" => {
                         if mode.as_deref() == Some("matches") {
                             return Err(unsupported("pattern-matching case statement"));
+                        }
+                        // A case statement compares with `===` (IEEE 1800-2023 12.5).
+                        let operator = match (mode.as_deref(), keyword.as_str()) {
+                            (Some("inside"), _) => "inside",
+                            (_, "case") => "===",
+                            (_, keyword) => keyword,
+                        };
+                        // Only `case` compares chandles, with chandle or
+                        // `null` items (6.14); the binder rejects them
+                        // elsewhere. A selector is a chandle also when only
+                        // a default arm compares nothing with it.
+                        let mut chandles = operator == "==="
+                            && expression_binding::native_chandle(
+                                self.tree,
+                                *value,
+                                native,
+                                &self.dims,
+                                self.session,
+                            );
+                        for case_match in arms.iter().flat_map(|arm| &arm.matches) {
+                            if let celox_sv_syntax::CaseMatch::Expression(label) = case_match {
+                                chandles |= expression_binding::check_chandle_equality(
+                                    operator,
+                                    *value,
+                                    *label,
+                                    self.tree,
+                                    native,
+                                    &self.dims,
+                                    self.session,
+                                )?;
+                            }
                         }
                         let kind = if mode.as_deref() == Some("inside") {
                             CaseKind::Inside
@@ -315,20 +365,57 @@ impl BodyBuilder<'_, '_, '_> {
                                 _ => return Err(disagreement()),
                             }
                         };
-                        let selector = self.native_value(*value)?;
+                        output.extend(self.effects(&[*value])?);
+                        let selector = if chandles {
+                            self.native_chandle_value(*value)?
+                        } else {
+                            self.native_value(*value)?
+                        };
                         jobs.push(Job::CaseNext(CaseState {
                             id,
                             index: 0,
                             kind,
                             selector,
+                            chandles,
                             items: Vec::new(),
                             default: None,
                         }));
                     }
                     StatementKind::Wait { condition, body } => {
                         self.allow_timing("wait statement")?;
-                        let condition = self.native_value(*condition)?;
-                        output.push(Stmt::Wait(condition));
+                        // `wait(e.triggered)` (IEEE 1800-2023 15.5.3).
+                        if let Some(event) = events::triggered(
+                            self.tree,
+                            self.session,
+                            *condition,
+                            self.tree.declarations(),
+                            &self.dims,
+                        )? {
+                            let event = self.native_value(event)?;
+                            // A level wait also checks the condition again when
+                            // a variable of the design names another event.
+                            // Locals and class properties cannot wake a wait, so
+                            // a wait on them keeps the event it started with.
+                            if self.watched_handle(&event) {
+                                output.extend(self.wait_statements(events::call(
+                                    celox_design::ProcessOp::Triggered,
+                                    vec![event],
+                                ))?);
+                            } else {
+                                output.push(Stmt::Eval(events::call(
+                                    celox_design::ProcessOp::WaitTriggered,
+                                    vec![event],
+                                )));
+                            }
+                        } else {
+                            let condition = self.native_value(*condition)?;
+                            if events::reads_triggered(&condition) {
+                                return Err(unsupported(
+                                    "`triggered` in a wait condition with other operands",
+                                ));
+                            }
+                            output.extend(self.wait_statements(condition)?);
+                        }
                         jobs.push(Job::Enter(*body));
                     }
                     StatementKind::Timing { control, body } => {
@@ -337,6 +424,8 @@ impl BodyBuilder<'_, '_, '_> {
                                 start: output.len(),
                                 sensitivity: self.sensitivity_body.len(),
                             });
+                        } else if let Some(stmts) = self.virtual_event_control(*control)? {
+                            output.extend(stmts);
                         } else {
                             let timing = self.native_timing_control(*control)?;
                             output.push(timing);
@@ -383,6 +472,7 @@ impl BodyBuilder<'_, '_, '_> {
                                     .transpose()?;
                                 if let Some(disable) = &disable {
                                     assertions::concurrent_operand(disable)?;
+                                    assertions::concurrent_disable(disable)?;
                                 }
                                 (condition, &None, Some(disable))
                             }
@@ -439,14 +529,53 @@ impl BodyBuilder<'_, '_, '_> {
                     StatementKind::Break => output.push(Stmt::Break),
                     StatementKind::Continue => output.push(Stmt::Continue),
                     StatementKind::Return(value) => {
+                        if let Some(id) = value {
+                            output.extend(self.effects(&[*id])?);
+                            // A result of an unpacked array type is assigned
+                            // like any array (IEEE 1800-2023 7.6, 13.4.1).
+                            if let Some(target) = self
+                                .stream_return_shape
+                                .as_ref()
+                                .filter(|shape| !shape.unpacked.is_empty())
+                            {
+                                array_compatibility::check_native_unpacked_assignment(
+                                    self.tree,
+                                    self.session,
+                                    *id,
+                                    target,
+                                    || "return value".into(),
+                                    &self.dims,
+                                )?;
+                            }
+                        }
                         let value = value
                             .map(|id| {
-                                let mut value = expression_binding::bind_value(
+                                if let Some(chandle) = self.return_chandle {
+                                    expression_binding::check_chandle_assignment(
+                                        chandle,
+                                        id,
+                                        self.tree,
+                                        native,
+                                        &self.dims,
+                                        self.session,
+                                    )?;
+                                }
+                                let bind = if self.return_chandle == Some(true) {
+                                    expression_binding::bind_chandle_value
+                                } else {
+                                    expression_binding::bind_value
+                                };
+                                let mut value = bind(
                                     id,
                                     native,
                                     self.tree,
+                                    self.session,
                                     &self.dims,
-                                    self.return_shape.as_ref(),
+                                    if expression_binding::is_stream(id, native) {
+                                        self.stream_return_shape.as_ref()
+                                    } else {
+                                        self.return_shape.as_ref()
+                                    },
                                 )?;
                                 self.rename_expr(&mut value);
                                 Ok(value)
@@ -558,6 +687,27 @@ impl BodyBuilder<'_, '_, '_> {
                         }
                     } else {
                         let branch = &branches[state.index];
+                        let effects = match branch.predicate.items.as_slice() {
+                            [item] if item.pattern.is_none() => self.effects(&[item.expression])?,
+                            _ => Vec::new(),
+                        };
+                        // The condition of an `else if` is evaluated only
+                        // when the previous ones fail: the rest of the chain
+                        // becomes the else branch.
+                        let state = if effects.is_empty() || state.index == 0 {
+                            state
+                        } else {
+                            jobs.push(Job::IfFinish {
+                                branches: state.branches,
+                                start: output.len(),
+                            });
+                            IfState {
+                                id: state.id,
+                                index: state.index,
+                                branches: Vec::new(),
+                            }
+                        };
+                        output.extend(effects);
                         let condition = self.cond_predicate(&branch.predicate)?;
                         jobs.push(Job::IfBranch {
                             state,
@@ -593,15 +743,15 @@ impl BodyBuilder<'_, '_, '_> {
                         });
                     } else {
                         let arm = &arms[state.index];
-                        let labels =
-                            if arm.default {
-                                None
-                            } else {
-                                Some(self.native_case_labels(
-                                    &arm.matches,
-                                    state.kind == CaseKind::Inside,
-                                )?)
-                            };
+                        let labels = if arm.default {
+                            None
+                        } else {
+                            Some(self.native_case_labels(
+                                &arm.matches,
+                                state.kind == CaseKind::Inside,
+                                state.chandles,
+                            )?)
+                        };
                         jobs.push(Job::CaseBranch {
                             state,
                             labels,
@@ -628,11 +778,13 @@ impl BodyBuilder<'_, '_, '_> {
                     kind,
                     init,
                     condition,
+                    mut prologue,
                     step,
                     scope,
                     start,
                 } => {
-                    let body = output.split_off(start);
+                    prologue.extend(output.split_off(start));
+                    let body = prologue;
                     if scope {
                         self.pop_scope();
                     }
@@ -645,8 +797,38 @@ impl BodyBuilder<'_, '_, '_> {
                     });
                 }
                 Job::DoWhile { native, start } => {
-                    let body = output.split_off(start);
-                    let condition = self.native_value(native)?;
+                    let mut body = output.split_off(start);
+                    if let Some(prologue) = self.loop_condition(native)? {
+                        // `continue` evaluates the condition too (12.8): it
+                        // starts every iteration but the first.
+                        let first = self.hidden(Type::new(TypeKind::Logic)).1;
+                        output.push(Stmt::Assign {
+                            lhs: LValue::Ident(first.clone()),
+                            rhs: Expr::Literal("1'b1".into()),
+                            nonblocking: false,
+                        });
+                        body.insert(
+                            0,
+                            Stmt::If {
+                                condition: Expr::Ident(first.clone()),
+                                then_body: vec![Stmt::Assign {
+                                    lhs: LValue::Ident(first),
+                                    rhs: Expr::Literal("1'b0".into()),
+                                    nonblocking: false,
+                                }],
+                                else_body: prologue,
+                            },
+                        );
+                        output.push(Stmt::Loop {
+                            kind: LoopKind::For,
+                            init: Vec::new(),
+                            condition: None,
+                            step: Vec::new(),
+                            body,
+                        });
+                        continue;
+                    }
+                    let condition = self.native_chandle_value(native)?;
                     output.push(Stmt::Loop {
                         kind: LoopKind::DoWhile,
                         init: Vec::new(),
@@ -657,17 +839,22 @@ impl BodyBuilder<'_, '_, '_> {
                 }
                 Job::Foreach { loops, start } => {
                     let body = output.split_off(start);
+                    // A `break` leaves the whole foreach, not only the loop
+                    // of its innermost dimension (IEEE 1800-2023 12.8).
+                    let stop = (loops.len() > 1 && breaks(&body))
+                        .then(|| self.declare("$celox_foreach_break", int_type()));
                     self.pop_scope();
-                    output.extend(Self::fold_foreach(loops, body));
+                    output.extend(Self::fold_foreach(loops, body, stop));
                 }
             }
         }
         Ok(output)
     }
     fn native_case_labels(
-        &self,
+        &mut self,
         labels: &[celox_sv_syntax::CaseMatch],
         inside: bool,
+        chandles: bool,
     ) -> Result<Vec<CaseLabel<Expr>>, AnalyzerError> {
         if labels.is_empty() {
             return Err(AnalyzerError::Parse("native case arm has no labels".into()));
@@ -675,6 +862,9 @@ impl BodyBuilder<'_, '_, '_> {
         labels
             .iter()
             .map(|label| match label {
+                celox_sv_syntax::CaseMatch::Expression(id) if chandles => {
+                    self.native_chandle_value(*id).map(CaseLabel::Value)
+                }
                 celox_sv_syntax::CaseMatch::Expression(id) => {
                     self.native_value(*id).map(CaseLabel::Value)
                 }
@@ -690,11 +880,77 @@ impl BodyBuilder<'_, '_, '_> {
     }
 }
 
+/// Whether `body` has a `break` of the loop that holds it, outside nested
+/// loops and fork branches.
+fn breaks(body: &[Stmt]) -> bool {
+    body.iter().any(|stmt| match stmt {
+        Stmt::Break => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => breaks(then_body) || breaks(else_body),
+        Stmt::Case { items, default, .. } => {
+            items.iter().any(|item| breaks(&item.body)) || default.as_deref().is_some_and(breaks)
+        }
+        Stmt::WaitImplicit(body) => breaks(body),
+        _ => false,
+    })
+}
+
+/// `body` with each `break` of the loop that holds it, outside nested loops
+/// and fork branches, first setting `stop`.
+pub(super) fn mark_breaks(body: Vec<Stmt>, stop: &str) -> Vec<Stmt> {
+    let mut marked = Vec::with_capacity(body.len());
+    for stmt in body {
+        match stmt {
+            Stmt::Break => {
+                marked.push(Stmt::Assign {
+                    lhs: LValue::Ident(stop.to_owned()),
+                    rhs: Expr::Literal("1".into()),
+                    nonblocking: false,
+                });
+                marked.push(Stmt::Break);
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => marked.push(Stmt::If {
+                condition,
+                then_body: mark_breaks(then_body, stop),
+                else_body: mark_breaks(else_body, stop),
+            }),
+            Stmt::Case {
+                kind,
+                selector,
+                items,
+                default,
+            } => marked.push(Stmt::Case {
+                kind,
+                selector,
+                items: items
+                    .into_iter()
+                    .map(|mut item| {
+                        item.body = mark_breaks(item.body, stop);
+                        item
+                    })
+                    .collect(),
+                default: default.map(|body| mark_breaks(body, stop)),
+            }),
+            Stmt::WaitImplicit(body) => marked.push(Stmt::WaitImplicit(mark_breaks(body, stop))),
+            stmt => marked.push(stmt),
+        }
+    }
+    marked
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn native_scope_jobs_restore_bindings_after_a_typed_leaf_error() {
+        let session = &mut Session::default();
         let tree=crate::source_tree::parse_source("module M;initial begin automatic int outer_value=1;begin automatic int inner_value=2;disable target;end end endmodule",std::path::Path::new("scope-error.sv")).unwrap();
         let tree = AnalysisContext::unspecialized(&tree);
         let mut locals = Vec::new();
@@ -714,6 +970,7 @@ mod tests {
         };
         let mut builder = BodyBuilder::new(
             &tree,
+            session,
             &PackedDimensions::default(),
             &mut state,
             system_functions::Body::Initial,
@@ -726,11 +983,11 @@ mod tests {
             )
             .unwrap_err();
         assert!(error.to_string().contains("disable statement"), "{error}");
-        assert_eq!(builder.scopes.len(), 1);
+        assert_eq!(builder.names.scopes.len(), 1);
         for name in ["outer_value", "inner_value"] {
-            assert!(builder.lookup(name).is_none());
+            assert!(builder.names.lookup(name).is_none());
             assert!(builder.dims.get(name).is_none());
-            assert!(!builder.local_constants.contains_key(name));
+            assert!(!builder.names.local_constants.contains_key(name));
         }
     }
 }

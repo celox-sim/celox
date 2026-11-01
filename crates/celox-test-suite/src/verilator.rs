@@ -143,6 +143,17 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
             .is_some_and(|count| count.parse::<usize>().is_ok_and(|n| n > 0))
         {
             source_context = false;
+        } else if let Some(error) = line.strip_prefix("%Error-PROCASSWIRE: ") {
+            // Table 10-1: a procedural assignment requires a variable.
+            if !source_diagnostic(error, sources).is_some_and(|diagnostic| {
+                diagnostic.starts_with(
+                    "Procedural assignment to wire, perhaps intended var (IEEE 1800-2023 6.5): '",
+                ) && diagnostic.ends_with('\'')
+            }) {
+                return false;
+            }
+            rejected = true;
+            source_context = true;
         } else if let Some(error) = line.strip_prefix("%Error: ") {
             let reviewed = source_diagnostic(error, sources).is_some_and(|diagnostic| {
                 diagnostic
@@ -161,6 +172,37 @@ pub fn is_source_rejection(code: Option<i32>, log: &str, sources: &[PathBuf]) ->
                     // parameter port list is a localparam.
                     || (diagnostic.starts_with("Instance attempts to override '")
                         && diagnostic.ends_with("' as a parameter, but it is a local parameter"))
+                    // IEEE 1800-2023 25.9: a virtual interface of another
+                    // interface, or one with a modport assigned to one
+                    // without it.
+                    || (diagnostic.starts_with("Operator ASSIGN expected '")
+                        && diagnostic.contains("' interface on Assign RHS but '")
+                        && diagnostic.contains("' is a different interface ('"))
+                    || (diagnostic.starts_with(
+                        "Operator ASSIGN expected no interface modport on Assign RHS but got '",
+                    ) && diagnostic.ends_with("' modport."))
+                    // IEEE 1800-2023 11.4.11: the operands of a conditional
+                    // that are neither integral nor class types, such as an
+                    // integer and `null`, must be equivalent.
+                    || diagnostic.starts_with("Incompatible types of operands of condition operator: ")
+                    // IEEE 1800-2023 25.9: a value that is not a virtual
+                    // interface, such as an integer function result.
+                    || (diagnostic.starts_with("Operator ASSIGN expected '")
+                        && diagnostic.contains("' interface on Assign RHS but '")
+                        && diagnostic.ends_with("' is not an interface."))
+                    // IEEE 1800-2023 25.9: an actual of a virtual interface
+                    // formal that is not a compatible virtual interface.
+                    // IEEE 1800-2023 13.5.2, 6.22.2: a virtual interface
+                    // actual of an integral ref formal.
+                    || (diagnostic.starts_with("Ref argument requires matching types; port '")
+                        && diagnostic.ends_with("' but connection is 'IFACEREFDTYPE'."))
+                    || (diagnostic.starts_with("Operator TASKREF '")
+                        && diagnostic.contains("' expected non-interface on Function Argument but '")
+                        && diagnostic.ends_with("' is an interface."))
+                    || (diagnostic.starts_with("Virtual interface argument '")
+                        && diagnostic.ends_with(
+                            "' requires a compatible interface type, parameters, and modport.",
+                        ))
             });
             if !reviewed {
                 return false;
@@ -210,6 +252,7 @@ fn is_diagnostic_context(line: &str) -> bool {
         ": ... Expression data type: '",
         "... See the manual at https://verilator.org/verilator_doc.html?",
         "... For warning description see https://verilator.org/warn/WIDTHEXPAND?",
+        "... For error description see https://verilator.org/warn/PROCASSWIRE?",
         "... Use \"/* verilator lint_off WIDTHEXPAND */\" and lint_on around source to disable this message.",
     ].iter().any(|prefix| line.starts_with(prefix))
 }

@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { createHash } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { readdirSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { arch, cpus, hostname } from 'node:os';
@@ -11,8 +12,10 @@ const [projects, output, celox, veryl] = [projectsArg, outputArg, celoxArg, very
 const repeat = Number(repeatArg);
 if (!Number.isSafeInteger(repeat) || repeat < 1 || repeat > 20) throw new Error('REPEAT must be 1..20');
 const hash = value => createHash('sha256').update(value).digest('hex');
+const git = (...args) => execFileSync('git', args, { cwd: new URL('..', import.meta.url), encoding: 'utf8' }).trim();
 mkdirSync(output);
 const report = { schemaVersion: 2, date: new Date().toISOString(), revision: process.env.RICA_SOURCE_REVISION ?? null, verylVersion: '0.22.0', comparison: 'cold-tiered-process-v1', workload: 'board-kernel-tiered-tb-v1',
+  celox: { commit: git('rev-parse', 'HEAD'), dirty: Boolean(git('status', '--porcelain', '--untracked-files=no')) },
   settings: { frontend: 'veryl', testbenchLanguage: 'veryl', backend: 'tiered', cache: 'cold', stateModel: 'two-state', threads: 1, optimization: 'default-tiered' },
   host: { cpu: cpus()[0]?.model, arch: arch(), hostname: hostname() },
   binaries: { celox: hash(readFileSync(celox)), veryl: hash(readFileSync(veryl)) }, results: [] };

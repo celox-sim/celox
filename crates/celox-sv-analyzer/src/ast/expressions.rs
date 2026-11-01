@@ -2,7 +2,12 @@
 
 use super::*;
 
-pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
+pub(super) fn guard_zero_divisions(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    expr: Expr,
+) -> Expr {
+    let functions = &tree.functions;
     // Binding an enclosing expression can visit an already guarded operand.
     // Its children were guarded when it was constructed. Wrapping it again
     // loses the operation's type when the internal unknown arm is lowered.
@@ -19,7 +24,7 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
             lsb,
             signed,
         } => Expr::Select {
-            expr: Box::new(guard_zero_divisions(state, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             msb,
             lsb,
             signed,
@@ -27,14 +32,14 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
         Expr::Concat(parts) => Expr::Concat(
             parts
                 .into_iter()
-                .map(|expr| guard_zero_divisions(state, expr))
+                .map(|expr| guard_zero_divisions(tree, session, expr))
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
             count,
             parts: parts
                 .into_iter()
-                .map(|expr| guard_zero_divisions(state, expr))
+                .map(|expr| guard_zero_divisions(tree, session, expr))
                 .collect(),
         },
         Expr::Resize {
@@ -42,24 +47,24 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
             width,
             signed,
         } => Expr::Resize {
-            expr: Box::new(guard_zero_divisions(state, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             width,
             signed,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op,
-            expr: Box::new(guard_zero_divisions(state, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
         },
         Expr::Binary { left, op, right } => {
-            let left = Box::new(guard_zero_divisions(state, *left));
-            let right = Box::new(guard_zero_divisions(state, *right));
+            let left = Box::new(guard_zero_divisions(tree, session, *left));
+            let right = Box::new(guard_zero_divisions(tree, session, *right));
             let operation = Expr::Binary {
                 left,
                 op,
                 right: right.clone(),
             };
-            let divisor_is_nonzero = expr_to_const(state, (*right).clone())
-                .and_then(|right| eval_ast_const_expr(state, &right, &HashMap::default()))
+            let divisor_is_nonzero = expr_to_const(session, (*right).clone())
+                .and_then(|right| eval_ast_const_expr(functions, &right, &HashMap::default()))
                 .is_some_and(|right| right != 0);
             if matches!(op, BinaryOp::Div | BinaryOp::Mod) && !divisor_is_nonzero {
                 Expr::Mux {
@@ -80,15 +85,15 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
             then_expr,
             else_expr,
         } => Expr::Mux {
-            condition: Box::new(guard_zero_divisions(state, *condition)),
-            then_expr: Box::new(guard_zero_divisions(state, *then_expr)),
-            else_expr: Box::new(guard_zero_divisions(state, *else_expr)),
+            condition: Box::new(guard_zero_divisions(tree, session, *condition)),
+            then_expr: Box::new(guard_zero_divisions(tree, session, *then_expr)),
+            else_expr: Box::new(guard_zero_divisions(tree, session, *else_expr)),
         },
         Expr::Inside { expr, items } => Expr::Inside {
-            expr: Box::new(guard_zero_divisions(state, *expr)),
+            expr: Box::new(guard_zero_divisions(tree, session, *expr)),
             items: items
                 .into_iter()
-                .map(|item| item.map(&mut |operand| guard_zero_divisions(state, operand)))
+                .map(|item| item.map(&mut |operand| guard_zero_divisions(tree, session, operand)))
                 .collect(),
         },
         Expr::Call {
@@ -100,18 +105,18 @@ pub(super) fn guard_zero_divisions(state: &AnalysisState, expr: Expr) -> Expr {
             callee,
             args: args
                 .into_iter()
-                .map(|arg| arg.map(|expr| guard_zero_divisions(state, expr)))
+                .map(|arg| arg.map(|expr| guard_zero_divisions(tree, session, expr)))
                 .collect(),
         },
     }
 }
 
 pub(super) fn identifier_expression(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     name: String,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
-    if scope::imported(state).interface_types.contains_key(&name) && dimensions.get(&name).is_none()
+    if scope::imported(tree).interface_types.contains_key(&name) && dimensions.get(&name).is_none()
     {
         return Err(unsupported(format!(
             "use of interface `{name}` other than as a port connection or through a member"
@@ -122,17 +127,18 @@ pub(super) fn identifier_expression(
 
 /// Numeric system-function semantics for already-bound native arguments.
 pub(super) fn numeric_system_function(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     function: SystemFunction,
     mut arguments: Vec<Expr>,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
+    let functions = &tree.functions;
     let operand_error = || unsupported(format!("operand of `{}`", function.name()));
     match function {
         SystemFunction::Signed | SystemFunction::Unsigned => {
             let argument = arguments.pop().ok_or_else(operand_error)?;
-            let width =
-                expr_static_width(state, &argument, dimensions).ok_or_else(operand_error)?;
+            let width = expr_static_width(tree, &argument, dimensions).ok_or_else(operand_error)?;
             Ok(Expr::Resize {
                 expr: Box::new(argument),
                 width,
@@ -152,8 +158,7 @@ pub(super) fn numeric_system_function(
                     arg_order: Vec::new(),
                 });
             }
-            let width =
-                expr_static_width(state, &argument, dimensions).ok_or_else(operand_error)?;
+            let width = expr_static_width(tree, &argument, dimensions).ok_or_else(operand_error)?;
             let signed =
                 dimensions::expression_signedness(&argument, dimensions, &dimensions.const_env)
                     .ok_or_else(operand_error)?;
@@ -161,8 +166,9 @@ pub(super) fn numeric_system_function(
             // reads as a literal.
             if function == SystemFunction::Past
                 && let Some(ticks) = arguments.get_mut(1)
-                && let Some(constant) = expr_to_const(state, ticks.clone())
-                && let Some(value) = eval_ast_const_expr(state, &constant, &dimensions.const_env)
+                && let Some(constant) = expr_to_const(session, ticks.clone())
+                && let Some(value) =
+                    eval_ast_const_expr(functions, &constant, &dimensions.const_env)
             {
                 *ticks = Expr::Literal(value.to_string());
             }
@@ -219,9 +225,9 @@ pub(super) fn numeric_system_function(
         | SystemFunction::Countbits => {
             if function == SystemFunction::Clog2
                 && let [argument] = arguments.as_slice()
-                && let Some(argument) = expr_to_const(state, argument.clone())
+                && let Some(argument) = expr_to_const(session, argument.clone())
                 && let Some(value) = eval_ast_const_expr(
-                    state,
+                    functions,
                     &ConstExpr::Function {
                         callee: Callee::System(function),
                         args: vec![argument],

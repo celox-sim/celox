@@ -17,6 +17,7 @@ synthesis and is tested at the design level.
 | Area | Supported |
 | --- | --- |
 | Modules | ANSI ports, non-ANSI ports (a header of port names and body `input` / `output` / `inout` declarations, optionally completed by a net or variable declaration of the same name), `parameter` / `localparam`, type parameters (`parameter type`), named and positional port and parameter connections, implicit nets of output port connections and continuous assignment targets (`default_nettype none` disables them), hierarchy, instance arrays (a connection is broadcast, or split between the elements when it is as wide as all of them), `inout` ports below the top module whose net has one continuous driver on either side, such as a tristate `assign io = oe ? d : 'z;` (both sides read the driven value, or `z`) |
+| Logic gates | Scalar `and`, `nand`, `or`, `nor`, `xor`, `xnor` without explicit strengths or delays; named/unnamed and multiple instances, including generate scopes (IEEE 1800-2023 28.4) |
 | Programs | `program` declarations with ports and parameters, instantiated from modules like a module; their `initial` procedures run in the reactive region set (see [Programs](#programs)) |
 | Generate | `for` (with `genvar`), `if`, `case`; constant expressions including `**` |
 | Hierarchical references | reads of nets and variables of other instances, and procedural writes of their variables, including selects of unpacked array elements (`u.mem[i][7:0] = v`), through names that start at an instance of the module (also of a generate block or an instance array element), at the module's own name, at an enclosing module's name (upward) or at `$root`; see [Hierarchical references](#hierarchical-references) |
@@ -32,8 +33,9 @@ synthesis and is tested at the design level.
 | Selects | constant and run-time bit selects and indexed part-selects (`[i]`, `[i +: W]`, `[i -: W]`), in reads and writes, in either declaration direction |
 | Patterns | assignment patterns for packed and unpacked structs, packed arrays and unpacked arrays (`'{a, b}`, `'{x: a, default: 0}`, `'{n{a}}`, `T'{...}`) |
 | Dynamic containers | dynamic arrays, queues (including bounded queues), and associative arrays with integral, string or class handle keys, also nested (`int m[string][$]`, `T m[C][C][E]`); element access, value assignment, equality, `foreach` and built-in container methods. See [dynamic containers](#dynamic-containers) |
+| Chandles | `chandle` variables, class properties, elements of dynamic arrays, queues and associative arrays, subroutine arguments and results, and DPI-C arguments and results (passed as C pointers): they start as `null`, compare with `==`, `!=`, `===` and `!==` against another chandle or `null`, test as Booleans, and are assigned from another chandle or `null`. Other operators, assignments from or to other types, casts, ports, event expressions, continuous assignments and packed types of chandles are rejected (IEEE 1800-2023 6.14). Fixed-size unpacked arrays of chandles (`chandle a[4]`, also through a typedef) are not supported |
 | Strings | `string` variables, function arguments and results: assignment of strings, string literals and casts (`string'(x)`), `==`, `!=` and ordering comparisons, concatenation and replication (with a run-time count), character reads and writes (`s[i]`), and the methods `len`, `getc`, `putc`, `toupper`, `tolower`, `compare`, `icompare`, `substr`, `atoi` / `atohex` / `atooct` / `atobin` and `itoa` / `hextoa` / `octtoa` / `bintoa`; `%s` and format-less display of string values; text formatted by `$sformatf` / `$sformat` / `$swrite`. See [strings](#strings) |
-| Classes | classes declared in a module, a package or the compilation unit: properties of 2-state and 4-state integral types up to 64 bits (4-state properties start as X and keep X/Z bits), `string` and class handle types, unpacked structures of those types (see [unpacked structures](#unpacked-structures)), plus dynamic arrays, queues and associative arrays, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named and defaulted method and constructor arguments; shallow copies (`new h`). See [classes](#classes) |
+| Classes | classes declared in a module, a package or the compilation unit: properties of 2-state and 4-state integral types of any width (4-state properties start as X and keep X/Z bits), `string` and class handle types, unpacked structures of those types (see [unpacked structures](#unpacked-structures)), plus dynamic arrays, queues and associative arrays, with initializers; `new` with and without arguments, implicit and explicit constructors; methods (`function` and `task`, also `extern` with an out-of-block body) called through a handle or unqualified inside the class; `this`, `null`, handle assignment and comparison; inheritance of properties and methods, with base constructors called by `super.new(...)` or `extends Base(...)`; `super.` members; virtual methods, abstract (`virtual`) classes and pure virtual methods; classes that implement interface classes and method calls through interface class handles; `$cast` of class handles, as a function and as a task; static properties and methods; `C::` scope resolution of static members and `C::new`; arrays of handles; parameterized classes with value and type parameters, parameters read through a handle or `C#(...)::`, typedefs of classes and interface classes and `C::T`; named and defaulted method and constructor arguments; shallow copies (`new h`); bit and part selects of properties, read and written like selects of a variable (11.5.1). See [classes](#classes) |
 | Parameters | integral parameters and overrides preserving widths beyond 128 bits and X/Z values, and parameters of unpacked array or packed struct type given by an assignment pattern (constant tables), including unpacked-array pattern overrides |
 
 ### Processes and control flow
@@ -56,6 +58,7 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 | `#delay` | integral and real delays, `#(min:typ:max)` (the typical value), package-scoped values such as `#pkg::D`, and [time literals](#time-literal-delays); an X or Z delay counts as zero |
 | `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, `iff` conditions on items (not in `always_ff`), and `@*` / `@(*)`, which waits on the variables its statement reads |
 | `wait (condition)` | any condition; an X or Z condition counts as false |
+| Delayed nonblocking assignments | `lhs <= #constant rhs` in `initial` and ordinary `always`, for integral constant delays and time literals. The value and destination position are captured immediately; the update is queued in the NBA region of the target time without suspending the caller (IEEE 1800-2023 10.4.2). Pending updates survive checkpoints and state files. |
 | Assignments | blocking and nonblocking, to any target a blocking assignment takes, including unpacked array elements and run-time positions; nonblocking updates take effect in the NBA region of the time slot, at the position evaluated when the assignment executes, and bits outside the target or at a position with an X or Z bit are not written |
 
 An `always` whose sensitivity list names exactly the variables its statement
@@ -95,8 +98,9 @@ while the task is suspended. Functions, `always_comb`, `always_latch` and
 Automatic task arguments and locals have separate storage for each activation
 and survive suspension. Module-local static task arguments remain shared. Inputs and inouts
 are copied in at entry; outputs and inouts are copied back when the task returns
-(IEEE 1800-2023 13.3–13.3.2). Timed tasks with static local declarations remain
-unsupported; use automatic locals. Package and `$unit` timed tasks with static
+(IEEE 1800-2023 13.3–13.3.2). Static task locals are shared by every call,
+also by calls that overlap while one is suspended (see Variable lifetimes).
+Package and `$unit` timed tasks with static
 arguments, and `wait` conditions reading static task arguments, are rejected
 until shared argument storage and its change notifications are supported.
 Event expressions have the same restrictions
@@ -204,8 +208,8 @@ while preserving its identity and RNG state.
 ### Class randomization
 
 `object.randomize()` randomizes enabled `rand` properties and returns signed
-`int` value `1`. Supported properties are 2-state integral values, including scalar enums, up
-to 64 bits in classes without constraints. Enum randomization selects uniformly
+`int` value `1`. Supported properties are 2-state integral values, including scalar enums, of
+any width in classes without constraints. Enum randomization selects uniformly
 from the declared values, including sparse and negative values (18.3, 18.4.1).
 Enums with unresolved or X/Z values and ranged enumerator declarations remain
 unsupported for randomization. Inherited properties are included,
@@ -313,7 +317,7 @@ waits zero.
 
 | Area | Supported |
 | --- | --- |
-| System functions | `$timeunit`, `$timeprecision`, `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
+| System functions | `$timeunit`, `$timeprecision`, `$typename` (see [Type names](#type-names)), `$bits`, `$size`, `$left`, `$right`, `$low`, `$high`, `$increment`, `$dimensions`, `$unpacked_dimensions`, `$clog2`, `$countbits`, `$countones`, `$onehot`, `$onehot0`, `$isunknown`, `$isunbounded` in expressions, constant expressions and as statements; `$signed`, `$unsigned` in expressions, constant expressions and as statements |
 | Random numbers | `$urandom`, `$urandom_range`, `$random` and `$dist_uniform` in clocked processes, `always_comb`, `always @*`, `initial` blocks and their subroutines; an optional integral seed of `$urandom`, a seed variable of `$random`, and a separate stream per process |
 | Simulation time | `$time`, `$stime` and `$realtime` in clocked and combinational processes, continuous assignments, `initial` blocks and their subroutines |
 | Sampled values | `$sampled` in processes, combinational logic and the subroutines they call; `$past`, `$rose`, `$fell`, `$stable` and `$changed` in edge-triggered processes whose clock they infer and the subroutines those call; see [Sampled values](#sampled-values) |
@@ -339,16 +343,34 @@ from an assignment pattern (`'{a, b}`, `'{m: v, default: d}`, `T'{...}`, with
 `default` applied to the members of nested structures). Other operators,
 selects and casts of a whole structure are rejected.
 
+Constant integral member initial values are supported for module variables,
+procedural locals and class properties (7.2.2). They are captured in the type's
+declaration scope, including instance parameter overrides, and apply only when
+the variable has no explicit initializer. Nested members inherit their own
+type's initial values. Automatic locals are initialized on each entry; static
+locals are initialized once. Assignment sizing preserves wide values and X/Z.
+
+Member initial values on enum or non-integral members, whole nested-structure
+member initializers, and defaulted structure types in module ports, subroutine
+interfaces or dynamic containers remain unsupported. Constants that cannot be
+resolved in the declaration environment also report `Unsupported`.
+
 ## Unsupported constructs {#what-is-not-supported}
 
 Celox reports an `Unsupported` error naming the construct instead of ignoring
 it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
-- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants as class parameter values, module-local classes as type arguments to package-class specializations, properties that are `real`, arrays or wider than 64 bits, bit and part selects and packed structure members of a property (also of a member of a property of unpacked structure type), properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Timed tasks with static local declarations and recursive calls remain unsupported.
-- Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
+- Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants of a module or package as class parameter values (a class passes its own such parameters on by name), module-local classes as type arguments to package-class specializations, properties that are `real` or arrays, reads of bit and part selects of a property not declared `[N-1:0]`, selects of a member of a property of unpacked structure type, packed structure members of a property, properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Recursive calls remain unsupported.
+- Behavioral and verification constructs: nonblocking intra-assignment event controls and nonconstant delays,
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
-  named events and `->`, `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
+  `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
+- Named events beyond those [listed](#named-events): arrays of events, event ports,
+  event members of unpacked structures, functions returning an event, triggers
+  in `always_comb` / `always_latch`, `->>` with a
+  delay or event control, event controls that list an event with signal changes or
+  edges (`@(e or posedge clk)`), `triggered` in a `wait` condition with other
+  operands or read by a function that the condition calls, and `wait_order`.
 - Timing controls in processes: impure function calls in event expressions,
   `wait` or event expressions reading a static task argument, and `wait`
   conditions or event expressions reading a class property (directly, through
@@ -358,14 +380,14 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
 - Nonblocking assignments inside `always_latch` ([#431](https://github.com/celox-sim/celox/issues/431)); use blocking assignments for the supported latch subset.
 - Inferred latches inside `always_comb` are rejected by default. Set `inferred_latch = "warn"` or `"allow"` in `celox.toml` under `[diagnostics]` to permit retained blocking assignments. Ordinary `always @*` and explicit `always_latch` do not require this option.
 - Ports and instances: non-ANSI port expressions such as `module m({a, b}, c[3:0], .p(d))` ([#1953](https://github.com/celox-sim/celox/issues/1953)), `ref` ports
-  ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
+  ([#427](https://github.com/celox-sim/celox/issues/427)), wildcard `.*` connections ([#442](https://github.com/celox-sim/celox/issues/442)), gate delays, strengths, instance arrays and other gate/switch primitives ([#457](https://github.com/celox-sim/celox/issues/457)),
   `bind`.
 - Declarations: variable declaration initializers of members of an interface
   array, ANSI port default values, tagged unions, unpacked unions, packed union assignment patterns, internal nets without a driver ([#460](https://github.com/celox-sim/celox/issues/460)),
   `real`, and unpacked structs as ports, nets, parameters, static, `rand` or
   `const` class properties, fixed-size array elements, or with members that
-  are arrays (also dynamic arrays, queues and associative arrays), `real`, or
-  have default values.
+  are arrays (also dynamic arrays, queues and associative arrays) or `real`.
+  Restrictions on member initial values are listed [above](#unpacked-structures).
 - Sequential processes: `iff` qualifiers in `always_ff` event lists ([#452](https://github.com/celox-sim/celox/issues/452)), and in
   `always_ff` edge operands other than a plain signal ([#464](https://github.com/celox-sim/celox/issues/464)), multi-bit
   edge signals, and several edges without an asynchronous reset.
@@ -384,8 +406,8 @@ constructs without a dedicated issue point to the frontend roadmap, [#88](https:
   parameter and in a function body. A `$` name that is not a system task or
   function, a call with the wrong number of arguments, an omitted argument
   without a declared default, and a task used as a value are errors.
-- DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), DPI
-  exports, nets with several drivers (including tri-state buses) and `inout`
+- DPI-C beyond the subset described in [DPI-C imports](#dpi-c-imports), nets
+  with several drivers (including tri-state buses) and `inout`
   ports of the top module.
 
 ### Interface restrictions {#interface-restrictions}
@@ -395,7 +417,9 @@ Interfaces are supported within the limits below:
 - **Declarations:** ANSI header ports can be passed through module interface
   ports and modports, including clock inputs and parameter-dependent widths.
   Tasks, implicit nets,
-  enums and module instances inside an interface, and virtual interfaces are unsupported.
+  enums and module instances inside an interface are unsupported. Virtual
+  interfaces are supported within the limits of
+  [virtual interfaces](#virtual-interfaces).
   Macros and compiler directives inside an interface are also unsupported.
 - **Modports and connections:** `inout`, `ref`, expression ports, `export` and
   clocking modports are unsupported. A connection cannot name a modport if the
@@ -453,6 +477,13 @@ string, and an integral value assigned or cast to a string contributes its
 bytes from the most significant one. A character read as `s[i]` or `s.getc(i)` is a `byte`,
 which is signed (6.16, 6.11): a code above 127 reads as a negative value.
 
+Fixed unpacked arrays of strings support assignment patterns, whole-array and
+subarray copies, indexed reads and assignments, and string methods that do not
+modify the receiver. A full element selection yields a string; a further index
+reads a character. Invalid element indices read as the empty string and writes
+are ignored (7.4.5). Mutating methods and character writes on array elements,
+and array-valued string arguments or return values, remain unsupported.
+
 Not yet supported: `atoreal` / `realtoa`, string
 arguments of `$value$plusargs`, file I/O and DPI-C, and string values in VPI,
 VCD output and the TypeScript API.
@@ -463,14 +494,33 @@ Dynamic arrays (`T a[]`) support `new[n]`, `new[n](a)`, `size()` and
 `delete()` (IEEE 1800-2023 7.5). Queues (`T q[$]`, `T q[$:N]`) support
 `size`, `insert`, `delete`, `push_front`, `push_back`, `pop_front` and
 `pop_back`. Queue indices may use `$` and `$+1`.
-Associative arrays support integral keys up to 64 bits, `string` keys or
-class handle keys (7.8.5), which keep their objects alive; `num` / `size`,
-`exists`, `delete`, and `first` / `last` / `next` / `prev` (7.8–7.10).
+Associative arrays support integral keys of any width, packed structures
+included, which order numerically by the signedness of the index type (7.8.4),
+`string` keys or class handle keys (7.8.5), which keep their objects alive;
+`num` / `size`, `exists`, `delete`, and `first` / `last` / `next` / `prev`
+(7.8–7.10). The locator methods that return indices (`find_index` and the
+like) are not supported for integral keys wider than 64 bits.
 Traversal leaves its index unchanged when no key is found. A container
 declared with several dynamic dimensions, `T m[a][b]`, holds containers as
 elements: `m[a][b] = v` updates the inner container of `m[a]`, which reads as
 empty when absent, and methods apply to an element (`m[a].exists(b)`).
-`foreach` iterates one dimension at a time.
+`foreach (m[a, b])` iterates each dimension with its loop variable, the
+first the outermost, an associative array in index order; a skipped
+variable (`m[, b]`) still iterates its dimension (12.7.3).
+
+A dynamic array, queue or associative array formal of any direction holds a
+copy unless it is a [reference](#reference-arguments) (IEEE 1800-2023 13.5.1).
+An `input` receives a container value as an assignment does: a compatible
+container (a dynamic array for a queue formal and the reverse), an assignment
+pattern, `{}` or `new[n]`, also as a default; changes in the body stay its own.
+An `output` starts empty and an `inout` from a copy of the actual; both are
+copied to the actual when the subroutine returns, also after a task waits.
+Formals may be declared with a typedef of a container type and may be in
+class methods, virtual ones included. The actual of an `output` or `inout`
+container formal must be a container variable of a compatible type, whose queue
+bound, if any, is the formal's. Function results of container type, class
+properties and container elements as `output` or `inout` actuals, and actuals
+whose element types differ remain unsupported.
 
 The empty parentheses on zero-argument container methods are optional:
 `a.size`, `q.pop_front`, `map.num` and `map.delete` have the same behavior as
@@ -489,12 +539,13 @@ supports class handles. Element X/Z bits and class identity are preserved.
 For module variables, `@(a[i])` observes changes to the selected element,
 including changes caused by ordering methods (9.4.2).
 Associative arrays cannot use ordering methods. Fixed-array ordering, `shuffle`,
-`with` expressions and iterator arguments remain unsupported.
+and ordering `with` expressions and iterator arguments remain unsupported.
 
-Elements may be packed integral values up to 64 bits, strings, class
+Elements may be packed integral values of any width, strings, class
 handles or [unpacked structures](#unpacked-structures); a missing
 associative entry or a new dynamic array element of structure type has the
-structure's default members. Containers of unpacked structures with a string
+structure's default members. Containers of elements wider than 64 bits are
+not compared with `==`, sorted, reduced or printed with `%p`. Containers of unpacked structures with a string
 or handle member, or wider than 64 bits, are not compared with `==` or sorted
 without `with`; a member of such an element is read, not written (assign
 the whole element). Positional assignment patterns and element concatenations construct
@@ -531,13 +582,31 @@ Fixed arrays may have elements wider than 64 bits. These methods currently
 require a one-dimensional array variable or dynamic-container class property;
 `with` expressions and iterator arguments remain unsupported.
 
-Multidimensional containers, elements wider than 64 bits, real elements,
-wildcard or class keys, slices, array locator methods, keyed patterns,
-container operands within concatenations, compound or nonblocking element
-assignments, container ports / subroutine parameters and
+Dynamic arrays, queues, associative arrays and one-dimensional fixed-size
+arrays support the locator methods `find`, `find_index`, `find_first`,
+`find_first_index`, `find_last` and `find_last_index`, which require a `with`
+clause, and `min`, `max`, `unique` and `unique_index`, with or without one
+(IEEE 1800-2023 7.12.1). Each returns a queue of elements, or of indices: `int`,
+or the index type of an associative array. The `with` expression reads the
+element through `item` or a named iterator and its index through
+`item.index`, `item.index()` or a named index method (7.12.4). It may read
+class properties of handle elements, call functions and read the locals and
+arguments of the enclosing subroutine; it runs once per element when the
+call is evaluated, so a call in a short-circuited operand or a loop condition
+runs only when reached. Searches visit elements from the left index of a fixed
+array, in index order for an associative array, and in reverse for
+`find_last` and `find_last_index`. `min`, `max` and `unique` compare integral
+values up to 64 bits or strings. Locator methods are not available in
+continuous assignments, on multidimensional fixed arrays or real elements, or
+as discarded statements.
+
+Multidimensional containers, real elements,
+wildcard or class keys, slices, keyed patterns,
+associative arrays within concatenations, nonblocking element assignments,
+compound element assignments whose container or index has a side effect or
+whose element is a string, handle or container, container ports and
 const containers remain unsupported. A `new[]` initializer currently requires
 another compatible dynamic array or queue; fixed-size arrays are unsupported.
-Static local initializers retain the existing constant-initializer restriction.
 `$size` queries the current outer dimension. Sequence `$left`, `$right`,
 `$low`, `$high`, `$increment`, and dimension counts are also supported.
 Queries of element dimensions and associative bounds remain unsupported.
@@ -726,6 +795,42 @@ Interface type parameters are specialized per instance and forwarded through
 modport ports. Nested interface instances retain their own members and
 parameters; recursive specializations and nesting beyond 64 levels are rejected.
 
+### Virtual interfaces {#virtual-interfaces}
+
+A virtual interface (IEEE 1800-2023 25.9) may be a variable, a class
+property, a subroutine argument or result, or an element of an array or a
+container, and a type is a class type parameter value, as in
+`uvm_config_db#(virtual bus_if)`. It holds `null`, an interface instance (also an element of an
+array of instances), the instance connected to an interface port, or another
+virtual interface of the same interface; one without a modport may be
+assigned to one with a modport, not the reverse. Members are read and written
+through it, with blocking, nonblocking and compound assignments; nets are
+not written through it, and a member outside the selected modport is
+rejected. An access through `null` is an error that ends the simulation.
+
+A virtual interface value is the number of an interface instance, and a
+member access selects among the instances of its interface. Only designs that
+declare virtual interface types pay for this: they are analyzed twice, the
+second time with the instances of the elaborated design. Event controls
+and `wait` statements may read members through a virtual interface held by a
+static variable, as in `@(posedge vif.clk)`. The variable is an operand of the
+event expression: when it changes, the expression is evaluated again, and a
+change of its value is an event (9.4.2). Such an item is an `expr` other
+than a variable, so its `iff` condition is judged when the occurrence is
+detected, after combinational logic settles ([event waits](#timing-semantics)).
+An edge-sensitive `always` on such an item runs as a process; `always_ff`
+rejects it. A write of the member of an instance is an event of the item
+when the variable denotes that instance after combinational logic settles,
+so a pulse of another instance's member followed by an assignment that
+makes the variable denote that instance, in one activation, is one,
+although the selected value does not change (9.4.2;
+[#2549](https://github.com/celox-sim/celox/issues/2549)). Waiting through a virtual interface
+held by an automatic variable, an argument or a class property is
+unsupported. Virtual interfaces
+of parameterized interfaces, and interface tasks, functions, clocking blocks
+and nested interface instances reached through a virtual interface, are
+unsupported.
+
 ### Block-local variables
 
 Block-local variables have lexical scope in `always_comb` and `always_ff`.
@@ -895,6 +1000,75 @@ unsupported, including when the inference option is enabled.
   A plain `always @(posedge clk iff en)` runs as a process; `always_ff`
   rejects `iff` ([#452](https://github.com/celox-sim/celox/issues/452)).
 
+### Named events {#named-events}
+
+An `event` is a handle of a synchronization object (IEEE 1800-2023 15.5).
+Each declaration of an event without an initializer creates one: module and
+local variables, static class properties, and the event properties of each
+object. Events may be task and function arguments and class properties, and
+assignment and comparison work as for class handles:
+
+- `-> e` unblocks the processes already waiting for `e`, and only those
+  (15.5.1, 15.5.2). `->> e` triggers it in the NBA region, after the
+  nonblocking assignments issued before it.
+- `@e`, `@(e)` and `@(e1 or e2)` wait for a trigger; `e` may be any
+  expression of type `event`, such as `obj.e` or `m[key].e`.
+- `e.triggered` is 1 from a trigger until time advances, and
+  `wait (e.triggered)` returns at once in that time step (15.5.3). When `e`
+  is a variable of the design, the wait also checks again after `e` is
+  assigned another event; on a local, an argument or a class property it waits
+  for the event `e` named when it started.
+- `e1 = e2` merges the events: later triggers and waits through either
+  variable use one object. A process already waiting for `e1` waits for the
+  old object (15.5.5.1). After `e = null`, `-> e` does nothing and
+  `e.triggered` is 0; a wait for a null event blocks forever (15.5.5.2).
+- Events compare with `==`, `!=`, `===`, `!==` and `null`, and an event is
+  true when it is not null (15.5.5.3).
+
+A wildcard `always` or an `always_ff` that triggers an event, also through a
+function, runs as a process. Event waits and triggers use the scheduler only in
+the processes that use them; other processes are compiled as before. Named events are not saved in
+state files: saving is refused while a process waits for an event or a trigger
+of the current time step is still visible to `triggered`.
+
+### Semaphores {#semaphores}
+
+`semaphore` and `std::semaphore` are the built-in class of IEEE 1800-2023
+15.3: `new(keyCount = 0)` creates one with that many keys, which may be
+negative. `put(n = 1)` returns keys, `get(n = 1)` takes them, blocking until
+enough are available, and `try_get(n = 1)` takes them only if enough are
+available, returning 1, and returns 0 otherwise. A `get` takes available keys
+at once; the processes that wait obtain keys in arrival order, so a later
+small request waits behind an earlier large one (15.3.3). A negative key
+count is a run-time error. `get` is a task: functions cannot call it. A
+process killed or disabled while it waits stops waiting, and the processes
+behind it may get keys. A semaphore is a heap object, so collection reclaims
+it once no handle reaches it; like other objects, it keeps a portable state
+file from being saved while a variable holds it.
+
+### Mailboxes {#mailboxes}
+
+`mailbox #(T)` and `std::mailbox #(T)` are the parameterized mailboxes of
+IEEE 1800-2023 15.4. `T` may be an integral type up to 64 bits, two- or
+four-state, a `string`, or a class, `mailbox`, `semaphore`, `process` or
+`event` handle. `new(bound = 0)` creates an unbounded mailbox, or one that
+holds at most `bound` messages. `put` blocks while a bounded mailbox is
+full, `get` and `peek` block while it is empty, and `try_put`, `try_get`
+and `try_peek` return 0 instead of blocking and a positive value when they
+succeed. Messages come out in the order they were put; a message unblocks
+every waiting `peek` and the first waiting `get`, and waiting processes are
+served in arrival order. A waiting process is served when the message or the
+room it waits for arrives, whenever it then runs: the message is its own,
+and it is gone if the process ends before it runs. `get`, `peek`, `try_get`
+and `try_peek` assign the message, as a value of the message type, to a
+variable or a class property. `num` returns the number of messages. A
+message keeps a handle it holds alive. A negative bound is a run-time error.
+`put`, `get` and `peek` are tasks: functions cannot call them. Typeless
+mailboxes (`mailbox` without a type parameter) are not supported. A mailbox
+is a heap object, so collection reclaims it once no handle reaches it; like
+other objects, it keeps a portable state file from being saved while a
+variable holds it.
+
 ### Variable lifetimes
 
 Variable lifetimes follow IEEE 1800-2023 6.21. Outside classes, a variable
@@ -921,6 +1095,15 @@ stateful function require `Simulation` or a native testbench to execute the
 initialization process. Constant function calls use
 fresh values and do not affect runtime storage (13.4.3).
 
+Static task locals, and the explicit `static` locals of automatic tasks and
+class methods, keep their values between calls in the same way (13.3.1). They
+are one variable for every call, also for calls that overlap in time because
+one is suspended at a delay or a wait: nonblocking assignments, event controls
+and `wait` conditions on such a local, and the forked children of the task,
+all use that variable. A module task has one per module instance, a package
+task one for the design, and a class method one per specialization. Locals of
+a task that cannot suspend whose value on entry is never read stay temporaries.
+
 A static local of a process may have a run-time initializer. It runs once,
 in declaration order, before any procedure starts (IEEE 1800-2023 6.8), and
 may read module variables and other static locals but no automatic variable.
@@ -934,8 +1117,14 @@ run-time initializer in a procedure that runs once, such as `initial`. In an
 because its author likely meant it to run on every entry; declare the local
 `static` or `automatic` to state which.
 
-Task locals that keep their values and nonconstant initializers of static
-function locals remain unsupported; declare those locals `automatic`. Package
+A static local of a function, task or class method may have a run-time
+initializer too, such as `static uvm_tree_printer printer = new();`. It runs
+once before any procedure starts, also when no call is ever made, and may read
+module or package variables and other static locals, but no formal or
+automatic local. Package variables and static class properties may likewise be
+initialized with constructor or function calls; IEEE 1800-2023 6.8 and 10.5
+only require those initializers to run before every procedure, so a design
+should not rely on their order across packages and modules. Package
 function state is a
 package variable, which the processes of every instance may write.
 An interface whose default lifetime (`interface automatic`) differs from that of the
@@ -950,6 +1139,33 @@ progress reports a runtime error naming its loop variable.
 ### Unbounded parameters
 
 `$isunbounded(P)` returns a one-bit unsigned result: 1 for a value parameter assigned `$`, otherwise 0. The symbolic value survives parameter aliases and instance overrides (IEEE 1800-2023 6.20.7, 20.6.3).
+
+### Type names {#type-names}
+
+`$typename` returns, as a `string`, what IEEE 1800-2023 20.6.1 defines for a
+data type (also `p::t`, `C::T` and a typedef with packed dimensions such as
+`t [3:0]`) or for a variable, generate-local variable (`g.v`), function local,
+port or class property named by its argument,
+as a constant wherever elaboration needs one (a parameter, a generate
+condition). Typedefs are resolved, a signing equal to the default is not
+written, ranges are decimal `[left:right]` numbers and `$` stands for the name
+of an unpacked array, so `logic [W-1:0] m [4]` is `logic[3:0]$[0:3]`. The
+integer types with predefined widths keep their keyword (`int`,
+`integer unsigned`), `reg` is `logic` and `realtime` is `real`. Dynamic arrays,
+queues and associative arrays are `int$[]`, `int$[$:5]` and `int$[string]`.
+An enumeration is written with its constants and values and a struct or packed
+union with its members, followed by its typedef name prefixed with its package
+or module: `enum logic[1:0]{R=2'd0,G=2'd2}p::color_t`,
+`struct packed{bit a;bit b;}top.ab_t`, `struct{bit A;bit B;}top.AB_t`. A class is named by its package or
+module, with the parameter values of a parameterized class:
+`p::resource#(int)`; a parameterized class named alone is its default
+specialization. Types without one exact spelling are rejected:
+anonymous enumerations, structs and unions (whose names the standard leaves to
+the implementation), soft and tagged unions, unpacked structures with unpacked array members, packed arrays of enumerations or
+of signed typedefs, classes with non-integral value parameters, and operands
+other than names and data types, such as `$typename(a + b)`. Simulators
+differ in this spelling; Verilator, Icarus and xezim each deviate from 20.6.1
+(see the [suite limitations](https://github.com/celox-sim/celox/blob/master/crates/celox-test-suite/LIMITATIONS.md)).
 
 ### System functions called as statements
 
@@ -1196,16 +1412,30 @@ is available, with the same field widths, X/Z digits and `%t` scaling.
 `$sformatf` can appear in any expression of a procedural statement, including
 function results, arguments, concatenations and conditional operands. The format
 can be a string literal or, evaluated when the call runs, a `string` or integral
-value. The output of `$sformat` and `$swrite` must be a `string` variable or
-class property; integral outputs are unsupported.
+value. The output of `$sformat` and `$swrite` is a `string` or integral
+variable or class property. An integral output takes the text as a string
+literal assigned to it (5.9): right-justified with zeros on the left, and a
+text longer than the output keeps its rightmost characters. An unpacked array
+of `byte` is not supported as the output.
 
 `%p` of a literal format, in these functions and in `$display`, `$write`,
 the file output and the severity tasks, prints an integral value as `%0d`
 does, a real as an unformatted real, a string or string literal in quotes, a
 class handle as `null` or `@` and its handle, and a queue, dynamic array or
 associative array of such elements as an assignment pattern, `'{1, 2}` or
-`'{"key":1}` (IEEE 1800-2023 21.2.1.6). `%p` of enums, structures, unpacked
-arrays and containers of them is rejected. A `%p` of a format read at run time
+`'{"key":1}` (IEEE 1800-2023 21.2.1.6). An unpacked structure variable,
+member or class property prints as an assignment pattern with named members,
+`'{name:"a", n:1}`, nested for structure members, and so does each element of
+a queue, dynamic array or associative array of unpacked structures,
+`'{1:'{name:"a", n:1}}`, in a procedural body. An enum value prints as the
+name of its member, or as its base type does for a value that is no member,
+and so do enum members of these structures, elements of a queue, dynamic
+array or associative array of enums and enum indices of an associative
+array, `'{A:4, B:7}`, in a procedural body. `%p` of an enum value returned
+by a function call or popped from a queue, packed structures, packed arrays
+of enums, fixed-size unpacked arrays, structures with real members, other
+structure values (such as function results) and containers of other
+aggregates is rejected. A `%p` of a format read at run time
 prints a string in quotes and any other value as `%0d`.
 
 Each call with conversions is a host request of a timed `Simulation`, like the
@@ -1461,11 +1691,32 @@ first release supports this subset:
   argument types, with up to 16 `input` arguments. Imports linked to one C
   name must declare the same prototype.
 - Argument and result types `bit`, `logic` (passed as `svBit` / `svLogic`),
-  `byte`, `shortint`, `int` and `longint`, signed or `unsigned`.
+  `byte`, `shortint`, `int` and `longint`, signed or `unsigned`, and
+  `chandle` (passed as a C pointer).
 
 Imports at compilation-unit scope, `output` and `inout` arguments, `context`
-imports, task imports, exports, packed vector arguments (`svBitVecVal` /
-`svLogicVecVal`), `integer`, `real`, `chandle` and `string` are rejected.
+imports, task imports, packed vector arguments (`svBitVecVal` /
+`svLogicVecVal`), `integer`, `real` and `string` are rejected.
+
+`export "DPI-C"` declarations of functions and tasks defined in the same
+module or package are accepted and checked: the subroutine is exported once,
+C names are unique, and it takes no `ref` formals or class handles (35.7). An
+export does not change the subroutine (35.7), and only `context` imports may
+call exported subroutines (35.5.3), so no C code calls them.
+
+The functions of UVM's C library (UVM `src/dpi`) are provided by Celox, so UVM
+runs without `UVM_NO_DPI` or a C library, and without the `sv-dpi` feature: an
+import with one of their C names and UVM's prototype binds to Celox's version
+instead of a C function, and a user implementation under that name is not
+called. `uvm_re_comp`, `uvm_re_exec`, `uvm_re_free`, `uvm_re_compexec`,
+`uvm_re_compexecfree`, `uvm_re_buffer` and `uvm_re_deglobbed` behave like UVM's
+`uvm_regex.cc`, except that expressions are compiled with the Rust `regex`
+crate, whose syntax differs from POSIX extended regular expressions in some rare
+constructs, and
+`uvm_dpi_get_next_arg_c` returns `celox` followed by the plusargs, with
+`uvm_dpi_get_tool_name_c` returning `Celox`. The `uvm_hdl_*` and
+`uvm_polling_*` functions are not provided yet: they return 0 or `null` and
+leave their outputs unchanged, so UVM reports the facility as unavailable.
 
 ## SystemVerilog emitted by Veryl {#systemverilog-emitted-by-veryl}
 

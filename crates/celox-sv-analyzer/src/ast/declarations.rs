@@ -4,6 +4,7 @@ use super::*;
 
 pub(super) fn ports_from_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     selected: Option<&port_owners::Selection<'_>>,
@@ -30,11 +31,26 @@ pub(super) fn ports_from_scope(
                     celox_sv_syntax::DataTypeKind::Implicit
                 )
             });
-        let base = match type_binding::port_type(native, syntax_tree, const_env, type_aliases)? {
-            Some(ty) => ty,
-            None if native.data_type.is_none() => inherited_type.clone(),
-            None => return Err(unsupported("unsupported port data type")),
-        };
+        let base =
+            match type_binding::port_type(native, syntax_tree, session, const_env, type_aliases)? {
+                Some(ty) => ty,
+                None if native.data_type.is_none() => inherited_type.clone(),
+                None => return Err(unsupported("unsupported port data type")),
+            };
+        if !type_binding::declared_port_range_matches(
+            native,
+            &base,
+            syntax_tree,
+            session,
+            const_env,
+            type_aliases,
+        )? {
+            return Err(AnalyzerError::Parse(format!(
+                "the ranges of a non-ANSI port declaration and its net or variable \
+                 declaration of `{}` differ",
+                native_port_name(native)?
+            )));
+        }
         inherited_direction = direction;
         inherited_type = base.clone();
         let ty = type_with_unpacked_ranges(
@@ -42,12 +58,34 @@ pub(super) fn ports_from_scope(
             constant_binding::unpacked_ranges(
                 &native.dimensions,
                 syntax_tree,
+                session,
                 const_env,
                 type_aliases,
             )?,
-        );
+        )?;
         if ty.container.is_some() {
             return Err(unsupported("dynamic container port"));
+        }
+        if ty.kind() == TypeKind::Event {
+            return Err(unsupported("event port"));
+        }
+        if ty.unpacked_struct().is_some() {
+            if ty.unpacked_struct().is_some_and(|aggregate| {
+                aggregate.leaves().iter().any(|leaf| leaf.default.is_some())
+            }) {
+                return Err(unsupported(
+                    "unpacked structure member initial values on a port",
+                ));
+            }
+            if !ty.unpacked_ranges.is_empty() {
+                return Err(unsupported("array of unpacked structures on a port"));
+            }
+            if !matches!(direction, PortDirection::Input | PortDirection::Output) {
+                return Err(unsupported("unpacked structure inout or ref port"));
+            }
+            if native.default.is_some() {
+                return Err(unsupported("unpacked structure port default"));
+            }
         }
         let default = native
             .default
@@ -65,20 +103,23 @@ pub(super) fn ports_from_scope(
                         syntax_tree.declarations(),
                         &LValue::Ident(name),
                         syntax_tree,
+                        session,
                         &dimensions,
                     )?;
                     let value = fold_const_integral_expr_preserving_mask(
-                        &syntax_tree.state,
+                        syntax_tree,
+                        session,
                         expression,
                         const_env,
                     );
-                    return expr_to_const(&syntax_tree.state, value)
+                    return expr_to_const(session, value)
                         .ok_or_else(|| unsupported("nonconstant unpacked input port default"));
                 }
                 constant_binding::expression(
                     value,
                     syntax_tree.declarations(),
                     syntax_tree,
+                    session,
                     const_env,
                     type_aliases,
                 )?
@@ -174,13 +215,15 @@ pub(super) fn module_interface_from_scope(
 
 pub(super) fn parameters_from_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     type_aliases: &HashMap<String, Type>,
     base_const_env: &HashMap<String, i128>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<Vec<Parameter>, AnalyzerError> {
     let mut parameters = Vec::new();
     let mut environment = parameters::ParameterEnvironment::new(
-        &syntax_tree.state,
+        syntax_tree,
+        session,
         &parameters,
         base_const_env,
         &parameters::ownership::scope_names(syntax_tree)?,
@@ -215,6 +258,7 @@ pub(super) fn parameters_from_scope(
             parameters::parameters_from_native_with_environment(
                 values,
                 syntax_tree,
+                session,
                 &mut parameters,
                 values[0].local,
                 base_const_env,
@@ -244,6 +288,7 @@ pub(super) fn parameters_from_scope(
         parameters::parameters_from_native_with_environment(
             &values,
             syntax_tree,
+            session,
             &mut parameters,
             local,
             base_const_env,
@@ -258,32 +303,35 @@ pub(super) fn parameters_from_scope(
 
 pub(super) fn signals_from_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
 ) -> Result<Vec<Signal>, AnalyzerError> {
-    signals_from_scope_with_declaration_ranges(syntax_tree, const_env, type_aliases, false)
+    signals_from_scope_with_declaration_ranges(syntax_tree, session, const_env, type_aliases, false)
 }
 
 pub(super) fn signals_from_scope_with_declaration_ranges(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     preserve_parameters: bool,
 ) -> Result<Vec<Signal>, AnalyzerError> {
     let mut signals = Vec::new();
-    for mut item in generate::items(syntax_tree, const_env, type_aliases)? {
-        let _interface_scope = item.interface_scope();
+    for mut item in generate::items(syntax_tree, session, const_env, type_aliases)? {
+        let syntax_tree = &item.scoped(syntax_tree);
         if preserve_parameters {
             let names = item.env.keys().cloned().collect::<Vec<_>>();
             for name in names {
                 item.env.remove(&local_parameter_marker(&name));
             }
         }
-        let _constant_functions = item.enter();
+        let syntax_tree = &item.enter(syntax_tree);
         let start = signals.len();
         signals_from_body_item(
             item.id,
             syntax_tree,
+            session,
             &item.type_aliases(type_aliases),
             &item.env,
             None,
@@ -309,6 +357,7 @@ pub(super) fn signals_from_scope_with_declaration_ranges(
 pub(super) fn signals_from_body_item(
     id: celox_sv_syntax::BodyItemId,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     aliases: &HashMap<String, Type>,
     env: &HashMap<String, i128>,
     selected_name: Option<&str>,
@@ -345,9 +394,9 @@ pub(super) fn signals_from_body_item(
                         celox_sv_syntax::DataTypeKind::Named(_)
                     )
                 {
-                    type_binding::alias_signals(value, tree, env, aliases, selected_name)?
+                    type_binding::alias_signals(value, tree, session, env, aliases, selected_name)?
                 } else {
-                    type_binding::local_signals(value, tree, env, aliases, selected_name)?
+                    type_binding::local_signals(value, tree, session, env, aliases, selected_name)?
                 }
             }
             DataDeclaration::Unconverted(_) => {
@@ -359,6 +408,7 @@ pub(super) fn signals_from_body_item(
         BodyItemKind::Net(id) => type_binding::net_signals(
             tree.declarations().net_declaration(id),
             tree,
+            session,
             env,
             aliases,
             selected_name,
@@ -379,15 +429,16 @@ pub(super) fn signals_from_body_item(
                         constant_binding::bind_unpacked_ranges(
                             &variable.dimensions,
                             tree,
+                            session,
                             &context,
                         )?,
-                    );
+                    )?;
                     values.push(Signal::new(name, ty));
                 }
             }
             values
         }
-        BodyItemKind::Unconverted { .. } => classes::item_statics(id, tree, env, aliases)
+        BodyItemKind::Unconverted { .. } => classes::item_statics(id, tree, session, env, aliases)
             .into_iter()
             .filter(|property| selected_name.is_none_or(|selected| selected == property.variable))
             .map(|property| Signal::new(property.variable, property.r#type))

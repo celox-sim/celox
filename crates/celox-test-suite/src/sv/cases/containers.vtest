@@ -1087,3 +1087,453 @@ endmodule
   (top Top)
   (run_until 6000)
   (expect_output "3000 [2999] 2999\n"))
+(case compound_element_assignments
+  (source "top.sv" #"
+module Top(output int sum);
+    class C;
+        int unsigned m[C];
+        int q[$];
+    endclass
+    int m[string];
+    byte unsigned b[];
+    int q[$];
+    C c;
+    initial begin
+        c = new();
+        c.m[c] = 1;
+        c.m[c] += 5;
+        c.m[c] -= 2;
+        m["a"] = 6;
+        m["a"] *= 7;
+        m["a"] >>= 1;
+        m["a"] |= 'h100;
+        b = new[2];
+        b[1] = 250;
+        b[1] += 10;
+        q.push_back(5);
+        q.push_back(9);
+        q[$] += 1;
+        q[0] <<= 2;
+        c.q.push_back(2);
+        c.q[0] ^= 3;
+        sum = c.m[c] + 10 * m["a"] + 10000 * b[1] + 100000 * q[0] + 10000000 * q[1]
+            + 1000000000 * c.q[0];
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 1102042774))
+(case string_indices_from_calls
+  (source "package.sv" #"
+package p;
+    class Obj;
+        string nm;
+        function new(string n);
+            nm = n;
+        endfunction
+        virtual function string get_type_name();
+            return {"T_", nm};
+        endfunction
+        static function string kind();
+            return "k";
+        endfunction
+    endclass
+    function string pre();
+        return "p";
+    endfunction
+endpackage
+"#)
+  (source "top.sv" #"
+module Top(output int sum);
+    import p::*;
+    int counts[string];
+    initial begin
+        automatic Obj obj = new("a");
+        counts[obj.get_type_name()] = 3;
+        counts[Obj::kind()] = 2;
+        counts[pre()] = 7;
+        if (counts.exists(obj.get_type_name()))
+            counts[obj.get_type_name()] = counts[obj.get_type_name()] + 1;
+        sum = counts["T_a"] + 10 * counts["k"] + 100 * counts["p"] + 1000 * counts.num();
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 3724))
+(case array_items_in_concatenations
+  (source "top.sv" #"
+module Top(output int sum, output int text);
+    class O;
+        int id;
+        function new(int i);
+            id = i;
+        endfunction
+    endclass
+    class F;
+        O a[$], b[$];
+        function int run();
+            O all[$], o;
+            o = new(1);
+            a.push_back(o);
+            o = new(2);
+            a.push_back(o);
+            o = new(3);
+            b.push_back(o);
+            all = {a, b};
+            return all.size() * 100 + all[0].id * 10 + all[2].id;
+        endfunction
+    endclass
+    int q[$], r[$], d[], t[$];
+    string s[$], u[$];
+    initial begin
+        automatic F f = new();
+        q = {1, 2};
+        r = {3};
+        d = {q, 9, r};
+        t = {r, q, r};
+        s = {"x"};
+        u = {s, "y", s};
+        sum = f.run() + 1000 * d.size() + 10000 * d[2] + 100000 * d[3] + 1000000 * t.size()
+            + 10000000 * t[1];
+        text = (u.size() == 3 && u[0] == "x" && u[1] == "y" && u[2] == "x") ? 1 : 0;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq sum 14394313) (assert_eq text 1))
+
+; IEEE 1800-2023 7.8.4: an integral index of any width is cast to the index
+; type and orders numerically, signed or unsigned per the index type; 7.9
+; methods traverse the indices in that order.
+(case wide_associative_keys
+  (source "wide_associative_keys.sv" #"
+module Top(output bit done);
+    typedef struct packed { bit [31:0] hi; bit [63:0] mid; bit [63:0] lo; } range_t;
+    int u[bit [64:0]];
+    int c[bit [64:0]];
+    string m[range_t];
+    bit [64:0] uk;
+    range_t r;
+    initial begin
+        u[65'h1_0000_0000_0000_0000] = 3;
+        u[65'd5] = 1;
+        u[65'h1_ffff_ffff_ffff_ffff] = 4;
+        u[65'h0_ffff_ffff_ffff_ffff] = 2;
+        $display("u %0d %0d %0d %0d", u.num(), u.size(), u.exists(65'd5), u.exists(65'd6));
+        foreach (u[k]) $display("each %h %0d", k, u[k]);
+        if (u.first(uk)) do $display("next %h", uk); while (u.next(uk));
+        if (u.last(uk)) do $display("prev %h", uk); while (u.prev(uk));
+        c = u;
+        c.delete(65'd5);
+        u[65'd5] = 10;
+        $display("copy %0d %0d %0d %0d", c.num(), c.exists(65'd5), u[65'd5], c[65'h1_ffff_ffff_ffff_ffff]);
+        r = '{hi: 32'h1, mid: 64'h0, lo: 64'h2};
+        m[r] = "b";
+        r.hi = 0;
+        m[r] = "a";
+        r = '{hi: 32'hffff_ffff, mid: 64'h0, lo: 64'hffff_ffff_ffff_ffff};
+        m[r] = "c";
+        foreach (m[k]) $display("struct %h %h %s", k, k.hi, m[k]);
+        void'(m.first(r));
+        $display("first %h %h %s", r.hi, r.lo, m[r]);
+        void'(m.next(r));
+        $display("next %h %h %s", r.hi, r.lo, m[r]);
+        m.delete(r);
+        $display("deleted %0d %0d", m.num(), m.exists(r));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "u 4 4 1 0\neach 00000000000000005 1\neach 0ffffffffffffffff 2\neach 10000000000000000 3\neach 1ffffffffffffffff 4\nnext 00000000000000005\nnext 0ffffffffffffffff\nnext 10000000000000000\nnext 1ffffffffffffffff\nprev 1ffffffffffffffff\nprev 10000000000000000\nprev 0ffffffffffffffff\nprev 00000000000000005\ncopy 3 0 10 4\nstruct 0000000000000000000000000000000000000002 00000000 a\nstruct 0000000100000000000000000000000000000002 00000001 b\nstruct ffffffff0000000000000000ffffffffffffffff ffffffff c\nfirst 00000000 0000000000000002 a\nnext 00000001 0000000000000002 b\ndeleted 2 0\n"))
+
+(case wide_signed_associative_keys
+  (source "wide_signed_associative_keys.sv" #"
+module Top(output bit done);
+    typedef bit signed [127:0] s128_t;
+    int s[s128_t];
+    s128_t sk;
+    initial begin
+        s[-128'sd1] = 1;
+        s[128'sd1 <<< 100] = 3;
+        s[-(128'sd1 <<< 120)] = 0;
+        s[0] = 2;
+        foreach (s[k]) $display("signed %0d %0d", k, s[k]);
+        void'(s.first(sk));
+        $display("first %0d", sk);
+        void'(s.last(sk));
+        $display("last %0d", sk);
+        sk = 0;
+        void'(s.prev(sk));
+        $display("before zero %0d", sk);
+        sk = -128'sd1;
+        void'(s.next(sk));
+        $display("after minus one %0d", sk);
+        s.delete();
+        $display("cleared %0d %0d", s.num(), s.first(sk));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "signed -1329227995784915872903807060280344576 0\nsigned -1 1\nsigned 0 2\nsigned 1267650600228229401496703205376 3\nfirst -1329227995784915872903807060280344576\nlast 1267650600228229401496703205376\nbefore zero -1\nafter minus one 0\ncleared 0 0\n"))
+
+; IEEE 1800-2023 7.8.4: a wide index with unknown bits is invalid, so no
+; element exists for it.
+(case wide_associative_keys_with_unknown_bits
+  (four_state)
+  (source "wide_associative_unknown_keys.sv" #"
+module Top(output bit done);
+    int m[logic [99:0]];
+    logic [99:0] k;
+    initial begin
+        m[100'h1_0000_0000_0000_0000_0000_0001] = 7;
+        k = 100'h1_0000_0000_0000_0000_0000_0001;
+        $display("%0d %0d", m.exists(k), m[k]);
+        k[50] = 1'bx;
+        $display("%0d %0d", m.exists(k), m.num());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 7\n0 1\n"))
+
+(case queue_slice_runtime_bounds
+  (source "queue_slice_bounds.sv" #"
+    module Top(input logic clk, input int lo, hi,
+               output int count, first, last);
+      int q[$:5];
+      int r[$];
+      always @(posedge clk) begin
+        q = {0,1,2,3,4,5};
+        r = q[lo:hi];
+        count = r.size();
+        first = count ? r[0] : 0;
+        last = count ? r[$] : 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for lo (list -2 0 2 5 6 9)
+    (for hi (list -2 0 2 5 6 9)
+      (modify (set lo (trunc 32 lo)) (set hi (trunc 32 hi)))
+      (tick clk)
+      (let count (max 0 (+ 1 (- (min hi 5) (max lo 0)))))
+      (assert_eq count count)
+      (assert_eq first (? (> count 0) (max lo 0) 0))
+      (assert_eq last (? (> count 0) (min hi 5) 0)))))
+
+(case queue_slice_updates_and_copies
+  (source "queue_slice_updates.sv" #"
+    module Top(output int size, middle, original, evaluations, copied,
+               output logic strings_ok);
+      int q[$], r[$];
+      string words[$], tail[$];
+      int lo, hi;
+      initial begin
+        q = {1,2,3,4};
+        lo=1; hi=2;
+        r = q[lo++:hi++];
+        evaluations = lo*10+hi;
+        r[0] = 99;
+        original = q[1];
+        copied = r[1];
+        q = {q[0:1],10,q[2:$]};
+        q = q[1:$];
+        q = q[0:$-1];
+        size=q.size(); middle=q[1];
+        words={"first","second","third"};
+        tail=words[1:$];
+        words[1]="changed";
+        strings_ok = tail.size()==2 && tail[0]=="second" && tail[1]=="third";
+        r={};
+        r=r[0:$];
+        if(r.size()!=0) size=999;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 0)
+  (assert_eq size 3)
+  (assert_eq middle 10)
+  (assert_eq original 2)
+  (assert_eq copied 3)
+  (assert_eq evaluations 23)
+  (assert_eq strings_ok 1))
+
+(case queue_slice_wide_and_unknown_bounds
+  (four_state)
+  (source "queue_slice_wide_bounds.sv" #"
+    module Top(input logic clk, signed_mode,
+               input logic [95:0] lo, hi,
+               input logic signed [95:0] signed_lo,
+               output int count, output logic [7:0] first, last);
+      logic [7:0] q[$], r[$];
+      always @(posedge clk) begin
+        q={8'h11,8'hxx,8'hzz};
+        if(signed_mode) r=q[signed_lo:hi];
+        else r=q[lo:hi];
+        count=r.size();
+        first=count ? r[0] : 0;
+        last=count ? r[$] : 0;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (modify (set lo 0) (set hi 2))
+  (tick clk)
+  (assert_eq count 3)
+  (assert_eq first 0x11)
+  (assert_eq last (fourstate 0 0xff))
+  (modify (set lo 1) (set hi 1))
+  (tick clk)
+  (assert_eq count 1)
+  (assert_eq first (fourstate 0xff 0xff))
+  (modify (set lo (<< 1 80)) (set hi (<< 1 90)))
+  (tick clk)
+  (assert_eq count 0)
+  (modify (set lo 0))
+  (tick clk)
+  (assert_eq count 3)
+  (modify (set lo (fourstate 0 (<< 1 80))) (set hi 2))
+  (tick clk)
+  (assert_eq count 0)
+  (modify (set lo 0) (set hi (fourstate 0 (<< 1 80))))
+  (tick clk)
+  (assert_eq count 0)
+  (modify (set signed_mode 1) (set signed_lo (- (<< 1 96) 1)) (set hi 1))
+  (tick clk)
+  (assert_eq count 2)
+  (assert_eq first 0x11)
+  (assert_eq last (fourstate 0xff 0xff)))
+
+; IEEE 1800-2023 26.3: a package variable named by its package scope, `p::q`,
+; is a container receiver like any other variable (7.10.2), in a statement
+; or an expression, also in a class or another package.
+(case package_scoped_container_methods
+  (source "package_scoped_containers.sv" #"
+package p;
+    int q[$];
+    class C;
+        function void add(int v); p::q.push_back(v); endfunction
+    endclass
+endpackage
+package r;
+    function automatic int take();
+        p::q.push_front(9);
+        return p::q.pop_back();
+    endfunction
+endpackage
+module Top(output bit done);
+    p::C c;
+    int sum;
+    initial begin
+        c = new();
+        c.add(1);
+        c.add(2);
+        p::q.insert(1, 5);
+        $display("q %0d %0d %0d %0d", p::q.size(), p::q[0], p::q[1], p::q[2]);
+        $display("take %0d", r::take());
+        foreach (p::q[i]) sum += p::q[i];
+        $display("sum %0d", sum);
+        void'(p::q.pop_front());
+        $display("rest %0d %0d", p::q.size(), p::q[0]);
+        p::q.delete();
+        $display("empty %0d", p::q.size());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "q 3 1 5 2\ntake 2\nsum 15\nrest 2 1\nempty 0\n"))
+
+; IEEE 1800-2023 12.7.3: each loop variable of a foreach over a container of
+; containers iterates one dimension, the first the outermost, in that
+; dimension's order: an associative array in index order, an empty inner
+; container not at all.
+(case nested_container_foreach
+  (source "nested_container_foreach.sv" #"
+module Top(output bit done);
+    typedef int iq_t[$];
+    iq_t all[int];
+    int d[$][];
+    string s[string][$];
+    int sum;
+    initial begin
+        all[3].push_back(30);
+        all[3].push_back(31);
+        all[1].push_back(10);
+        all[7] = {};
+        foreach (all[k, j]) $display("all %0d %0d %0d", k, j, all[k][j]);
+        foreach (all[k]) $display("outer %0d %0d", k, all[k].size());
+        d.push_back('{1, 2});
+        d.push_back('{});
+        d.push_back('{3});
+        foreach (d[i, j]) begin
+            sum += d[i][j];
+            $display("d %0d %0d %0d", i, j, d[i][j]);
+        end
+        s["b"].push_back("x");
+        s["a"].push_back("y");
+        s["a"].push_back("z");
+        foreach (s[k, i]) $display("s %s %0d %s", k, i, s[k][i]);
+        $display("sum %0d", sum);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "all 1 0 10\nall 3 0 30\nall 3 1 31\nouter 1 1\nouter 3 2\nouter 7 0\nd 0 0 1\nd 0 1 2\nd 2 0 3\ns a 0 y\ns a 1 z\ns b 0 x\nsum 6\n"))
+
+; IEEE 1800-2023 12.7.3: a skipped loop variable still iterates its dimension.
+(case nested_container_foreach_skipped_index
+  (source "nested_container_foreach_skipped.sv" #"
+module Top(output bit done);
+    typedef int iq_t[$];
+    iq_t all[int];
+    int n;
+    initial begin
+        all[3].push_back(30);
+        all[3].push_back(31);
+        all[1].push_back(10);
+        foreach (all[, j]) begin
+            n++;
+            $display("inner %0d", j);
+        end
+        $display("n %0d", n);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "inner 0\ninner 0\ninner 1\nn 3\n"))
+
+; IEEE 1800-2023 12.8: a break in a foreach with several loop variables
+; leaves the whole foreach, and a continue goes on with the next index of the
+; innermost one, over containers and fixed-size arrays alike.
+(case multidimensional_foreach_break
+  (source "multidimensional_foreach_break.sv" #"
+module Top(output bit done);
+    int q[$][$];
+    int a[2][3];
+    int n, m, c;
+    initial begin
+        q.push_back('{1, 2});
+        q.push_back('{3});
+        foreach (q[i, j]) begin
+            n++;
+            if (q[i][j] == 2) break;
+        end
+        foreach (a[i, j]) begin
+            m++;
+            if (j == 1) break;
+        end
+        foreach (q[i, j]) begin
+            if (j == 0) continue;
+            c++;
+        end
+        $display("%0d %0d %0d", n, m, c);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "2 2 1\n"))

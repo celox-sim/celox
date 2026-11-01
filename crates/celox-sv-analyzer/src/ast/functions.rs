@@ -6,14 +6,16 @@ mod symbolic;
 
 pub(super) fn functions_from_scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     dimensions: &PackedDimensions,
 ) -> Converted<HashMap<String, Function>> {
-    let aliases = type_aliases_from_scope_with_env(tree, env)?;
-    let items = generate::items(tree, env, &aliases)?;
+    let aliases = type_aliases_from_scope_with_env(tree, session, env)?;
+    let items = generate::items(tree, session, env, &aliases)?;
     native_functions(
         &items,
         tree,
+        session,
         dimensions,
         lifetimes::automatic_by_default(tree),
     )
@@ -22,6 +24,7 @@ pub(super) fn functions_from_scope(
 pub(super) fn native_functions(
     items: &[generate::Item],
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     automatic: bool,
 ) -> Converted<HashMap<String, Function>> {
@@ -58,14 +61,18 @@ pub(super) fn native_functions(
     let names = Arc::new(names);
     let mut functions = HashMap::default();
     for (item, id) in owners {
-        let aliases = item.type_aliases(&dimensions.type_aliases);
-        let _scope = item.interface_scope();
-        let _constants = item.enter();
+        let aliases = item.shared_type_aliases(&dimensions.type_aliases);
+        let tree = &item.scoped(tree);
+        let tree = &item.enter(tree);
         let mut signature_context = item.dimensions(dimensions);
         signature_context.const_env = item.env.clone();
-        signature_context.type_aliases = aliases.as_ref().clone().into();
-        let mut function =
-            native_signature(tree.declarations().subroutine(id), tree, &signature_context)?;
+        signature_context.type_aliases = aliases.clone();
+        let mut function = native_signature(
+            tree.declarations().subroutine(id),
+            tree,
+            session,
+            &signature_context,
+        )?;
         let mut locals = Vec::new();
         let mut counter = 0;
         let mut state = procedural::BodyState {
@@ -84,6 +91,7 @@ pub(super) fn native_functions(
         match procedural::lower_subroutine(
             id,
             tree,
+            session,
             &item.env,
             &aliases,
             &dims,
@@ -174,6 +182,7 @@ pub(super) fn case_item_condition(case_expr: Expr, item_expr: Expr, wildcard: bo
 fn native_signature(
     native: &celox_sv_syntax::Subroutine,
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     context: &PackedDimensions,
 ) -> Converted<Function> {
     let mut params = Vec::new();
@@ -196,14 +205,14 @@ fn native_signature(
         let ty = if port.direction.is_none() && omitted {
             previous
                 .clone()
-                .or(type_binding::bind(port.data_type, tree, context)?)
+                .or(type_binding::bind(port.data_type, tree, session, context)?)
         } else {
-            type_binding::bind(port.data_type, tree, context)?
+            type_binding::bind(port.data_type, tree, session, context)?
         };
         previous = ty.clone();
         let expr_type = ty
             .as_ref()
-            .and_then(|ty| expr_type_from_type(&tree.state, ty, &context.const_env));
+            .and_then(|ty| expr_type_from_type(&tree.functions, ty, &context.const_env));
         params.push(FunctionParam {
             name: instances::normalize_identifier(&name.spelling),
             has_default: port.default.is_some(),
@@ -219,16 +228,16 @@ fn native_signature(
         });
     }
     let ty = match native.return_type {
-        Some(id) => type_binding::bind(id, tree, context)?,
+        Some(id) => type_binding::bind(id, tree, session, context)?,
         None => None,
     };
     let result = ty
         .as_ref()
-        .and_then(|ty| expr_type_from_type(&tree.state, ty, &context.const_env));
+        .and_then(|ty| expr_type_from_type(&tree.functions, ty, &context.const_env));
     let first = match ty.as_ref().and_then(|ty| ty.packed_ranges().first()) {
         Some(range) => (|| {
-            let left = eval_ast_const_expr(&tree.state, &range.left, &context.const_env)?;
-            let right = eval_ast_const_expr(&tree.state, &range.right, &context.const_env)?;
+            let left = eval_ast_const_expr(&tree.functions, &range.left, &context.const_env)?;
+            let right = eval_ast_const_expr(&tree.functions, &range.right, &context.const_env)?;
             usize::try_from(left.abs_diff(right).checked_add(1)?).ok()
         })(),
         None => result.map(|ty| ty.width),
@@ -239,6 +248,9 @@ fn native_signature(
             .is_some_and(|ty| matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal)),
         return_string: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::String),
         return_handle: ty.as_ref().is_some_and(|ty| ty.kind() == TypeKind::Object),
+        return_chandle: ty
+            .as_ref()
+            .is_some_and(|ty| ty.chandle && ty.unpacked_ranges.is_empty()),
         name: instances::normalize_identifier(&native.name.spelling),
         params,
         body: None,
@@ -247,7 +259,8 @@ fn native_signature(
         return_first_packed_dimension_width: first,
         return_dimensions: ty.as_ref().map(|ty| {
             ty.unpacked_ranges().len()
-                + if matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
+                // A chandle has no packed dimensions (IEEE 1800-2023 6.14).
+                + if ty.chandle || matches!(ty.kind(), TypeKind::Real | TypeKind::Shortreal) {
                     0
                 } else {
                     ty.packed_ranges().len()
@@ -259,6 +272,11 @@ fn native_signature(
             .as_ref()
             .filter(|ty| ty.unpacked_ranges.is_empty())
             .and_then(|ty| ty.enum_domain.clone()),
+        return_class: ty
+            .as_ref()
+            .filter(|ty| ty.unpacked_ranges.is_empty() && ty.container.is_none())
+            .and_then(|ty| ty.class().map(str::to_owned)),
+        return_virtual_interface: ty.as_ref().and_then(|ty| ty.virtual_interface.clone()),
         return_type: ty
             .filter(|ty| {
                 !ty.members.is_empty()
@@ -269,7 +287,7 @@ fn native_signature(
             .and_then(|ty| {
                 ty.pattern_target(&const_functions::Environment {
                     constants: &*context.const_env,
-                    functions: &tree.state.const_functions,
+                    functions: &tree.functions,
                 })
             }),
     })

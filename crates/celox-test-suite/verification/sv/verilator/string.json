@@ -80,6 +80,29 @@
     },
     {
       "category": "Types",
+      "detail": "Verilator 5.052 reads words[0][0] as the existing words[1][0] element of string words[2:1][0:0], so its comparison to the empty string is false. IEEE 1800-2023 7.4.5 requires an invalid string-array read to return the empty string. Only the invalid-index case is excluded; normal multidimensional copies, slices and character reads pass.",
+      "expectation": "Simulation",
+      "name": "string::fixed_array_invalid_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_verilator_fixed_string_array_invalid_indices",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "reason": "Verilator 5.052 reads words[0][0] as the existing words[1][0] element of string words[2:1][0:0], so its comparison to the empty string is false. IEEE 1800-2023 7.4.5 requires an invalid string-array read to return the empty string. Only the invalid-index case is excluded; normal multidimensional copies, slices and character reads pass.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/string-arrays-verilator.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "string::methods",

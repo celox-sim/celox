@@ -85,15 +85,17 @@ X/Z を扱う場合は builder に `.four_state(true)` を指定します。
 各領域には制約があります。デザインを移植する際は、
 [詳しい対応一覧](./systemverilog-reference#what-is-supported)でポート、型、文、システム関数を確認してください。
 
+`and`、`nand`、`or`、`nor`、`xor`、`xnor` は、遅延・強度指定がなく、端子が1ビットの整数式なら対応しています（IEEE 1800-2023 28.4）。名前付き・名前なし、同一宣言での複数インスタンス、generate スコープを利用できます。
+
 ## サポートしていないもの
 
 デザインの変更が必要になりやすいのは、次の機能です。
 
 - [単純なクラス](./systemverilog-reference#classes)を超えるクラスを使う検証、[単一サイクルBoolean部分集合](./systemverilog-reference#並行アサーション)を超える並行アサーション。
-- `fork` / `join`、named event、`a = #1 b` のような代入内のタイミング制御、
+- `fork` / `join`、ノンブロッキング代入内のイベント制御と定数でない遅延、
   `always_ff` のイベント制御の `iff`（[#452](https://github.com/celox-sim/celox/issues/452)）。
 - ラッチ内のノンブロッキング代入、複数ドライバ、トライステートバス。`always_comb` の暗黙のラッチ推論は 共通の `[diagnostics]` 設定で `inferred_latch = "warn"` または `"allow"` を指定して許可します。
-- 非 ANSI モジュールポート、ワイルドカード `.*` 接続、ゲートプリミティブ、`bind`。
+- 非 ANSI モジュールポート、ワイルドカード `.*` 接続、遅延・強度指定やインスタンス配列を持つゲートプリミティブ、`bind`。
 - `real`、ポート・固定長配列の unpacked 構造体、interface の一部の機能。
 
 [制約の一覧](./systemverilog-reference#what-is-not-supported)に、より細かな条件と追跡 issue をまとめています。

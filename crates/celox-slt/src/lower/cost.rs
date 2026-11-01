@@ -4,7 +4,7 @@ use super::*;
 
 impl SLTToSIRLowerer {
     pub(super) fn reset_cost_cache<A: Hash + Eq + Clone>(
-        &self,
+        &mut self,
         root: NodeId,
         arena: &SLTNodeArena<A>,
         materialized: &crate::HashMap<NodeId, RegisterId>,
@@ -19,14 +19,14 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn reset_cost_cache_roots<A: Hash + Eq + Clone>(
-        &self,
+        &mut self,
         roots: &[NodeId],
         arena: &SLTNodeArena<A>,
         materialized: &crate::HashMap<NodeId, RegisterId>,
         honor_materialized: bool,
     ) {
         let node_count = arena.len();
-        let mut cache = self.cost_cache.borrow_mut();
+        let cache = &mut self.cost_cache;
         cache.reset(node_count);
         cache.traversal_work.clear();
         cache.traversal_work.extend_from_slice(roots);
@@ -55,21 +55,21 @@ impl SLTToSIRLowerer {
                 cache.traversal_work.push(child);
             }
         }
-        self.cache_insert_log.borrow_mut().clear();
-        self.region_slice_cache.borrow_mut().clear();
-        self.region_slice_cache_insert_log.borrow_mut().clear();
+        self.cache_insert_log.clear();
+        self.region_slice_cache.clear();
+        self.region_slice_cache_insert_log.clear();
     }
 
     pub(super) fn cache_transaction(&self) -> LowerCacheTransaction {
         LowerCacheTransaction {
-            node_insertions: self.cache_insert_log.borrow().len(),
-            region_slice_insertions: self.region_slice_cache_insert_log.borrow().len(),
+            node_insertions: self.cache_insert_log.len(),
+            region_slice_insertions: self.region_slice_cache_insert_log.len(),
         }
     }
 
     #[cfg(test)]
-    pub(super) fn note_analysis_visits(&self, visits: usize) {
-        let mut cache = self.cost_cache.borrow_mut();
+    pub(super) fn note_analysis_visits(&mut self, visits: usize) {
+        let cache = &mut self.cost_cache;
         cache.analysis_node_visits = cache.analysis_node_visits.saturating_add(visits);
     }
 
@@ -79,20 +79,20 @@ impl SLTToSIRLowerer {
 
     #[cfg(test)]
     pub(super) fn analysis_node_visits(&self) -> usize {
-        self.cost_cache.borrow().analysis_node_visits
+        self.cost_cache.analysis_node_visits
     }
 
     pub(super) fn rollback_cache(
-        &self,
+        &mut self,
         cache: &mut crate::HashMap<NodeId, RegisterId>,
         transaction: LowerCacheTransaction,
     ) {
-        let mut log = self.cache_insert_log.borrow_mut();
+        let log = &mut self.cache_insert_log;
         for node in log.drain(transaction.node_insertions..) {
             cache.remove(&node);
         }
-        let mut region_log = self.region_slice_cache_insert_log.borrow_mut();
-        let mut region_cache = self.region_slice_cache.borrow_mut();
+        let region_log = &mut self.region_slice_cache_insert_log;
+        let region_cache = &mut self.region_slice_cache;
         for key in region_log.drain(transaction.region_slice_insertions..) {
             region_cache.remove(&key);
         }
@@ -101,12 +101,12 @@ impl SLTToSIRLowerer {
     /// Return the cache entries created by the most recent top-level `lower`
     /// call. A scheduler-owned control arm keeps them available to subsequent
     /// paths in that arm, then removes them before lowering the sibling arm.
-    pub(crate) fn take_scheduled_region_insertions(&self) -> Vec<NodeId> {
-        std::mem::take(&mut *self.cache_insert_log.borrow_mut())
+    pub(crate) fn take_scheduled_region_insertions(&mut self) -> Vec<NodeId> {
+        std::mem::take(&mut self.cache_insert_log)
     }
 
-    pub(super) fn prepare_cost_cache<A: Hash + Eq + Clone>(&self, arena: &SLTNodeArena<A>) {
-        let mut cache = self.cost_cache.borrow_mut();
+    pub(super) fn prepare_cost_cache<A: Hash + Eq + Clone>(&mut self, arena: &SLTNodeArena<A>) {
+        let cache = &mut self.cost_cache;
         if cache.tree_costs.len() < arena.len() {
             cache.resize(arena.len());
         }
@@ -266,12 +266,12 @@ impl SLTToSIRLowerer {
     /// sets for muxes that cannot possibly pay for a branch.  It may count a
     /// shared descendant more than once; the final decision below never does.
     pub(super) fn estimated_tree_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> u128 {
         self.prepare_cost_cache(arena);
-        if let Some(cost) = self.cost_cache.borrow().tree_costs[node.0] {
+        if let Some(cost) = self.cost_cache.tree_costs[node.0] {
             return cost;
         }
         self.note_analysis_visits(1);
@@ -279,7 +279,7 @@ impl SLTToSIRLowerer {
         for child in Self::node_children(node, arena) {
             cost = cost.saturating_add(self.estimated_tree_cost(child, arena));
         }
-        let mut cache = self.cost_cache.borrow_mut();
+        let cache = &mut self.cost_cache;
         cache.touch(node);
         cache.tree_costs[node.0] = Some(cost);
         cost
@@ -301,17 +301,17 @@ impl SLTToSIRLowerer {
     /// work for conditionally skippable work.  The memo makes all nested mux
     /// queries constant-time after one traversal of the top-level DAG.
     pub(super) fn owned_tree_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> u128 {
         self.prepare_cost_cache(arena);
-        if let Some(cost) = self.cost_cache.borrow().owned_costs[node.0] {
+        if let Some(cost) = self.cost_cache.owned_costs[node.0] {
             return cost;
         }
         self.note_analysis_visits(1);
         let excluded = {
-            let cache = self.cost_cache.borrow();
+            let cache = &self.cost_cache;
             cache.initially_materialized[node.0] || cache.fanout[node.0] > 1
         };
         let mut cost = if excluded {
@@ -324,7 +324,7 @@ impl SLTToSIRLowerer {
                 cost = cost.saturating_add(self.owned_tree_cost(child, arena));
             }
         }
-        let mut cache = self.cost_cache.borrow_mut();
+        let cache = &mut self.cost_cache;
         cache.touch(node);
         cache.owned_costs[node.0] = Some(cost);
         cost
@@ -334,17 +334,17 @@ impl SLTToSIRLowerer {
     /// may compose into its child without emitting an instruction, while every
     /// other non-materialized node emits at least its one-chunk operation.
     pub(super) fn owned_slice_lower_cost<A: Hash + Eq + Clone + std::fmt::Debug>(
-        &self,
+        &mut self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> u128 {
         self.prepare_cost_cache(arena);
-        if let Some(cost) = self.cost_cache.borrow().owned_slice_lower_costs[node.0] {
+        if let Some(cost) = self.cost_cache.owned_slice_lower_costs[node.0] {
             return cost;
         }
         self.note_analysis_visits(1);
         let excluded = {
-            let cache = self.cost_cache.borrow();
+            let cache = &self.cost_cache;
             cache.initially_materialized[node.0] || cache.fanout[node.0] > 1
         };
         let mut cost = if excluded {
@@ -368,24 +368,24 @@ impl SLTToSIRLowerer {
                 cost = cost.saturating_add(self.owned_slice_lower_cost(child, arena));
             }
         }
-        let mut cache = self.cost_cache.borrow_mut();
+        let cache = &mut self.cost_cache;
         cache.touch(node);
         cache.owned_slice_lower_costs[node.0] = Some(cost);
         cost
     }
 
     pub(super) fn contains_shared_nontrivial<A: Hash + Eq + Clone>(
-        &self,
+        &mut self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> bool {
         self.prepare_cost_cache(arena);
-        if let Some(result) = self.cost_cache.borrow().contains_shared_nontrivial[node.0] {
+        if let Some(result) = self.cost_cache.contains_shared_nontrivial[node.0] {
             return result;
         }
         self.note_analysis_visits(1);
         let (materialized, fanout) = {
-            let cache = self.cost_cache.borrow();
+            let cache = &self.cost_cache;
             (cache.initially_materialized[node.0], cache.fanout[node.0])
         };
         let result = !materialized
@@ -393,14 +393,14 @@ impl SLTToSIRLowerer {
                 || Self::node_children(node, arena)
                     .into_iter()
                     .any(|child| self.contains_shared_nontrivial(child, arena)));
-        let mut cache = self.cost_cache.borrow_mut();
+        let cache = &mut self.cost_cache;
         cache.touch(node);
         cache.contains_shared_nontrivial[node.0] = Some(result);
         result
     }
 
     fn direct_shared_candidates<A: Hash + Eq + Clone>(
-        &self,
+        &mut self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
         materialized: &crate::HashMap<NodeId, RegisterId>,
@@ -413,14 +413,14 @@ impl SLTToSIRLowerer {
             .into_iter()
             .filter(|candidate| {
                 !materialized.contains_key(candidate)
-                    && self.cost_cache.borrow().fanout[candidate.0] > 1
+                    && self.cost_cache.fanout[candidate.0] > 1
                     && Self::is_nontrivial_node(*candidate, arena)
             })
             .collect()
     }
 
     fn arm_has_only_direct_shared<A: Hash + Eq + Clone>(
-        &self,
+        &mut self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
         materialized: &crate::HashMap<NodeId, RegisterId>,
@@ -430,7 +430,7 @@ impl SLTToSIRLowerer {
             return true;
         }
         let node_is_shared =
-            self.cost_cache.borrow().fanout[node.0] > 1 && Self::is_nontrivial_node(node, arena);
+            self.cost_cache.fanout[node.0] > 1 && Self::is_nontrivial_node(node, arena);
         if node_is_shared {
             return false;
         }
@@ -448,7 +448,7 @@ impl SLTToSIRLowerer {
     /// exists, the mux remains a Select; this conservative rule preserves CSE
     /// and keeps analysis linear for long nested priority-mux chains.
     pub(super) fn shared_mux_nodes<A: Hash + Eq + Clone>(
-        &self,
+        &mut self,
         then_expr: NodeId,
         else_expr: NodeId,
         arena: &SLTNodeArena<A>,
@@ -471,12 +471,12 @@ impl SLTToSIRLowerer {
     }
 
     pub(super) fn is_speculatable_pure<A: Hash + Eq + Clone>(
-        &self,
+        &mut self,
         node: NodeId,
         arena: &SLTNodeArena<A>,
     ) -> bool {
         self.prepare_cost_cache(arena);
-        if let Some(result) = self.cost_cache.borrow().is_speculatable_pure[node.0] {
+        if let Some(result) = self.cost_cache.is_speculatable_pure[node.0] {
             return result;
         }
         self.note_analysis_visits(1);
@@ -490,7 +490,7 @@ impl SLTToSIRLowerer {
         ) && Self::node_children(node, arena)
             .into_iter()
             .all(|child| self.is_speculatable_pure(child, arena));
-        let mut cache = self.cost_cache.borrow_mut();
+        let cache = &mut self.cost_cache;
         cache.touch(node);
         cache.is_speculatable_pure[node.0] = Some(result);
         result

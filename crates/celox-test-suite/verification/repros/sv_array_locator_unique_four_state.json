@@ -1,0 +1,30 @@
+{
+  "case": "array_locators::array_locator_four_state",
+  "source": "src/sv/cases/array_locators.vtest",
+  "standard": "IEEE 1800-2023 7.12.1: unique returns one entry for each value of the with expression, and 4'b1x00 and 4'b1z00 are different 4-state values (6.3.1), so the seven elements have four unique values.",
+  "method": "The shared case runs unchanged in verify-sv-xezim; the reduced source below runs without the adapter in 4-state mode. Verilator 5.052 does not run four-state cases and Icarus 13.0 does not parse locator methods.",
+  "reduced_source": "module Top;\n    logic [3:0] q[$], r[$], m[$];\n    int i[$];\n    initial begin\n        q = '{4'b1x00, 4'd3, 4'b1x00, 4'bzzzz, 4'd3, 4'bzzzz, 4'b1z00};\n        r = q.unique;\n        i = q.unique_index;\n        $display(\"unique size=%0d index size=%0d\", r.size(), i.size());\n        m = r.find with (item === 4'b1x00);\n        $display(\"assigned find size=%0d operand size=%0d\", m.size(), r.find with (item === 4'b1x00).size());\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "status": "compile_error",
+      "stderr": "%Error-UNSUPPORTED: repro.sv:5:13: Unsupported tristate construct: CONSQUEUE\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:9: syntax error\nrepro.sv:9: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "unique size=3 index size=3\nassigned find size=1 operand size=0\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "unique size=4 index size=4\nassigned find size=1 operand size=1\n"
+    }
+  ]
+}

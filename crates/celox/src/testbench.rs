@@ -24,6 +24,7 @@ use celox_testbench::{
     format_veryl_display_arg, pad_veryl_field,
 };
 use num_bigint::BigUint;
+use num_traits::{ToPrimitive as _, Zero as _};
 use rand::{RngExt as _, SeedableRng as _};
 use rand_pcg::Pcg64;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -90,17 +91,40 @@ pub(crate) type TestbenchStatement<B> = ExecutableStatement<<B as SimBackend>::E
 
 pub(crate) type CompiledAssertArg = ExecutableArgument;
 
+/// The value of `expr` with its unknown bits read as 0, as a two-state use
+/// reads them (IEEE 1800-2023 6.11.2). A condition is true when this is
+/// nonzero: when the value has a known one bit (12.4, 16.3).
 fn eval_expr<B: SimBackend>(
     sim: &mut Simulator<B>,
     expr: &celox_testbench::CompiledExpr,
 ) -> TbValue {
-    let (value, writes) = eval_backend_expr_tracked(&mut sim.backend, expr);
+    let (value, mask) = eval_expr_four_state(sim, expr);
+    if mask.is_zero() {
+        return value;
+    }
+    let value = value.to_biguint();
+    let known = &value ^ (&value & mask);
+    match known.to_u64() {
+        Some(known) if expr.kernel().is_some_and(|kernel| kernel.width <= 64) => {
+            TbValue::U64(known)
+        }
+        _ => TbValue::Wide(known),
+    }
+}
+
+/// The value of `expr` and its unknown bits.
+fn eval_expr_four_state<B: SimBackend>(
+    sim: &mut Simulator<B>,
+    expr: &celox_testbench::CompiledExpr,
+) -> (TbValue, BigUint) {
+    let (value, mask, writes) = eval_backend_expr_tracked(&mut sim.backend, expr);
     sim.dirty |= writes
         .iter()
         .any(|&(offset, len)| !private_testbench_range(sim, offset, len));
-    value
+    (value, mask)
 }
 
+/// The value bits of `expr`: an unknown bit reads as its value-plane bit.
 pub(crate) fn eval_backend_expr<B: SimBackend>(
     backend: &mut B,
     expr: &celox_testbench::CompiledExpr,
@@ -108,10 +132,11 @@ pub(crate) fn eval_backend_expr<B: SimBackend>(
     eval_backend_expr_tracked(backend, expr).0
 }
 
+/// Run `expr`: its value, its unknown bits and the ranges it wrote.
 fn eval_backend_expr_tracked<B: SimBackend>(
     backend: &mut B,
     expr: &celox_testbench::CompiledExpr,
-) -> (TbValue, Vec<(usize, usize)>) {
+) -> (TbValue, BigUint, Vec<(usize, usize)>) {
     let kernel = expr
         .kernel()
         .expect("expression was compiled before state layout");
@@ -133,6 +158,15 @@ fn eval_backend_expr_tracked<B: SimBackend>(
     } else {
         TbValue::Wide(BigUint::from_bytes_le(bytes))
     };
+    // A four-state result slot holds its mask plane after its value plane.
+    let mask = if kernel.four_state {
+        let plane = kernel.width.div_ceil(8);
+        BigUint::from_bytes_le(unsafe {
+            std::slice::from_raw_parts(memory.add(kernel.result + plane), plane)
+        })
+    } else {
+        BigUint::ZERO
+    };
     let writes = kernel
         .writes
         .iter()
@@ -150,7 +184,7 @@ fn eval_backend_expr_tracked<B: SimBackend>(
     for &(offset, len) in &writes {
         backend.mark_settle_range(offset, len);
     }
-    (value, writes)
+    (value, mask, writes)
 }
 
 fn private_testbench_range<B: SimBackend>(sim: &Simulator<B>, offset: usize, len: usize) -> bool {
@@ -241,16 +275,17 @@ fn format_assert_arg<B: SimBackend>(
     spec: char,
     field: FieldSpec,
 ) -> Vec<u8> {
-    let value = eval_expr(sim, &arg.expr);
+    // Formatting keeps unknown bits (IEEE 1800-2023 21.2.1.3).
+    let (value, mask) = eval_expr_four_state(sim, &arg.expr);
     let width = match &value {
         TbValue::String(bytes) => bytes.len() * 8,
         _ => arg.width,
     };
-    let value = value.to_biguint();
+    let (value, mask) = (value.to_biguint(), (!mask.is_zero()).then_some(mask));
     format_veryl_display_arg(
         &DisplayFormatArg {
             value: &value,
-            mask: None,
+            mask: mask.as_ref(),
             width,
             signed: arg.signed,
             is_string: arg.is_string,
@@ -699,6 +734,7 @@ fn run_testbench_limited<B: SimBackend>(
         tick_limit_reached: false,
         queues: HashMap::default(),
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
+        record_passes: false,
     };
     let mut result = if sim.components.finish_requested() {
         ExecResult::Finished
@@ -848,6 +884,7 @@ pub(crate) fn run_testbench_detailed<B: SimBackend>(
         tick_limit_reached: false,
         queues: HashMap::default(),
         random: RandomTable::new(execution_random_seed(testbench.configured_random_seed())),
+        record_passes: true,
     };
     let result = if sim.components.finish_requested() {
         ExecResult::Finished
@@ -879,6 +916,10 @@ struct DetailedExecContext {
     tick_limit: Option<u64>,
     tick_limit_reached: bool,
     random: RandomTable,
+    /// Whether passing assertions are recorded, as the detailed API reports
+    /// them.
+    record_passes: bool,
+
     queues: HashMap<String, std::collections::VecDeque<(BigUint, BigUint)>>,
 }
 
@@ -947,7 +988,10 @@ fn publish_tb_assert_event<B: SimBackend>(
 ) {
     let args = assert_event_args(message)
         .iter()
-        .map(|arg| eval_expr(sim, &arg.expr).to_biguint())
+        .map(|arg| {
+            let (value, mask) = eval_expr_four_state(sim, &arg.expr);
+            (value.to_biguint(), mask)
+        })
         .collect::<Vec<_>>();
     let layout = sim.layout();
     let Some(site_layout) = layout
@@ -991,9 +1035,10 @@ fn publish_tb_assert_event<B: SimBackend>(
         arg_count as u64,
     );
 
-    for (idx, value) in args.iter().take(arg_count).enumerate() {
+    for (idx, (value, mask)) in args.iter().take(arg_count).enumerate() {
         let arg_layout = &site_layout.args[idx];
         let words = value.to_u64_digits();
+        let mask_words = mask.to_u64_digits();
         for word_idx in 0..arg_layout.word_count {
             let value_word = words.get(word_idx).copied().unwrap_or(0);
             write_u64_volatile(
@@ -1008,7 +1053,7 @@ fn publish_tb_assert_event<B: SimBackend>(
                 slot_base
                     + RUNTIME_EVENT_SLOT_PAYLOAD_OFFSET
                     + (arg_layout.mask_word_offset + word_idx) * 8,
-                0,
+                mask_words.get(word_idx).copied().unwrap_or(0),
             );
         }
     }
@@ -1022,14 +1067,27 @@ fn drain_runtime_assertions<B: SimBackend>(
     ctx: &mut DetailedExecContext,
     location: Option<&SourceLocation>,
 ) -> DrainedAssertionEvents {
-    let mut last_message = None;
-    let mut fatal_message = None;
-    let mut finished = false;
     let format_ctx = RuntimeFormatContext {
         tb_time: Some(ctx.simulation_time()),
         scope: None,
     };
-    for event in sim.drain_runtime_events_deferred_with_context(format_ctx) {
+    let events = sim.drain_runtime_events_deferred_with_context(format_ctx);
+    record_runtime_events(
+        ctx,
+        events.into_iter().map(|event| (event, location.cloned())),
+    )
+}
+
+/// Forward the messages of runtime events and record their failures, each
+/// at its source location.
+fn record_runtime_events(
+    ctx: &mut DetailedExecContext,
+    events: impl IntoIterator<Item = (RuntimeEvent, Option<SourceLocation>)>,
+) -> DrainedAssertionEvents {
+    let mut last_message = None;
+    let mut fatal_message = None;
+    let mut finished = false;
+    for (event, location) in events {
         match event {
             // Only errors fail a test (IEEE 1800-2023 20.10).
             RuntimeEvent::Report(report) if report.severity < Severity::Error => {
@@ -1044,7 +1102,7 @@ fn drain_runtime_assertions<B: SimBackend>(
                 ctx.assertions.push(AssertionResult {
                     passed: false,
                     message: Some(message),
-                    location: location.cloned(),
+                    location,
                 });
             }
             RuntimeEvent::Missed { count } => {
@@ -1084,14 +1142,28 @@ struct ProcessClock<Event> {
     falling_edge: Option<u64>,
 }
 
+/// Whether some process waits on `clock`: the generator's enable.
+fn waited_on<Event: celox_runtime::backend::EventHandle>(
+    waits: &[Option<ProcessWait<Event>>],
+    clock: &ProcessClock<Event>,
+) -> bool {
+    waits.iter().any(|wait| {
+        wait.as_ref()
+            .is_some_and(|wait| wait.remaining != 0 && wait.clock.id() == clock.event.id())
+    })
+}
+
 // Clock generators start low even when the design uses four-state storage.
 // Otherwise X's nonzero payload can make the first scheduled 1 look like a
 // steady high to the edge detector, losing the first clock/reset cycle.
-// Returns the clock events, declared generators first.
+// Returns how many distinct clocks the testbench has, declared or waited
+// on. A declared generator nobody waits on stays low and drives nothing,
+// but it still keeps the timed scheduler, which reports each process's
+// time in units of the clock periods rather than in cycles.
 fn initialize_process_clocks<B: SimBackend>(
     sim: &mut Simulator<B>,
     testbench: &CompiledTestbench<B>,
-) -> Vec<B::Event> {
+) -> usize {
     fn referenced<B: SimBackend>(statements: &[TestbenchStatement<B>], clocks: &mut Vec<B::Event>) {
         for statement in statements {
             match statement {
@@ -1112,17 +1184,24 @@ fn initialize_process_clocks<B: SimBackend>(
             }
         }
     }
-    let mut clocks: Vec<_> = testbench.clocks().iter().map(|clock| clock.event).collect();
-    referenced::<B>(testbench.statements(), &mut clocks);
-    let mut unique: Vec<B::Event> = Vec::with_capacity(clocks.len());
-    for event in clocks {
+    let mut waited: Vec<B::Event> = Vec::new();
+    referenced::<B>(testbench.statements(), &mut waited);
+    let mut unique: Vec<B::Event> = Vec::with_capacity(waited.len());
+    for event in waited {
         if unique.iter().all(|known| known.id() != event.id()) {
-            let signal = sim.backend.resolve_signal(&event.addr());
-            sim_set_u64(sim, signal, 0);
             unique.push(event);
         }
     }
-    unique
+    for clock in testbench.clocks() {
+        if unique.iter().all(|known| known.id() != clock.event.id()) {
+            unique.push(clock.event);
+        }
+    }
+    for &event in &unique {
+        let signal = sim.backend.resolve_signal(&event.addr());
+        sim_set_u64(sim, signal, 0);
+    }
+    unique.len()
 }
 
 fn exec_testbench<B: SimBackend>(
@@ -1134,7 +1213,7 @@ fn exec_testbench<B: SimBackend>(
     let clocks = initialize_process_clocks(sim, testbench);
     // A finished kernel returns without passing a collection point, so
     // collect its temporaries here; no process is suspended anymore.
-    if let Some(result) = compiled::run(sim, testbench, ctx) {
+    if let Some(result) = compiled::run(sim, testbench, ctx, clocks) {
         sim.heap_safepoint();
         return result;
     }
@@ -1143,7 +1222,7 @@ fn exec_testbench<B: SimBackend>(
     if blocks.is_empty() {
         return ExecResult::Continue;
     }
-    if blocks.len() == 1 && clocks.len() <= 1 {
+    if blocks.len() == 1 && clocks <= 1 {
         let mut process = match native::Process::<B>::compile(blocks[0], &testbench.kernels()[0]) {
             Ok(process) => process,
             Err(error) => return ExecResult::Fail(format!("testbench compilation: {error}")),
@@ -1189,18 +1268,9 @@ fn exec_processes<B: SimBackend>(
         Ok(processes) => processes,
         Err(error) => return ExecResult::Fail(format!("testbench compilation: {error}")),
     };
-    // Every clock generator runs from time 0, whether or not a process
-    // waits on it.
-    let mut clocks: Vec<ProcessClock<B::Event>> = testbench
-        .clocks()
-        .iter()
-        .map(|clock| ProcessClock {
-            event: clock.event,
-            period: clock.period.max(2),
-            next_edge: 0,
-            falling_edge: None,
-        })
-        .collect();
+    // A clock generator joins when a process first waits on it, and rises
+    // only while some process does.
+    let mut clocks: Vec<ProcessClock<B::Event>> = Vec::new();
     // Capture the baseline before runnable processes drive reset. Reset
     // assertions are signal writes AND events at this timestamp, even if
     // their clock's next edge is still in the future. Rebasing after the
@@ -1320,7 +1390,9 @@ fn exec_processes<B: SimBackend>(
         fired.extend(
             clocks
                 .iter()
-                .filter(|clock| !draining && !stopped && clock.next_edge == now)
+                .filter(|clock| {
+                    !draining && !stopped && clock.next_edge == now && waited_on(&waits, clock)
+                })
                 .map(|clock| clock.event),
         );
         {
@@ -1382,7 +1454,7 @@ fn exec_processes<B: SimBackend>(
         }
         let next_edge = clocks
             .iter()
-            .filter(|_| !ctx.at_tick_limit())
+            .filter(|clock| !ctx.at_tick_limit() && waited_on(&waits, clock))
             .map(|clock| clock.next_edge)
             .min();
         let next_falling = clocks.iter().filter_map(|clock| clock.falling_edge).min();
@@ -1671,12 +1743,23 @@ fn exec_one_detailed<B: SimBackend>(
             }
             let passed = !eval_expr(sim, expr).is_zero();
             if passed {
-                let rendered_message = render_assert_message(sim, message, ctx.simulation_time());
-                ctx.assertions.push(AssertionResult {
-                    passed,
-                    message: rendered_message.clone(),
-                    location: location.clone(),
-                });
+                if ctx.record_passes {
+                    let rendered_message =
+                        render_assert_message(sim, message, ctx.simulation_time());
+                    ctx.assertions.push(AssertionResult {
+                        passed,
+                        message: rendered_message,
+                        location: location.clone(),
+                    });
+                } else {
+                    // The message is not rendered, but what its arguments
+                    // write still happens.
+                    for arg in assert_event_args(message) {
+                        if arg.expr.bytecode().writes_state() {
+                            eval_expr(sim, &arg.expr);
+                        }
+                    }
+                }
                 ExecResult::Continue
             } else {
                 publish_tb_assert_event(sim, *site_id, message);
@@ -2061,6 +2144,7 @@ mod tests {
     use std::error::Error as _;
 
     use super::*;
+
     use crate::{Simulator, TestResult};
 
     #[test]
@@ -2186,6 +2270,24 @@ mod tests {
         assert_eq!(sim.get_as::<u8>(q), 4);
     }
 
+    // Retained comb state keeps TB edges out of the compiled scheduler, so a
+    // two-state case covering every selector value must not retain any.
+    #[test]
+    fn complete_binary_case_retains_no_comb_state() {
+        let arms = (0..4)
+            .map(|i| format!("2'd{i}: q = d + 8'd{i};"))
+            .collect::<String>();
+        let source = format!(
+            "module Top(s: input logic<2>, d: input logic<8>, q: output logic<8>) {{
+                always_comb {{ case s {{ {arms} }} }}
+            }}"
+        );
+        let sim = Simulator::builder(&source, "Top")
+            .build_interpreter()
+            .unwrap();
+        assert!(sim.program.runtime_schema.persistent_comb_state.is_empty());
+    }
+
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     #[test]
     fn native_image_retains_latch_observation_and_tb_dependencies() {
@@ -2294,12 +2396,12 @@ mod tests {
                 .build_native()
                 .unwrap();
             let tb = compile_initial_testbench(&sim).unwrap();
-            compiled::take_counters();
+            compiled::take_counters(&mut sim);
             assert_eq!(
                 run_compiled_testbench_to_finish(&mut sim, &tb),
                 TestResult::Pass
             );
-            let counters = compiled::take_counters();
+            let counters = compiled::take_counters(&mut sim);
             results.push((
                 sim.get_as::<u32>(sim.signal("a")),
                 sim.get_as::<u32>(sim.signal("b")),
@@ -2312,6 +2414,422 @@ mod tests {
         }
         assert_eq!(results[0], results[1]);
         assert_eq!(results[1], (128, 96, 128));
+    }
+
+    /// Run `source` with the reference loop and with the compiled TB
+    /// scheduler, and return each result with the compiled run's counters.
+    fn run_both_schedulers(
+        source: &str,
+        signals: &[&str],
+    ) -> [(TestResult, Vec<u64>, (usize, usize, usize)); 2] {
+        [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ]
+        .map(|mode| {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(false)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            let result = run_compiled_testbench(&mut sim, &tb);
+            let counters = compiled::take_counters(&mut sim);
+            assert_eq!(
+                counters.0 != 0,
+                mode == crate::SchedulerMode::Compiled,
+                "generated scheduler runs: {counters:?}"
+            );
+            let values = signals
+                .iter()
+                .map(|name| sim.get_as::<u64>(sim.signal(name)))
+                .collect();
+            (result, values, counters)
+        })
+    }
+
+    #[test]
+    fn compiled_tb_statements_stay_in_the_generated_scheduler() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                var total: logic<16>;
+                inst dut: Counter(clk, q);
+                initial {
+                    total = 0;
+                    for round in 0..4 {
+                        clk.next(5);
+                        $assert(q == 5 * (round as 8 + 1), "round %d q=%d", round, q);
+                        $display("round %d q=%d at %t", round, q);
+                        total += q as 16;
+                    }
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "total"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.1, vec![20, 50]);
+        // Assertions, displays and the finish run in generated code.
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_resets_and_their_edges_stay_in_the_generated_scheduler() {
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset, q: output logic<8>) {
+                always_ff { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                inst rst: $tb::reset_gen (clk);
+                var q: logic<8>;
+                var total: logic<16>;
+                inst dut: Counter(clk, rst, q);
+                initial {
+                    total = 0;
+                    for round in 0..4 {
+                        rst.assert(2);
+                        $assert(q == 0);
+                        clk.next(5);
+                        $assert(q == 5);
+                        total += q as 16;
+                    }
+                    // A reset the TB assigns moves its event too.
+                    rst = 0;
+                    clk.next(1);
+                    $assert(q == 0);
+                    rst = 1;
+                    clk.next(3);
+                    total += q as 16;
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "total"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.1, vec![3, 23]);
+        // The resets, their releases and their edges run in generated code.
+        assert_eq!(compiled.2.1, 0, "host edge batches: {:?}", compiled.2);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_resets_with_derived_resets_match_the_reference() {
+        // The design derives its own reset from the TB's: those writes stay
+        // in the host, without costing every slot of the run.
+        let source = r#"
+            module Counter(clk: input clock, rst: input reset, run: input logic,
+                           q: output logic<8>) {
+                let core_rst: reset = rst & run;
+                always_ff (clk, core_rst) { if_reset { q = 0; } else { q += 1; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                inst rst: $tb::reset_gen (clk);
+                var run: logic;
+                var q: logic<8>;
+                inst dut: Counter(clk, rst, run, q);
+                initial {
+                    run = 1;
+                    rst.assert(2);
+                    clk.next(5);
+                    $assert(q == 5);
+                    rst.assert(1);
+                    $assert(q == 0);
+                    clk.next(3);
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_failures_keep_their_messages_and_times() {
+        // A second process reports physical event times instead of ticks.
+        for (extra, expected) in [
+            ("", "continue t=3 q=3\nfatal t=5 q=5"),
+            (
+                "initial { clk.next(100); }",
+                "continue t=6 q=3\nfatal t=10 q=5",
+            ),
+        ] {
+            let source = format!(
+                r#"
+                module Counter(clk: input clock, q: output logic<8>) {{
+                    always_ff {{ q += 1; }}
+                }}
+                #[test(Top)] module Top {{
+                    inst clk: $tb::clock_gen;
+                    var q: logic<8>;
+                    inst dut: Counter(clk, q);
+                    initial {{
+                        clk.next(3);
+                        $assert_continue(q == 100, "continue t=%t q=%d", q);
+                        clk.next(2);
+                        $assert(q == 200, "fatal t=%t q=%d", q);
+                        clk.next(2);
+                        $finish();
+                    }}
+                    {extra}
+                }}
+            "#
+            );
+            let [reference, compiled] = run_both_schedulers(&source, &["q"]);
+            assert_eq!(reference.0, TestResult::Fail(expected.into()));
+            assert_eq!(reference.0, compiled.0);
+            assert_eq!(reference.1, compiled.1);
+            assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+        }
+    }
+
+    #[test]
+    fn compiled_tb_rtl_reports_keep_their_times() {
+        // The generated scheduler runs many times before the host drains
+        // these reports.
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff {
+                    q += 1;
+                    if q[1:0] == 2'd2 { $assert_continue(1'b0, "rtl t=%t q=%d", q); }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(12); $finish(); }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert!(
+            matches!(&reference.0, TestResult::Fail(message) if message.lines().count() == 3),
+            "{:?}",
+            reference.0
+        );
+        assert_eq!(reference.0, compiled.0);
+        assert_eq!(compiled.2.1, 0, "host edge batches: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn tb_messages_format_unknown_bits() {
+        // Digits whose bits are all unknown print `x`, partly unknown ones
+        // `X` (IEEE 1800-2023 21.2.1.3). Veryl prints any unknown decimal as
+        // `x`.
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var mem: logic<16> [4];
+                var padded: logic<12> [4];
+                var p: logic<8>;
+                var u: logic<8>;
+                assign p = 8'bxx0x0101;
+                initial {
+                    clk.next(1);
+                    $assert_continue(1'b0, "m=%h n=%h p=%h d=%d", mem[2], padded[1], p, u);
+                    $assert(1'b1, "p=%h", p);
+                    $finish();
+                }
+            }
+        "#;
+        fn check<B: SimBackend>(build: impl Fn() -> Simulator<B>, context: &str) {
+            let mut sim = build();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            let detailed = run_testbench_detailed(&mut sim, &tb);
+            let messages: Vec<_> = detailed
+                .assertions
+                .iter()
+                .map(|assertion| {
+                    (
+                        assertion.passed,
+                        String::from_utf8(assertion.message.clone().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                messages,
+                [
+                    (false, "m=xxxx n=xxx p=X5 d=x".to_string()),
+                    (true, "p=X5".to_string())
+                ],
+                "{context}"
+            );
+            let mut sim = build();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench(&mut sim, &tb),
+                TestResult::Fail("m=xxxx n=xxx p=X5 d=x".into()),
+                "{context}"
+            );
+        }
+        let builder = |mode| {
+            Simulator::builder(source, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+        };
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            check(
+                || builder(mode).build_native().unwrap(),
+                &format!("native {mode:?}"),
+            );
+            #[cfg(feature = "cranelift")]
+            check(
+                || builder(mode).build_cranelift().unwrap(),
+                &format!("cranelift {mode:?}"),
+            );
+            check(
+                || builder(mode).build_interpreter().unwrap(),
+                &format!("interpreter {mode:?}"),
+            );
+        }
+    }
+
+    #[test]
+    fn compiled_tb_finish_in_one_process_stops_the_others() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                var loops: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(10); $finish(); }
+                initial {
+                    loops = 0;
+                    for i in 0..100 { clk.next(); loops += 1; }
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q", "loops"]);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, compiled.1);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn compiled_tb_drains_events_before_the_buffer_overflows() {
+        // More records in one time than the runtime event buffer holds.
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                initial {
+                    for i in 0..3000 { $write(""); }
+                    clk.next();
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &[]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(compiled.2.2, 0, "host statements: {:?}", compiled.2);
+    }
+
+    #[test]
+    fn detailed_compiled_tb_runs_record_passing_assertions() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff { q += 1; }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial {
+                    for i in 0..3 {
+                        clk.next();
+                        $assert(q != 0, "q=%d", q);
+                    }
+                    $finish();
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top")
+            .four_state(false)
+            .build_native()
+            .unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        let detailed = run_testbench_detailed(&mut sim, &tb);
+        assert!(detailed.passed);
+        let messages: Vec<_> = detailed
+            .assertions
+            .iter()
+            .map(|assertion| (assertion.passed, assertion.message.clone()))
+            .collect();
+        assert_eq!(
+            messages,
+            [1, 2, 3].map(|q| (true, Some(format!("q={q}").into_bytes())))
+        );
+    }
+
+    #[test]
+    fn passing_assertions_keep_the_writes_of_their_messages() {
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var count: u8;
+                function bump() -> u8 {
+                    count = count + 1;
+                    return count;
+                }
+                initial {
+                    count = 0;
+                    $assert(1'b1, "%d", bump());
+                    $assert(count == 1, "%d", bump());
+                    clk.next();
+                    $finish();
+                }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["count"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(reference.1, vec![2]);
+        assert_eq!(compiled.1, vec![2]);
+    }
+
+    #[test]
+    fn compiled_tb_drains_rtl_event_bursts() {
+        // Bursts of records in successive times that fit the runtime event
+        // buffer one at a time, but not together.
+        let source = r#"
+            module Burst(clk: input clock, q: output logic<8>) {
+                always_ff {
+                    q += 1;
+                    if q == 1 { for i in 0..400 { $write(""); } }
+                    if q == 2 { for i in 0..800 { $write(""); } }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var q: logic<8>;
+                inst dut: Burst(clk, q);
+                initial { clk.next(4); $finish(); }
+            }
+        "#;
+        let [reference, compiled] = run_both_schedulers(source, &["q"]);
+        assert_eq!(reference.0, TestResult::Pass);
+        assert_eq!(compiled.0, TestResult::Pass);
+        assert_eq!(compiled.1, reference.1);
     }
 
     #[test]
@@ -2414,6 +2932,512 @@ mod tests {
         }
     }
 
+    /// A reset that `rst.assert` moves and a TB write then makes unknown
+    /// keeps its unknown level when its edges fall back to the host. The
+    /// move from 1 is a negedge (IEEE 1800-2023 9.4.2), and the flip-flop's
+    /// unknown reset condition is false (12.4): it counts once more.
+    fn unknown_tb_reset_levels<B: SimBackend>(
+        build: impl Fn(crate::SchedulerMode) -> Simulator<B>,
+    ) {
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = build(mode);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let [rst, count, c0] =
+                ["rst", "count", "c0"].map(|name| sim.get_four_state(sim.signal(name)));
+            assert_ne!(rst.1, 0u8.into(), "{mode:?}: rst stays unknown: {rst:?}");
+            assert_eq!(c0, (4u8.into(), 0u8.into()), "{mode:?}");
+            // The reference scheduler does not run the negedge of a TB
+            // write to an unknown level (#2650).
+            if mode == crate::SchedulerMode::Compiled {
+                assert_eq!(count, (9u8.into(), 0u8.into()), "{mode:?}");
+            }
+        }
+    }
+
+    const UNKNOWN_TB_RESET: &str = r#"
+        module Counter(clk: input clock, rst: input reset, count: output logic<8>) {
+            always_ff (clk, rst) { if_reset { count = 0; } else { count += 1; } }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            inst rst: $tb::reset_gen (clk);
+            var unknown: logic;
+            var count: logic<8>;
+            var c0: logic<8>;
+            inst dut: Counter(clk, rst, count);
+            initial {
+                rst.assert(2);
+                clk.next(4);
+                c0 = count;
+                rst = unknown;
+                clk.next(4);
+                $finish();
+            }
+        }
+    "#;
+
+    #[test]
+    fn unknown_tb_reset_levels_survive_host_edges_on_the_interpreter() {
+        unknown_tb_reset_levels(|mode| {
+            Simulator::builder(UNKNOWN_TB_RESET, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn unknown_tb_reset_levels_survive_host_edges_natively() {
+        unknown_tb_reset_levels(|mode| {
+            Simulator::builder(UNKNOWN_TB_RESET, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
+    /// A four-state design's TB edges run in the generated scheduler, as
+    /// the edge engine runs them: a reset, a clock enable and so a gated
+    /// clock that the TB sets to x or z, and flip-flops that start at x.
+    fn four_state_tb_edges<B: SimBackend>(build: impl Fn(crate::SchedulerMode) -> Simulator<B>) {
+        let names = [
+            "count", "gated", "c0", "c1", "c2", "c3", "c4", "g1", "g2", "g3", "g4",
+        ];
+        let mut results = Vec::new();
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = build(mode);
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters(&mut sim);
+            let values: Vec<_> = names
+                .iter()
+                .map(|name| sim.get_four_state(sim.signal(name)))
+                .collect();
+            results.push((values, counters.1));
+        }
+        // The reference scheduler misses the negedge of `rst = 'x` (#2650):
+        // from then on its count is one lower.
+        let mut reference = results[0].0.clone();
+        for (index, name) in names.iter().enumerate() {
+            if ["count", "c3", "c4"].contains(name) {
+                reference[index].0 += 1u8;
+            }
+        }
+        assert_eq!(reference, results[1].0);
+        // A TB write moves the reset in the unit unless the reset moves to
+        // or from x or z: its writes from its initial x to 0, from 1 to x,
+        // from x to z and from z to 1 go to the host, and so does the first
+        // step.
+        assert_eq!(results[1].1, 5, "host edge batches");
+        let (value, mask) = &results[1].0[2];
+        assert!(*mask != 0u8.into(), "count starts at x: {value}/{mask}");
+    }
+
+    const FOUR_STATE_TB: &str = r#"
+        module Gate(clk: input clock, rst: input reset_async_low, en: input logic,
+                    count: output logic<8>, gated: output logic<8>) {
+            let gclk: '_ clock = clk & en;
+            always_ff (clk, rst) { if_reset { count = 0; } else { count += 1; } }
+            always_ff (gclk) { gated += 1; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var rst: reset_async_low;
+            var en: logic;
+            var count: logic<8>;
+            var gated: logic<8>;
+            var c0: logic<8>; var c1: logic<8>; var c2: logic<8>;
+            var c3: logic<8>; var c4: logic<8>;
+            var g1: logic<8>; var g2: logic<8>; var g3: logic<8>; var g4: logic<8>;
+            inst dut: Gate(clk, rst, en, count, gated);
+            initial {
+                clk.next(8);
+                c0 = count;
+                rst = 0;
+                clk.next(1);
+                rst = 1;
+                en = 'x;
+                clk.next(8);
+                c1 = count; g1 = gated;
+                en = 1;
+                clk.next(8);
+                c2 = count; g2 = gated;
+                rst = 'x;
+                clk.next(8);
+                c3 = count; g3 = gated;
+                rst = 'z;
+                en = 'z;
+                clk.next(4);
+                rst = 1;
+                en = 0;
+                clk.next(8);
+                c4 = count; g4 = gated;
+                $finish();
+            }
+        }
+    "#;
+
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_on_the_interpreter() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_natively() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "cranelift")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_with_cranelift() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_cranelift()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "wasm-runtime")]
+    #[test]
+    fn four_state_tb_edges_run_in_the_generated_scheduler_on_wasm() {
+        four_state_tb_edges(|mode| {
+            Simulator::builder(FOUR_STATE_TB, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_wasm()
+                .unwrap()
+        });
+    }
+
+    const UNKNOWN_WRITES_TB: &str = r#"
+        module Top2(clk: input clock, a: input logic, q: output logic) {
+            always_ff (clk) { q = a; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen;
+            var r: logic; var s: logic; var a: logic; var q: logic;
+            var w: logic<8>; var m: logic<8>;
+            var n: logic; var o: logic; var e: logic; var t: logic<8>;
+            var i1: logic<8>; var i2: logic<8>;
+            var v: logic<8>; var idx: logic<3>; var b: bit<8>;
+            var y: logic; var f: bit;
+            var k4: logic<4>; var wm: logic; var ux: logic<8>; var cb: bit<8>;
+            var ir: logic; var ua: logic<8> [4]; var idx2: logic<2>; var ue: logic<8>;
+            var pz: logic<4>; var sel: logic;
+            inst dut: Top2(clk, a, q);
+            function pass_bit(x: input bit) -> bit {
+                return x;
+            }
+            initial {
+                r = 1; s = 0; a = 0; v = 0;
+                clk.next(1);
+                r = 'x; s = 'z; a = 'x;
+                w = 'x;
+                m = 8'b01xz01xz;
+                n = r & 1; o = r | 1; e = r == 1;
+                t = if r ? 8'd3 : 8'd5;
+                if r { i1 = 1; } else { i1 = 2; }
+                if r == 1 { i2 = 1; } else { i2 = 2; }
+                idx = 'x;
+                v[idx] = 1;
+                b = m as u8;
+                y = s;
+                f = pass_bit(r);
+                k4 = 4'b0101;
+                wm = k4 ==? 4'b01xx;
+                ux = 'x;
+                cb = (ux as u8) + 1;
+                ir = v[idx];
+                ua[0] = 8'h12;
+                idx2 = 'x;
+                ue = ua[idx2];
+                pz = 4'b0z10;
+                sel = pz[2];
+                clk.next(2);
+                $finish();
+            }
+        }
+    "#;
+
+    /// A TB write stores x and z bits in a four-state build, in both
+    /// schedulers: constants, operator results, and through the DUT. An
+    /// unknown condition is false (IEEE 1800-2023 12.4), an unknown ternary
+    /// condition combines both arms (11.4.11), a write at an unknown index
+    /// writes nothing and a read there is x (11.5.1), a copy or a selection keeps z bits, a
+    /// wildcard pattern's unknown bits match anything (11.4.6), and a
+    /// two-state cast, variable or function argument reads unknown bits as
+    /// 0 (6.11.2). A two-state build reads every unknown bit as 0, a
+    /// wildcard pattern's too. A two-state build reads every unknown bit as 0.
+    fn tb_writes_keep_unknown_bits<B: SimBackend>(
+        build: impl Fn(bool, crate::SchedulerMode) -> Simulator<B>,
+    ) {
+        let names = [
+            "r", "s", "a", "q", "w", "m", "n", "o", "e", "t", "i1", "i2", "v", "b", "y", "f", "wm",
+            "cb", "ir", "ue", "sel",
+        ];
+        // Celox encodes an X bit as (1, 1) and a Z bit as (0, 1).
+        let four_state: [(u64, u64); 21] = [
+            (1, 1),
+            (0, 1),
+            (1, 1),
+            (1, 1),
+            (0xff, 0xff),
+            (0x66, 0x33),
+            (1, 1),
+            (1, 0),
+            (1, 1),
+            (7, 6),
+            (2, 0),
+            (2, 0),
+            (0, 0),
+            (0x44, 0),
+            (0, 1),
+            (0, 0),
+            (1, 0),
+            (1, 0),
+            (1, 1),
+            (0xff, 0xff),
+            (0, 1),
+        ];
+        let two_state: [(u64, u64); 21] = [
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (0x44, 0),
+            (0, 0),
+            (1, 0),
+            (0, 0),
+            (5, 0),
+            (2, 0),
+            (2, 0),
+            (1, 0),
+            (0x44, 0),
+            (0, 0),
+            (0, 0),
+            (0, 0),
+            (1, 0),
+            (1, 0),
+            (0x12, 0),
+            (0, 0),
+        ];
+        for (four, expected) in [(true, four_state), (false, two_state)] {
+            for mode in [
+                crate::SchedulerMode::Reference,
+                crate::SchedulerMode::Compiled,
+            ] {
+                let mut sim = build(four, mode);
+                let tb = compile_initial_testbench(&sim).unwrap();
+                assert_eq!(
+                    run_compiled_testbench_to_finish(&mut sim, &tb),
+                    TestResult::Pass
+                );
+                let values: Vec<_> = names
+                    .iter()
+                    .map(|name| sim.get_four_state(sim.signal(name)))
+                    .collect();
+                let expected: Vec<_> = expected
+                    .iter()
+                    .map(|&(value, mask)| (BigUint::from(value), BigUint::from(mask)))
+                    .collect();
+                assert_eq!(values, expected, "four_state={four} {mode:?} {names:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn tb_writes_keep_unknown_bits_on_the_interpreter() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_interpreter()
+                .unwrap()
+        });
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_natively() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "cranelift")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_with_cranelift() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_cranelift()
+                .unwrap()
+        });
+    }
+
+    #[cfg(feature = "wasm-runtime")]
+    #[test]
+    fn tb_writes_keep_unknown_bits_on_wasm() {
+        tb_writes_keep_unknown_bits(|four_state, mode| {
+            Simulator::builder(UNKNOWN_WRITES_TB, "Top")
+                .four_state(four_state)
+                .scheduler_mode(mode)
+                .build_wasm()
+                .unwrap()
+        });
+    }
+
+    /// An immediate assertion of an unknown value fails (IEEE 1800-2023
+    /// 16.3), and its message keeps the unknown bits of a computed argument.
+    #[test]
+    fn tb_assertions_of_unknown_values_fail() {
+        let source = r#"
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var r: logic; var p: logic<8>;
+                initial {
+                    r = 'x;
+                    p = 8'b0000_01x1;
+                    clk.next(1);
+                    $assert(r | 1, "known");
+                    $assert_continue(r == 1, "eq=%b sum=%h", r == 1, p + 1);
+                    $assert_continue(r, "plain");
+                    $finish();
+                }
+            }
+        "#;
+        for mode in [
+            crate::SchedulerMode::Reference,
+            crate::SchedulerMode::Compiled,
+        ] {
+            let mut sim = Simulator::builder(source, "Top")
+                .four_state(true)
+                .scheduler_mode(mode)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            let detailed = run_testbench_detailed(&mut sim, &tb);
+            let messages: Vec<_> = detailed
+                .assertions
+                .iter()
+                .map(|assertion| {
+                    (
+                        assertion.passed,
+                        String::from_utf8(assertion.message.clone().unwrap()).unwrap(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                messages,
+                [
+                    (true, "known".to_string()),
+                    (false, "eq=x sum=xxxxxxxx".to_string()),
+                    (false, "plain".to_string()),
+                ],
+                "{mode:?}"
+            );
+        }
+    }
+
+    // Latches, including ones that read the clock, keep TB edges in the
+    // generated scheduler: a TB write settles there before the edges.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn latch_designs_run_tb_edges_natively() {
+        let icg = r#"
+            module Icg(clk: input clock, en: input logic, count: output logic<8>) {
+                var en_l: logic;
+                always_comb { if !clk { en_l = en; } }
+                let gclk: '_ clock = clk & en_l;
+                always_ff (gclk) { count += 1; }
+            }
+            module Pipeline(clk: input clock, upstream: output logic<8>,
+                            held: output logic<8>, downstream: output logic<8>) {
+                always_ff (clk) { upstream += 1; downstream = held; }
+                always_comb { if !clk { held = upstream; } }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen;
+                var en: logic;
+                var count: logic<8>;
+                var upstream: logic<8>;
+                var held: logic<8>;
+                var downstream: logic<8>;
+                inst gate: Icg(clk, en, count);
+                inst pipe: Pipeline(clk, upstream, held, downstream);
+                initial {
+                    en = 0;
+                    clk.next(3);
+                    $assert(count == 0);
+                    $assert(upstream == 3 && held == 3 && downstream == 2);
+                    en = 1;
+                    clk.next(4);
+                    $assert(count == 4);
+                    en = 0;
+                    clk.next(2);
+                    $assert(count == 4);
+                    en = 1;
+                    clk.next(1);
+                    $assert(count == 5);
+                    $finish();
+                }
+            }
+        "#;
+        for source in [include_str!("../testdata/veryl/latch_initial.veryl"), icg] {
+            let mut sim = Simulator::builder(source, "Top")
+                .allow_inferred_latches(true)
+                .build_native()
+                .unwrap();
+            assert!(!sim.program.runtime_schema.persistent_comb_state.is_empty());
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters(&mut sim);
+            assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+        }
+    }
+
     #[test]
     fn concurrent_tb_preserves_low_phase_latch_updates() {
         let source = r#"
@@ -2450,6 +3474,39 @@ mod tests {
         );
     }
 
+    // Clocks that only pace TB processes, with no RTL domain, still run
+    // their edges in the generated scheduler.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn tb_only_clocks_run_edges_natively() {
+        let source = r#"
+            #[test(Top)]
+            module Top {
+                inst slow: $tb::clock_gen #(period: 10);
+                inst fast: $tb::clock_gen #(period: 2);
+                var observed: logic;
+                initial {
+                    slow.next(1);
+                    $assert(observed == 1'd1);
+                    $finish();
+                }
+                initial {
+                    fast.next(3);
+                    observed = 1'd1;
+                }
+            }
+        "#;
+        let mut sim = Simulator::builder(source, "Top").build_native().unwrap();
+        let tb = compile_initial_testbench(&sim).unwrap();
+        compiled::take_counters(&mut sim);
+        assert_eq!(
+            run_compiled_testbench_to_finish(&mut sim, &tb),
+            TestResult::Pass
+        );
+        let counters = compiled::take_counters(&mut sim);
+        assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+    }
+
     #[test]
     fn concurrent_tb_publishes_each_clock_phase_to_vcd() {
         let source = r#"
@@ -2477,6 +3534,27 @@ mod tests {
         );
         sim.flush_vcd().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
+        // Native edges publish each time step the same way.
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        {
+            let native_path = directory.path().join("native.vcd");
+            let mut sim = Simulator::builder(source, "Top")
+                .vcd(&native_path)
+                .build_native()
+                .unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            compiled::take_counters(&mut sim);
+            assert_eq!(
+                run_compiled_testbench_to_finish(&mut sim, &tb),
+                TestResult::Pass
+            );
+            let counters = compiled::take_counters(&mut sim);
+            assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+            sim.flush_vcd().unwrap();
+            let native = std::fs::read_to_string(&native_path).unwrap();
+            let body = |text: &str| text.split_once("$enddefinitions").unwrap().1.to_string();
+            assert_eq!(body(&native), body(&text));
+        }
         let timestamps: Vec<_> = text
             .lines()
             .filter_map(|line| line.strip_prefix('#'))
@@ -2488,6 +3566,62 @@ mod tests {
                 "missing low phase {falling_edge}: {timestamps:?}"
             );
         }
+    }
+
+    // A `$finish` an RTL domain runs on a native edge still publishes the
+    // terminating time step to the VCD.
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn rtl_finish_on_native_edge_publishes_terminal_step() {
+        let source = r#"
+            module Counter(clk: input clock, q: output logic<8>) {
+                always_ff (clk) {
+                    q += 1;
+                    if q == 3 { $finish(); }
+                }
+            }
+            #[test(Top)] module Top {
+                inst clk: $tb::clock_gen #(period: 2);
+                var q: logic<8>;
+                inst dut: Counter(clk, q);
+                initial { clk.next(100); }
+            }
+        "#;
+        let directory = tempfile::tempdir().unwrap();
+        let unpublished = {
+            let mut sim = Simulator::builder(source, "Top").build_native().unwrap();
+            let tb = compile_initial_testbench(&sim).unwrap();
+            run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1000)
+        };
+        assert_eq!(unpublished.result, TestResult::Pass);
+        let mut bodies = Vec::new();
+        for native in [false, true] {
+            let path = directory.path().join(format!("{native}.vcd"));
+            let builder = Simulator::builder(source, "Top").vcd(&path);
+            let result = if native {
+                let mut sim = builder.build_native().unwrap();
+                let tb = compile_initial_testbench(&sim).unwrap();
+                compiled::take_counters(&mut sim);
+                let result = run_compiled_testbench_with_tick_limit(&mut sim, &tb, 1000);
+                let counters = compiled::take_counters(&mut sim);
+                assert_eq!(counters.1, 0, "host edge batches: {counters:?}");
+                sim.flush_vcd().unwrap();
+                // Publishing the step does not drop its tick.
+                assert_eq!(result, unpublished);
+                result.result
+            } else {
+                let mut sim = builder.build_interpreter().unwrap();
+                let tb = compile_initial_testbench(&sim).unwrap();
+                let result = run_compiled_testbench_to_finish(&mut sim, &tb);
+                sim.flush_vcd().unwrap();
+                result
+            };
+            assert_eq!(result, TestResult::Pass);
+            let text = std::fs::read_to_string(&path).unwrap();
+            bodies.push(text.split_once("$enddefinitions").unwrap().1.to_string());
+        }
+        assert_eq!(bodies[1], bodies[0]);
+        assert!(bodies[0].contains("#6\n"), "{}", bodies[0]);
     }
 
     #[test]
@@ -2523,7 +3657,7 @@ mod tests {
             TestResult::Pass,
             "q={}, counters={:?}",
             sim.get_as::<u32>(sim.signal("q")),
-            compiled::take_counters()
+            compiled::take_counters(&mut sim)
         );
     }
 

@@ -9,8 +9,8 @@ use celox::testbench::{
     compile_initial_testbench, run_compiled_testbench, run_compiled_testbench_with_tick_limit,
 };
 use celox::{
-    OptLevel, OptimizeOptions, Simulator, SirPass, TestResult, TieredExecutionStats,
-    TieredExecutionTier, TieredPromotionStatus,
+    OptLevel, OptimizeOptions, Simulator, SirPass, TestResult, TieredCompileKind,
+    TieredExecutionStats, TieredExecutionTier, TieredExecutionTiming, TieredPromotionStatus,
 };
 use clap::{Args, ValueEnum};
 use veryl_metadata::Metadata;
@@ -826,7 +826,7 @@ pub(super) fn run(
         execute_cpu_elapsed,
         tiered_stats,
         tiered_promotion_error,
-        tiered_promotion_elapsed,
+        tiered_timing,
     ) = match opts.backend {
         #[cfg(any(
             all(target_arch = "x86_64", not(feature = "arm64-codegen")),
@@ -1005,9 +1005,7 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             let execute_elapsed = execute_start.elapsed();
-            let promotion_elapsed = sim
-                .finish_tiered_execution_timing()
-                .and_then(|timing| timing.promotion_elapsed());
+            let timing = sim.finish_tiered_execution_timing();
             let stats = sim.tiered_execution_stats();
             let promotion_error = sim.promotion_error().map(ToString::to_string);
             (
@@ -1022,7 +1020,7 @@ pub(super) fn run(
                     .map(|(end, start)| end.saturating_sub(start)),
                 Some(stats),
                 promotion_error,
-                promotion_elapsed,
+                timing,
             )
         }
     };
@@ -1036,13 +1034,17 @@ pub(super) fn run(
         execute_cpu_elapsed,
     );
     if let Some(stats) = tiered_stats {
-        print_tiered_stats(opts.report, &opts.test, stats, tiered_promotion_elapsed);
+        let promotion_elapsed = tiered_timing.and_then(TieredExecutionTiming::promotion_elapsed);
+        print_tiered_stats(opts.report, &opts.test, stats, promotion_elapsed);
+        if let Some(timing) = tiered_timing {
+            print_tiered_timeline(opts.report, &opts.test, timing);
+        }
         if opts.require_compiled
             && !tick_limit_reached
             && (stats.tier != TieredExecutionTier::Compiled
                 || stats.promotion != TieredPromotionStatus::Promoted
                 || stats.compiled_evaluations == 0
-                || tiered_promotion_elapsed.is_none())
+                || promotion_elapsed.is_none())
         {
             let detail = tiered_promotion_error
                 .as_deref()
@@ -1102,6 +1104,46 @@ pub(super) fn run(
             Err(RunError::TestFailed { message })
         }
     }
+}
+
+/// When each tier ran: the background compilations, and the time and
+/// testbench tick at which generated code, then optimizing code, took over.
+fn print_tiered_timeline(report: bool, test: &str, timing: TieredExecutionTiming) {
+    let optional = |value: Option<u128>| value.map_or_else(|| "NA".to_string(), |v| v.to_string());
+    let compiles = timing
+        .compiles()
+        .map(|stage| {
+            let kind = match stage.kind {
+                TieredCompileKind::Single => "single",
+                TieredCompileKind::Baseline => "baseline",
+                TieredCompileKind::Optimizing => "optimizing",
+                TieredCompileKind::DerivedEdges => "derived_edges",
+                _ => "unknown",
+            };
+            let outcome = if stage.completed {
+                "completed"
+            } else {
+                "failed"
+            };
+            format!("{kind}:{}:{outcome}", stage.elapsed.as_nanos())
+        })
+        .collect::<Vec<_>>();
+    let compiles = if compiles.is_empty() {
+        "none".to_string()
+    } else {
+        compiles.join(",")
+    };
+    let promotion = timing.promotion();
+    let upgrade = timing.upgrade();
+    report!(
+        report,
+        "CELOX_TIERED_TIMELINE test={test} compiles={compiles} promoted_ns={} promoted_tick={} upgraded_ns={} upgraded_tick={} finish_tick={}",
+        optional(promotion.map(|t| t.elapsed.as_nanos())),
+        optional(promotion.and_then(|t| t.tick).map(u128::from)),
+        optional(upgrade.map(|t| t.elapsed.as_nanos())),
+        optional(upgrade.and_then(|t| t.tick).map(u128::from)),
+        optional(timing.finish_tick().map(u128::from)),
+    );
 }
 
 fn print_tiered_stats(

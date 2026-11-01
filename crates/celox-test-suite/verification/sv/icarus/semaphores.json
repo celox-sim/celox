@@ -1,0 +1,37 @@
+{
+  "cases": [
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\n<case>/source_0.sv:2: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "semaphores::get_waits_until_enough_keys_are_put",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\n<case>/source_0.sv:3: error: semaphore doesn't name a type.\n",
+      "expectation": "Simulation",
+      "name": "semaphores::one_key_admits_one_process_at_a_time",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:2: syntax error\n<case>/source_0.sv:2: error: Invalid module instantiation\n",
+      "expectation": "Simulation",
+      "name": "semaphores::try_get_takes_only_available_keys",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

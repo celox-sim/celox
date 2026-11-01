@@ -44,6 +44,7 @@ mod ff;
 mod floating;
 mod hierarchy;
 mod procedural;
+mod virtual_interfaces;
 
 type RegionedVarAddr = RegionedVarAddrBase<SourceVarId>;
 type GlueBlock = GlueBlockBase<SourceVarId>;
@@ -154,9 +155,6 @@ pub(crate) struct LoweredSvModule {
     /// The continuous assignments of the event expressions the processes
     /// wait on, by their hidden target `$event[k]`.
     event_assignments: Vec<(SourceVarId, Vec<sv::ir::Stmt>)>,
-    /// The creation orders of the `always @(list)` processes lowered like
-    /// `always @*`.
-    level_lists_lowered: Vec<usize>,
     /// The write streams one flip-flop evaluation may write twice.
     repeated_ff_writes: Vec<FfWriteStream>,
     /// The `inout` ports whose net has its driver in this module or below it,
@@ -328,6 +326,7 @@ fn interface_signatures_collecting(
                 LevelLists::Processes,
                 &HashMap::default(),
                 &HashMap::default(),
+                SharedAlways::default(),
             )?;
             Ok(InterfaceSignature {
                 name: prototype.name,
@@ -425,7 +424,7 @@ fn analyze_sources_with_requests(
         sv::generated_time_declarations_with_options(
             sources,
             selected_roots.as_deref(),
-            analysis_options,
+            analysis_options.clone(),
         )?
     } else {
         String::new()
@@ -491,6 +490,24 @@ fn analyze_sources_with_requests(
     }
     let interfaces = std::sync::Arc::new(interfaces);
     let parsed: Vec<&sv::ParsedSource> = sources.iter().map(|(source, ..)| &**source).collect();
+    // The interfaces that virtual interface types name, before their
+    // instances are known (see `virtual_interfaces`).
+    let analysis_options = if analysis_options.virtual_interfaces.is_none() {
+        let texts = sources
+            .iter()
+            .map(|(_, code, path)| (*code, *path))
+            .collect::<Vec<_>>();
+        sv::AnalysisOptions {
+            virtual_interfaces: sv::VirtualInterfaces::declarations_of(
+                &texts,
+                &parsed,
+                &analysis_options,
+            )?,
+            ..analysis_options
+        }
+    } else {
+        analysis_options
+    };
     let mut packages = match roots {
         Some(roots) => {
             let roots = roots
@@ -628,6 +645,55 @@ fn validate_specialized_instance_net_drivers(
         let drivers =
             ModuleDrivers::new(&module.source, &module.constants, &module.parameter_types);
         let children = child_output_drivers(module, module_ids, modules);
+        // Table 10-1 permits procedural writes only to variables. Include
+        // suspended processes and writes made by their called subroutines;
+        // declaration initializers of nets remain continuous drivers.
+        let mut procedural_writes = HashSet::default();
+        for body in module
+            .source
+            .comb_processes()
+            .iter()
+            .filter(|process| process.kind() != sv::ir::CombProcessKind::ContinuousAssign)
+            .map(sv::ir::CombProcess::body)
+            .chain(
+                module
+                    .source
+                    .ff_processes()
+                    .iter()
+                    .map(sv::ir::FfProcess::body),
+            )
+            .chain(
+                module
+                    .source
+                    .initial_processes()
+                    .iter()
+                    .map(|process| process.body()),
+            )
+        {
+            procedural::written_names_with_calls(&module.source, body, &mut procedural_writes);
+        }
+        // Hierarchical aliases keep the specific driver diagnostics below.
+        for name in module
+            .source
+            .signals()
+            .iter()
+            .filter(|signal| signal.is_net() && signal.hierarchical().is_none())
+            .map(|signal| signal.name())
+            .chain(
+                module
+                    .source
+                    .ports()
+                    .iter()
+                    .filter(|port| port.is_net())
+                    .map(|port| port.name()),
+            )
+        {
+            if procedural_writes.contains(name) {
+                return Err(sv::AnalyzerError::ProceduralNetAssignment {
+                    name: name.to_string(),
+                });
+            }
+        }
         for port in module
             .source
             .ports()
@@ -775,9 +841,15 @@ fn child_output_drivers(
         let Some(child) = modules.get(&child_id) else {
             continue;
         };
+        let Ok(authored_connections) =
+            expand_structure_connections(&instance.port_connections, &module.source, &child.source)
+        else {
+            // Attaching the instance reports an invalid connection.
+            continue;
+        };
         let element_connections = match instance.array_element {
             Some((position, count)) => match array_element_connections(
-                &instance.port_connections,
+                &authored_connections,
                 child,
                 position,
                 count,
@@ -794,7 +866,7 @@ fn child_output_drivers(
         };
         let connections = element_connections
             .as_deref()
-            .unwrap_or(&instance.port_connections);
+            .unwrap_or(&authored_connections);
         for connection in connections {
             if !child.source.ports().iter().any(|port| {
                 port.name() == connection.formal
@@ -920,12 +992,13 @@ fn package_warnings(
 /// instance each, numbered from `first`.
 fn lower_package_states(
     packages: &sv::Packages,
+    design: &sv::Design,
     first: usize,
     four_state: bool,
     ff_parts: bool,
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<Vec<(String, ModuleId, LoweredSvModule)>, sv::AnalyzerError> {
-    let states = packages.specialized_state_modules();
+    let states = packages.specialized_state_modules(design);
     let mut states = states.iter().collect::<Vec<_>>();
     states.sort_by(|left, right| left.name().cmp(right.name()));
     states
@@ -942,6 +1015,7 @@ fn lower_package_states(
                 LevelLists::Processes,
                 &HashMap::default(),
                 &HashMap::default(),
+                SharedAlways::default(),
             )?;
             lowered.sim_module.time_precision = Some(
                 celox_design::TimePrecision::try_from(packages.global_time_precision())
@@ -949,9 +1023,15 @@ fn lower_package_states(
             );
             lowered.sim_module.time_scale = scope_time_scale(packages, module.name())?;
             // Declaration initializers run before every `initial` block
-            // (IEEE 1800-2023 10.5); one that is not folded into an initial
-            // value would run among them.
-            if !lowered.sim_module.processes.is_empty() {
+            // (IEEE 1800-2023 6.8, 10.5): one that is not folded into an
+            // initial value runs as a declaration initializer, and any other
+            // process would run among the `initial` blocks.
+            if lowered
+                .sim_module
+                .processes
+                .iter()
+                .any(|process| process.slots.kind != celox_design::ProcessKind::Initializer)
+            {
                 return Err(sv::AnalyzerError::Unsupported(format!(
                     "package variable initializer that is not constant in package `{}`",
                     module.name()
@@ -1213,6 +1293,338 @@ fn shared_edge_memories(
     memories
 }
 
+/// How `always @*` blocks that write a common variable run.
+#[derive(Clone, Copy)]
+struct SharedAlways<'a> {
+    /// Make a variable a temporary of each block when that is unobservable
+    /// within the module (the `shared_always_temporary` diagnostic; see
+    /// [`share_always_variables`]).
+    temporaries: bool,
+    /// The module's signals that hierarchical names in other modules denote.
+    foreign_references: &'a HashSet<String>,
+}
+
+impl Default for SharedAlways<'_> {
+    fn default() -> Self {
+        static EMPTY: std::sync::LazyLock<HashSet<String>> =
+            std::sync::LazyLock::new(HashSet::default);
+        Self {
+            temporaries: false,
+            foreign_references: &EMPTY,
+        }
+    }
+}
+
+/// `module` with its `always @*` blocks that write a common variable
+/// rearranged, and the variables they write together as processes, or
+/// `None` when no blocks write a common variable.
+///
+/// Several plain `always` processes may write one variable (IEEE 1800-2023
+/// 6.5, 9.2.2), such as a loop index, and each block waits on the variables
+/// it reads, a shared one included (9.4.2.2). So the blocks run as
+/// processes, whose writes notify other blocks that are waiting. For isolated
+/// indices written before reads, let other Active work run after the body but
+/// before its next implicit wait, as 4.7 and 4.9.3 permit. The shared variable's
+/// writes and event notifications remain; no private copy is substituted.
+/// Blocks that still keep waking each other report the time and processes.
+///
+/// With `shared.temporaries`, a variable becomes a temporary of each block
+/// instead when only such blocks write it, each writes it before it reads
+/// it on every path, and nothing else reads it: no other process,
+/// continuous assignment, subroutine, port, instance connection or
+/// hierarchical name. Its writes then wake no other block, unlike in the
+/// standard, and the variable itself keeps its initial value.
+fn share_always_variables(
+    module: &sv::ir::Module,
+    constants: &HashMap<String, i128>,
+    parameter_types: &HashMap<String, (usize, bool)>,
+    shared: SharedAlways<'_>,
+    warnings: &mut Vec<crate::warning::PendingWarning>,
+) -> Option<(sv::ir::Module, HashSet<String>)> {
+    let comb = module.comb_processes();
+    let mut shared_names = HashSet::default();
+    let drivers = ModuleDrivers::new(module, constants, parameter_types);
+    let mut processes = HashSet::default();
+    let mut deferred_rearm = HashSet::default();
+    let mut temporaries: Vec<(&sv::ir::Signal, Vec<usize>)> = Vec::new();
+    for signal in module.signals().iter().filter(|signal| !signal.is_net()) {
+        let mut writers: Vec<usize> = drivers
+            .local(signal.name())
+            .iter()
+            .map(|(driver, _)| *driver)
+            .collect();
+        writers.sort_unstable();
+        writers.dedup();
+        if writers.len() < 2
+            || !writers.iter().all(|&driver| {
+                comb.get(driver)
+                    .is_some_and(|process| process.kind() == sv::ir::CombProcessKind::AlwaysStar)
+            })
+        {
+            continue;
+        }
+        let isolated = !shared.foreign_references.contains(signal.name())
+            && !read_outside(module, signal.name(), &writers)
+            && writers.iter().all(|&driver| {
+                let body = comb[driver].body();
+                !has_nonblocking_write(body, signal.name())
+                    && written_before_read(body, signal.name(), false) == Some(true)
+            });
+        if shared.temporaries && isolated {
+            temporaries.push((signal, writers));
+        } else {
+            if isolated {
+                deferred_rearm.extend(writers.iter().copied());
+            }
+            processes.extend(writers);
+            shared_names.insert(signal.name().to_string());
+        }
+    }
+    if processes.is_empty() && temporaries.is_empty() {
+        return None;
+    }
+    let mut module = module.clone();
+    let mut renames: HashMap<usize, HashMap<String, String>> = HashMap::default();
+    for (signal, writers) in &temporaries {
+        let mut sites: Vec<String> = writers
+            .iter()
+            .filter_map(|&driver| driver_site(&module, driver))
+            .collect();
+        sites.sort_unstable();
+        warnings.push((
+            crate::FrontendWarningKind::SharedAlwaysTemporary {
+                module: module.name().into(),
+                signal: signal.name().into(),
+                blocks: sites.join(", "),
+            },
+            comb[writers[0]].site().cloned(),
+        ));
+        for &driver in writers {
+            let local = format!("{}$always{driver}", signal.name());
+            module = module.add_local(sv::ir::LocalVariable {
+                name: local.clone(),
+                source_name: signal.name().into(),
+                r#type: signal.r#type().clone(),
+            });
+            renames
+                .entry(driver)
+                .or_default()
+                .insert(signal.name().into(), local);
+        }
+    }
+    let module = module.map_comb_process_bodies(|index, body, sensitivity| {
+        let Some(renames) = renames.get(&index) else {
+            return body;
+        };
+        let mut renamed: Vec<sv::ir::Stmt> = Vec::new();
+        if !sensitivity {
+            // Each run starts a new temporary.
+            let mut locals: Vec<&String> = renames.values().collect();
+            locals.sort_unstable();
+            renamed.extend(locals.into_iter().map(|name| sv::ir::Stmt::Local {
+                name: name.clone(),
+                init: None,
+            }));
+        }
+        renamed.extend(body.into_iter().map(|stmt| {
+            stmt.map(
+                &mut |expr| ff::rename_idents(&expr, renames),
+                &mut |lvalue| rename_lvalue(lvalue, renames),
+            )
+        }));
+        renamed
+    });
+    Some((
+        module.run_comb_processes_with_deferred_rearm(|index, _| {
+            processes
+                .contains(&index)
+                .then_some(deferred_rearm.contains(&index))
+        }),
+        shared_names,
+    ))
+}
+
+/// `lvalue` with the identifiers in `renames` replaced.
+fn rename_lvalue(lvalue: sv::ir::LValue, renames: &HashMap<String, String>) -> sv::ir::LValue {
+    match lvalue {
+        sv::ir::LValue::Ident(name) => {
+            sv::ir::LValue::Ident(renames.get(&name).cloned().unwrap_or(name))
+        }
+        sv::ir::LValue::Select {
+            name,
+            msb,
+            lsb,
+            array_slice_width,
+            array_slice_reversed,
+        } => sv::ir::LValue::Select {
+            name: renames.get(&name).cloned().unwrap_or(name),
+            msb: ff::rename_const_idents(&msb, renames),
+            lsb: ff::rename_const_idents(&lsb, renames),
+            array_slice_width: array_slice_width
+                .map(|width| ff::rename_const_idents(&width, renames)),
+            array_slice_reversed,
+        },
+    }
+}
+
+/// Whether `stmts` mention `name`, read or written.
+fn stmts_mention(stmts: &[sv::ir::Stmt], name: &str) -> bool {
+    let renames: HashMap<String, String> =
+        std::iter::once((name.to_string(), format!("{name}$"))).collect();
+    stmts.iter().any(|stmt| {
+        let mut expression_found = false;
+        let mut target_found = false;
+        stmt.clone().map(
+            &mut |expr| {
+                expression_found |= ff::rename_idents(&expr, &renames) != expr;
+                expr
+            },
+            &mut |lvalue| {
+                target_found |= rename_lvalue(lvalue.clone(), &renames) != lvalue;
+                lvalue
+            },
+        );
+        expression_found || target_found
+    })
+}
+
+/// Whether something other than the processes `writers` (indices among the
+/// combinational processes) of `module` reads or writes `name`.
+fn read_outside(module: &sv::ir::Module, name: &str, writers: &[usize]) -> bool {
+    let renames: HashMap<String, String> =
+        std::iter::once((name.to_string(), format!("{name}$"))).collect();
+    let mentions = |expr: &sv::ir::Expr| ff::rename_idents(expr, &renames) != *expr;
+    module.ports().iter().any(|port| port.name() == name)
+        || module
+            .comb_processes()
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !writers.contains(index))
+            .any(|(_, process)| {
+                stmts_mention(process.body(), name)
+                    || stmts_mention(process.sensitivity_body(), name)
+            })
+        || module
+            .ff_processes()
+            .iter()
+            .any(|process| stmts_mention(process.body(), name))
+        || module
+            .initial_processes()
+            .iter()
+            .any(|process| stmts_mention(process.body(), name))
+        || module
+            .subroutines()
+            .iter()
+            .any(|subroutine| stmts_mention(&subroutine.body, name))
+        || module
+            .assignments()
+            .iter()
+            .any(|assignment| assignment.lhs() == name || mentions(assignment.rhs()))
+        || module.instances().iter().any(|instance| {
+            instance.port_connections().iter().any(|connection| {
+                connection.actual() == name || connection.actual_expr().is_some_and(mentions)
+            })
+        })
+}
+
+/// A queued write cannot initialize a temporary or remain combinational
+/// after privatization, even if a blocking assignment precedes it.
+fn has_nonblocking_write(stmts: &[sv::ir::Stmt], name: &str) -> bool {
+    use sv::ir::Stmt;
+    stmts.iter().any(|stmt| {
+        let mut found = false;
+        stmt.walk(&mut |stmt| {
+            found |= match stmt {
+                Stmt::Assign {
+                    lhs,
+                    nonblocking: true,
+                    ..
+                } => lhs.name() == name,
+                Stmt::AssignConcat {
+                    parts,
+                    nonblocking: true,
+                    ..
+                } => parts.iter().any(|part| part.name() == name),
+                _ => false,
+            };
+        });
+        found
+    })
+}
+
+/// Whether every path through `stmts` writes the whole of `name` before it
+/// reads it: `Some` with whether `name` is written when they end, or `None`
+/// when a read may come before the write. `assigned` says whether it is
+/// written when they start.
+fn written_before_read(stmts: &[sv::ir::Stmt], name: &str, mut assigned: bool) -> Option<bool> {
+    use sv::ir::Stmt;
+    let reads = |stmt: &Stmt| stmts_mention(std::slice::from_ref(stmt), name);
+    for stmt in stmts {
+        assigned = match stmt {
+            Stmt::Assign {
+                lhs,
+                rhs,
+                nonblocking: false,
+            } => {
+                let whole = matches!(lhs, sv::ir::LValue::Ident(target) if target == name);
+                let probe = Stmt::Eval(rhs.clone());
+                let index_reads = !whole
+                    && matches!(lhs, sv::ir::LValue::Select { .. })
+                    && lhs.name() != name
+                    && reads(stmt);
+                if !assigned && (reads(&probe) || index_reads) {
+                    return None;
+                }
+                assigned || whole
+            }
+            Stmt::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                if !assigned && reads(&Stmt::Eval(condition.clone())) {
+                    return None;
+                }
+                let then_assigned = written_before_read(then_body, name, assigned)?;
+                let else_assigned = written_before_read(else_body, name, assigned)?;
+                then_assigned && else_assigned
+            }
+            Stmt::Loop {
+                kind,
+                init,
+                condition,
+                step,
+                body,
+            } => {
+                let initialized = written_before_read(init, name, assigned)?;
+                let header = Stmt::Loop {
+                    kind: kind.clone(),
+                    init: Vec::new(),
+                    condition: condition.clone(),
+                    step: Vec::new(),
+                    body: Vec::new(),
+                };
+                if !initialized && reads(&header) {
+                    return None;
+                }
+                // The body and the step may not run.
+                let after_body = written_before_read(body, name, initialized)?;
+                written_before_read(step, name, after_body)?;
+                initialized
+            }
+            Stmt::Break | Stmt::Continue => assigned,
+            // Other statements, case statements included, only read here.
+            _ => {
+                if !assigned && reads(stmt) {
+                    return None;
+                }
+                assigned
+            }
+        };
+    }
+    Some(assigned)
+}
+
 /// Variables, other than unpacked arrays, that several plain edge-triggered
 /// `always` processes write only by blocking assignments, such as a loop
 /// index they share. A variable may have several procedural writers, and the
@@ -1346,6 +1758,7 @@ fn kernel_window_writes(
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
 ) -> HashSet<String> {
     let subroutines = module.subroutines();
+    let scan = DriverScan::of(module);
     let mut names = HashSet::default();
     for process in module
         .initial_processes()
@@ -1361,7 +1774,7 @@ fn kernel_window_writes(
                 .unwrap_or(body.len())
         };
         kernel_written_names(
-            subroutines,
+            &scan,
             &body[first..],
             &mut names,
             &mut HashSet::default(),
@@ -1409,7 +1822,7 @@ fn stmt_may_suspend(subroutines: &[sv::ir::Subroutine], stmt: &sv::ir::Stmt) -> 
 /// Adds the names of the variables `body` writes, directly or in the
 /// subroutines it calls, to `names` (see [`DriverScan`]).
 fn kernel_written_names(
-    subroutines: &[sv::ir::Subroutine],
+    scan: &DriverScan<'_>,
     body: &[sv::ir::Stmt],
     names: &mut HashSet<String>,
     visited: &mut HashSet<String>,
@@ -1458,10 +1871,20 @@ fn kernel_written_names(
             sv::ir::Callee::String(_)
             | sv::ir::Callee::Object(_)
             | sv::ir::Callee::Checked { .. }
-            | sv::ir::Callee::Lookup { .. } => continue,
+            | sv::ir::Callee::Lookup { .. }
+            | sv::ir::Callee::Stream(_) => continue,
             sv::ir::Callee::Subroutine(name) => name,
         };
-        let Some(subroutine) = subroutines
+        if let Some(import) = scan.dpi_import(&name) {
+            names.extend(
+                procedural::written_dpi_arguments(import, &args)
+                    .iter()
+                    .map(|lvalue| lvalue.name().to_string()),
+            );
+            continue;
+        }
+        let Some(subroutine) = scan
+            .subroutines
             .iter()
             .find(|subroutine| subroutine.name == name)
         else {
@@ -1476,7 +1899,7 @@ fn kernel_written_names(
             }
         }
         if visited.insert(name) {
-            kernel_written_names(subroutines, &subroutine.body, names, visited, depth + 1);
+            kernel_written_names(scan, &subroutine.body, names, visited, depth + 1);
         }
     }
 }
@@ -1604,8 +2027,19 @@ fn validate_variable_driver_ranges(
             })
         });
         if overlapping_continuous || (has_overlap && !shared.contains(signal_name)) {
+            let mut sites: Vec<String> = local
+                .iter()
+                .filter_map(|(driver, _)| driver_site(module, *driver))
+                .collect();
+            sites.sort_unstable();
+            sites.dedup();
+            let at = if sites.is_empty() {
+                String::new()
+            } else {
+                format!(", written at {}", sites.join(", "))
+            };
             return Err(sv::AnalyzerError::Unsupported(format!(
-                "multiple variable drivers for `{signal_name}`"
+                "multiple variable drivers for `{signal_name}`{at}"
             )));
         }
     }
@@ -1617,9 +2051,21 @@ fn validate_variable_driver_ranges(
 /// the calling process (IEEE 1800-2023 9.2.2.2).
 struct DriverScan<'a> {
     subroutines: &'a [sv::ir::Subroutine],
+    dpi_imports: &'a [sv::ir::DpiImport],
 }
 
-impl DriverScan<'_> {
+impl<'a> DriverScan<'a> {
+    fn of(module: &'a sv::ir::Module) -> Self {
+        Self {
+            subroutines: module.subroutines(),
+            dpi_imports: module.dpi_imports(),
+        }
+    }
+
+    fn dpi_import(&self, name: &str) -> Option<&sv::ir::DpiImport> {
+        self.dpi_imports.iter().find(|import| import.name() == name)
+    }
+
     /// Calls `record` with each assignment target of `body`.
     fn body(&self, record: &mut dyn FnMut(&sv::ir::LValue), body: &[sv::ir::Stmt]) {
         self.body_at(record, body, &mut HashSet::default(), 0);
@@ -1663,9 +2109,16 @@ impl DriverScan<'_> {
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
                 | sv::ir::Callee::Checked { .. }
-                | sv::ir::Callee::Lookup { .. } => continue,
+                | sv::ir::Callee::Lookup { .. }
+                | sv::ir::Callee::Stream(_) => continue,
                 sv::ir::Callee::Subroutine(name) => name,
             };
+            if let Some(import) = self.dpi_import(&name) {
+                for lvalue in procedural::written_dpi_arguments(import, &args) {
+                    record(&lvalue);
+                }
+                continue;
+            }
             let Some(subroutine) = self
                 .subroutines
                 .iter()
@@ -1718,12 +2171,13 @@ struct DriverWrite {
     element: Option<(i128, i128)>,
 }
 
-/// Repeated zero-delay aliases of a declared net have one effective value
-/// (IEEE 1800-2023 6.5, 6.6.1). Keep the authored process indices so removing
-/// an alias does not renumber the random streams of later processes.
-/// Only whole-net identifier reads qualify: calls, slices, variables and
-/// conditional assignments retain their independent driver identities.
-fn redundant_net_aliases(module: &sv::ir::Module) -> HashSet<usize> {
+/// Repeated zero-delay aliases or identical literal drivers of a declared net
+/// have one effective value (IEEE 1800-2023 6.6.1, 10.3.1). Keep the authored
+/// process indices so removing a driver does not renumber the random streams
+/// of later processes. Only whole-net identifier reads and identical literals
+/// qualify: calls, slices, variables and conditional assignments retain their
+/// independent driver identities. In particular, `uwire` drivers must not merge.
+fn redundant_net_drivers(module: &sv::ir::Module) -> HashSet<usize> {
     let nets: HashSet<_> = module
         .signals()
         .iter()
@@ -1739,7 +2193,7 @@ fn redundant_net_aliases(module: &sv::ir::Module) -> HashSet<usize> {
                 .map(|port| port.name()),
         )
         .collect();
-    let mut aliases = HashSet::default();
+    let mut drivers = HashSet::default();
     let mut redundant = HashSet::default();
     for (index, process) in module.comb_processes().iter().enumerate() {
         if process.kind() != sv::ir::CombProcessKind::ContinuousAssign
@@ -1750,14 +2204,21 @@ fn redundant_net_aliases(module: &sv::ir::Module) -> HashSet<usize> {
         let [
             sv::ir::Stmt::Assign {
                 lhs: sv::ir::LValue::Ident(target),
-                rhs: sv::ir::Expr::Ident(source),
+                rhs,
                 nonblocking: false,
             },
         ] = process.body()
         else {
             continue;
         };
-        if nets.contains(target.as_str()) && !aliases.insert((target.as_str(), source.as_str())) {
+        let (literal, source) = match rhs {
+            sv::ir::Expr::Ident(source) => (false, source),
+            sv::ir::Expr::Literal(source) => (true, source),
+            _ => continue,
+        };
+        if nets.contains(target.as_str())
+            && !drivers.insert((target.as_str(), literal, source.as_str()))
+        {
             redundant.insert(index);
         }
     }
@@ -1794,9 +2255,7 @@ impl ModuleDrivers {
         // run-time element.
         let mut shapes: HashMap<String, Option<(usize, usize)>> = HashMap::default();
         let mut writes: HashMap<String, Vec<DriverWrite>> = HashMap::default();
-        let scan = DriverScan {
-            subroutines: module.subroutines(),
-        };
+        let scan = DriverScan::of(module);
         let mut walk = |body: &[sv::ir::Stmt],
                         local: Option<usize>,
                         continuous: Option<usize>,
@@ -1851,7 +2310,7 @@ impl ModuleDrivers {
         };
         let comb = module.comb_processes();
         let ff = module.ff_processes();
-        let redundant = redundant_net_aliases(module);
+        let redundant = redundant_net_drivers(module);
         for (index, process) in comb.iter().enumerate() {
             if redundant.contains(&index) {
                 continue;
@@ -1919,6 +2378,30 @@ impl ModuleDrivers {
     fn initial(&self, signal_name: &str) -> Vec<(usize, Option<(i128, i128)>)> {
         self.drivers(signal_name, |write| Some((write.initial?, write.range)))
     }
+}
+
+/// Where process `driver` of [`ModuleDrivers::local`] is written, as
+/// `path:line` or `path:line:column`.
+fn driver_site(module: &sv::ir::Module, driver: usize) -> Option<String> {
+    let combinational = module.comb_processes().len();
+    let edge = combinational + module.ff_processes().len();
+    if let Some(process) = module.comb_processes().get(driver) {
+        return process
+            .site()
+            .map(|site| format!("{}:{}", site.logical_path.display(), site.line));
+    }
+    if driver < edge {
+        return module.ff_processes()[driver - combinational]
+            .site()
+            .map(ToString::to_string);
+    }
+    module
+        .initial_processes()
+        .iter()
+        .filter(|process| process.repeats())
+        .nth(driver - edge)
+        .and_then(|process| process.site())
+        .map(ToString::to_string)
 }
 
 /// Whether process `driver` of [`ModuleDrivers::local`] must be the only writer of
@@ -2173,6 +2656,12 @@ fn prepare_external_hierarchy_collecting(
         analysis_options,
     )?;
     package_warnings(&analyzed, warnings);
+    // The specializations that the modules request of package class
+    // templates, shared by all of their analyses.
+    let mut design = analyzed
+        .values()
+        .next()
+        .map_or_else(sv::Design::default, |module| module.packages.design());
     let dummy = sv::ParsedSource::parse(
         "module __celox_foreign(); endmodule",
         Path::new("<foreign-signature>"),
@@ -2184,6 +2673,7 @@ fn prepare_external_hierarchy_collecting(
         &[],
         &sv::ModuleInterfaces::default(),
         &sv::Packages::default(),
+        &mut sv::Design::default(),
     )?;
     let lower_foreign = |signature: &ExternalModule| {
         let variables: HashMap<_, _> = signature
@@ -2237,7 +2727,6 @@ fn prepare_external_hierarchy_collecting(
             // The foreign module's own combinational blocks carry its copies.
             event_copies: Vec::new(),
             event_assignments: Vec::new(),
-            level_lists_lowered: Vec::new(),
             repeated_ff_writes: Vec::new(),
             inout_driven_inside: HashSet::default(),
         }
@@ -2378,6 +2867,7 @@ fn prepare_external_hierarchy_collecting(
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         let lowered = specialize_module(
             base,
+            &mut design,
             &key,
             four_state,
             false,
@@ -2417,6 +2907,7 @@ fn prepare_external_hierarchy_collecting(
                 module_id,
                 specialize_module(
                     base,
+                    &mut design,
                     key,
                     four_state,
                     false,
@@ -2490,6 +2981,7 @@ fn prepare_external_hierarchy_collecting(
     };
     let package_states = lower_package_states(
         &any_module.packages,
+        &design,
         module_ids.len(),
         four_state,
         false,
@@ -2845,8 +3337,15 @@ fn schedule_sources_collecting(
     analysis_options: sv::AnalysisOptions,
     force_signals: &[String],
 ) -> Result<ScheduledRtlOutput, FrontendError> {
-    let analyzed = analyze_sources(sources, &[top], analysis_options)?;
+    let found_warnings = warnings.len();
+    let analyzed = analyze_sources(sources, &[top], analysis_options.clone())?;
     package_warnings(&analyzed, warnings);
+    // The specializations that the modules request of package class
+    // templates, shared by all of their analyses.
+    let mut design = analyzed
+        .values()
+        .next()
+        .map_or_else(sv::Design::default, |module| module.packages.design());
     let top = top.to_string();
     let root_key = LoweredSvModuleKey {
         name: top.clone(),
@@ -2877,6 +3376,17 @@ fn schedule_sources_collecting(
     let mut index = 0;
     let mut elaborated = HashMap::default();
     let mut hierarchical_modules = Vec::new();
+    // The virtual interfaces of the design, and the analyses of the modules
+    // that may refer to their instances (see `virtual_interfaces`).
+    let virtual_interfaces = analyzed[&top].packages.virtual_interfaces().cloned();
+    let instances_known = virtual_interfaces
+        .as_ref()
+        .is_some_and(|declarations| declarations.elaborated);
+    let mut virtual_sources = HashMap::default();
+    // These analyses have no unresolved hierarchical names. Retain them until
+    // their first final lowering, whose scheduling and foreign-writer context
+    // is established below. The cache belongs only to this elaboration attempt.
+    let mut discovery_analyses = HashMap::default();
     while index < queue.len() {
         let key = queue[index].clone();
         index += 1;
@@ -2884,21 +3394,35 @@ fn schedule_sources_collecting(
             .get(&key.name)
             .ok_or_else(|| unsupported_sv_instance(key.name.clone()))?;
         let module_id = module_ids[&key];
-        let module = match specialize_module(
-            base,
-            &key,
-            four_state,
-            false,
-            warnings,
-            LevelLists::Processes,
-            HierarchicalNames::default(),
-        ) {
-            Ok(lowered) => hierarchy::ElaboratedModule::from_lowered(lowered),
+        // Discovery needs only instance bindings and reflected declarations.
+        // Executable lowering is deferred until hierarchy and foreign writers
+        // are known, rather than constructing and discarding a full SimModule.
+        let discovery =
+            analyze_specialization(base, &mut design, &key, &[], warnings).and_then(|ir| {
+                let source = ir
+                    .modules()
+                    .iter()
+                    .find(|module| module.name() == base.name)
+                    .ok_or_else(|| {
+                        sv::AnalyzerError::Unsupported(format!("module `{}`", base.name))
+                    })?;
+                let declarations =
+                    hierarchy::ElaboratedModule::from_declarations(source, &key.force_signals)?;
+                if instances_known {
+                    virtual_sources.insert(module_id, source.clone());
+                }
+                Ok((declarations, ir))
+            });
+        let module = match discovery {
+            Ok((declarations, ir)) => {
+                discovery_analyses.insert(module_id, ir);
+                declarations
+            }
             // Elaborate the hierarchy below the module before resolving its
             // hierarchical names.
             Err(error) if hierarchical_reference_path(&error).is_some() => {
                 hierarchical_modules.push(module_id);
-                specialize_module_declarations(base, &key)?
+                specialize_module_declarations(base, &mut design, &key)?
             }
             Err(error) => return Err(error.into()),
         };
@@ -2917,6 +3441,44 @@ fn schedule_sources_collecting(
         }
     }
 
+    // The ids of interface instances depend on the elaborated hierarchy, which
+    // the virtual interface accesses do not change: analyze again with them.
+    let virtual_instances = match &virtual_interfaces {
+        Some(declarations) => {
+            let instances = virtual_interfaces::Instances::elaborate(
+                root_id,
+                &module_ids,
+                &elaborated,
+                declarations,
+            );
+            if !declarations.elaborated {
+                drop(discovery_analyses);
+                warnings.truncate(found_warnings);
+                return schedule_sources_collecting(
+                    sources,
+                    &top,
+                    parameter_overrides,
+                    ignored_loops,
+                    true_loops,
+                    four_state,
+                    parallel,
+                    trace_options,
+                    trace,
+                    allow_inferred_latches,
+                    warnings,
+                    sv::AnalysisOptions {
+                        virtual_interfaces: Some(std::sync::Arc::new(
+                            instances.table(declarations),
+                        )),
+                        ..analysis_options
+                    },
+                    force_signals,
+                );
+            }
+            Some((instances, declarations.clone()))
+        }
+        None => None,
+    };
     let keys: HashMap<ModuleId, &LoweredSvModuleKey> =
         module_ids.iter().map(|(key, &id)| (id, key)).collect();
     let hierarchy = hierarchy::Hierarchy::new(
@@ -2931,6 +3493,7 @@ fn schedule_sources_collecting(
     // the order the modules are lowered in.
     let mut references = HashMap::default();
     let mut analyses = HashMap::default();
+    let mut foreign_references: HashMap<ModuleId, HashSet<String>> = HashMap::default();
     let mut foreign_writes: HashMap<ModuleId, HashMap<String, hierarchy::ForeignWrites>> =
         HashMap::default();
     for &module_id in &hierarchical_modules {
@@ -2941,7 +3504,13 @@ fn schedule_sources_collecting(
                 .iter()
                 .map(|reference| reference.signal.clone())
                 .collect();
-            match analyze_specialization(&analyzed[&key.name], key, &signals, &mut Vec::new()) {
+            match analyze_specialization(
+                &analyzed[&key.name],
+                &mut design,
+                key,
+                &signals,
+                &mut Vec::new(),
+            ) {
                 Ok(ir) => break ir,
                 // A name with an instance index that is a constant
                 // expression reaches the analysis with the index evaluated.
@@ -2960,20 +3529,60 @@ fn schedule_sources_collecting(
         if let Some(module) = ir.modules().iter().find(|module| module.name() == key.name) {
             hierarchy::collect_foreign_writes(module, &resolved, &mut foreign_writes);
         }
+        for reference in &resolved {
+            for (target_module, target) in &reference.targets {
+                foreign_references
+                    .entry(*target_module)
+                    .or_default()
+                    .insert(target.clone());
+            }
+        }
         references.insert(module_id, resolved);
         analyses.insert(module_id, ir);
     }
     // The elaboration only served to resolve the hierarchical names.
     drop(hierarchy);
     drop(elaborated);
+    // Signals that denote members of interface instances for virtual
+    // interfaces, which other modules then write and watch.
+    let mut virtual_references: HashMap<ModuleId, Vec<hierarchy::HierarchicalReference>> =
+        HashMap::default();
+    if let Some((instances, declarations)) = &virtual_instances {
+        for (&module_id, ir) in
+            virtual_sources
+                .iter()
+                .chain(analyses.iter().filter_map(|(module_id, ir)| {
+                    let key = keys[module_id];
+                    Some((
+                        module_id,
+                        ir.modules()
+                            .iter()
+                            .find(|module| module.name() == key.name)?,
+                    ))
+                }))
+        {
+            let references = instances.references(ir, declarations);
+            if references.is_empty() {
+                continue;
+            }
+            hierarchy::collect_virtual_writes(ir, &references, &mut foreign_writes);
+            virtual_references.insert(module_id, references);
+        }
+    }
+    drop(virtual_sources);
 
-    // A combinational loop through an `always @(list)` lowered like
-    // `always @*` may converge as a process: demote the lists in the loop
-    // and schedule again, until no lowered list takes part in it.
+    // Level-sensitive always blocks in a static combinational loop may
+    // converge as event processes. Demote the participating blocks and retry;
+    // the runtime then evaluates convergence using their authored sensitivity.
     let no_demotions = HashSet::default();
     let mut demoted: HashMap<ModuleId, HashSet<usize>> = HashMap::default();
     let mut trace = trace;
     let no_foreign_writes = HashMap::default();
+    // Specialization keys, resolved hierarchical names and foreign writers are
+    // fixed above. A retry changes only the demoted level lists of the modules
+    // reported by `demote_level_lists`; retain every other lowered module.
+    let mut lowered_modules = HashMap::default();
+    let no_foreign_references = HashSet::default();
     loop {
         let mut specialize = |key: &LoweredSvModuleKey,
                               module_id: ModuleId|
@@ -2990,8 +3599,12 @@ fn schedule_sources_collecting(
                 .flatten()
                 .map(|reference: &hierarchy::HierarchicalReference| reference.signal.clone())
                 .collect();
+            // Move out the discovery result: final lowering owns its source
+            // module, so keeping another complete IR through retries is needless.
+            let discovery_analysis = discovery_analyses.remove(&module_id);
             Ok(specialize_module(
                 base,
+                &mut design,
                 key,
                 four_state,
                 parallel.enabled(),
@@ -3000,14 +3613,23 @@ fn schedule_sources_collecting(
                 HierarchicalNames {
                     signals: &signals,
                     foreign_writes: foreign_writes.get(&module_id).unwrap_or(&no_foreign_writes),
-                    analyzed: analyses.get(&module_id),
+                    analyzed: analyses.get(&module_id).or(discovery_analysis.as_ref()),
+                    shared: SharedAlways {
+                        temporaries: analysis_options.shared_always_temporaries,
+                        foreign_references: foreign_references
+                            .get(&module_id)
+                            .unwrap_or(&no_foreign_references),
+                    },
                 },
             )?)
         };
-        let mut lowered_modules = module_ids
-            .iter()
-            .map(|(key, &module_id)| Ok((module_id, specialize(key, module_id)?)))
-            .collect::<Result<HashMap<_, _>, FrontendError>>()?;
+        for (key, &module_id) in &module_ids {
+            if let std::collections::hash_map::Entry::Vacant(entry) =
+                lowered_modules.entry(module_id)
+            {
+                entry.insert(specialize(key, module_id)?);
+            }
+        }
         resolve_inout_drivers(&module_ids, &mut lowered_modules);
         validate_specialized_instance_net_drivers(&module_ids, &lowered_modules)?;
         let root = &lowered_modules[&root_id];
@@ -3030,7 +3652,11 @@ fn schedule_sources_collecting(
         // Waits and flip-flop domains of other modules may watch the
         // signals that hierarchical names reach.
         let mut hierarchical_targets: HashMap<ModuleId, HashSet<String>> = HashMap::default();
-        for reference in references.values().flatten() {
+        for reference in references
+            .values()
+            .flatten()
+            .chain(virtual_references.values().flatten())
+        {
             for (module, target) in &reference.targets {
                 hierarchical_targets
                     .entry(*module)
@@ -3039,6 +3665,7 @@ fn schedule_sources_collecting(
             }
         }
         let no_targets = HashSet::default();
+        let mut instance_values = Vec::new();
         let mut modules = HashMap::default();
         let mut module_names = HashMap::default();
         for (key, &module_id) in &module_ids {
@@ -3047,6 +3674,16 @@ fn schedule_sources_collecting(
             if let Some(references) = references.get(&module_id) {
                 sim_module.hierarchical_bindings =
                     hierarchy::bindings(references, lowered, &lowered_modules)?;
+            }
+            if let Some(references) = virtual_references.get(&module_id) {
+                sim_module.hierarchical_bindings.extend(hierarchy::bindings(
+                    references,
+                    lowered,
+                    &lowered_modules,
+                )?);
+            }
+            if let Some((instances, _)) = &virtual_instances {
+                instance_values.extend(instances.values(module_id, lowered));
             }
             attach_instance_glue(
                 &mut sim_module,
@@ -3066,6 +3703,7 @@ fn schedule_sources_collecting(
 
         let package_states = lower_package_states(
             &analyzed[&top].packages,
+            &design,
             module_ids.len(),
             four_state,
             parallel.enabled(),
@@ -3093,6 +3731,7 @@ fn schedule_sources_collecting(
             module_names,
             root_id,
             packages,
+            instance_values,
         };
         let mut loop_members = Vec::new();
         let scheduled =
@@ -3111,20 +3750,25 @@ fn schedule_sources_collecting(
             Ok(scheduled) => return Ok(scheduled),
             Err(error) => error,
         };
-        if !demote_level_lists(&loop_members, &lowered_modules, &mut demoted) {
+        let changed = demote_level_lists(&loop_members, &lowered_modules, &mut demoted);
+        if changed.is_empty() {
             return Err(error.into());
+        }
+        for module_id in changed {
+            lowered_modules.remove(&module_id);
         }
     }
 }
 
-/// Demote the `always @(list)` processes lowered like `always @*` which
-/// drive a range of a combinational loop. Whether any was demoted.
+/// Demote `always @*` and equivalent explicit-list processes which drive
+/// a range of a combinational loop. Return the changed modules so only
+/// their lowering is invalidated before scheduling again.
 fn demote_level_lists(
     loop_members: &[celox_frontend_core::symbolic::assembly::LoopMember],
     lowered_modules: &HashMap<ModuleId, LoweredSvModule>,
     demoted: &mut HashMap<ModuleId, HashSet<usize>>,
-) -> bool {
-    let mut changed = false;
+) -> HashSet<ModuleId> {
+    let mut changed = HashSet::default();
     for (module_id, member) in loop_members {
         let Some(lowered) = lowered_modules.get(module_id) else {
             continue;
@@ -3136,13 +3780,10 @@ fn demote_level_lists(
         else {
             continue;
         };
-        let scan = DriverScan {
-            subroutines: lowered.source.subroutines(),
-        };
+        let scan = DriverScan::of(&lowered.source);
         for process in lowered.source.comb_processes() {
             let creation_order = process.creation_order();
             if process.kind() != sv::ir::CombProcessKind::AlwaysStar
-                || !lowered.level_lists_lowered.contains(&creation_order)
                 || demoted
                     .get(module_id)
                     .is_some_and(|demoted| demoted.contains(&creation_order))
@@ -3159,7 +3800,7 @@ fn demote_level_lists(
                     .entry(*module_id)
                     .or_default()
                     .insert(creation_order);
-                changed = true;
+                changed.insert(*module_id);
             }
         }
     }
@@ -3314,10 +3955,13 @@ fn specialization_overrides(
 /// `hierarchical`.
 fn analyze_specialization(
     module: &AnalyzedSvModule,
+    design: &mut sv::Design,
     key: &LoweredSvModuleKey,
     hierarchical: &[sv::ast::HierarchicalSignal],
     warnings: &mut Vec<crate::warning::PendingWarning>,
 ) -> Result<sv::Ir, sv::AnalyzerError> {
+    #[cfg(test)]
+    tests::record_analysis(key);
     let (overrides, type_overrides, pattern_overrides) = specialization_overrides(key)?;
     let analyzed = module.source.analyze_module_with_hierarchy(
         &module.name,
@@ -3326,6 +3970,7 @@ fn analyze_specialization(
         &pattern_overrides,
         &module.interfaces,
         &module.packages,
+        design,
         hierarchical,
     );
     if let Err(error) = &analyzed {
@@ -3339,6 +3984,7 @@ fn analyze_specialization(
 #[allow(clippy::too_many_arguments)]
 fn specialize_module(
     module: &AnalyzedSvModule,
+    design: &mut sv::Design,
     key: &LoweredSvModuleKey,
     four_state: bool,
     ff_parts: bool,
@@ -3346,6 +3992,8 @@ fn specialize_module(
     level_lists: LevelLists<'_>,
     hierarchical: HierarchicalNames<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
+    #[cfg(test)]
+    tests::record_specialization(key, level_lists);
     let analyzed;
     let ir = match hierarchical.analyzed {
         Some(ir) => {
@@ -3353,7 +4001,7 @@ fn specialize_module(
             ir
         }
         None => {
-            analyzed = analyze_specialization(module, key, hierarchical.signals, warnings)?;
+            analyzed = analyze_specialization(module, design, key, hierarchical.signals, warnings)?;
             &analyzed
         }
     };
@@ -3383,6 +4031,7 @@ fn specialize_module(
         level_lists,
         hierarchical.foreign_writes,
         &module.interface_member_paths,
+        hierarchical.shared,
     )?;
     propagate_force_signals(&mut lowered.instances, &key.force_signals);
     lowered.sim_module.time_precision = Some(
@@ -3401,6 +4050,8 @@ struct HierarchicalNames<'a> {
     signals: &'a [sv::ast::HierarchicalSignal],
     /// The module's signals that names in other modules write.
     foreign_writes: &'a HashMap<String, hierarchy::ForeignWrites>,
+    /// How `always @*` blocks that write a common variable run.
+    shared: SharedAlways<'a>,
     /// The analysis of the module with `signals`, if it is done already.
     analyzed: Option<&'a sv::Ir>,
 }
@@ -3412,6 +4063,7 @@ impl Default for HierarchicalNames<'_> {
         Self {
             signals: &[],
             foreign_writes: &EMPTY,
+            shared: SharedAlways::default(),
             analyzed: None,
         }
     }
@@ -3450,6 +4102,7 @@ fn propagate_force_signals(instances: &mut [LoweredSvInstance], force_signals: &
 /// The declarations and instances of specialization `key`.
 fn specialize_module_declarations(
     module: &AnalyzedSvModule,
+    design: &mut sv::Design,
     key: &LoweredSvModuleKey,
 ) -> Result<hierarchy::ElaboratedModule, sv::AnalyzerError> {
     let (overrides, type_overrides, pattern_overrides) = specialization_overrides(key)?;
@@ -3460,6 +4113,7 @@ fn specialize_module_declarations(
         &pattern_overrides,
         &module.interfaces,
         &module.packages,
+        design,
     )?;
     let specialized = ir
         .modules()
@@ -3497,6 +4151,7 @@ fn lower_module(
     level_lists: LevelLists<'_>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
+    shared: SharedAlways<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     lower_module_with_overrides(
         module,
@@ -3509,6 +4164,7 @@ fn lower_module(
         level_lists,
         foreign_writes,
         reflected_paths,
+        shared,
     )
 }
 
@@ -3593,9 +4249,31 @@ fn lower_module_with_overrides(
     level_lists: LevelLists<'_>,
     foreign_writes: &HashMap<String, hierarchy::ForeignWrites>,
     reflected_paths: &HashMap<String, sv::InterfaceMemberPath>,
+    shared: SharedAlways<'_>,
 ) -> Result<LoweredSvModule, sv::AnalyzerError> {
     let parameter_types = module_parameter_types(module);
     let constants = module_constants_with_overrides(module, parameter_overrides);
+    let demoted_stars = match level_lists {
+        LevelLists::Lowered { demoted }
+            if module.comb_processes().iter().any(|process| {
+                process.kind() == sv::ir::CombProcessKind::AlwaysStar
+                    && demoted.contains(&process.creation_order())
+            }) =>
+        {
+            Some(
+                module
+                    .clone()
+                    .run_comb_processes_as_processes(|_, process| {
+                        demoted.contains(&process.creation_order())
+                    }),
+            )
+        }
+        _ => None,
+    };
+    let module = demoted_stars.as_ref().unwrap_or(module);
+    let sharing = share_always_variables(module, &constants, &parameter_types, shared, warnings);
+    let module = sharing.as_ref().map_or(module, |(module, _)| module);
+    let shared_process_variables = sharing.as_ref().map(|(_, names)| names);
     let fallbacks = module
         .ff_processes()
         .iter()
@@ -3631,7 +4309,11 @@ fn lower_module_with_overrides(
     let drivers = ModuleDrivers::new(module, &constants, &parameter_types);
     let shared_memories = shared_edge_memories(module, &drivers, foreign_writes, warnings);
     let shared_variables = shared_edge_variables(module, &drivers);
-    let shared_all = shared_memories.union(&shared_variables).cloned().collect();
+    let shared_all = shared_memories
+        .union(&shared_variables)
+        .chain(shared_process_variables.into_iter().flatten())
+        .cloned()
+        .collect();
     validate_variable_driver_ranges(module, &drivers, &shared_all)?;
     validate_foreign_drivers(module, &drivers, &shared_memories, foreign_writes)?;
     let scheduled = module
@@ -3652,7 +4334,27 @@ fn lower_module_with_overrides(
     let mut port_order = Vec::new();
     let mut initial_memory_values = Vec::new();
 
+    // Array-valued subroutine slots need to preserve their array shape in
+    // captured arguments and results; keep their existing unsupported boundary.
+    let string_array = |ty: &sv::ir::Type| {
+        ty.kind() == sv::ir::TypeKind::String && !ty.unpacked_ranges().is_empty()
+    };
+    if module.subroutines().iter().any(|routine| {
+        routine.return_type.as_ref().is_some_and(string_array)
+            || routine
+                .params
+                .iter()
+                .any(|param| string_array(&param.r#type))
+    }) {
+        return Err(sv::AnalyzerError::Unsupported(
+            "fixed string arrays in subroutine interfaces".into(),
+        ));
+    }
+
     for port in module.ports() {
+        if port.r#type().structure_identity().is_some() {
+            continue;
+        }
         if name_to_id.contains_key(port.name()) {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "duplicate port name `{}`",
@@ -3736,6 +4438,9 @@ fn lower_module_with_overrides(
     }
 
     for signal in module.signals() {
+        if signal.r#type().structure_identity().is_some() {
+            continue;
+        }
         if name_to_id.contains_key(signal.name()) {
             return Err(sv::AnalyzerError::Unsupported(format!(
                 "duplicate port or signal name `{}`",
@@ -3908,7 +4613,13 @@ fn lower_module_with_overrides(
         }
     }
 
-    if !cfg!(feature = "dpi") && !module.dpi_imports().is_empty() {
+    // The functions Celox provides need no C library.
+    if !cfg!(feature = "dpi")
+        && module
+            .dpi_imports()
+            .iter()
+            .any(|import| import.builtin().is_none())
+    {
         return Err(sv::AnalyzerError::Unsupported(
             "DPI-C import (enable the `sv-dpi` feature of `celox`)".to_string(),
         ));
@@ -3923,7 +4634,6 @@ fn lower_module_with_overrides(
     )?;
     // `always @(list)` naming exactly the reads of its statement is
     // `always @*` (IEEE 1800-2023 9.4.2.2), which needs no process.
-    let mut level_lists_lowered = Vec::new();
     let level_sensitive = match level_lists {
         LevelLists::Processes => None,
         LevelLists::Lowered { demoted } => Some(demoted),
@@ -3945,14 +4655,10 @@ fn lower_module_with_overrides(
             warnings,
         );
         module.clone().lower_level_sensitive_processes(|process| {
-            let selected = !demoted.contains(&process.creation_order())
+            !demoted.contains(&process.creation_order())
                 && process
                     .level_sensitive()
-                    .is_some_and(|(items, body)| pm.is_implicit_event_list(items, body));
-            if selected {
-                level_lists_lowered.push(process.creation_order());
-            }
-            selected
+                    .is_some_and(|(items, body)| pm.is_implicit_event_list(items, body))
         })
     });
     let module = level_sensitive.as_ref().unwrap_or(module);
@@ -4081,7 +4787,6 @@ fn lower_module_with_overrides(
         package_variables,
         event_copies: event_vars.copies,
         event_assignments,
-        level_lists_lowered,
         repeated_ff_writes,
         inout_driven_inside: HashSet::default(),
     })
@@ -4498,6 +5203,109 @@ fn check_tagged_port_connections(
     Ok(())
 }
 
+/// Connect unpacked structures through their independently typed leaf ports.
+/// Aggregate declarations remain in source metadata for nominal type checking.
+fn expand_structure_connections<'a>(
+    connections: &'a [LoweredSvPortConnection],
+    parent: &sv::ir::Module,
+    child: &sv::ir::Module,
+) -> Result<std::borrow::Cow<'a, [LoweredSvPortConnection]>, ParserError> {
+    if !child
+        .ports()
+        .iter()
+        .any(|port| port.r#type().structure_identity().is_some())
+    {
+        return Ok(std::borrow::Cow::Borrowed(connections));
+    }
+    let mut expanded = Vec::new();
+    let mut connected_structures = HashSet::default();
+    for connection in connections {
+        let Some(port) = child.ports().iter().find(|port| {
+            port.name() == connection.formal && port.r#type().structure_identity().is_some()
+        }) else {
+            expanded.push(connection.clone());
+            continue;
+        };
+        let invalid = |message: String| {
+            ParserError::illegal_context(
+                "systemverilog unpacked structure port connection",
+                message,
+                None,
+            )
+        };
+        if !connected_structures.insert(&connection.formal) {
+            return Err(invalid(format!(
+                "duplicate connection of port `{}`",
+                connection.formal
+            )));
+        }
+        if let Some(pattern) = &connection.bound_pattern {
+            if port.direction() != sv::ir::PortDirection::Input {
+                return Err(invalid(
+                    "an output structure port requires a variable".into(),
+                ));
+            }
+            let parts = port
+                .bind_structure_pattern(pattern)
+                .map_err(|error| invalid(error.to_string()))?;
+            for ((member, _), value) in port.r#type().structure_leaves().iter().zip(parts) {
+                expanded.push(LoweredSvPortConnection {
+                    formal: format!("{}.{member}", connection.formal),
+                    actual: connection.actual.clone(),
+                    actual_expr: Some(value),
+                    bound_pattern: None,
+                });
+            }
+            continue;
+        }
+        if connection.actual_expr.is_none() {
+            // An explicitly open port leaves all of its leaf ports open.
+            continue;
+        }
+        let actual = parent
+            .ports()
+            .iter()
+            .find(|p| p.name() == connection.actual)
+            .map(|p| p.r#type())
+            .or_else(|| {
+                parent
+                    .signals()
+                    .iter()
+                    .find(|s| s.name() == connection.actual)
+                    .map(|s| s.r#type())
+            });
+        if actual.and_then(|ty| ty.structure_identity()) != port.r#type().structure_identity() {
+            return Err(invalid(format!(
+                "port `{}` requires a variable of the same unpacked structure type",
+                connection.formal
+            )));
+        }
+        let expected = sv::ir::Expr::Concat(
+            port.r#type()
+                .structure_leaves()
+                .iter()
+                .map(|(member, _)| sv::ir::Expr::Ident(format!("{}.{member}", connection.actual)))
+                .collect(),
+        );
+        if connection.actual_expr.as_ref() != Some(&expected)
+            && connection.actual_expr.as_ref()
+                != Some(&sv::ir::Expr::Ident(connection.actual.clone()))
+        {
+            return Err(invalid("an unpacked structure port currently requires a named variable or an input assignment pattern".into()));
+        }
+        for (member, _) in port.r#type().structure_leaves() {
+            let actual = format!("{}.{member}", connection.actual);
+            expanded.push(LoweredSvPortConnection {
+                formal: format!("{}.{member}", connection.formal),
+                actual: actual.clone(),
+                actual_expr: Some(sv::ir::Expr::Ident(actual)),
+                bound_pattern: None,
+            });
+        }
+    }
+    Ok(std::borrow::Cow::Owned(expanded))
+}
+
 fn bind_port_patterns(
     connections: &mut [LoweredSvPortConnection],
     child: &LoweredSvModule,
@@ -4569,7 +5377,12 @@ pub(crate) fn attach_instance_glue(
         let Some(child) = lowered_modules.get(&child_id) else {
             return Err(unsupported_sv_instance(instance.module_name.clone()));
         };
-        let mut authored_connections = instance.port_connections.clone();
+        let mut authored_connections = expand_structure_connections(
+            &instance.port_connections,
+            &lowered.source,
+            &child.source,
+        )?
+        .into_owned();
         bind_port_patterns(&mut authored_connections, child)?;
         let connections = match instance.array_element {
             Some((position, count)) => {
@@ -4935,6 +5748,126 @@ pub(crate) fn attach_instance_glue(
         );
     }
     Ok(())
+}
+
+/// A [`sv::ir::Callee::Stream`] call as slices and concatenations of its
+/// arguments, each lowered once. `lower` lowers an operand with a context
+/// width and signedness.
+fn lower_stream<A: std::hash::Hash + Eq + Clone>(
+    args: &[Option<sv::ir::Expr>],
+    stream: &sv::ir::Stream,
+    arena: &mut SLTNodeArena<A>,
+    lower: &mut dyn FnMut(
+        &sv::ir::Expr,
+        &mut SLTNodeArena<A>,
+        Option<usize>,
+        Option<bool>,
+    ) -> Option<NodeId>,
+) -> Option<NodeId> {
+    fn slice<A: std::hash::Hash + Eq + Clone>(
+        arena: &mut SLTNodeArena<A>,
+        expr: NodeId,
+        (lsb, width): (usize, usize),
+    ) -> Option<NodeId> {
+        if lsb == 0 && width == celox_slt::get_width(expr, arena) {
+            return Some(expr);
+        }
+        arena
+            .alloc(SLTNode::Slice {
+                expr,
+                access: BitAccess::new(lsb, lsb + width - 1),
+            })
+            .ok()
+    }
+    // The ranges of `expr`, the first in the most significant bits.
+    fn gather<A: std::hash::Hash + Eq + Clone>(
+        arena: &mut SLTNodeArena<A>,
+        expr: NodeId,
+        ranges: Vec<(usize, usize)>,
+    ) -> Option<NodeId> {
+        if let [range] = ranges.as_slice() {
+            return slice(arena, expr, *range);
+        }
+        let parts = ranges
+            .into_iter()
+            .map(|range| Some((slice(arena, expr, range)?, range.1)))
+            .collect::<Option<Vec<_>>>()?;
+        arena.alloc(SLTNode::Concat(parts)).ok()
+    }
+    let mut parts = Vec::with_capacity(args.len());
+    for (arg, layout) in args.iter().zip(&stream.args) {
+        // An operand is evaluated in its own self-determined type (11.4.14.1).
+        let node = lower(arg.as_ref()?, arena, None, None)?;
+        let node = coerce_node_width(arena, node, Some(layout.width), false).ok()?;
+        let bits = layout.bits.unwrap_or((0, layout.width));
+        let node = slice(arena, node, bits)?;
+        parts.push((gather(arena, node, layout.elements(bits.1))?, bits.1));
+    }
+    let generic = match parts.as_slice() {
+        [(node, _)] => *node,
+        _ => arena.alloc(SLTNode::Concat(parts)).ok()?,
+    };
+    let (width, stream_width) = (stream.width(), stream.stream_width());
+    let ordered = if stream.unpack {
+        let source = stream.args.first()?.width;
+        let packed = slice(
+            arena,
+            generic,
+            (source.checked_sub(stream_width)?, stream_width),
+        )?;
+        // The packed stream holds the blocks most significant first: put
+        // each back at its place in the stream.
+        let mut lsb = stream_width;
+        let mut blocks = stream
+            .blocks(stream_width)
+            .into_iter()
+            .map(|(block, size)| {
+                lsb -= size;
+                (block, (lsb, size))
+            })
+            .collect::<Vec<_>>();
+        blocks.sort_by_key(|block| std::cmp::Reverse(block.0));
+        gather(
+            arena,
+            packed,
+            blocks.into_iter().map(|(_, range)| range).collect(),
+        )?
+    } else {
+        let ordered = gather(arena, generic, stream.blocks(stream_width))?;
+        if width > stream_width {
+            let fill = width - stream_width;
+            let zeros = arena
+                .alloc(SLTNode::Constant(
+                    BigUint::default(),
+                    BigUint::default(),
+                    fill,
+                    false,
+                ))
+                .ok()?;
+            arena
+                .alloc(SLTNode::Concat(vec![
+                    (ordered, stream_width),
+                    (zeros, fill),
+                ]))
+                .ok()?
+        } else {
+            ordered
+        }
+    };
+    if stream.targets.iter().all(|target| target.element.is_none()) {
+        return Some(ordered);
+    }
+    let mut lsb = width;
+    let mut parts = Vec::with_capacity(stream.targets.len());
+    for target in &stream.targets {
+        lsb -= target.width;
+        let part = slice(arena, ordered, (lsb, target.width))?;
+        parts.push((
+            gather(arena, part, target.elements(target.width))?,
+            target.width,
+        ));
+    }
+    arena.alloc(SLTNode::Concat(parts)).ok()
 }
 
 /// A [`sv::ir::Callee::Lookup`] call as nested multiplexers of case
@@ -5517,7 +6450,7 @@ fn lower_comb_processes(
     pm.runtime_errors = std::mem::take(runtime_errors);
     pm.extern_functions = std::mem::take(extern_functions);
     let random_seeds = process_random_seeds(module);
-    let redundant = redundant_net_aliases(module);
+    let redundant = redundant_net_drivers(module);
     let watchable =
         watch_seeds.map(|seeds| watchable_variables(&pm, module, port_assignments, seeds));
     for (index, process) in module.comb_processes().iter().enumerate() {
@@ -6094,6 +7027,9 @@ fn unpacked_array_type(variable: &SvVariable) -> Option<sv::typecheck::UnpackedA
         element_width,
         signed: variable.signed,
         four_state: variable.is_4state,
+        // Lowered variables keep only the bits of their elements, so a port
+        // connection compares the integral shape of the element types.
+        element: None,
     })
 }
 
@@ -6132,8 +7068,8 @@ fn check_unpacked_port_connection(
     }
     let error = sv::AnalyzerError::IncompatibleUnpackedArray {
         context: format!("connection of port `{}`", connection.formal),
-        actual: actual_type,
-        target,
+        actual: actual_type.to_string(),
+        target: target.to_string(),
     };
     Err(ParserError::illegal_context(
         "systemverilog port connection",
@@ -7306,6 +8242,42 @@ fn lower_glue_parent_expr(
             source_ids.dedup();
             Some((node, sources, source_ids))
         }
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Stream(stream),
+            args,
+            ..
+        } => {
+            let mut sources = HashSet::default();
+            let mut source_ids = Vec::new();
+            let node = lower_stream(
+                args,
+                stream,
+                arena,
+                &mut |expr, arena, context_width, context_signed| {
+                    let (node, expr_sources, expr_source_ids) = lower_glue_parent_expr(
+                        expr,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        context_width,
+                        context_signed,
+                    )?;
+                    sources.extend(expr_sources);
+                    source_ids.extend(expr_source_ids);
+                    Some(node)
+                },
+            )?;
+            source_ids.sort();
+            source_ids.dedup();
+            Some((
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
+                    .ok()?,
+                sources,
+                source_ids,
+            ))
+        }
         sv::ir::Expr::Inside { expr, items } => lower_glue_parent_expr(
             &inside_as_comparisons(expr, items),
             variables,
@@ -7516,6 +8488,7 @@ fn signal_type_from_sv(
                 | sv::ir::TypeKind::String
                 | sv::ir::TypeKind::Object
                 | sv::ir::TypeKind::Process
+                | sv::ir::TypeKind::Event
         );
     let packed_ranges = typ
         .packed_ranges()
@@ -7535,13 +8508,14 @@ fn signal_type_from_sv(
         })
         .collect();
     let type_kind = match typ.kind() {
-        sv::ir::TypeKind::Bit | sv::ir::TypeKind::Real | sv::ir::TypeKind::Shortreal => {
-            PortTypeKind::Bit
-        }
+        sv::ir::TypeKind::Bit => PortTypeKind::Bit,
+        sv::ir::TypeKind::Real => PortTypeKind::Real,
+        sv::ir::TypeKind::Shortreal => PortTypeKind::ShortReal,
+        sv::ir::TypeKind::String => PortTypeKind::String,
         sv::ir::TypeKind::Logic | sv::ir::TypeKind::Reg | sv::ir::TypeKind::Implicit => {
             PortTypeKind::Logic
         }
-        sv::ir::TypeKind::String | sv::ir::TypeKind::Object | sv::ir::TypeKind::Process => {
+        sv::ir::TypeKind::Object | sv::ir::TypeKind::Process | sv::ir::TypeKind::Event => {
             PortTypeKind::Other
         }
     };
@@ -7550,13 +8524,6 @@ fn signal_type_from_sv(
         sv::ir::TypeKind::Object => celox_design::ValueKind::ObjRef,
         _ => celox_design::ValueKind::Bits,
     };
-    if value_kind == celox_design::ValueKind::StrRef && !array_dims.is_empty() {
-        // Selects of such an array would need to tell element selects from
-        // character selects.
-        return Err(sv::AnalyzerError::Unsupported(
-            "unpacked array of strings".into(),
-        ));
-    }
     Ok(SvSignalType {
         float,
         value_kind,
@@ -8023,6 +8990,7 @@ fn lower_bit_vector_function_slt<A: std::hash::Hash + Eq + Clone>(
         | SystemFunction::Fell
         | SystemFunction::Stable
         | SystemFunction::Changed
+        | SystemFunction::Typename
         | SystemFunction::Bits
         | SystemFunction::Size
         | SystemFunction::Dimensions
@@ -8736,6 +9704,37 @@ fn lower_expr_with_context(
                 },
             )?;
             Some((node, sources))
+        }
+        sv::ir::Expr::Call {
+            callee: sv::ir::Callee::Stream(stream),
+            args,
+            ..
+        } => {
+            let mut sources = HashSet::default();
+            let node = lower_stream(
+                args,
+                stream,
+                arena,
+                &mut |expr, arena, context_width, context_signed| {
+                    let (node, expr_sources) = lower_expr_with_context(
+                        expr,
+                        variables,
+                        name_to_id,
+                        constants,
+                        parameter_types,
+                        arena,
+                        context_width,
+                        context_signed,
+                    )?;
+                    sources.extend(expr_sources);
+                    Some(node)
+                },
+            )?;
+            Some((
+                coerce_node_width(arena, node, context_width, context_signed.unwrap_or(false))
+                    .ok()?,
+                sources,
+            ))
         }
         sv::ir::Expr::Inside { expr, items } => lower_expr_with_context(
             &inside_as_comparisons(expr, items),
@@ -10818,18 +11817,116 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_always_temporaries_exclude_queued_writes() {
+        // The syntax frontend currently rejects untimed wildcard NBAs before
+        // lowering. Exercise the IR transformation directly so it remains safe
+        // when such a process reaches this pass.
+        for (left, right) in [
+            ("j=a; x=j;", "j=b; y=j;"),
+            ("{j}=a; x=j;", "{j}=b; y=j;"),
+            (
+                "j=0; case(a) default:j=a; endcase x=j;",
+                "j=0; case(b) default:{j}=b; endcase y=j;",
+            ),
+        ] {
+            let source = format!(
+                "module Top(input bit a,b, output bit x,y); bit j; \
+                 always @* begin {left} end always @* begin {right} end endmodule"
+            );
+            let ir = sv::analyze_source(&source, Path::new("shared_nba.sv")).unwrap();
+            let module =
+                ir.modules()[0]
+                    .clone()
+                    .map_comb_process_bodies(|_, mut body, sensitivity| {
+                        if !sensitivity {
+                            for stmt in &mut body {
+                                stmt.walk_mut(&mut |stmt| match stmt {
+                                    sv::ir::Stmt::Assign {
+                                        lhs,
+                                        rhs: sv::ir::Expr::Ident(_),
+                                        nonblocking,
+                                    } if lhs.name() == "j" => *nonblocking = true,
+                                    sv::ir::Stmt::AssignConcat {
+                                        parts, nonblocking, ..
+                                    } if parts.iter().any(|part| part.name() == "j") => {
+                                        *nonblocking = true
+                                    }
+                                    _ => {}
+                                });
+                            }
+                        }
+                        body
+                    });
+            let mut warnings = Vec::new();
+            let (converted, shared) = share_always_variables(
+                &module,
+                &module_constants_with_overrides(&module, &[]),
+                &module_parameter_types(&module),
+                SharedAlways {
+                    temporaries: true,
+                    foreign_references: &HashSet::default(),
+                },
+                &mut warnings,
+            )
+            .unwrap();
+            assert!(shared.contains("j"), "{source}");
+            assert!(warnings.is_empty(), "{source}");
+            assert!(converted.comb_processes().is_empty(), "{source}");
+            assert_eq!(converted.initial_processes().len(), 2, "{source}");
+        }
+    }
+
+    std::thread_local! {
+        // Observe the real compilation path without sharing counters between
+        // concurrently running tests or adding instrumentation to release builds.
+        #[allow(clippy::disallowed_types, reason = "test-local specialization observations")]
+        static SPECIALIZATIONS: std::cell::RefCell<Option<Vec<(LoweredSvModuleKey, bool)>>> = const {
+            std::cell::RefCell::new(None)
+        };
+        #[allow(clippy::disallowed_types, reason = "test-local analysis observations")]
+        static ANALYSES: std::cell::RefCell<Option<Vec<LoweredSvModuleKey>>> = const {
+            std::cell::RefCell::new(None)
+        };
+    }
+
+    pub(super) fn record_analysis(key: &LoweredSvModuleKey) {
+        ANALYSES.with_borrow_mut(|records| {
+            if let Some(records) = records {
+                records.push(key.clone());
+            }
+        });
+    }
+
+    pub(super) fn record_specialization(key: &LoweredSvModuleKey, lists: LevelLists<'_>) {
+        SPECIALIZATIONS.with_borrow_mut(|records| {
+            if let Some(records) = records {
+                records.push((key.clone(), matches!(lists, LevelLists::Lowered { .. })));
+            }
+        });
+    }
+
+    #[test]
     fn stateless_function_scratch_loops_do_not_become_runtime_loops() {
-        let source = r#"module Top(input wire [255:0] d, output wire [255:0] q);
+        // The second result keeps bit 15 of every row between calls; nothing
+        // reads it, so each call still returns the same constant.
+        let sources = [16, 15].map(|columns| {
+            format!(
+                r#"module Top(input wire [255:0] d, output wire [255:0] q);
             function [15:0][15:0] pattern();
                 logic [15:0] words [15:0];
                 for (int i=0; i<16; i++) words[i] = 16'b1 << i;
-                for (int i=0; i<16; i++) for (int j=0; j<16; j++) pattern[i][j] = words[i][j];
+                for (int i=0; i<16; i++) for (int j=0; j<{columns}; j++) pattern[i][j] = words[i][j];
             endfunction
             assign q = d ^ pattern();
-        endmodule"#;
-        for four_state in [false, true] {
+        endmodule"#
+            )
+        });
+        for (source, four_state) in sources
+            .iter()
+            .flat_map(|source| [(source, false), (source, true)])
+        {
             let output = schedule_sources(
-                &[(source, Path::new("top.sv"))],
+                &[(source.as_str(), Path::new("top.sv"))],
                 "Top",
                 &[],
                 &[],
@@ -10960,7 +12057,8 @@ mod tests {
                         sv::ir::Callee::String(_)
                         | sv::ir::Callee::Object(_)
                         | sv::ir::Callee::Checked { .. }
-                        | sv::ir::Callee::Lookup { .. } => continue,
+                        | sv::ir::Callee::Lookup { .. }
+                        | sv::ir::Callee::Stream(_) => continue,
                         sv::ir::Callee::Subroutine(name) => name,
                     };
                     let Some(subroutine) = self
@@ -11449,6 +12547,118 @@ endmodule
             ),
         ] {
             assert_eq!(procedure_kernels(source), kernels, "{source}");
+        }
+    }
+
+    #[test]
+    fn level_list_retry_reuses_unaffected_parameter_specializations() {
+        let source = "module Leaf #(parameter N = 8)
+                        (input bit [N-1:0] d, output wire [N-1:0] q);
+                        for (genvar i = 0; i < N; i++) assign q[i] = ~d[i];
+                      endmodule
+                      module Top(output bit [7:0] a, b, output wire [7:0] y,
+                                 output wire [15:0] z);
+                        initial begin #1; a = 1; end
+                        always @(a) if (a < 4) b = a;
+                        always @(b) if (b < 4) a = b + 1;
+                        Leaf #(8) byte_leaf(.d(a), .q(y));
+                        Leaf #(16) word_leaf(.d({a, b}), .q(z));
+                      endmodule";
+        SPECIALIZATIONS.set(Some(Vec::new()));
+        let kernels = procedure_kernels(source);
+        let observations = SPECIALIZATIONS.take().unwrap();
+        assert_eq!(kernels, 3, "the affected level lists remain processes");
+        let mut lowered = HashMap::<LoweredSvModuleKey, usize>::default();
+        for (key, final_lowering) in observations {
+            if final_lowering {
+                *lowered.entry(key).or_default() += 1;
+            }
+        }
+        assert_eq!(lowered.len(), 3, "Top and two distinct Leaf parameters");
+        assert_eq!(lowered[&LoweredSvModuleKey::base("Top".into())], 2);
+        let leaves: Vec<_> = lowered
+            .iter()
+            .filter(|(key, _)| key.name == "Leaf")
+            .collect();
+        assert_eq!(leaves.len(), 2);
+        assert!(leaves.iter().all(|(_, count)| **count == 1), "{leaves:?}");
+    }
+
+    #[test]
+    fn hierarchy_discovery_analyses_are_reused_by_parameter_identity() {
+        let source = "module Leaf #(parameter N = 8)
+                        (input bit [N-1:0] d, output wire [N-1:0] q);
+                        for (genvar i = 0; i < N; i++) assign q[i] = ~d[i];
+                      endmodule
+                      module Top(input bit [15:0] d, output wire [7:0] y,
+                                 output wire [15:0] z);
+                        Leaf #(8) byte_leaf(.d(d[7:0]), .q(y));
+                        Leaf #(16) word_leaf(.d(d), .q(z));
+                      endmodule";
+        for four_state in [false, true] {
+            ANALYSES.set(Some(Vec::new()));
+            SPECIALIZATIONS.set(Some(Vec::new()));
+            let result = schedule_sources(
+                &[(source, Path::new("discovery.sv"))],
+                "Top",
+                &[],
+                &[],
+                &[],
+                four_state,
+                &celox_frontend_core::ParallelScheduleOptions::default(),
+                &FrontendTraceOptions::default(),
+                None,
+                &mut Vec::new(),
+            );
+            let observations = ANALYSES.take().unwrap();
+            let lowerings = SPECIALIZATIONS.take().unwrap();
+            result.unwrap_or_else(|error| panic!("{error}"));
+            let mut counts = HashMap::<LoweredSvModuleKey, usize>::default();
+            for key in observations {
+                *counts.entry(key).or_default() += 1;
+            }
+            assert_eq!(
+                lowerings.len(),
+                3,
+                "lower each specialization only for execution"
+            );
+            assert!(
+                lowerings.iter().all(|(_, final_lowering)| *final_lowering),
+                "hierarchy discovery must not lower executable bodies: {lowerings:?}"
+            );
+            assert_eq!(counts.len(), 3, "Top and two Leaf parameterizations");
+            assert!(counts.values().all(|&count| count == 1), "{counts:?}");
+        }
+    }
+
+    #[test]
+    fn discovery_reuse_keeps_hierarchical_resolution_separate() {
+        let source = "module Leaf(input bit [7:0] d, output wire [7:0] q);
+                        assign q = d + 1;
+                      endmodule
+                      module Top(input bit [7:0] d, output wire [7:0] y);
+                        Leaf leaf(.d(d), .q());
+                        assign y = leaf.q;
+                      endmodule";
+        for four_state in [false, true] {
+            ANALYSES.set(Some(Vec::new()));
+            let result = schedule_sources(
+                &[(source, Path::new("hierarchical-discovery.sv"))],
+                "Top",
+                &[],
+                &[],
+                &[],
+                four_state,
+                &celox_frontend_core::ParallelScheduleOptions::default(),
+                &FrontendTraceOptions::default(),
+                None,
+                &mut Vec::new(),
+            );
+            let observations = ANALYSES.take().unwrap();
+            result.unwrap_or_else(|error| panic!("{error}"));
+            let count = |name: &str| observations.iter().filter(|key| key.name == name).count();
+            assert_eq!(count("Leaf"), 1, "reuse the independent child analysis");
+            assert!(count("Top") >= 2, "resolve the parent's hierarchical names");
         }
     }
 

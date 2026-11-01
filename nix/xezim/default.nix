@@ -1,7 +1,7 @@
 # xezim, an IEEE 1800 simulator, as an external reference for the shared test
-# suite. `src` is the `xezim` flake input, pinned by revision and updated by
-# Renovate. Upstream does not commit a Cargo.lock; the one here resolves that
-# revision, and `update-lock.sh` regenerates it after an update. Its git
+# suite. `src` is the `xezim` flake input, pinned to a stable release tag and
+# content-locked in flake.lock. Updatecli updates the release and both locks.
+# Upstream does not commit a Cargo.lock; `update-lock.sh` resolves it. Its git
 # dependency xezim-core is fetched at the revision the lockfile records.
 {
   lib,

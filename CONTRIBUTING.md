@@ -211,6 +211,10 @@ See GitHub's [advanced setup migration instructions](https://docs.github.com/en/
 
 ### Product checks
 
+Validation workflows disable LTO for development, test, and release-profile
+builds, including dependency cache warming. Benchmark and publication workflows
+retain the workspace LTO settings.
+
 Rust caches in `ci.yml` are restored on every branch but saved only on the
 default branch. A PR's merge-ref cache cannot be restored by another PR, so
 saving one copy per PR consumes the shared cache quota without warming other
@@ -418,12 +422,12 @@ Local validation uses the behavior-based matrix above.
 | --- | --- |
 | On a candidate push to `release` | Full CI on the fixed candidate SHA, followed by stable tag/GitHub Release creation and package dispatch only after success. Stable publishers verify this successful branch run, including manual retries and recovery tags. |
 | Daily at 01:17 UTC (10:17 JST) | Full `ci.yml` on the default branch, with every change-classifier output enabled. Includes native/WASI NAPI, JS/browser tests, ARM64, script tests, and all ordinary Celox workspace tests. |
-| Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages and the small pinned/HEAD Heliodor Linux boot compatibility checks. |
+| Daily from `nightly.yml` at 02:43 UTC (11:43 JST) | Dispatch the same full CI on `develop`, with detection of its Veryl dependency lane. Queue nightly packages. External simulator comparisons and Heliodor are not dispatched on `develop`. |
 | Daily at 01:47 UTC (10:47 JST) | `bench.yml` measures Rust, Verilator, and TypeScript on one host and publishes master history. Manual dispatch supports branch measurements. |
 | Daily at 02:17 UTC (11:17 JST) | `codspeed.yml` measures compile time on the default branch using CPU simulation. Execution failures and CodSpeed performance-check failures open or update a branch issue; the next healthy run closes it. Manual dispatch supports branch measurements. PRs, merge groups, and pushes do not run CodSpeed. |
 | Daily at 02:37 UTC (11:37 JST) | `heliodor-bench.yml` runs the complete master Linux suite on x86-64 and AArch64. Explicit manual selections retain focused suite runs and ARM64 profiling. PRs do not run this workflow; its tooling tests run in `Lint & Format` with the other script tests. |
 | Every full CI run | Run the pinned upstream `common_cells` Gray code SV TB through `celox run --project`, plus an assertion negative control. Logs are retained for 14 days and failures feed the Full CI issue. See [the reproduction instructions](conformance/common-cells/README.md). |
-| Daily at 03:47 UTC (12:47 JST), on develop from nightly, and on demand | Independent `external-comparisons.yml` runs every shared Veryl and SystemVerilog case against Verilator, Icarus, and xezim, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
+| Daily at 03:47 UTC (12:47 JST) on the default branch, and on demand | Independent `external-comparisons.yml` runs every shared Veryl and SystemVerilog case against Verilator, Icarus, and xezim, with locked Nix tools. Run the live adapter tests normally marked ignored because they need external tools. Preserve reports and per-case diagnostics as artifacts for 14 days, including on failure; matrix failures do not cancel the other comparisons. |
 | Affected pull requests and merge groups; daily at 03:41 UTC (12:41 JST); on demand | `lydite-checks.yml` owns Lydite Rust tests, proof, conformance, editor, and mutation gates. Unrelated changes skip these jobs. Bridge gates are disabled; daily and manual runs enable only core lanes and report failures in an issue. |
 | On demand | Dispatch `ci.yml` on the desired branch to run full product CI, regardless of its diff. Dispatch `external-comparisons.yml` separately for external comparisons. |
 
@@ -520,3 +524,60 @@ dequeue as usual to withdraw the merge request entirely. The generated
 
 Each label's behavior works after its configuration reaches the PR's base
 branch. Creating or applying a label alone does not install the queue policy.
+
+## GitHub Actions dependencies
+
+All workflows use the generated `.github/workflows/actions.lock` to pin direct
+and transitive action dependencies. Install the official CLI extension and
+regenerate the lockfile after adding workflows or changing action references:
+
+```sh
+gh extension install github/gh-actions-lock --pin v0.4.0
+gh actions-lock --no-narrow
+gh actions-lock --verify
+```
+
+Keep readable version references in workflows; review the generated commit and
+repository identity changes in `actions.lock`. Do not edit the lockfile by hand.
+Use `gh actions-lock --verify-local` for an offline coverage check. To advance
+moving tags or branches deliberately, review upstream changes and run
+`gh actions-lock --no-narrow --relock`.
+
+Repository actions use `$/` references so their transitive dependencies are
+included. These actions run from the workflow commit, even when checkout uses a
+different validation revision. When adding a local action, use `$/` or run
+`gh actions-lock --no-narrow --migrate-local-actions` and review that migration.
+
+The Verify workflow lockfile check verifies coverage and upstream provenance on
+pull requests, merge groups, and pushes to master/develop. Dependabot manages
+GitHub Actions updates, including matching lockfile entries; Renovate continues
+to manage other dependencies. See the
+[GitHub lockfile documentation](https://docs.github.com/en/actions/concepts/security/workflow-dependency-lockfiles).
+
+Lockfile verification is required even for documentation-only queue batches.
+The CI `Queue validation` job requires its reusable lockfile verification job
+to succeed; failures, cancellations, and skips block merging. All Mergify queues
+also require the standalone `Verify workflow lockfile` check. Keep that check
+required in the master/develop rulesets so older PR check results cannot bypass
+a newly introduced lockfile requirement.
+
+## Dependency security updates
+
+Dependabot security updates open PRs when GitHub reports a vulnerable dependency
+with an available compatible fix. The root Cargo configuration in
+`.github/dependabot.yml` sets `open-pull-requests-limit: 0`: this disables
+Dependabot version-update PRs while allowing security-update PRs. The required
+`schedule` field does not turn these into routine lockfile refreshes.
+
+Enable Dependabot alerts and security updates in the repository's security
+settings; the YAML file alone does not enable security updates. Security PRs
+carry `dependencies` and require review before queueing.
+
+The daily `cargo-deny` workflow remains the RustSec advisory gate. GitHub's
+advisory database and RustSec can differ, so a cargo-deny failure does not
+guarantee an immediate Dependabot PR. An incompatible requirement in an
+upstream dependency can also prevent an automatic fix; those cases need an
+upstream release or an explicitly maintained patch.
+
+See [Dependabot security updates](https://docs.github.com/en/code-security/concepts/supply-chain-security/dependabot-security-updates)
+and [security-only configuration](https://docs.github.com/en/code-security/how-tos/secure-your-supply-chain/secure-your-dependencies/configure-security-updates).

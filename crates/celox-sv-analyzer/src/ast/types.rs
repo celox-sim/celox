@@ -4,11 +4,13 @@ use celox_sv_syntax::{BodyItemKind, ParameterKind, TypeAliasTarget};
 
 pub(super) fn type_aliases_from_scope(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
 ) -> Converted<HashMap<String, Type>> {
     // Constants of this scope are not available until parameter collection.
     // The subsequent pass with an environment requires complete defaults.
     type_aliases_in_scope(
         tree,
+        session,
         &HashMap::default(),
         &HashMap::default(),
         true,
@@ -19,10 +21,12 @@ pub(super) fn type_aliases_from_scope(
 }
 pub(super) fn type_aliases_from_scope_with_env(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
 ) -> Converted<HashMap<String, Type>> {
     type_aliases_in_scope(
         syntax_tree,
+        session,
         const_env,
         &HashMap::default(),
         true,
@@ -35,12 +39,14 @@ pub(super) fn type_aliases_from_scope_with_env(
 /// Resolve a selected body while retaining its enclosing lexical type bindings.
 pub(super) fn type_aliases_from_body_with_env(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
 ) -> Converted<HashMap<String, Type>> {
     type_aliases_in_scope(
         syntax_tree,
+        session,
         const_env,
         inherited,
         false,
@@ -55,6 +61,7 @@ pub(super) fn type_aliases_from_body_with_env(
 /// in each iteration of a loop (IEEE 1800-2023 27.4).
 pub(super) fn type_aliases_of_generate_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     items: &[celox_sv_syntax::BodyItemId],
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
@@ -62,6 +69,7 @@ pub(super) fn type_aliases_of_generate_scope(
 ) -> Converted<HashMap<String, Type>> {
     type_aliases_in_scope(
         syntax_tree,
+        session,
         const_env,
         inherited,
         false,
@@ -73,6 +81,7 @@ pub(super) fn type_aliases_of_generate_scope(
 
 fn type_aliases_in_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     const_env: &HashMap<String, i128>,
     inherited: &HashMap<String, Type>,
     include_header: bool,
@@ -80,7 +89,11 @@ fn type_aliases_in_scope(
     defer_class_defaults: bool,
     generate_scope: Option<&str>,
 ) -> Converted<HashMap<String, Type>> {
-    let mut aliases = scope::imported(&syntax_tree.state).type_aliases.clone();
+    // Each alias binds in a context that shares the tables; it is dropped
+    // before the next alias is added, so the table grows without copies.
+    let const_env: SharedMap<i128> = const_env.clone().into();
+    let const_env = &const_env;
+    let mut aliases: SharedMap<Type> = scope::imported(syntax_tree).type_aliases.clone().into();
     aliases.extend(
         inherited
             .iter()
@@ -93,6 +106,7 @@ fn type_aliases_in_scope(
                 parameter,
                 parameter.id,
                 syntax_tree,
+                session,
                 const_env,
                 &mut aliases,
             )?;
@@ -117,6 +131,7 @@ fn type_aliases_in_scope(
                         parameter,
                         parameter.id,
                         syntax_tree,
+                        session,
                         const_env,
                         &mut aliases,
                     )?;
@@ -131,6 +146,7 @@ fn type_aliases_in_scope(
                     id,
                     syntax_tree.declarations(),
                     syntax_tree,
+                    session,
                     const_env,
                     &aliases,
                     defer_class_defaults,
@@ -139,8 +155,14 @@ fn type_aliases_in_scope(
                     continue;
                 };
                 let context = PackedDimensions::new(HashMap::default(), const_env, &aliases);
-                let mut ty =
-                    containers::with_dimensions(base, &alias.dimensions, syntax_tree, &context)?;
+                let mut ty = containers::with_dimensions(
+                    base,
+                    &alias.dimensions,
+                    syntax_tree,
+                    session,
+                    &context,
+                )?;
+                drop(context);
                 ty.name_declaration(|| declaration_name(syntax_tree, alias, generate_scope));
                 aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
             }
@@ -153,45 +175,54 @@ fn type_aliases_in_scope(
     // widen the index arithmetic of a run-time select to 128 bits.
     for ty in aliases.values_mut() {
         for range in &mut ty.packed_ranges {
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.left, const_env) {
+            if let Some(value) = eval_ast_const_expr(&syntax_tree.functions, &range.left, const_env)
+            {
                 range.left = bound_literal(value);
             }
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.right, const_env) {
+            if let Some(value) =
+                eval_ast_const_expr(&syntax_tree.functions, &range.right, const_env)
+            {
                 range.right = bound_literal(value);
             }
         }
         for range in &mut ty.unpacked_ranges {
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.left, const_env) {
+            if let Some(value) = eval_ast_const_expr(&syntax_tree.functions, &range.left, const_env)
+            {
                 range.left = bound_literal(value);
             }
-            if let Some(value) = eval_ast_const_expr(&syntax_tree.state, &range.right, const_env) {
+            if let Some(value) =
+                eval_ast_const_expr(&syntax_tree.functions, &range.right, const_env)
+            {
                 range.right = bound_literal(value);
             }
             if let Some(value) = range
                 .size
                 .as_ref()
-                .and_then(|size| eval_ast_const_expr(&syntax_tree.state, size, const_env))
+                .and_then(|size| eval_ast_const_expr(&syntax_tree.functions, size, const_env))
             {
                 range.size = Some(bound_literal(value));
             }
         }
     }
-    Ok(aliases)
+    Ok(aliases.into_inner())
 }
 
 /// The name of typedef `alias`, qualified by the module, interface, program
-/// or package that declares it and by its generate scope.
-fn declaration_name(
+/// or package that declares it and by its generate scope, and that name as
+/// `$typename` writes it.
+pub(super) fn declaration_name(
     tree: &AnalysisContext<'_>,
     alias: &celox_sv_syntax::TypeAlias,
     generate_scope: Option<&str>,
-) -> String {
+) -> (String, type_names::TypedefName) {
     let name = instances::normalize_identifier(&alias.name.spelling);
     let name = match generate_scope {
         Some(path) => format!("{path}.{name}"),
         None => name,
     };
-    match classes::enclosing_unit(tree.declarations(), alias.tokens) {
+    let unit = classes::enclosing_unit(tree.declarations(), alias.tokens);
+    let typename = type_names::TypedefName::Scope(type_names::scoped_name(unit, &name).into());
+    let identity = match unit {
         Some(unit) => format!(
             "{}::{name}",
             instances::normalize_identifier(&unit.name.spelling)
@@ -204,7 +235,8 @@ fn declaration_name(
             tree.compilation_path().hash(&mut hasher);
             format!("{}::{name}@{:016x}", packages::UNIT, hasher.finish())
         }
-    }
+    };
+    (identity, typename)
 }
 
 fn bound_literal(value: i128) -> ConstExpr {
@@ -221,21 +253,21 @@ fn add_type_parameter(
     parameter: &celox_sv_syntax::Parameter,
     key: celox_sv_syntax::ParameterId,
     tree: &AnalysisContext<'_>,
-    env: &HashMap<String, i128>,
-    aliases: &mut HashMap<String, Type>,
+    session: &mut Session,
+    env: &SharedMap<i128>,
+    aliases: &mut SharedMap<Type>,
 ) -> Converted<()> {
     let ParameterKind::Type { default } = parameter.kind else {
         return Ok(());
     };
     let name = instances::normalize_identifier(&parameter.name.spelling);
-    if let Some(bound) = scope::imported(&tree.state)
-        .type_parameter_bindings
-        .get(&key)
-    {
+    if let Some(bound) = scope::imported(tree).type_parameter_bindings.get(&key) {
         aliases.insert(name, bound.clone());
     } else if let Some(id) = default {
-        let context = PackedDimensions::new(HashMap::default(), env, aliases);
-        if let Some(ty) = type_binding::bind(id, tree, &context)? {
+        let context = PackedDimensions::new(HashMap::default(), env, &*aliases);
+        let ty = type_binding::bind(id, tree, session, &context)?;
+        drop(context);
+        if let Some(ty) = ty {
             aliases.insert(name, ty);
         }
     }
@@ -267,22 +299,55 @@ pub(super) fn enclose_aliased_packed_type(
     r#type
 }
 
-pub(super) fn type_with_unpacked_ranges(mut r#type: Type, ranges: Vec<UnpackedRange>) -> Type {
+/// The error of packed dimensions on a chandle, returned directly by the
+/// recursive type binder, which keeps its frames small.
+#[inline(never)]
+#[cold]
+pub(super) fn packed_chandles<T>() -> Result<T, AnalyzerError> {
+    Err(AnalyzerError::IllegalChandleUse {
+        detail: "a packed array of chandles".into(),
+    })
+}
+
+/// The error of an enumeration whose base type is a chandle, which is not
+/// integral (IEEE 1800-2023 6.19). Out of line like [`packed_chandles`].
+#[inline(never)]
+#[cold]
+pub(super) fn chandle_enum<T>() -> Result<T, AnalyzerError> {
+    Err(AnalyzerError::IllegalChandleUse {
+        detail: "an enumeration of chandle base type".into(),
+    })
+}
+
+/// `r#type` with the fixed-size unpacked dimensions `ranges` (IEEE 1800-2023
+/// 7.4) in front of its own. Every declaration of a fixed-size unpacked
+/// array, also of a typedef, a parameter or a container element, takes its
+/// type here.
+pub(super) fn type_with_unpacked_ranges(
+    mut r#type: Type,
+    ranges: Vec<UnpackedRange>,
+) -> Result<Type, AnalyzerError> {
+    // UVM keeps chandles in scalars and dynamic containers only.
+    if r#type.chandle && !ranges.is_empty() {
+        return Err(AnalyzerError::Unsupported(
+            "fixed-size unpacked array of chandle".into(),
+        ));
+    }
     let mut unpacked_ranges = ranges;
     unpacked_ranges.extend(r#type.unpacked_ranges);
     r#type.unpacked_ranges = unpacked_ranges;
-    r#type
+    Ok(r#type)
 }
 
 pub(super) fn validate_unpacked_dimension_sizes(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     ranges: &[UnpackedRange],
     const_env: &HashMap<String, i128>,
 ) -> Result<(), AnalyzerError> {
     if ranges.iter().any(|range| {
         range
             .size()
-            .and_then(|size| eval_ast_const_expr(state, size, const_env))
+            .and_then(|size| eval_ast_const_expr(functions, size, const_env))
             .is_some_and(|size| size <= 0)
     }) {
         return Err(AnalyzerError::Unsupported(

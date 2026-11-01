@@ -250,6 +250,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "execute",
                             "the design did not finish after run_to_finish",
                         ),
+                        ("icarus", "procedural::dpi_exports_leave_subroutines_unchanged") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
                         ("icarus", "fork_control::process_self_kill_finishes_program") => {
                             ("compile_error", "compile", "source_0.sv:10: syntax error")
                         }
@@ -291,6 +294,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "icarus",
                             "fork_control::process_nested_calls_preserve_level_wait_resume",
                         ) => ("compile_error", "compile", "source_0.sv:4: syntax error"),
+                        ("icarus", "fork_control::process_handles_index_associative_arrays") => {
+                            ("compile_error", "compile", "source_0.sv:5: syntax error")
+                        }
                         (
                             "icarus",
                             "fork_control::process_ancestor_kill_preserves_caller_rng"
@@ -471,6 +477,31 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Unsupported: tristate in top-level IO",
                         ),
+                        (
+                            "icarus",
+                            "mailboxes::get_and_bounded_put_block"
+                            | "mailboxes::messages_come_out_in_put_order"
+                            | "mailboxes::try_methods_do_not_block",
+                        ) => ("compile_error", "compile", "Invalid module instantiation"),
+                        ("icarus", "mailboxes::strings_and_class_handles") => {
+                            ("compile_error", "compile", "Invalid module item")
+                        }
+                        (
+                            "icarus",
+                            "semaphores::get_waits_until_enough_keys_are_put"
+                            | "semaphores::try_get_takes_only_available_keys",
+                        ) => ("compile_error", "compile", "Invalid module instantiation"),
+                        ("icarus", "semaphores::one_key_admits_one_process_at_a_time") => {
+                            ("compile_error", "compile", "semaphore doesn't name a type")
+                        }
+                        ("icarus", "events::events_of_class_objects") => {
+                            ("compile_error", "compile", "Invalid class item")
+                        }
+                        ("icarus", "events::triggered_state_lasts_until_time_advances") => (
+                            "compile_error",
+                            "compile",
+                            "Event name blast can't have member names (triggered)",
+                        ),
                         ("verilator", "references::ref_actual_of_an_equivalent_type") => (
                             "compile_error",
                             "compile",
@@ -548,6 +579,122 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                             "compile",
                             "Overriding the default variable lifetime is not yet supported",
                         ),
+                        ("icarus", "class::members_of_call_results") => {
+                            ("compile_error", "compile", "source_0.sv:17: syntax error")
+                        }
+                        ("icarus", "containers::compound_element_assignments") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:7: error: Type names are not valid expressions here.",
+                        ),
+                        ("icarus", "containers::string_indices_from_calls") => (
+                            "compile_error",
+                            "compile",
+                            "source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.",
+                        ),
+                        ("icarus", "containers::array_items_in_concatenations") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:26: sorry: Overriding the default variable lifetime is not yet supported.",
+                        ),
+                        ("verilator", "string_format::formatted_strings_into_integral_outputs") => {
+                            (
+                                "mismatch",
+                                "execute",
+                                "assert_eq d: expected 0x5a, got 0x58",
+                            )
+                        }
+                        ("icarus", "string_format::formatted_strings_into_integral_outputs") => (
+                            "runtime_error",
+                            "execute",
+                            "native testbench exited without reaching $finish",
+                        ),
+                        ("icarus", "class::parameter_literals_hide_module_constants") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:4: error: Invalid module item.",
+                        ),
+                        ("icarus", "class::parameter_strings_wider_than_a_constant") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::scoped_typedef_handles") => (
+                            "compile_error",
+                            "compile",
+                            "source_0.sv:4: error: Invalid class item.",
+                        ),
+                        (
+                            "icarus",
+                            "types::unpacked_array_assignments_through_selects_and_calls",
+                        ) => (
+                            "compile_error",
+                            "compile",
+                            "Subroutine ports with unpacked dimensions are not yet supported",
+                        ),
+                        (
+                            "xezim",
+                            "types::unpacked_array_assignments_through_selects_and_calls",
+                        ) => (
+                            "mismatch",
+                            "execute",
+                            "assert_eq sum: expected 0x1179b59, got 0x117b2e7",
+                        ),
+                        ("icarus", "containers::wide_associative_keys") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("icarus", "containers::wide_associative_keys_with_unknown_bits") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
+                        ("icarus", "containers::wide_signed_associative_keys") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
+                        ("icarus", "string_format::pattern_format_structure_containers") => {
+                            ("compile_error", "compile", "Unpacked structs not supported")
+                        }
+                        ("icarus", "string_format::pattern_format_structure_values") => {
+                            ("compile_error", "compile", "Unpacked structs not supported")
+                        }
+                        ("icarus", "containers::package_scoped_container_methods") => {
+                            ("compile_error", "compile", "syntax error")
+                        }
+                        ("verilator", "containers::nested_container_foreach_skipped_index") => {
+                            ("compile_error", "compile", "Verilator internal fault")
+                        }
+                        ("icarus", "containers::nested_container_foreach") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
+                        ("icarus", "containers::nested_container_foreach_skipped_index") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here",
+                        ),
+                        ("icarus", "containers::multidimensional_foreach_break") => {
+                            ("compile_error", "compile", "Queue of type")
+                        }
+                        ("icarus", "class::static_initializers_run_once_before_time_zero") => (
+                            "compile_error",
+                            "compile",
+                            "sorry: Overriding the default variable lifetime is not yet supported.",
+                        ),
+                        ("icarus", "class::specialized_scope_typedef_calls") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "class::specialized_scope_typedef_properties") => {
+                            ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("xezim", "class::specialized_scope_typedef_properties") => (
+                            "mismatch",
+                            "execute",
+                            "reads count with unknown bits in a two-state run",
+                        ),
+                        ("icarus", "string_format::pattern_format_enums") => {
+                            ("compile_error", "compile", "Unpacked structs not supported")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
@@ -585,6 +732,9 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         }
                         ("icarus", "class::foreign_generic_unit_type_constructor") => {
                             ("compile_error", "compile", "source_0.sv:3: syntax error")
+                        }
+                        ("icarus", "types::chandles_hold_null_and_copies") => {
+                            ("compile_error", "compile", "Invalid class item")
                         }
                         _ => panic!("unreviewed failure: {tool} {name}: {status}"),
                     };

@@ -334,6 +334,7 @@ pub(crate) fn finalize_scheduled_rtl(
         component_libraries,
         component_file_base,
         testbench_random_seed,
+        four_state,
         diagnostics,
     )
     .and_then(|(sir, runtime)| {
@@ -361,6 +362,7 @@ pub(crate) fn project_scheduled_rtl(
     component_libraries: Vec<celox_testbench::ComponentLibrary>,
     component_file_base: Option<std::path::PathBuf>,
     testbench_random_seed: Option<u64>,
+    four_state: bool,
     diagnostics: &crate::RuntimeDiagnostics,
 ) -> Result<(crate::ir::SirProgram, crate::ir::RuntimeProgram), ParserError> {
     apply_fused_optimization_hints(
@@ -391,10 +393,15 @@ pub(crate) fn project_scheduled_rtl(
             ParserError::illegal_context("runtime design projection", error.to_string(), None)
         })?;
     if let Some(testbench) = &mut testbench {
-        crate::testbench_compile::lower_expressions(&mut sir, &mut runtime, testbench)
+        crate::testbench_compile::lower_expressions(&mut sir, &mut runtime, testbench, four_state)
             .and_then(|()| {
                 testbench.fold_clock_waits();
-                crate::testbench_compile::lower_processes(&mut sir, &mut runtime, testbench)
+                crate::testbench_compile::lower_processes(
+                    &mut sir,
+                    &mut runtime,
+                    testbench,
+                    four_state,
+                )
             })
             .map_err(|error| ParserError::illegal_context("testbench SIR lowering", error, None))?;
     }

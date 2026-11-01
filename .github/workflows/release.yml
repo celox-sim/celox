@@ -15,10 +15,36 @@ concurrency:
 permissions: {}
 
 jobs:
+  release-issue:
+    name: Update release issue
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      # GitHub's generate-notes endpoint requires contents:write, even though
+      # planning does not save a release, tag, branch or commit.
+      contents: write
+      issues: write
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install release planner
+        run: npm ci --ignore-scripts --prefix scripts/release-please
+      - name: Update release tracker without opening a pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-issue.mjs
+
   release-please:
-    name: Update release pull request
+    name: Prepare weekly release pull request
+    outputs:
+      held: ${{ steps.release-issue.outputs.held }}
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v7
+
       # Resources created with GITHUB_TOKEN do not start follow-up workflows.
       # Use an installation token so release PR checks and release-triggered
       # publisher workflows run normally. Workflows permission also allows a
@@ -34,6 +60,14 @@ jobs:
           permission-issues: write
           permission-pull-requests: write
           permission-workflows: write
+
+      - name: Check whether the release issue is held
+        id: release-issue
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+        run: |
+          held="$(node scripts/release-issue.mjs held)"
+          echo "held=$held" >> "$GITHUB_OUTPUT"
 
       # Freeze the source PR as soon as queueing is requested, including while
       # waiting for admission or after a dequeue. Rewriting it invalidates the
@@ -54,6 +88,7 @@ jobs:
 
       - name: Create release or update release pull request
         id: release
+        if: steps.release-issue.outputs.held != 'true'
         uses: googleapis/release-please-action@v5
         with:
           token: ${{ steps.release-token.outputs.token }}
@@ -63,10 +98,17 @@ jobs:
           skip-github-release: true
           skip-github-pull-request: ${{ steps.release-pr.outputs.frozen == 'true' }}
 
+      - name: Close tracker after preparing the release PR
+        if: steps.release.outputs.prs_created == 'true'
+        env:
+          GH_TOKEN: ${{ steps.release-token.outputs.token }}
+          RELEASE_PR_NUMBER: ${{ fromJSON(steps.release.outputs.pr).number }}
+        run: node scripts/release-issue.mjs
+
   queue-release:
     name: Queue weekly release
     needs: release-please
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    if: needs.release-please.outputs.held != 'true' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     permissions:
       contents: read

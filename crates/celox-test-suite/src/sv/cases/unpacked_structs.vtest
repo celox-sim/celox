@@ -1,5 +1,140 @@
 (group unpacked_structs (category types))
 
+(case member_initial_values
+  (source "struct_defaults.sv" #"
+    module Top(output bit same);
+      parameter BASE = 5;
+      typedef struct { bit [3:0] low = BASE; int high = -2; int zero; } inner_t;
+      typedef struct { inner_t inner; bit flag = 1; } outer_t;
+      outer_t first, second;
+      outer_t explicit_value = '{'{9, 8, 7}, 0};
+      initial begin
+        same = first.inner.low == 5 && first.inner.high == -2 && first.inner.zero == 0
+          && first.flag && second.inner.low == 5
+          && explicit_value.inner.low == 9 && explicit_value.inner.high == 8
+          && explicit_value.inner.zero == 7 && !explicit_value.flag;
+        first.inner.low = 1;
+        same = same && second.inner.low == 5;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case member_initial_values_local_lifetimes
+  (source "struct_defaults.sv" #"
+    module Top(output int automatic_sum, static_sum, output bit same);
+      typedef struct { int value = 3; int other = 7; } row_t;
+      function automatic int automatic_value();
+        row_t row;
+        row.value++;
+        return row.value;
+      endfunction
+      function automatic int static_value();
+        static row_t row;
+        row.value++;
+        return row.value;
+      endfunction
+      initial begin
+        automatic row_t local_row;
+        automatic row_t explicit_row = '{default:0};
+        automatic_sum = automatic_value() + automatic_value();
+        static_sum = static_value() + static_value();
+        same = local_row.value == 3 && local_row.other == 7
+          && explicit_row.value == 0 && explicit_row.other == 0;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq automatic_sum 8) (assert_eq static_sum 9) (assert_eq same 1))
+
+(case member_initial_values_declaration_scope
+  (source "struct_defaults.sv" #"
+    package defs;
+      parameter VALUE = 9;
+      typedef struct { int value = VALUE + 2; bit [159:0] wide = '1; } row_t;
+    endpackage
+    module Top(output bit same, output int captured_value);
+      parameter VALUE = 2;
+      defs::row_t row;
+      initial begin
+        captured_value = row.value;
+        $display("%h", row.wide);
+        same = row.wide == 160'hffffffffffffffffffffffffffffffffffffffff;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq captured_value 11) (expect_output "ffffffffffffffffffffffffffffffffffffffff\n") (assert_eq same 1))
+
+(case member_initial_values_specialized_functions
+  (source "struct_defaults.sv" #"
+    module Child #(parameter BASE = 2)(output int value);
+      function automatic int initial_value();
+        return BASE + 1;
+      endfunction
+      typedef struct { int value = initial_value(); } row_t;
+      row_t row;
+      initial value = row.value;
+    endmodule
+    module Top(output bit same);
+      int first, second;
+      Child #(.BASE(3)) a(first);
+      Child #(.BASE(7)) b(second);
+      always_comb same = first == 4 && second == 8;
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case member_initial_values_assignment_context
+  (source "struct_defaults.sv" #"
+    module Top(output bit same);
+      typedef struct {
+        bit [63:0] shifted = 32'd1 << 40;
+        bit [159:0] fill = 1 ? '1 : '0;
+        bit [63:0] negative = -32'sd1;
+        bit [3:0] narrow = 32'h123;
+      } row_t;
+      row_t row;
+      initial same = row.shifted == 64'h10000000000
+        && row.fill == 160'hffffffffffffffffffffffffffffffffffffffff
+        && row.negative == 64'hffffffffffffffff && row.narrow == 3;
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case member_initial_values_four_state
+  (source "struct_defaults.sv" #"
+    module Top(output bit same);
+      typedef struct { logic [3:0] known = '1; logic [3:0] unknown = 4'bxz01; bit two = 'x; logic plain; } row_t;
+      row_t row;
+      row_t explicit_row = '{default:0};
+      initial same = row.known === 4'b1111 && row.unknown === 4'bxz01
+        && row.two === 1'b0 && row.plain === 1'bx
+        && explicit_row.unknown === 4'b0000 && explicit_row.plain === 1'b0;
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case member_initial_values_class_properties
+  (source "struct_defaults.sv" #"
+    module Top(output bit same);
+      typedef struct { int value = 3; } inner_t;
+      typedef struct { inner_t inner; int other = 7; } row_t;
+      class Box;
+        row_t row;
+        row_t explicit_row = '{'{9}, 8};
+      endclass
+      Box first, second;
+      initial begin
+        first = new;
+        second = new;
+        same = first.row.inner.value == 3 && first.row.other == 7
+          && first.explicit_row.inner.value == 9 && first.explicit_row.other == 8;
+        first.row.inner.value = 2;
+        same = same && second.row.inner.value == 3;
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
 (case members_whole_copies_and_equality
   (source "unpacked_struct_locals.sv" #"
 module Top(output bit done);
@@ -806,3 +941,128 @@ endmodule
   (top Top)
   (run_until 6000)
   (expect_output "[2999] [2999!] [h2999] [h2999!] 3000\n"))
+
+(case module_ports
+  (source "unpacked_struct_ports.sv" #"
+typedef struct { bit [7:0] value; bit [3:0] tag; } payload_t;
+typedef struct { payload_t payload; bit valid; } packet_t;
+module PayloadTransform(input payload_t i, output payload_t o);
+    always_comb begin
+        o = i;
+        o.value = i.value + 1;
+        o.tag = i.tag ^ 4'hf;
+    end
+endmodule
+module Transform(input packet_t i, output packet_t o);
+    PayloadTransform payload(.i(i.payload), .o(o.payload));
+    assign o.valid = i.valid;
+endmodule
+module Relay(input packet_t i, output packet_t o);
+    Transform transform(i, o);
+endmodule
+module Top(input bit [7:0] a, input bit [3:0] b, input bit valid,
+           output bit [7:0] y, output bit [3:0] tag, output bit seen);
+    packet_t i, o;
+    assign i = '{payload: '{value: a, tag: b}, valid: valid};
+    Relay relay(.i, .o);
+    assign y = o.payload.value;
+    assign tag = o.payload.tag;
+    assign seen = o.valid;
+endmodule
+"#)
+  (top Top)
+  (for (x t v) (list (0 0 0) (16 3 1) (255 15 0))
+    (modify (set a x) (set b t) (set valid v))
+    (assert_eq y (& (+ x 1) 255))
+    (assert_eq tag (^ t 15))
+    (assert_eq seen v)))
+
+(case module_port_patterns
+  (source "unpacked_struct_port_patterns.sv" #"
+typedef struct { bit [7:0] value; bit [3:0] tag; } data_t;
+typedef struct { data_t data; bit valid; } row_t;
+module Observe(input row_t i, output bit [7:0] value, output bit [3:0] tag, output bit valid);
+    assign value = i.data.value;
+    assign tag = i.data.tag;
+    assign valid = i.valid;
+endmodule
+module Top(input bit [7:0] a, input bit [3:0] b, input bit v,
+           output bit [7:0] value, output bit [3:0] tag, output bit valid,
+           output bit typed_ok);
+    bit [7:0] typed_value;
+    bit [3:0] typed_tag;
+    bit typed_valid;
+    data_t data;
+    assign data = '{value: a, tag: b};
+    Observe child(.i('{data: '{value: a + 1, tag: b}, valid: v}), .value, .tag, .valid);
+    Observe typed(.i('{valid: v, default: data}), .value(typed_value), .tag(typed_tag), .valid(typed_valid));
+    assign typed_ok = typed_value == a && typed_tag == b && typed_valid == v;
+endmodule
+"#)
+  (top Top)
+  (for (x t v) (list (0 0 0) (16 3 1) (255 15 0))
+    (modify (set a x) (set b t) (set v v))
+    (assert_eq value (& (+ x 1) 255))
+    (assert_eq tag t)
+    (assert_eq valid v)
+    (assert_eq typed_ok 1)))
+
+(case module_port_recursive_defaults
+  (source "unpacked_struct_port_defaults.sv" #"
+typedef struct { bit [7:0] value; bit [3:0] tag; } data_t;
+typedef struct { data_t data; bit valid; } row_t;
+module Observe(input row_t i, output bit [7:0] value, output bit [3:0] tag, output bit valid);
+    assign value = i.data.value;
+    assign tag = i.data.tag;
+    assign valid = i.valid;
+endmodule
+module Top(input bit [7:0] a, input bit [3:0] b,
+           output bit zero_ok, output bit one_ok, output bit override_ok, output bit repeat_ok);
+    bit [7:0] zero_value, one_value, override_value, repeat_value;
+    bit [3:0] zero_tag, one_tag, override_tag, repeat_tag;
+    bit zero_valid, one_valid, override_valid, repeat_valid;
+    Observe zeroes(.i('{default: 0}), .value(zero_value), .tag(zero_tag), .valid(zero_valid));
+    Observe ones(.i('{default: 1}), .value(one_value), .tag(one_tag), .valid(one_valid));
+    Observe overrides(.i('{data: '{tag: b, default: 1}, default: 0}),
+                      .value(override_value), .tag(override_tag), .valid(override_valid));
+    Observe repeated(.i('{default: a}), .value(repeat_value), .tag(repeat_tag), .valid(repeat_valid));
+    assign zero_ok = zero_value == 0 && zero_tag == 0 && zero_valid == 0;
+    assign one_ok = one_value == 1 && one_tag == 1 && one_valid == 1;
+    assign override_ok = override_value == 1 && override_tag == b && override_valid == 0;
+    assign repeat_ok = repeat_value == a && repeat_tag == a[3:0] && repeat_valid == a[0];
+endmodule
+"#)
+  (top Top)
+  (for (x t) (list (0 0) (16 3) (255 15))
+    (modify (set a x) (set b t))
+    (assert_eq zero_ok 1)
+    (assert_eq one_ok 1)
+    (assert_eq override_ok 1)
+    (assert_eq repeat_ok 1)))
+
+(case module_port_four_state_members
+  (source "unpacked_struct_port_states.sv" #"
+typedef struct { logic flag; bit two; logic signed [7:0] value; } row_t;
+module Copy(input row_t i, output row_t o);
+    assign o = i;
+endmodule
+typedef struct { row_t row; bit tag; } nested_t;
+module Defaults(input nested_t i, output bit ok);
+    assign ok = $isunknown(i.row.flag) && i.row.two == 0 && $isunknown(i.row.value) && i.tag == 0;
+endmodule
+module Top(output bit done);
+    row_t i, o;
+    bit defaults_ok;
+    Copy child(.i, .o);
+    Defaults defaults(.i('{default: 'x}), .ok(defaults_ok));
+    initial begin
+        i = '{1'bx, 1'bx, -8'sd3};
+        #1;
+        done = $isunknown(o.flag) && o.two == 0 && o.value < 0 && o.value == -3;
+        i = '{1'bz, 1'b1, 8'sd7};
+        #1;
+        done = done && o.flag === 1'bz && o.two == 1 && o.value == 7 && defaults_ok;
+    end
+endmodule
+"#)
+  (top Top) (four_state) (run_until 3) (assert_eq done 1))

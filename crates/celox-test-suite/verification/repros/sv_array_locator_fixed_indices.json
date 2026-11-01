@@ -1,0 +1,29 @@
+{
+  "case": "array_locators::array_locator_fixed",
+  "source": "src/sv/cases/array_locators.vtest",
+  "standard": "IEEE 1800-2023 7.12.1: find_index returns the indices of the elements, and the first element is the one closest to the leftmost indexed element; 7.12.4: item.index returns the index value; 6.11: byte is a signed integer type, so min of {1, -2, 3, -4} is -4.",
+  "method": "The shared case runs unchanged in verify-sv-verilator, verify-sv-icarus and verify-sv-xezim; the reduced source below runs without the adapters.",
+  "reduced_source": "module Top;\n    int down[3:0];\n    byte bytes[2:5] = '{1, -2, 3, -4};\n    int r[$];\n    byte b[$];\n    initial begin\n        down[3] = 1; down[2] = 5; down[1] = 5; down[0] = 2;\n        r = down.find_first_index with (item == 5);\n        $display(\"down first=%0d\", r[0]);\n        r = bytes.find_index with (item < 0);\n        $display(\"bytes negative at %0d %0d\", r[0], r[1]);\n        b = bytes.min;\n        $display(\"bytes min=%0d\", b[0]);\n        b = bytes.find_first with (item.index == 4);\n        $display(\"bytes[4] found=%0d\", b.size());\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "down first=1\nbytes negative at 1 3\nbytes min=1\nbytes[4] found=0\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "status": "compile_error",
+      "stderr": "repro.sv:8: syntax error\nrepro.sv:8: error: Malformed statement\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "down first=1\nbytes negative at 3 0\nbytes min=-2\nbytes[4] found=0\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "down first=2\nbytes negative at 3 5\nbytes min=-4\nbytes[4] found=1\n"
+    }
+  ]
+}

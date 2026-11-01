@@ -9,7 +9,6 @@
 use fxhash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::{
     borrow::Cow,
-    cell::RefCell,
     ops::{Deref, DerefMut},
     path::Path,
     sync::Arc,
@@ -17,58 +16,96 @@ use std::{
 
 use crate::source_tree::SourceTree as SyntaxTree;
 
-/// State owned by one analysis session, shared explicitly with nested scopes.
+/// What one analysis owns and changes as it goes: the caches it keys by
+/// their inputs and what it reports. Analysis passes it down as `&mut`.
 #[derive(Default)]
-pub(super) struct AnalysisState {
-    pub(crate) const_functions: const_functions::State,
-    foreign: std::rc::Rc<classes::foreign::Registry>,
-    foreign_arguments: RefCell<Vec<(String, classes::specializations::BoundArguments)>>,
-    foreign_names: RefCell<Vec<(String, classes::specializations::BoundArguments, String)>>,
-    foreign_error: RefCell<Option<AnalyzerError>>,
-    scope: scope::State,
-    interfaces: interface_ast::State,
+pub(crate) struct Session {
+    foreign: classes::foreign::Registry,
+    foreign_arguments: Vec<(String, classes::specializations::BoundArguments)>,
+    foreign_names: Vec<(String, classes::specializations::BoundArguments, String)>,
+    foreign_error: Option<AnalyzerError>,
     dimensions: dimensions::State,
-    root_subroutines: std::cell::Cell<bool>,
-    inline_randomizations: RefCell<Vec<classes::constraints::Inline>>,
-    next_call_site: std::rc::Rc<std::cell::Cell<usize>>,
-    timescales: timescales::State,
-    diagnostics: RefCell<Vec<warnings::AnalyzerWarning>>,
-    /// Revision of the imported scope, the analyzed package, the active
-    /// interface instances and the root-subroutine mode.
-    revision: generate::Revision,
+    inline_randomizations: Vec<classes::constraints::Inline>,
+    next_call_site: usize,
+    diagnostics: Vec<warnings::AnalyzerWarning>,
     generate_items: generate::Memo,
     /// Classes laid out so far, by name.
-    classes: std::cell::RefCell<HashMap<String, std::rc::Rc<classes::Class>>>,
+    classes: HashMap<String, std::rc::Rc<classes::Class>>,
     /// The constants and types of the scope that declares each class, which
     /// its parameter defaults and body see (IEEE 1800-2023 8.25).
-    class_declaration_scopes:
-        std::cell::RefCell<HashMap<String, (HashMap<String, i128>, HashMap<String, Type>)>>,
+    class_declaration_scopes: HashMap<String, (SharedMap<i128>, SharedMap<Type>)>,
+    /// The specializations that class references have named, by class
+    /// declaration (see [`classes::specializations`]).
+    class_specialization_names: HashMap<String, Vec<classes::specializations::Named>>,
     /// The classes declared in a generate block that elaboration repeats,
     /// which would be a class of their own in each repetition (27.4).
-    class_declarations_repeated: std::cell::RefCell<HashSet<String>>,
+    class_declarations_repeated: HashSet<String>,
     /// Set once the class methods of the scope being analyzed have their
     /// signatures, after which a new specialization would have none.
-    class_specializations_frozen: std::cell::Cell<bool>,
+    class_specializations_frozen: bool,
     /// The class specializations being made, which their own declarations
     /// may name before they are complete.
-    class_specializations_building: std::cell::RefCell<Vec<String>>,
+    class_specializations_building: Vec<String>,
     /// How many class specializations are being made, one inside another.
-    class_specialization_depth: std::cell::Cell<usize>,
+    class_specialization_depth: usize,
     /// The specializations of classes made so far, in order.
-    class_specializations: std::cell::RefCell<
-        Vec<(
-            String,
-            std::rc::Rc<classes::specializations::Specialization>,
-        )>,
-    >,
+    class_specializations: Vec<(
+        String,
+        std::rc::Rc<classes::specializations::Specialization>,
+    )>,
+    /// The virtual interfaces of the design, if it has any (IEEE 1800-2023
+    /// 25.9).
+    virtual_interfaces: Option<Arc<virtual_interfaces::VirtualInterfaces>>,
+    /// The semantic types of the design.
+    types: semantic_types::TyTable,
+}
+
+impl Session {
+    /// A session for a scope analyzed with `packages`, which takes over the
+    /// package class specializations, types and call sites of the design
+    /// until [`Self::restore`] gives them back.
+    fn with_packages(packages: &packages::Packages, design: &mut packages::Design) -> Self {
+        Self {
+            next_call_site: design.call_sites,
+            foreign: std::mem::take(&mut design.foreign),
+            virtual_interfaces: packages.virtual_interfaces.clone(),
+            types: std::mem::take(&mut design.types),
+            ..Self::default()
+        }
+    }
+
+    /// Gives `packages` back what [`Self::with_packages`] took, with what
+    /// this session added to it.
+    fn restore(self, design: &mut packages::Design) {
+        design.call_sites = self.next_call_site;
+        design.foreign = self.foreign;
+        design.types = self.types;
+    }
 }
 
 /// Syntax and specialization bindings for one scope within an analysis session.
 /// Child modules share the session and receive their own parameter bindings.
-struct AnalysisContext<'a> {
+#[derive(Clone)]
+pub(crate) struct AnalysisContext<'a> {
     syntax_tree: &'a SyntaxTree,
-    state: std::rc::Rc<AnalysisState>,
     parameter_overrides: Cow<'a, HashMap<String, ConstExpr>>,
+    /// The symbols the scope being analyzed imports (IEEE 1800-2023 26.3).
+    imported: Arc<scope::ScopeSymbols>,
+    /// The package being analyzed, inside which `p::x` names its own item.
+    package: Option<Arc<str>>,
+    /// The constant functions that calls in constant expressions of the
+    /// scope call (IEEE 1800-2023 13.4.3).
+    pub(crate) functions: const_functions::ConstantFunctions,
+    /// Whether generate scopes elaborate only their items, and their
+    /// subroutines are collected later.
+    root_subroutines: bool,
+    /// The interface instances being analyzed, outermost first.
+    active_interfaces: Arc<Vec<interface_ast::ActiveInstance>>,
+    /// The time scopes that time queries of the scope read (IEEE 1800-2023
+    /// 3.14.2).
+    timescale: Arc<timescales::QueryContext>,
+    /// The hierarchical path of the interface instance being analyzed.
+    interface_instance: Option<Arc<str>>,
 }
 
 impl<'a> AnalysisContext<'a> {
@@ -79,28 +116,28 @@ impl<'a> AnalysisContext<'a> {
     ) -> Self {
         Self {
             syntax_tree,
-            state: std::rc::Rc::default(),
             parameter_overrides: Cow::Borrowed(parameter_overrides),
+            imported: Arc::default(),
+            package: None,
+            functions: const_functions::ConstantFunctions::default(),
+            root_subroutines: false,
+            active_interfaces: Arc::default(),
+            timescale: Arc::default(),
+            interface_instance: None,
         }
     }
 
-    fn unspecialized(syntax_tree: &'a SyntaxTree) -> Self {
+    pub(crate) fn unspecialized(syntax_tree: &'a SyntaxTree) -> Self {
         Self {
             syntax_tree,
-            state: std::rc::Rc::default(),
             parameter_overrides: Cow::Owned(HashMap::default()),
-        }
-    }
-
-    fn with_packages(syntax_tree: &'a SyntaxTree, packages: &packages::Packages) -> Self {
-        Self {
-            syntax_tree,
-            state: std::rc::Rc::new(AnalysisState {
-                next_call_site: packages.call_sites.clone(),
-                foreign: packages.foreign.clone(),
-                ..AnalysisState::default()
-            }),
-            parameter_overrides: Cow::Owned(HashMap::default()),
+            imported: Arc::default(),
+            package: None,
+            functions: const_functions::ConstantFunctions::default(),
+            root_subroutines: false,
+            active_interfaces: Arc::default(),
+            timescale: Arc::default(),
+            interface_instance: None,
         }
     }
 
@@ -111,8 +148,39 @@ impl<'a> AnalysisContext<'a> {
     ) -> AnalysisContext<'b> {
         AnalysisContext {
             syntax_tree,
-            state: self.state.clone(),
             parameter_overrides: Cow::Borrowed(parameter_overrides),
+            imported: self.imported.clone(),
+            package: self.package.clone(),
+            functions: self.functions.clone(),
+            root_subroutines: self.root_subroutines,
+            active_interfaces: self.active_interfaces.clone(),
+            timescale: self.timescale.clone(),
+            interface_instance: self.interface_instance.clone(),
+        }
+    }
+
+    /// This context analyzing a scope that imports `symbols`.
+    fn importing(&self, symbols: Arc<scope::ScopeSymbols>) -> Self {
+        Self {
+            imported: symbols,
+            ..self.clone()
+        }
+    }
+
+    /// This context with `functions` as its constant functions.
+    fn with_functions(&self, functions: const_functions::ConstantFunctions) -> Self {
+        Self {
+            functions,
+            ..self.clone()
+        }
+    }
+
+    /// This context analyzing package `name`, inside which `name::x` names
+    /// its own item `x`.
+    fn in_package(&self, name: &str) -> Self {
+        Self {
+            package: Some(name.into()),
+            ..self.clone()
         }
     }
 }
@@ -140,7 +208,10 @@ mod case;
 mod casts;
 mod classes;
 mod comb_process;
+mod events;
+mod mailboxes;
 mod processes;
+mod semaphores;
 pub use bound_patterns::BoundPattern;
 mod comb_rewrite;
 pub(crate) mod const_functions;
@@ -152,13 +223,14 @@ mod dimensions;
 mod dpi;
 mod enums;
 mod expression_binding;
+mod expression_types;
 mod expressions;
 mod ff_process;
 mod functions;
 mod generate;
 pub(crate) mod imports;
 mod inlining;
-mod instances;
+pub(crate) mod instances;
 mod interface_ast;
 mod interface_binding;
 pub mod interfaces;
@@ -174,19 +246,23 @@ mod type_binding;
 pub(crate) use parameters::unbounded_parameter_marker;
 mod array_reductions;
 mod containers;
+mod locators;
 mod patterns;
 mod procedural;
 mod scope;
 mod scoped_map;
 mod selects;
+mod semantic_types;
 mod shared_map;
 mod statements;
 mod subroutine_owners;
 pub(crate) mod timescales;
+mod type_names;
 pub(crate) mod type_parameters;
 mod types;
 mod unpacked_structs;
 pub(crate) mod validation;
+pub mod virtual_interfaces;
 pub(crate) mod warnings;
 
 use array_compatibility::selected_unpacked_shape;
@@ -237,7 +313,7 @@ use parameters::{
 };
 use scoped_map::{ScopedMap, Signedness};
 use selects::{add_expr, product_expr};
-use shared_map::SharedMap;
+use shared_map::{SharedMap, ToShared};
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_lvalue, lvalue_expr_type,
 };
@@ -325,22 +401,23 @@ impl Source {
         parameter_overrides: &HashMap<String, i128>,
     ) -> Result<Self, AnalyzerError> {
         let packages = packages::Packages::analyze(&[(syntax_tree, Path::new(""))])?;
-        let context = AnalysisContext::with_packages(syntax_tree, &packages);
+        let session = &mut Session::with_packages(&packages, &mut packages.design());
+        let context = AnalysisContext::unspecialized(syntax_tree);
         let syntax_tree = &context;
         let parameter_overrides = parameter_overrides
             .iter()
             .map(|(name, value)| (name.clone(), const_expr_from_i128(*value)))
             .collect();
         let interfaces = Self::module_interfaces_from_syntax(syntax_tree)?;
-        let _timescales = timescales::install_for_tree(
-            &syntax_tree.state.timescales,
-            packages.timescales.clone(),
-            syntax_tree,
-        )?;
+        let timed = AnalysisContext {
+            timescale: timescales::for_tree(packages.timescales.clone(), syntax_tree)?,
+            ..syntax_tree.clone()
+        };
+        let syntax_tree = &timed;
         let mut modules = Vec::new();
         for handle in syntax_tree.root_scopes()? {
             let scoped = syntax_tree.scoped(handle)?;
-            let scoped_context = context.child(&scoped, &parameter_overrides);
+            let scoped_context = timed.child(&scoped, &parameter_overrides);
             let syntax_tree = &scoped_context;
             let unit = syntax_tree.root_unit()?;
             if !unit.kind.is_module_like() {
@@ -356,6 +433,7 @@ impl Source {
                     modules.push(
                         Module::from_scope_with_parameter_overrides(
                             syntax_tree,
+                            session,
                             module_name,
                             &parameter_overrides,
                             &InterfaceLookup {
@@ -364,9 +442,7 @@ impl Source {
                             },
                             Arc::new(imported),
                         )
-                        .map_err(|error| {
-                            error.with_warnings(context.state.diagnostics.borrow().clone())
-                        })?,
+                        .map_err(|error| error.with_warnings(session.diagnostics.clone()))?,
                     );
                 }
                 celox_sv_syntax::PortStyle::NonAnsi => {
@@ -380,7 +456,7 @@ impl Source {
 
         Ok(Self {
             modules,
-            diagnostics: context.state.diagnostics.borrow().clone(),
+            diagnostics: session.diagnostics.clone(),
         })
     }
 
@@ -425,6 +501,7 @@ impl Source {
             },
             extra_interfaces,
             &packages,
+            &mut packages.design(),
         )
     }
 
@@ -439,14 +516,40 @@ impl Source {
         bindings: ModuleParameterBindings<'_>,
         extra_interfaces: &ModuleInterfaces,
         packages: &packages::Packages,
+        design: &mut packages::Design,
     ) -> Result<Self, AnalyzerError> {
-        let context = AnalysisContext::with_packages(syntax_tree, packages);
-        let syntax_tree = &context;
-        let _timescales = timescales::install_for_tree(
-            &syntax_tree.state.timescales,
-            packages.timescales.clone(),
+        let mut session = Session::with_packages(packages, design);
+        let source = Self::from_indexed_syntax_module_in(
             syntax_tree,
-        )?;
+            path,
+            index,
+            module_name,
+            bindings,
+            extra_interfaces,
+            packages,
+            &mut session,
+        );
+        session.restore(design);
+        source
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn from_indexed_syntax_module_in(
+        syntax_tree: &SyntaxTree,
+        path: &Path,
+        index: &module_index::ModuleIndex,
+        module_name: &str,
+        bindings: ModuleParameterBindings<'_>,
+        extra_interfaces: &ModuleInterfaces,
+        packages: &packages::Packages,
+        session: &mut Session,
+    ) -> Result<Self, AnalyzerError> {
+        let context = AnalysisContext::unspecialized(syntax_tree);
+        let syntax_tree = &context;
+        let timed = AnalysisContext {
+            timescale: timescales::for_tree(packages.timescales.clone(), syntax_tree)?,
+            ..syntax_tree.clone()
+        };
         let interfaces = InterfaceLookup {
             local: &index.interfaces,
             extra: extra_interfaces,
@@ -455,7 +558,7 @@ impl Source {
         let interface_plan = packages.interface_plan.modules.get(module_name);
         let original_name = interface_plan.map_or(module_name, |plan| plan.original.as_str());
         for scope_tree in index.scopes(original_name) {
-            let scope_context = context.child(scope_tree, bindings.values);
+            let scope_context = timed.child(scope_tree, bindings.values);
             let syntax_tree = &scope_context;
             match syntax_tree.root_unit()?.port_style {
                 celox_sv_syntax::PortStyle::Ansi => {
@@ -502,6 +605,7 @@ impl Source {
                     }
                     if let Some(mut module) = interface_binding::analyze_module(
                         syntax_tree,
+                        session,
                         path,
                         packages,
                         interface_binding::Bindings {
@@ -513,9 +617,8 @@ impl Source {
                         &interfaces,
                         imported.clone(),
                     )
-                    .map_err(|error| {
-                        error.with_warnings(context.state.diagnostics.borrow().clone())
-                    })? {
+                    .map_err(|error| error.with_warnings(session.diagnostics.clone()))?
+                    {
                         module.name = module_name.to_string();
                         modules.push(module);
                         continue;
@@ -523,14 +626,13 @@ impl Source {
                     modules.push(
                         Module::from_scope_with_parameter_overrides(
                             syntax_tree,
+                            session,
                             module_name,
                             bindings.values,
                             &interfaces,
                             Arc::new(imported),
                         )
-                        .map_err(|error| {
-                            error.with_warnings(context.state.diagnostics.borrow().clone())
-                        })?,
+                        .map_err(|error| error.with_warnings(session.diagnostics.clone()))?,
                     );
                 }
                 celox_sv_syntax::PortStyle::NonAnsi if syntax_tree.root_name()? == module_name => {
@@ -543,7 +645,7 @@ impl Source {
         }
         Ok(Self {
             modules,
-            diagnostics: context.state.diagnostics.borrow().clone(),
+            diagnostics: session.diagnostics.clone(),
         })
     }
 
@@ -622,6 +724,8 @@ pub struct Module {
     imported_parameters: Vec<Parameter>,
     /// Elaborated interface scopes, including those without data members.
     interface_scope_names: Vec<String>,
+    /// The interface instances and ports a virtual interface may denote.
+    interface_handles: Vec<crate::ir::InterfaceHandle>,
     /// The symbols of a package, for the scopes that use it.
     symbols: Option<scope::ScopeSymbols>,
 }
@@ -629,7 +733,8 @@ pub struct Module {
 impl Module {
     pub(crate) fn declaration_expr(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
         expr: &ConstExpr,
         signedness: &HashMap<String, bool>,
     ) -> ConstExpr {
@@ -640,7 +745,7 @@ impl Module {
             0,
             true,
         );
-        expr_to_index_const(state, expanded, &PackedDimensions::default())
+        expr_to_index_const(tree, session, expanded, &PackedDimensions::default())
             .unwrap_or_else(|| expr.clone())
     }
 
@@ -648,18 +753,18 @@ impl Module {
         &self.declaration_subroutines
     }
 
-    /// Make the module's constant functions available to the constant
-    /// evaluator until the guard is dropped.
-    pub(crate) fn constant_function_state(&self) -> AnalysisState {
-        let state = AnalysisState::default();
-        const_functions::replace(&state.const_functions, self.constant_functions.clone());
-        state
+    /// A context that calls the module's constant functions, for constant
+    /// expressions of the analyzed module, which no longer read its syntax:
+    /// `syntax` is an empty tree.
+    pub(crate) fn constant_context<'a>(&self, syntax: &'a SyntaxTree) -> AnalysisContext<'a> {
+        AnalysisContext::unspecialized(syntax).with_functions(self.constant_functions.clone())
     }
 
     /// Analyze a module or a package. The scope starts from the `imported`
     /// symbols of the packages it uses.
     fn from_scope_with_parameter_overrides(
         syntax_tree: &AnalysisContext<'_>,
+        session: &mut Session,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         interfaces: &InterfaceLookup<'_>,
@@ -667,6 +772,7 @@ impl Module {
     ) -> Result<Self, AnalyzerError> {
         Self::from_scope_with_symbols(
             syntax_tree,
+            session,
             override_module_name,
             parameter_overrides,
             interfaces,
@@ -677,6 +783,7 @@ impl Module {
 
     fn from_scope_with_symbols(
         syntax_tree: &AnalysisContext<'_>,
+        session: &mut Session,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         interfaces: &InterfaceLookup<'_>,
@@ -685,6 +792,7 @@ impl Module {
     ) -> Result<Self, AnalyzerError> {
         Self::from_selected_scope(
             syntax_tree,
+            session,
             override_module_name,
             parameter_overrides,
             interfaces,
@@ -697,6 +805,7 @@ impl Module {
     #[allow(clippy::too_many_arguments)]
     fn from_selected_scope(
         syntax_tree: &AnalysisContext<'_>,
+        session: &mut Session,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         interfaces: &InterfaceLookup<'_>,
@@ -704,34 +813,36 @@ impl Module {
         export_symbols: bool,
         header_ports: Option<&port_owners::Selection<'_>>,
     ) -> Result<Self, AnalyzerError> {
-        let registry = syntax_tree.state.foreign.clone();
         for _ in 0..1024 {
-            let revision = registry.revision();
+            let revision = session.foreign.revision();
             let mut symbols = (*imported).clone();
-            registry.extend(syntax_tree, &mut symbols);
+            session.foreign.extend(syntax_tree, &mut symbols);
             let declarations_only = symbols.declarations_only;
+            let export_symbols = export_symbols || session.foreign.has_templates();
             let result = Self::from_selected_scope_once(
                 syntax_tree,
+                session,
                 override_module_name,
                 parameter_overrides,
                 interfaces,
                 Arc::new(symbols),
-                export_symbols || registry.has_templates(),
+                export_symbols,
                 header_ports,
             );
             if let Ok(module) = &result
                 && !declarations_only
                 && let Some(symbols) = &module.symbols
             {
-                registry.finish(syntax_tree, symbols)?;
+                classes::foreign::finish(syntax_tree, session, symbols)?;
             }
-            if registry.revision() == revision {
+            if session.foreign.revision() == revision {
                 return result;
             }
-            syntax_tree.state.classes.borrow_mut().clear();
-            syntax_tree.state.class_specializations.borrow_mut().clear();
-            syntax_tree.state.foreign_error.borrow_mut().take();
-            syntax_tree.state.foreign_names.borrow_mut().clear();
+            session.classes.clear();
+            session.class_specializations.clear();
+            session.class_specialization_names.clear();
+            session.foreign_error.take();
+            session.foreign_names.clear();
         }
         Err(unsupported(
             "foreign class specialization discovery did not converge",
@@ -740,6 +851,7 @@ impl Module {
 
     fn from_selected_scope_once(
         syntax_tree: &AnalysisContext<'_>,
+        session: &mut Session,
         override_module_name: &str,
         parameter_overrides: &HashMap<String, ConstExpr>,
         interfaces: &InterfaceLookup<'_>,
@@ -749,7 +861,7 @@ impl Module {
     ) -> Result<Self, AnalyzerError> {
         // The scope makes its class specializations until its class methods
         // have signatures.
-        syntax_tree.state.class_specializations_frozen.set(false);
+        session.class_specializations_frozen = false;
         let unit = syntax_tree.scope_handle().unit(syntax_tree.declarations());
         let is_package = unit.is_none_or(|unit| unit.kind == celox_sv_syntax::UnitKind::Package);
         let program = unit.is_some_and(|unit| unit.kind == celox_sv_syntax::UnitKind::Program);
@@ -765,900 +877,1060 @@ impl Module {
         };
         let specialization =
             syntax_tree.child(syntax_tree.syntax_tree, applicable_parameter_overrides);
+        let specialization = specialization.importing(imported.clone());
         let syntax_tree = &specialization;
         // The collectors below each elaborate the same generate scopes.
-        let _elaborations = generate::memoize(syntax_tree);
-        let _imported = scope::install(&syntax_tree.state, imported.clone());
-        let with_imported = |mut functions: const_functions::ConstantFunctions| {
-            functions.extend_missing(&imported.constant_functions);
-            functions
-        };
-        let mut type_aliases = type_aliases_from_scope(syntax_tree)?;
-        // Constant functions see the module constants known so far; they are
-        // collected again once the parameters are known.
-        let _constant_functions = const_functions::install(
-            &syntax_tree.state,
-            with_imported(const_functions::module_constant_functions(
+        let previous = generate::memoize(syntax_tree, session);
+        let module = (|session: &mut Session| -> Result<Self, AnalyzerError> {
+            let with_imported = |mut functions: const_functions::ConstantFunctions| {
+                functions.extend_missing(&imported.constant_functions);
+                functions
+            };
+            // The scope's tables are shared with the contexts that bind in it.
+            let mut type_aliases: SharedMap<Type> =
+                type_aliases_from_scope(syntax_tree, session)?.into();
+            // Constant functions see the module constants known so far; they are
+            // collected again once the parameters are known.
+            let preliminary = syntax_tree.with_functions(with_imported(
+                const_functions::module_constant_functions(
+                    syntax_tree,
+                    session,
+                    &imported.const_env,
+                    &type_aliases,
+                    &imported.parameter_values,
+                ),
+            ));
+            let syntax_tree = &preliminary;
+            let mut parameters = parameters_from_scope(
                 syntax_tree,
+                session,
+                &type_aliases,
                 &imported.const_env,
-                &type_aliases,
-                &imported.parameter_values,
-            )),
-        );
-        let mut parameters = parameters_from_scope(
-            syntax_tree,
-            &type_aliases,
-            &imported.const_env,
-            applicable_parameter_overrides,
-        )?;
-        let mut parameter_names = HashSet::default();
-        if let Some(parameter) = parameters
-            .iter()
-            .find(|parameter| !parameter_names.insert(parameter.name()))
-        {
-            return Err(AnalyzerError::DuplicateParameter {
-                module: name,
-                name: parameter.name().to_string(),
-            });
-        }
-        if name == override_module_name {
-            apply_parameter_overrides(&mut parameters, parameter_overrides)?;
-        }
-        let mut const_env = imported.const_env.clone();
-        const_env.extend(const_env_from_parameters(&syntax_tree.state, &parameters));
-        type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
-        let mut enum_constants = enum_member_constants_from_scope(
-            syntax_tree,
-            &const_env,
-            &type_aliases,
-            applicable_parameter_overrides,
-        )?;
-        for (name, value) in &enum_constants.numbers {
-            const_env.entry(name.clone()).or_insert(*value);
-            const_env.insert(enum_marker(name), *value);
-            if let Some(r#type) = enum_constants.types.get(name) {
-                insert_parameter_type_markers(&mut const_env, name, *r#type);
+                applicable_parameter_overrides,
+            )?;
+            let mut parameter_names = HashSet::default();
+            if let Some(parameter) = parameters
+                .iter()
+                .find(|parameter| !parameter_names.insert(parameter.name()))
+            {
+                return Err(AnalyzerError::DuplicateParameter {
+                    module: name,
+                    name: parameter.name().to_string(),
+                });
             }
-        }
-        enum_constants.extend_missing(&imported.enum_constants);
-        // Alias ranges may themselves contain casts sized by enum members.
-        // Rebuild them before assigning declared parameter widths.
-        type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
-        // Constant casts are evaluated while parameter syntax is lowered.
-        // Repeat that lowering after enum constants become available so a
-        // cast operand such as `byte_t'(ENUM_MEMBER)` is not permanently
-        // discarded during the initial pass. Materialize only enum-member
-        // references so exported parameter expressions retain dependencies
-        // on other parameters for later specialization.
-        parameters = parameters_from_scope(
-            syntax_tree,
-            &type_aliases,
-            &const_env,
-            applicable_parameter_overrides,
-        )?;
-        for parameter in &mut parameters {
-            parameter.value = parameter.value.take().map(|value| {
-                substitute_typed_parameter_literals(
-                    value,
-                    &enum_constants.numbers,
-                    &enum_constants.types,
-                )
-            });
-        }
-        if name == override_module_name {
-            apply_parameter_overrides(&mut parameters, parameter_overrides)?;
-        }
-        extend_const_env_with_parameters(&syntax_tree.state, &mut const_env, &parameters);
-        type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
-        // Contract dependency analysis must see module parameter references
-        // before the normal procedural lowering substitutes default literals.
-        let symbolic_parameters = parameters
-            .iter()
-            .map(|parameter| parameter.name().to_string())
-            .collect();
-        // Class parameter defaults are bound where the class is declared.
-        classes::specializations::declare_scopes(syntax_tree, &const_env, &type_aliases);
-        let declaration_subroutines =
-            with_imported(const_functions::symbolic_module_constant_functions(
+            if name == override_module_name {
+                apply_parameter_overrides(&mut parameters, parameter_overrides)?;
+            }
+            let mut const_env: SharedMap<i128> = imported.const_env.clone().into();
+            const_env.extend(const_env_from_parameters(syntax_tree, session, &parameters));
+            type_aliases =
+                type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?.into();
+            let mut enum_constants = enum_member_constants_from_scope(
                 syntax_tree,
+                session,
                 &const_env,
                 &type_aliases,
-                &imported.parameter_values,
-                &symbolic_parameters,
-            ))
-            .declarations();
-        const_functions::replace(
-            &syntax_tree.state.const_functions,
-            with_imported(const_functions::module_constant_functions(
+                applicable_parameter_overrides,
+            )?;
+            for (name, value) in &enum_constants.numbers {
+                const_env.entry(name.clone()).or_insert(*value);
+                const_env.insert(enum_marker(name), *value);
+                if let Some(r#type) = enum_constants.types.get(name) {
+                    insert_parameter_type_markers(&mut const_env, name, *r#type);
+                }
+            }
+            enum_constants.extend_missing(&imported.enum_constants);
+            // Alias ranges may themselves contain casts sized by enum members.
+            // Rebuild them before assigning declared parameter widths.
+            type_aliases =
+                type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?.into();
+            // Constant casts are evaluated while parameter syntax is lowered.
+            // Repeat that lowering after enum constants become available so a
+            // cast operand such as `byte_t'(ENUM_MEMBER)` is not permanently
+            // discarded during the initial pass. Materialize only enum-member
+            // references so exported parameter expressions retain dependencies
+            // on other parameters for later specialization.
+            parameters = parameters_from_scope(
                 syntax_tree,
+                session,
+                &type_aliases,
+                &const_env,
+                applicable_parameter_overrides,
+            )?;
+            for parameter in &mut parameters {
+                parameter.value = parameter.value.take().map(|value| {
+                    substitute_typed_parameter_literals(
+                        value,
+                        &enum_constants.numbers,
+                        &enum_constants.types,
+                    )
+                });
+            }
+            if name == override_module_name {
+                apply_parameter_overrides(&mut parameters, parameter_overrides)?;
+            }
+            extend_const_env_with_parameters(syntax_tree, session, &mut const_env, &parameters);
+            type_aliases =
+                type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?.into();
+            // Contract dependency analysis must see module parameter references
+            // before the normal procedural lowering substitutes default literals.
+            let symbolic_parameters = parameters
+                .iter()
+                .map(|parameter| parameter.name().to_string())
+                .collect();
+            // Class parameter defaults are bound where the class is declared.
+            classes::specializations::declare_scopes(
+                syntax_tree,
+                session,
                 &const_env,
                 &type_aliases,
-                &parameter_value_env_with_imported(
-                    &syntax_tree.state,
-                    &parameters,
-                    &const_env,
-                    &imported,
-                ),
-            )),
-        );
-        extend_const_env_with_parameters(&syntax_tree.state, &mut const_env, &parameters);
-
-        let mut array_parameters =
-            array_parameters::array_parameters_from_scope(syntax_tree, &const_env, &type_aliases)?;
-        for parameter in &array_parameters {
-            const_env.insert(
-                parameters::unbounded_parameter_marker(&parameter.signal.name),
-                0,
             );
-        }
-
-        if !imported.declarations_only {
-            match reject_silently_ignored_constructs(
+            let declaration_subroutines =
+                with_imported(const_functions::symbolic_module_constant_functions(
+                    syntax_tree,
+                    session,
+                    &const_env,
+                    &type_aliases,
+                    &imported.parameter_values,
+                    &symbolic_parameters,
+                ))
+                .declarations();
+            let parameter_values = parameter_value_env_with_imported(
                 syntax_tree,
+                session,
+                &parameters,
+                &const_env,
+                &imported,
+            );
+            let parameterized = syntax_tree.with_functions(with_imported(
+                const_functions::module_constant_functions(
+                    syntax_tree,
+                    session,
+                    &const_env,
+                    &type_aliases,
+                    &parameter_values,
+                ),
+            ));
+            let syntax_tree = &parameterized;
+            extend_const_env_with_parameters(syntax_tree, session, &mut const_env, &parameters);
+
+            let mut array_parameters = array_parameters::array_parameters_from_scope(
+                syntax_tree,
+                session,
                 &const_env,
                 &type_aliases,
-                &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-                &parameter_value_env_with_imported(
-                    &syntax_tree.state,
+            )?;
+            for parameter in &array_parameters {
+                const_env.insert(
+                    parameters::unbounded_parameter_marker(&parameter.signal.name),
+                    0,
+                );
+            }
+
+            if !imported.declarations_only {
+                let parameter_values = parameter_value_env_with_imported(
+                    syntax_tree,
+                    session,
                     &parameters,
                     &const_env,
                     &imported,
-                ),
-            ) {
-                Ok(()) => {}
-                // A parameter initializer may inspect a port or signal type
-                // through `$bits`/`$size`. Collect declarations only when that
-                // missing type metadata is the remaining validation failure, so
-                // unsupported constructs keep their original diagnostics.
-                Err(AnalyzerError::Unsupported(construct))
-                    if construct == "constant cast expression" =>
-                {
-                    let preliminary_ports =
-                        ports_from_scope(syntax_tree, &const_env, &type_aliases, header_ports)?;
-                    let preliminary_signals =
-                        signals_from_scope(syntax_tree, &const_env, &type_aliases)?;
-                    extend_const_env_with_variable_types(
-                        &syntax_tree.state,
-                        &mut const_env,
-                        preliminary_ports
-                            .iter()
-                            .map(|port| (port.name(), port.r#type()))
-                            .chain(
-                                preliminary_signals
-                                    .iter()
-                                    .map(|signal| (signal.name(), signal.r#type())),
-                            ),
-                    );
-                    parameters = parameters_from_scope(
-                        syntax_tree,
-                        &type_aliases,
-                        &const_env,
-                        applicable_parameter_overrides,
-                    )?;
-                    for parameter in &mut parameters {
-                        parameter.value = parameter.value.take().map(|value| {
-                            substitute_typed_parameter_literals(
-                                value,
-                                &enum_constants.numbers,
-                                &enum_constants.types,
-                            )
-                        });
-                    }
-                    if name == override_module_name {
-                        apply_parameter_overrides(&mut parameters, parameter_overrides)?;
-                    }
-                    extend_const_env_with_parameters(
-                        &syntax_tree.state,
-                        &mut const_env,
-                        &parameters,
-                    );
-                    type_aliases = type_aliases_from_scope_with_env(syntax_tree, &const_env)?;
-                    array_parameters = array_parameters::array_parameters_from_scope(
-                        syntax_tree,
-                        &const_env,
-                        &type_aliases,
-                    )?;
-                    reject_silently_ignored_constructs(
-                        syntax_tree,
-                        &const_env,
-                        &type_aliases,
-                        &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
-                        &parameter_value_env_with_imported(
-                            &syntax_tree.state,
+                );
+                match reject_silently_ignored_constructs(
+                    syntax_tree,
+                    session,
+                    &const_env,
+                    &type_aliases,
+                    &parameter_packed_dimensions_with_imported(&parameters, &imported).into(),
+                    &parameter_values,
+                ) {
+                    Ok(()) => {}
+                    // A parameter initializer may inspect a port or signal type
+                    // through `$bits`/`$size`. Collect declarations only when that
+                    // missing type metadata is the remaining validation failure, so
+                    // unsupported constructs keep their original diagnostics.
+                    Err(AnalyzerError::Unsupported(construct))
+                        if construct == "constant cast expression" =>
+                    {
+                        let preliminary_ports = ports_from_scope(
+                            syntax_tree,
+                            session,
+                            &const_env,
+                            &type_aliases,
+                            header_ports,
+                        )?;
+                        let preliminary_signals =
+                            signals_from_scope(syntax_tree, session, &const_env, &type_aliases)?;
+                        extend_const_env_with_variable_types(
+                            &syntax_tree.functions,
+                            &mut const_env,
+                            preliminary_ports
+                                .iter()
+                                .map(|port| (port.name(), port.r#type()))
+                                .chain(
+                                    preliminary_signals
+                                        .iter()
+                                        .map(|signal| (signal.name(), signal.r#type())),
+                                ),
+                        );
+                        parameters = parameters_from_scope(
+                            syntax_tree,
+                            session,
+                            &type_aliases,
+                            &const_env,
+                            applicable_parameter_overrides,
+                        )?;
+                        for parameter in &mut parameters {
+                            parameter.value = parameter.value.take().map(|value| {
+                                substitute_typed_parameter_literals(
+                                    value,
+                                    &enum_constants.numbers,
+                                    &enum_constants.types,
+                                )
+                            });
+                        }
+                        if name == override_module_name {
+                            apply_parameter_overrides(&mut parameters, parameter_overrides)?;
+                        }
+                        extend_const_env_with_parameters(
+                            syntax_tree,
+                            session,
+                            &mut const_env,
+                            &parameters,
+                        );
+                        type_aliases =
+                            type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?
+                                .into();
+                        array_parameters = array_parameters::array_parameters_from_scope(
+                            syntax_tree,
+                            session,
+                            &const_env,
+                            &type_aliases,
+                        )?;
+                        let parameter_values = parameter_value_env_with_imported(
+                            syntax_tree,
+                            session,
                             &parameters,
                             &const_env,
                             &imported,
-                        ),
-                    )?;
-                }
-                Err(error) => return Err(error),
-            }
-        }
-        let mut ports = ports_from_scope(syntax_tree, &const_env, &type_aliases, header_ports)?;
-        ports.extend(imported.ports.iter().cloned());
-        let mut port_names = HashSet::default();
-        if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
-            return Err(AnalyzerError::DuplicatePort {
-                module: name,
-                name: port.name().to_string(),
-            });
-        }
-        if ports
-            .iter()
-            .any(|port| port.direction() == PortDirection::Ref)
-        {
-            return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
-        }
-        // The static properties of each class specialization are variables
-        // of the module (IEEE 1800-2023 8.9, 8.25).
-        classes::specializations::collect(
-            syntax_tree,
-            &PackedDimensions::new(HashMap::default(), &const_env, &type_aliases),
-        );
-        let mut signals = signals_from_scope(syntax_tree, &const_env, &type_aliases)?;
-        signals.extend(
-            array_parameters
-                .iter()
-                .map(|parameter| parameter.signal.clone()),
-        );
-        // The array parameters of the packages the module uses are constant
-        // signals of the module, like its own.
-        signals.extend(imported.signals.iter().cloned());
-        signals.extend(imported.state_signals.iter().cloned());
-        for r#type in ports
-            .iter()
-            .map(Port::r#type)
-            .chain(signals.iter().map(Signal::r#type))
-        {
-            validate_unpacked_dimension_sizes(
-                &syntax_tree.state,
-                r#type.unpacked_ranges(),
-                &const_env,
-            )?;
-        }
-        let signal_names: HashSet<_> = signals.iter().map(Signal::name).collect();
-        if let Some(parameter) = parameters.iter().find(|parameter| {
-            port_names.contains(parameter.name()) || signal_names.contains(parameter.name())
-        }) {
-            return Err(AnalyzerError::Unsupported(format!(
-                "parameter name collides with port or signal `{}`",
-                parameter.name()
-            )));
-        }
-        let mut packed_dimensions =
-            packed_dimensions_from_ports_and_signals(&ports, &signals, &const_env, &type_aliases);
-        // Four-state parameter values cannot be represented by the numeric
-        // environment. Keep their expressions for constant case analysis.
-        packed_dimensions.parameter_values = parameter_value_env_with_imported(
-            &syntax_tree.state,
-            &parameters,
-            &const_env,
-            &imported,
-        )
-        .into();
-        packed_dimensions
-            .parameter_values
-            .retain(|name, _| !const_env.contains_key(name));
-        packed_dimensions.extend(parameter_packed_dimensions_with_imported(
-            &parameters,
-            &imported,
-        ));
-        // Instance connections may call subroutines, of the module or of the
-        // packages it uses, with untyped assignment patterns.
-        let (mut subroutine_params, mut subroutine_shapes, mut subroutine_directions) =
-            procedural::subroutine_argument_names(syntax_tree, &const_env, &type_aliases)?;
-        for (name, params) in &imported.subroutine_params {
-            subroutine_params
-                .entry(name.clone())
-                .or_insert_with(|| params.clone());
-        }
-        for (name, shapes) in &imported.subroutine_shapes {
-            subroutine_shapes
-                .entry(name.clone())
-                .or_insert_with(|| shapes.clone());
-        }
-        // The subroutines of the packages the module uses, by their qualified
-        // names and by the names its imports give them.
-        for subroutine in &imported.subroutines {
-            subroutine_directions
-                .entry(subroutine.name.clone())
-                .or_insert_with(|| {
-                    subroutine
-                        .params
-                        .iter()
-                        .map(|param| param.direction)
-                        .collect()
-                });
-        }
-        for (name, target) in &imported.aliases {
-            if let Some(directions) = subroutine_directions.get(target).cloned() {
-                subroutine_directions
-                    .entry(name.clone())
-                    .or_insert(directions);
-            }
-        }
-        let dpi_items = generate::items(syntax_tree, &const_env, &type_aliases)?;
-        let mut dpi_imports = dpi::imports(&dpi_items, syntax_tree.declarations())?;
-        for import in &dpi_imports {
-            subroutine_params.insert(
-                import.name().to_string(),
-                import
-                    .arguments()
-                    .iter()
-                    .map(|arg| arg.name().to_string())
-                    .collect(),
-            );
-            subroutine_directions.insert(
-                import.name().to_string(),
-                vec![crate::procedural::ParamDirection::Input; import.arguments().len()],
-            );
-        }
-        packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
-        packed_dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
-        packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
-        // Array parameters retain a constant value as well as their signal layout.
-        // Bind their values in declaration order before child parameter arguments.
-        for process in &imported.initial_processes {
-            for statement in &process.body {
-                if let Stmt::Assign {
-                    lhs: LValue::Ident(name),
-                    rhs,
-                    ..
-                } = statement
-                {
-                    packed_dimensions
-                        .array_parameter_values
-                        .insert(name.clone(), rhs.clone());
-                }
-            }
-        }
-        let mut array_initial_processes = Vec::new();
-        let mut packed_pattern_values = HashMap::default();
-        for parameter in &array_parameters {
-            let process = parameter.initial_process(syntax_tree, &packed_dimensions)?;
-            if let Stmt::Assign { rhs, .. } = &process.body[0] {
-                packed_dimensions
-                    .array_parameter_values
-                    .insert(parameter.signal.name.clone(), rhs.clone());
-                let name = parameter.signal.name();
-                let shape = packed_dimensions.get(name).expect("array parameter shape");
-                if shape.unpacked.is_empty()
-                    && !shape.real
-                    && !shape.string
-                    && shape.class.is_none()
-                {
-                    // An integral value parameter is self-determined before
-                    // conversion at a receiving declaration (6.20.2). The
-                    // pattern's concatenation must retain its declared sign.
-                    let signed = shape.signed;
-                    let is_2state = shape.is_2state;
-                    let width = expr_static_width(
-                        &syntax_tree.state,
-                        &Expr::Ident(name.to_string()),
-                        &packed_dimensions,
-                    )
-                    .ok_or_else(|| unsupported("packed pattern parameter width"))?;
-                    let mut value = Expr::Resize {
-                        expr: Box::new(rhs.clone()),
-                        width,
-                        signed,
-                    };
-                    if is_2state {
-                        value = Expr::Unary {
-                            op: UnaryOp::ToTwoState,
-                            expr: Box::new(value),
-                        };
+                        );
+                        reject_silently_ignored_constructs(
+                            syntax_tree,
+                            session,
+                            &const_env,
+                            &type_aliases,
+                            &parameter_packed_dimensions_with_imported(&parameters, &imported)
+                                .into(),
+                            &parameter_values,
+                        )?;
                     }
-                    let value = fold_const_integral_expr_preserving_mask(
-                        &syntax_tree.state,
-                        value,
-                        &packed_dimensions.const_env,
-                    );
-                    packed_dimensions
-                        .parameter_values
-                        .insert(name.to_string(), value.clone());
-                    packed_pattern_values.insert(name.to_string(), value);
+                    Err(error) => return Err(error),
                 }
             }
-            array_initial_processes.push(process);
-        }
-        let mut instances =
-            instances_from_scope(syntax_tree, &const_env, &packed_dimensions, interfaces)?;
-        let mut instance_names = HashSet::default();
-        if let Some(instance) = instances
-            .iter()
-            .filter(|instance| {
-                instance
-                    .condition()
-                    .and_then(|condition| {
-                        eval_ast_const_expr(&syntax_tree.state, condition, &const_env)
-                    })
-                    .is_none_or(|value| value != 0)
-            })
-            .find(|instance| !instance_names.insert(instance.name()))
-        {
-            return Err(AnalyzerError::DuplicateInstance {
-                module: name,
-                name: instance.name().to_string(),
-            });
-        }
-        // A generate block shares its name space with the module's other
-        // declarations (IEEE 1800-2023 27.6, 23.9).
-        // The members of a variable of unpacked structure type are named
-        // like declarations of a scope of the variable's name.
-        let aggregates: HashSet<&str> = signals
-            .iter()
-            .filter(|signal| signal.is_aggregate())
-            .map(Signal::name)
-            .collect();
-        let scope_heads: HashSet<&str> = signals
-            .iter()
-            .filter(|signal| signal.hierarchical.is_none())
-            .map(Signal::name)
-            .chain(instances.iter().map(Instance::name))
-            .filter_map(generate_scope_head)
-            .filter(|head| !aggregates.contains(head))
-            .collect();
-        if let Some(conflict) = ports
-            .iter()
-            .map(Port::name)
-            .chain(signals.iter().map(Signal::name))
-            .chain(instances.iter().map(Instance::name))
-            .find(|conflict| scope_heads.contains(conflict))
-        {
-            return Err(AnalyzerError::DuplicateGenerateScope {
-                module: name,
-                name: conflict.to_string(),
-            });
-        }
-        let mut parameter_values = parameter_value_env_with_imported(
-            &syntax_tree.state,
-            &parameters,
-            &const_env,
-            &imported,
-        );
-        parameter_values.extend(packed_pattern_values);
-        for (name, value) in &enum_constants.exprs {
-            parameter_values
-                .entry(name.clone())
-                .or_insert_with(|| value.clone());
-        }
-        let mut expression_signedness = ports
-            .iter()
-            .map(|port| (port.name().to_string(), port.r#type().is_signed()))
-            .chain(
-                signals
+            let mut ports = ports_from_scope(
+                syntax_tree,
+                session,
+                &const_env,
+                &type_aliases,
+                header_ports,
+            )?;
+            if let Some(port) = ports.iter().find(|port| port.r#type.holds_chandle()) {
+                return Err(AnalyzerError::IllegalChandleUse {
+                    detail: format!("port `{}` of chandle type", port.name),
+                });
+            }
+            ports.extend(imported.ports.iter().cloned());
+            let mut port_names = HashSet::default();
+            if let Some(port) = ports.iter().find(|port| !port_names.insert(port.name())) {
+                return Err(AnalyzerError::DuplicatePort {
+                    module: name,
+                    name: port.name().to_string(),
+                });
+            }
+            if ports
+                .iter()
+                .any(|port| port.direction() == PortDirection::Ref)
+            {
+                return Err(AnalyzerError::Unsupported("ref port direction".to_string()));
+            }
+            // The static properties of each class specialization are variables
+            // of the module (IEEE 1800-2023 8.9, 8.25).
+            classes::specializations::collect(
+                syntax_tree,
+                session,
+                &PackedDimensions::new(HashMap::default(), &const_env, &type_aliases),
+            );
+            let mut signals = signals_from_scope(syntax_tree, session, &const_env, &type_aliases)?;
+            signals.extend(
+                array_parameters
                     .iter()
-                    .map(|signal| (signal.name().to_string(), signal.r#type().is_signed())),
+                    .map(|parameter| parameter.signal.clone()),
+            );
+            // The array parameters of the packages the module uses are constant
+            // signals of the module, like its own.
+            signals.extend(imported.signals.iter().cloned());
+            signals.extend(imported.state_signals.iter().cloned());
+            for r#type in ports
+                .iter()
+                .map(Port::r#type)
+                .chain(signals.iter().map(Signal::r#type))
+            {
+                validate_unpacked_dimension_sizes(
+                    &syntax_tree.functions,
+                    r#type.unpacked_ranges(),
+                    &const_env,
+                )?;
+            }
+            let signal_names: HashSet<_> = signals.iter().map(Signal::name).collect();
+            if let Some(parameter) = parameters.iter().find(|parameter| {
+                port_names.contains(parameter.name()) || signal_names.contains(parameter.name())
+            }) {
+                return Err(AnalyzerError::Unsupported(format!(
+                    "parameter name collides with port or signal `{}`",
+                    parameter.name()
+                )));
+            }
+            let mut packed_dimensions = packed_dimensions_from_ports_and_signals(
+                &ports,
+                &signals,
+                &const_env,
+                &type_aliases,
+            );
+            // Four-state parameter values cannot be represented by the numeric
+            // environment. Keep their expressions for constant case analysis.
+            packed_dimensions.parameter_values = parameter_value_env_with_imported(
+                syntax_tree,
+                session,
+                &parameters,
+                &const_env,
+                &imported,
             )
-            .collect::<HashMap<_, _>>();
-        expression_signedness.extend(
-            parameter_types_from_const_env(&const_env)
-                .into_iter()
-                .map(|(name, r#type)| (name, r#type.signed)),
-        );
-        let mut functions = functions_from_scope(syntax_tree, &const_env, &packed_dimensions)?;
-        for (name, function) in &imported.functions {
-            functions
-                .entry(name.clone())
-                .or_insert_with(|| function.clone());
-        }
-        for (name, metadata) in &imported.function_return_types {
+            .into();
             packed_dimensions
-                .function_return_types
-                .entry(name.clone())
-                .or_insert_with(|| metadata.clone());
-        }
-        packed_dimensions
-            .function_return_types
-            .extend(functions.iter().map(|(name, function)| {
-                (
-                    name.clone(),
-                    FunctionReturnMetadata {
-                        arguments: Some(function_argument_metadata(&function.params)),
-                        width: function.return_width,
-                        first_packed_dimension_width: function.return_first_packed_dimension_width,
-                        dimensions: function.return_dimensions,
-                        signed: function.return_signed,
-                        is_2state: function.return_is_2state,
-                        string: function.return_string,
-                        pattern_type: function.return_type.clone(),
-                        enum_domain: function.return_enum_domain.clone(),
-                    },
-                )
-            }));
-        packed_dimensions
-            .function_return_types
-            .extend(dpi_imports.iter().filter_map(|import| {
-                let r#type = import.return_type()?;
-                Some((
-                    import.name().to_string(),
-                    FunctionReturnMetadata {
-                        arguments: Some(dpi_argument_metadata(import)),
-                        width: Some(r#type.width()),
-                        first_packed_dimension_width: (r#type.width() > 1)
-                            .then_some(r#type.width()),
-                        dimensions: Some(usize::from(r#type.width() > 1)),
-                        signed: r#type.is_signed(),
-                        is_2state: !r#type.is_4state(),
-                        string: false,
-                        pattern_type: None,
-                        enum_domain: None,
-                    },
-                ))
-            }));
-        // Class methods are subroutines `class::method` (IEEE 1800-2023 8.6).
-        dimensions::all_class_signatures(syntax_tree, &mut packed_dimensions);
-        packed_dimensions.functions = Arc::new(functions.clone());
-        packed_dimensions.expression_signedness = expression_signedness.clone().into();
-        for instance in &mut instances {
-            for connection in &mut instance.port_connections {
-                if let Some(pattern) = &mut connection.bound_pattern {
-                    pattern.resolve_types(&packed_dimensions)?;
+                .parameter_values
+                .retain(|name, _| !const_env.contains_key(name));
+            packed_dimensions.extend(parameter_packed_dimensions_with_imported(
+                &parameters,
+                &imported,
+            ));
+            // Instance connections may call subroutines, of the module or of the
+            // packages it uses, with untyped assignment patterns.
+            let (mut subroutine_params, mut subroutine_shapes, mut subroutine_directions) =
+                procedural::subroutine_argument_names(
+                    syntax_tree,
+                    session,
+                    &const_env,
+                    &type_aliases,
+                )?;
+            for (name, params) in &imported.subroutine_params {
+                subroutine_params
+                    .entry(name.clone())
+                    .or_insert_with(|| params.clone());
+            }
+            for (name, shapes) in &imported.subroutine_shapes {
+                subroutine_shapes
+                    .entry(name.clone())
+                    .or_insert_with(|| shapes.clone());
+            }
+            // The subroutines of the packages the module uses, by their qualified
+            // names and by the names its imports give them.
+            for subroutine in &imported.subroutines {
+                subroutine_directions
+                    .entry(subroutine.name.clone())
+                    .or_insert_with(|| {
+                        subroutine
+                            .params
+                            .iter()
+                            .map(|param| param.direction)
+                            .collect()
+                    });
+            }
+            for (name, target) in &imported.aliases {
+                if let Some(directions) = subroutine_directions.get(target).cloned() {
+                    subroutine_directions
+                        .entry(name.clone())
+                        .or_insert(directions);
                 }
-                connection.map_expressions(|expr| {
-                    let expr = expand_expr_calls(expr, &functions, &expression_signedness, 0, true);
-                    substitute_expr_constants_with_parameter_literals(
-                        &syntax_tree.state,
-                        expr,
+            }
+            let dpi_items = generate::items(syntax_tree, session, &const_env, &type_aliases)?;
+            let mut dpi_imports = dpi::imports(&dpi_items, syntax_tree, session, &type_aliases)?;
+            for import in &dpi_imports {
+                // Shapes check the actuals as assignments to the formals.
+                subroutine_shapes.insert(
+                    import.name().to_string(),
+                    import
+                        .arguments()
+                        .iter()
+                        .filter_map(|argument| {
+                            let r#type = match argument.r#type() {
+                                crate::ir::DpiType::Bit => type_binding::builtin_type("bit", None),
+                                crate::ir::DpiType::Logic => {
+                                    type_binding::builtin_type("logic", None)
+                                }
+                                crate::ir::DpiType::String => {
+                                    type_binding::builtin_type("string", None)
+                                }
+                                crate::ir::DpiType::Chandle => {
+                                    type_binding::builtin_type("chandle", None)
+                                }
+                                crate::ir::DpiType::Integer { width, signed } => {
+                                    type_binding::builtin_type(
+                                        match width {
+                                            8 => "byte",
+                                            16 => "shortint",
+                                            32 => "int",
+                                            _ => "longint",
+                                        },
+                                        Some(signed),
+                                    )
+                                }
+                            }?;
+                            Some(procedural::dimensions_from_type(&r#type))
+                        })
+                        .collect(),
+                );
+                subroutine_params.insert(
+                    import.name().to_string(),
+                    import
+                        .arguments()
+                        .iter()
+                        .map(|arg| arg.name().to_string())
+                        .collect(),
+                );
+                subroutine_directions.insert(
+                    import.name().to_string(),
+                    import
+                        .arguments()
+                        .iter()
+                        .map(|argument| {
+                            if argument.is_output() {
+                                crate::procedural::ParamDirection::Output
+                            } else {
+                                crate::procedural::ParamDirection::Input
+                            }
+                        })
+                        .collect(),
+                );
+            }
+            packed_dimensions.subroutine_param_shapes = Arc::new(subroutine_shapes.clone());
+            packed_dimensions.subroutine_directions = Arc::new(subroutine_directions.clone());
+            packed_dimensions.subroutine_param_names = Arc::new(subroutine_params.clone());
+            // Array parameters retain a constant value as well as their signal layout.
+            // Bind their values in declaration order before child parameter arguments.
+            for process in &imported.initial_processes {
+                for statement in &process.body {
+                    if let Stmt::Assign {
+                        lhs: LValue::Ident(name),
+                        rhs,
+                        ..
+                    } = statement
+                    {
+                        packed_dimensions
+                            .array_parameter_values
+                            .insert(name.clone(), rhs.clone());
+                    }
+                }
+            }
+            let mut array_initial_processes = Vec::new();
+            let mut packed_pattern_values = HashMap::default();
+            for parameter in &array_parameters {
+                let mut process =
+                    parameter.initial_process(syntax_tree, session, &packed_dimensions)?;
+                // The value may name constants, such as enumeration members
+                // (IEEE 1800-2023 6.19), which every other process is given as
+                // values the same way.
+                for stmt in &mut process.body {
+                    procedural::substitute_stmt_constants(
+                        syntax_tree,
+                        session,
+                        stmt,
                         &const_env,
                         &enum_constants.exprs,
-                    )
+                    );
+                }
+                if let Stmt::Assign { rhs, .. } = &process.body[0] {
+                    packed_dimensions
+                        .array_parameter_values
+                        .insert(parameter.signal.name.clone(), rhs.clone());
+                    let name = parameter.signal.name();
+                    let shape = packed_dimensions.get(name).expect("array parameter shape");
+                    if shape.unpacked.is_empty()
+                        && !shape.real
+                        && !shape.string
+                        && shape.class.is_none()
+                    {
+                        // An integral value parameter is self-determined before
+                        // conversion at a receiving declaration (6.20.2). The
+                        // pattern's concatenation must retain its declared sign.
+                        let signed = shape.signed;
+                        let is_2state = shape.is_2state;
+                        let width = expr_static_width(
+                            syntax_tree,
+                            &Expr::Ident(name.to_string()),
+                            &packed_dimensions,
+                        )
+                        .ok_or_else(|| unsupported("packed pattern parameter width"))?;
+                        let mut value = Expr::Resize {
+                            expr: Box::new(rhs.clone()),
+                            width,
+                            signed,
+                        };
+                        if is_2state {
+                            value = Expr::Unary {
+                                op: UnaryOp::ToTwoState,
+                                expr: Box::new(value),
+                            };
+                        }
+                        let value = fold_const_integral_expr_preserving_mask(
+                            syntax_tree,
+                            session,
+                            value,
+                            &packed_dimensions.const_env,
+                        );
+                        packed_dimensions
+                            .parameter_values
+                            .insert(name.to_string(), value.clone());
+                        packed_pattern_values.insert(name.to_string(), value);
+                    }
+                }
+                array_initial_processes.push(process);
+            }
+            let mut instances = instances_from_scope(
+                syntax_tree,
+                session,
+                &const_env,
+                &packed_dimensions,
+                interfaces,
+            )?;
+            let mut instance_names = HashSet::default();
+            if let Some(instance) = instances
+                .iter()
+                .filter(|instance| {
+                    instance
+                        .condition()
+                        .and_then(|condition| {
+                            eval_ast_const_expr(&syntax_tree.functions, condition, &const_env)
+                        })
+                        .is_none_or(|value| value != 0)
+                })
+                .find(|instance| !instance_names.insert(instance.name()))
+            {
+                return Err(AnalyzerError::DuplicateInstance {
+                    module: name,
+                    name: instance.name().to_string(),
                 });
             }
-        }
-        // Bodies now have the active module's declarations and function types.
-        // Declaration-time queries still use syntax discovery while metadata
-        // is incomplete; generated/procedural scopes overlay this complete base.
-        packed_dimensions.scope_types_complete = true;
-        let mut locals = Vec::new();
-        let mut local_counter = 0usize;
-        let mut body_state = procedural::BodyState {
-            locals: &mut locals,
-            counter: &mut local_counter,
-            subroutine_params: &subroutine_params,
-            subroutine_directions: &subroutine_directions,
-            automatic: lifetimes::automatic_by_default(syntax_tree),
-            statics: Vec::new(),
-            explicit_statics: HashSet::default(),
-            static_initializers: Vec::new(),
-            constant_evaluation: false,
-        };
-        let (mut subroutines, mut comb_processes, mut ff_processes, mut initial_processes) =
-            if imported.declarations_only {
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new())
-            } else {
-                let subroutines = procedural::subroutines_from_scope(
-                    syntax_tree,
-                    &const_env,
-                    &packed_dimensions,
-                    &parameter_values,
-                    &mut body_state,
-                )?;
-                let mut comb_processes = comb_processes_from_scope(
-                    syntax_tree,
-                    &const_env,
-                    &packed_dimensions,
-                    &parameter_values,
-                    &mut body_state,
-                )?
-                .into_iter()
-                .map(|process| {
-                    substitute_process_constants_with_parameter_literals(
-                        &syntax_tree.state,
-                        process,
-                        &const_env,
-                        &parameter_values,
-                    )
-                })
-                .collect::<Vec<_>>();
-                let mut ff_processes = ff_processes_from_scope(
-                    syntax_tree,
-                    &const_env,
-                    &parameter_values,
-                    &packed_dimensions,
-                    &mut body_state,
-                )?;
-                comb_processes.extend(imported.comb_processes.iter().cloned());
-                ff_processes.extend(imported.ff_processes.iter().cloned());
-                let mut initial_processes = array_initial_processes;
-                initial_processes.extend(imported.initial_processes.iter().cloned());
-                initial_processes.extend(procedural::initial_processes_from_scope(
-                    syntax_tree,
-                    &const_env,
-                    &packed_dimensions,
-                    &parameter_values,
-                    &mut body_state,
-                )?);
-                (subroutines, comb_processes, ff_processes, initial_processes)
-            };
-        let (inline_subroutines, inline_randomizations) =
-            procedural::randomization::inline_subroutines(
+            // A generate block shares its name space with the module's other
+            // declarations (IEEE 1800-2023 27.6, 23.9).
+            // The members of a variable of unpacked structure type are named
+            // like declarations of a scope of the variable's name.
+            let aggregates: HashSet<&str> = signals
+                .iter()
+                .filter(|signal| signal.is_aggregate())
+                .map(Signal::name)
+                .collect();
+            let scope_heads: HashSet<&str> = signals
+                .iter()
+                .filter(|signal| signal.hierarchical.is_none())
+                .map(Signal::name)
+                .chain(instances.iter().map(Instance::name))
+                .filter_map(generate_scope_head)
+                .filter(|head| !aggregates.contains(head))
+                .collect();
+            if let Some(conflict) = ports
+                .iter()
+                .map(Port::name)
+                .chain(signals.iter().map(Signal::name))
+                .chain(instances.iter().map(Instance::name))
+                .find(|conflict| scope_heads.contains(conflict))
+            {
+                return Err(AnalyzerError::DuplicateGenerateScope {
+                    module: name,
+                    name: conflict.to_string(),
+                });
+            }
+            let mut parameter_values = parameter_value_env_with_imported(
                 syntax_tree,
-                &mut body_state,
-                &packed_dimensions,
-            )?;
-        subroutines.extend(inline_subroutines);
-        // Static locals of the processes that keep their value are variables
-        // of the module, initialized once with the declaration initializers.
-        let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
-        let (mut kept, mut static_initializers) = lifetimes::keep_static_locals(
-            &syntax_tree.state,
-            &statics,
-            &subroutine_directions,
-            comb_processes
-                .iter_mut()
-                .map(|process| (&mut process.body, false))
-                .chain(
-                    ff_processes
-                        .iter_mut()
-                        .map(|process| (&mut process.body, false)),
-                )
-                .chain(
-                    initial_processes
-                        .iter_mut()
-                        .map(|process| (&mut process.body, !process.repeats)),
-                ),
-            Some(&body_state.explicit_statics),
-        )?;
-        for subroutine in &subroutines {
-            kept.extend(subroutine.persistent_locals.iter().cloned());
-        }
-        // Statics of subroutines are initialized first: a run-time
-        // initializer of a process local may call the subroutine.
-        static_initializers.splice(0..0, body_state.static_initializers.drain(..));
-        locals.retain(|local| !kept.contains(&local.name));
-        for name in kept {
-            signals.push(Signal::new(name.clone(), statics[&name].clone()));
-        }
-        if !static_initializers.is_empty() {
-            // Declaration initializers run before the other initial blocks.
-            let first_block = initial_processes
-                .iter()
-                .position(|process| !process.is_initializer())
-                .unwrap_or(initial_processes.len());
-            // They may read module variables, so they also stay after those
-            // initializers when processes are reordered by creation.
-            let creation_order = initial_processes
-                .iter()
-                .filter(|process| process.is_initializer())
-                .map(|process| process.creation_order)
-                .max()
-                .unwrap_or(0);
-            initial_processes.insert(
-                first_block,
-                InitialProcess {
-                    creation_order,
-                    site: None,
-                    condition: None,
-                    body: static_initializers,
-                    kind: celox_design::ProcessKind::Initializer,
-                    validation_body: Vec::new(),
-                    synthetic: false,
-                    repeats: false,
-                },
+                session,
+                &parameters,
+                &const_env,
+                &imported,
             );
-        }
-        // A call of a name an import binds calls the package subroutine or
-        // DPI import. Calls of subroutines declared in a generate block were
-        // already bound to those.
-        let calls: HashMap<String, String> = imported
-            .aliases
-            .iter()
-            .filter(|(_, target)| {
-                imported
-                    .subroutines
-                    .iter()
-                    .any(|subroutine| subroutine.name == **target)
-                    || imported
-                        .dpi_imports
+            parameter_values.extend(packed_pattern_values);
+            for (name, value) in &enum_constants.exprs {
+                parameter_values
+                    .entry(name.clone())
+                    .or_insert_with(|| value.clone());
+            }
+            let mut expression_signedness = ports
+                .iter()
+                .map(|port| (port.name().to_string(), port.r#type().is_signed()))
+                .chain(
+                    signals
                         .iter()
-                        .any(|import| import.name() == target.as_str())
-            })
-            .map(|(name, target)| (name.clone(), target.clone()))
-            .collect();
-        if !calls.is_empty() {
-            let rename = scope::Renamer { names: &calls };
-            let body = |body: Vec<Stmt>| body.into_iter().map(|stmt| rename.stmt(stmt)).collect();
-            for process in &mut comb_processes {
-                process.body = body(std::mem::take(&mut process.body));
-                process.sensitivity_body = body(std::mem::take(&mut process.sensitivity_body));
-                for assignment in &mut process.assignments {
-                    assignment.rhs = rename.expr(assignment.rhs.clone());
-                }
+                        .map(|signal| (signal.name().to_string(), signal.r#type().is_signed())),
+                )
+                .collect::<HashMap<_, _>>();
+            expression_signedness.extend(
+                parameter_types_from_const_env(&const_env)
+                    .into_iter()
+                    .map(|(name, r#type)| (name, r#type.signed)),
+            );
+            let mut functions =
+                functions_from_scope(syntax_tree, session, &const_env, &packed_dimensions)?;
+            for (name, function) in &imported.functions {
+                functions
+                    .entry(name.clone())
+                    .or_insert_with(|| function.clone());
             }
-            for process in &mut ff_processes {
-                process.body = body(std::mem::take(&mut process.body));
+            for (name, metadata) in &imported.function_return_types {
+                packed_dimensions
+                    .function_return_types
+                    .entry(name.clone())
+                    .or_insert_with(|| metadata.clone());
             }
-            for process in &mut initial_processes {
-                process.body = body(std::mem::take(&mut process.body));
-                process.validation_body = body(std::mem::take(&mut process.validation_body));
-            }
-            for subroutine in &mut subroutines {
-                *subroutine = rename.subroutine(subroutine.clone());
-            }
+            packed_dimensions
+                .function_return_types
+                .extend(functions.iter().map(|(name, function)| {
+                    (
+                        name.clone(),
+                        FunctionReturnMetadata {
+                            arguments: Some(function_argument_metadata(&function.params)),
+                            width: function.return_width,
+                            first_packed_dimension_width: function
+                                .return_first_packed_dimension_width,
+                            dimensions: function.return_dimensions,
+                            signed: function.return_signed,
+                            is_2state: function.return_is_2state,
+                            string: function.return_string,
+                            chandle: function.return_chandle,
+                            pattern_type: function.return_type.clone(),
+                            enum_domain: function.return_enum_domain.clone(),
+                            class: function.return_class.clone(),
+                            virtual_interface: function.return_virtual_interface.clone(),
+                        },
+                    )
+                }));
+            packed_dimensions
+                .function_return_types
+                .extend(dpi_imports.iter().filter_map(|import| {
+                    let r#type = import.return_type()?;
+                    Some((
+                        import.name().to_string(),
+                        FunctionReturnMetadata {
+                            arguments: Some(dpi_argument_metadata(import)),
+                            width: Some(r#type.width()),
+                            first_packed_dimension_width: (r#type.width() > 1)
+                                .then_some(r#type.width()),
+                            dimensions: Some(usize::from(
+                                r#type.width() > 1 && r#type != crate::ir::DpiType::Chandle,
+                            )),
+                            signed: r#type.is_signed(),
+                            is_2state: !r#type.is_4state(),
+                            string: r#type == crate::ir::DpiType::String,
+                            chandle: r#type == crate::ir::DpiType::Chandle,
+                            pattern_type: None,
+                            enum_domain: None,
+                            class: None,
+                            virtual_interface: None,
+                        },
+                    ))
+                }));
+            // Class methods are subroutines `class::method` (IEEE 1800-2023 8.6).
+            dimensions::all_class_signatures(syntax_tree, session, &mut packed_dimensions);
+            packed_dimensions.functions = Arc::new(functions.clone());
+            packed_dimensions.expression_signedness = expression_signedness.clone().into();
             for instance in &mut instances {
                 for connection in &mut instance.port_connections {
-                    connection.map_expressions(|expr| rename.expr(expr));
+                    if let Some(pattern) = &mut connection.bound_pattern {
+                        pattern.resolve_types(&packed_dimensions)?;
+                    }
+                    connection.map_expressions(|expr| {
+                        let expr =
+                            expand_expr_calls(expr, &functions, &expression_signedness, 0, true);
+                        substitute_expr_constants_with_parameter_literals(
+                            syntax_tree,
+                            session,
+                            expr,
+                            &const_env,
+                            &enum_constants.exprs,
+                        )
+                    });
                 }
             }
-        }
-        let nets = signals
-            .iter()
-            .filter(|signal| signal.is_net())
-            .map(Signal::name)
-            .chain(ports.iter().filter(|port| port.is_net).map(Port::name))
-            .collect();
-        procedural::references::validate(
-            subroutines.iter().chain(imported.subroutines.iter()),
-            &comb_processes,
-            &ff_processes,
-            &initial_processes,
-            &subroutine_directions,
-            &subroutine_params,
-            &nets,
-        )?;
-        procedural::timed_tasks::classify(
-            subroutines.iter().chain(imported.subroutines.iter()),
-            &mut comb_processes,
-            &mut ff_processes,
-            &mut initial_processes,
-        )?;
-        let assignments = comb_processes
-            .iter()
-            .flat_map(|process| process.assignments().iter().cloned())
-            .collect();
-        // A package keeps its symbols for the scopes that use it.
-        let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
-            package_scopes: imported.package_scopes.clone(),
-            classes: classes::scope_classes(syntax_tree, &const_env),
-            class_member_types: classes::specializations::export_member_types(syntax_tree),
-            inline_randomizations,
-            declarations_only: imported.declarations_only,
-            type_parameter_bindings: HashMap::default(),
-            pattern_parameter_bindings: HashMap::default(),
-            const_env: const_env.clone(),
-            parameter_values: parameter_values.clone(),
-            parameters: parameters.clone(),
-            // A class of the scope is a type of it (IEEE 1800-2023 8.3).
-            type_aliases: type_aliases
+            // Bodies now have the active module's declarations and function types.
+            // Declaration-time queries still use syntax discovery while metadata
+            // is incomplete; generated/procedural scopes overlay this complete base.
+            packed_dimensions.scope_types_complete = true;
+            let mut locals = Vec::new();
+            let mut local_counter = 0usize;
+            let mut body_state = procedural::BodyState {
+                locals: &mut locals,
+                counter: &mut local_counter,
+                subroutine_params: &subroutine_params,
+                subroutine_directions: &subroutine_directions,
+                automatic: lifetimes::automatic_by_default(syntax_tree),
+                statics: Vec::new(),
+                explicit_statics: HashSet::default(),
+                static_initializers: Vec::new(),
+                constant_evaluation: false,
+            };
+            let (mut subroutines, mut comb_processes, mut ff_processes, mut initial_processes) =
+                if imported.declarations_only {
+                    (Vec::new(), Vec::new(), Vec::new(), Vec::new())
+                } else {
+                    let subroutines = procedural::subroutines_from_scope(
+                        syntax_tree,
+                        session,
+                        &const_env,
+                        &packed_dimensions,
+                        &parameter_values,
+                        &mut body_state,
+                    )?;
+                    let mut comb_processes = comb_processes_from_scope(
+                        syntax_tree,
+                        session,
+                        &const_env,
+                        &packed_dimensions,
+                        &parameter_values,
+                        &mut body_state,
+                    )?
+                    .into_iter()
+                    .map(|process| {
+                        substitute_process_constants_with_parameter_literals(
+                            syntax_tree,
+                            session,
+                            process,
+                            &const_env,
+                            &parameter_values,
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                    let mut ff_processes = ff_processes_from_scope(
+                        syntax_tree,
+                        session,
+                        &const_env,
+                        &parameter_values,
+                        &packed_dimensions,
+                        &mut body_state,
+                    )?;
+                    comb_processes.extend(imported.comb_processes.iter().cloned());
+                    ff_processes.extend(imported.ff_processes.iter().cloned());
+                    let mut initial_processes = array_initial_processes;
+                    initial_processes.extend(imported.initial_processes.iter().cloned());
+                    initial_processes.extend(procedural::initial_processes_from_scope(
+                        syntax_tree,
+                        session,
+                        &const_env,
+                        &packed_dimensions,
+                        &parameter_values,
+                        &mut body_state,
+                    )?);
+                    (subroutines, comb_processes, ff_processes, initial_processes)
+                };
+            let (inline_subroutines, inline_randomizations) =
+                procedural::randomization::inline_subroutines(
+                    syntax_tree,
+                    session,
+                    &mut body_state,
+                    &packed_dimensions,
+                )?;
+            subroutines.extend(inline_subroutines);
+            // Static locals of the processes that keep their value are variables
+            // of the module, initialized once with the declaration initializers.
+            let statics: HashMap<String, Type> = body_state.statics.drain(..).collect();
+            let (mut kept, mut static_initializers) = lifetimes::keep_static_locals(
+                syntax_tree,
+                session,
+                &statics,
+                &subroutine_directions,
+                comb_processes
+                    .iter_mut()
+                    .map(|process| (&mut process.body, false))
+                    .chain(
+                        ff_processes
+                            .iter_mut()
+                            .map(|process| (&mut process.body, false)),
+                    )
+                    .chain(
+                        initial_processes
+                            .iter_mut()
+                            .map(|process| (&mut process.body, !process.repeats)),
+                    ),
+                &body_state.explicit_statics,
+                &[],
+                false,
+            )?;
+            for subroutine in &subroutines {
+                kept.extend(subroutine.persistent_locals.iter().cloned());
+            }
+            // Statics of subroutines are initialized first: a run-time
+            // initializer of a process local may call the subroutine.
+            static_initializers.splice(0..0, body_state.static_initializers.drain(..));
+            locals.retain(|local| !kept.contains(&local.name));
+            for name in kept {
+                signals.push(Signal::new(name.clone(), statics[&name].clone()));
+            }
+            if !static_initializers.is_empty() {
+                // Declaration initializers run before the other initial blocks.
+                let first_block = initial_processes
+                    .iter()
+                    .position(|process| !process.is_initializer())
+                    .unwrap_or(initial_processes.len());
+                // They may read module variables, so they also stay after those
+                // initializers when processes are reordered by creation.
+                let creation_order = initial_processes
+                    .iter()
+                    .filter(|process| process.is_initializer())
+                    .map(|process| process.creation_order)
+                    .max()
+                    .unwrap_or(0);
+                initial_processes.insert(
+                    first_block,
+                    InitialProcess {
+                        creation_order,
+                        site: None,
+                        condition: None,
+                        body: static_initializers,
+                        kind: celox_design::ProcessKind::Initializer,
+                        validation_body: Vec::new(),
+                        synthetic: false,
+                        repeats: false,
+                    },
+                );
+            }
+            // A call of a name an import binds calls the package subroutine or
+            // DPI import. Calls of subroutines declared in a generate block were
+            // already bound to those.
+            let calls: HashMap<String, String> = imported
+                .aliases
                 .iter()
-                .map(|(name, ty)| (name.clone(), ty.clone()))
-                .chain(classes::scope_class_types(syntax_tree))
-                .collect(),
-            enum_constants: enum_constants.clone(),
-            functions: functions.clone(),
-            function_return_types: (*packed_dimensions.function_return_types).clone(),
-            constant_functions: const_functions::installed(&syntax_tree.state.const_functions),
-            subroutine_params: subroutine_params.clone(),
-            subroutine_shapes: subroutine_shapes.clone(),
-            subroutines: subroutines.clone(),
-            locals: locals.clone(),
-            dpi_imports: dpi_imports.clone(),
-            // A package's signals are its array parameters and constant
-            // variables, initialized by its initial processes.
-            signals: signals.clone(),
-            ports: Vec::new(),
-            state_signals: Vec::new(),
-            initial_processes: initial_processes.clone(),
-            comb_processes: comb_processes.clone(),
-            ff_processes: ff_processes.clone(),
-            aliases: imported.aliases.clone(),
-            interface_members: imported.interface_members.clone(),
-            local_aliases: imported.local_aliases.clone(),
-            interface_types: imported.interface_types.clone(),
-            interface_arrays: imported.interface_arrays.clone(),
-            interface_scopes: imported.interface_scopes.clone(),
-            interface_declarations: imported.interface_declarations.clone(),
-            interface_instances: imported.interface_instances.clone(),
-            generate_imports: HashMap::default(),
-        });
-        // The subroutines, locals and DPI imports of the packages the module
-        // uses are lowered with it.
-        for subroutine in &imported.subroutines {
-            if !subroutines
+                .filter(|(_, target)| {
+                    imported
+                        .subroutines
+                        .iter()
+                        .any(|subroutine| subroutine.name == **target)
+                        || imported
+                            .dpi_imports
+                            .iter()
+                            .any(|import| import.name() == target.as_str())
+                })
+                .map(|(name, target)| (name.clone(), target.clone()))
+                .collect();
+            if !calls.is_empty() {
+                let rename = scope::Renamer { names: &calls };
+                let body =
+                    |body: Vec<Stmt>| body.into_iter().map(|stmt| rename.stmt(stmt)).collect();
+                for process in &mut comb_processes {
+                    process.body = body(std::mem::take(&mut process.body));
+                    process.sensitivity_body = body(std::mem::take(&mut process.sensitivity_body));
+                    for assignment in &mut process.assignments {
+                        assignment.rhs = rename.expr(assignment.rhs.clone());
+                    }
+                }
+                for process in &mut ff_processes {
+                    process.body = body(std::mem::take(&mut process.body));
+                }
+                for process in &mut initial_processes {
+                    process.body = body(std::mem::take(&mut process.body));
+                    process.validation_body = body(std::mem::take(&mut process.validation_body));
+                }
+                for subroutine in &mut subroutines {
+                    *subroutine = rename.subroutine(subroutine.clone());
+                }
+                for instance in &mut instances {
+                    for connection in &mut instance.port_connections {
+                        connection.map_expressions(|expr| rename.expr(expr));
+                    }
+                }
+            }
+            let nets = signals
                 .iter()
-                .any(|known| known.name == subroutine.name)
-            {
-                subroutines.push(subroutine.clone());
-            }
-        }
-        for local in &imported.locals {
-            if !locals.iter().any(|known| known.name == local.name) {
-                locals.push(local.clone());
-            }
-        }
-        for import in &imported.dpi_imports {
-            if !dpi_imports
+                .filter(|signal| signal.is_net())
+                .map(Signal::name)
+                .chain(ports.iter().filter(|port| port.is_net).map(Port::name))
+                .collect();
+            procedural::references::validate(
+                subroutines.iter().chain(imported.subroutines.iter()),
+                &comb_processes,
+                &ff_processes,
+                &initial_processes,
+                &subroutine_directions,
+                &subroutine_params,
+                &nets,
+            )?;
+            procedural::timed_tasks::classify(
+                subroutines.iter().chain(imported.subroutines.iter()),
+                &mut comb_processes,
+                &mut ff_processes,
+                &mut initial_processes,
+            )?;
+            let assignments = comb_processes
                 .iter()
-                .any(|known| known.name() == import.name())
-            {
-                dpi_imports.push(import.clone());
+                .flat_map(|process| process.assignments().iter().cloned())
+                .collect();
+            // A package keeps its symbols for the scopes that use it.
+            let symbols = (is_package || export_symbols).then(|| scope::ScopeSymbols {
+                package_scopes: imported.package_scopes.clone(),
+                classes: classes::scope_classes(syntax_tree, session, &const_env),
+                class_member_types: classes::specializations::export_member_types(
+                    syntax_tree,
+                    session,
+                ),
+                inline_randomizations,
+                declarations_only: imported.declarations_only,
+                type_parameter_bindings: HashMap::default(),
+                pattern_parameter_bindings: HashMap::default(),
+                const_env: (*const_env).clone(),
+                parameter_values: parameter_values.clone(),
+                parameters: parameters.clone(),
+                // A class of the scope is a type of it (IEEE 1800-2023 8.3).
+                type_aliases: type_aliases
+                    .iter()
+                    .map(|(name, ty)| (name.clone(), ty.clone()))
+                    .chain(classes::scope_class_types(syntax_tree))
+                    .collect(),
+                enum_constants: enum_constants.clone(),
+                functions: functions.clone(),
+                function_return_types: (*packed_dimensions.function_return_types).clone(),
+                constant_functions: syntax_tree.functions.clone(),
+                subroutine_params: subroutine_params.clone(),
+                subroutine_shapes: subroutine_shapes.clone(),
+                subroutines: subroutines.clone(),
+                locals: locals.clone(),
+                dpi_imports: dpi_imports.clone(),
+                // A package's signals are its array parameters and constant
+                // variables, initialized by its initial processes.
+                signals: signals.clone(),
+                ports: Vec::new(),
+                state_signals: Vec::new(),
+                initial_processes: initial_processes.clone(),
+                comb_processes: comb_processes.clone(),
+                ff_processes: ff_processes.clone(),
+                aliases: imported.aliases.clone(),
+                interface_members: imported.interface_members.clone(),
+                local_aliases: imported.local_aliases.clone(),
+                interface_types: imported.interface_types.clone(),
+                interface_modports: imported.interface_modports.clone(),
+                interface_arrays: imported.interface_arrays.clone(),
+                interface_scopes: imported.interface_scopes.clone(),
+                interface_declarations: imported.interface_declarations.clone(),
+                interface_instances: imported.interface_instances.clone(),
+                generate_imports: HashMap::default(),
+            });
+            // The subroutines, locals and DPI imports of the packages the module
+            // uses are lowered with it.
+            for subroutine in &imported.subroutines {
+                if !subroutines
+                    .iter()
+                    .any(|known| known.name == subroutine.name)
+                {
+                    subroutines.push(subroutine.clone());
+                }
             }
-        }
-        let mut imported_parameters = imported.parameters.clone();
-        imported_parameters
-            .retain(|parameter| !parameters.iter().any(|local| local.name == parameter.name));
-
-        // Expression construction tracks only whole-variable assignments.
-        // Leave calls of functions with selected/concatenated writes symbolic
-        // in declaration contracts rather than publishing a partial body.
-        // Expression inlining also sizes formal and return conversions at the
-        // default specialization; symbolic signature widths cannot be inlined.
-        for subroutine in &declaration_subroutines {
-            let mut selected_write = false;
-            for statement in &subroutine.body {
-                statement.walk(&mut |statement| {
-                    selected_write |= matches!(
-                        statement,
-                        crate::procedural::StmtBase::Assign {
-                            lhs: crate::ir::LValue::Select { .. },
-                            ..
-                        } | crate::procedural::StmtBase::AssignConcat { .. }
-                    );
-                });
+            for local in &imported.locals {
+                if !locals.iter().any(|known| known.name == local.name) {
+                    locals.push(local.clone());
+                }
             }
-            let symbolic_type = subroutine
-                .return_type
-                .as_ref()
-                .is_some_and(|ty| ty.has_symbolic_ranges(&syntax_tree.state.const_functions))
-                || subroutine.params.iter().any(|param| {
-                    param
-                        .r#type
-                        .has_symbolic_ranges(&syntax_tree.state.const_functions)
-                });
-            if (selected_write || symbolic_type)
-                && let Some(function) = functions.get_mut(&subroutine.name)
-            {
-                function.body = None;
+            for import in &imported.dpi_imports {
+                if !dpi_imports
+                    .iter()
+                    .any(|known| known.name() == import.name())
+                {
+                    dpi_imports.push(import.clone());
+                }
             }
-        }
+            let mut imported_parameters = imported.parameters.clone();
+            imported_parameters
+                .retain(|parameter| !parameters.iter().any(|local| local.name == parameter.name));
 
-        // A native default value is not evidence of a representable symbolic
-        // body. Keep failed declaration lowerings visible to contract checking.
-        for function in functions.values_mut() {
-            if !declaration_subroutines
-                .iter()
-                .any(|subroutine| subroutine.name == function.name)
-            {
-                function.body = None;
+            // Expression construction tracks only whole-variable assignments.
+            // Leave calls of functions with selected/concatenated writes symbolic
+            // in declaration contracts rather than publishing a partial body.
+            // Expression inlining also sizes formal and return conversions at the
+            // default specialization; symbolic signature widths cannot be inlined.
+            for subroutine in &declaration_subroutines {
+                let mut selected_write = false;
+                for statement in &subroutine.body {
+                    statement.walk(&mut |statement| {
+                        selected_write |= matches!(
+                            statement,
+                            crate::procedural::StmtBase::Assign {
+                                lhs: crate::ir::LValue::Select { .. },
+                                ..
+                            } | crate::procedural::StmtBase::AssignConcat { .. }
+                        );
+                    });
+                }
+                let symbolic_type = subroutine
+                    .return_type
+                    .as_ref()
+                    .is_some_and(|ty| ty.has_symbolic_ranges(&syntax_tree.functions))
+                    || subroutine
+                        .params
+                        .iter()
+                        .any(|param| param.r#type.has_symbolic_ranges(&syntax_tree.functions));
+                if (selected_write || symbolic_type)
+                    && let Some(function) = functions.get_mut(&subroutine.name)
+                {
+                    function.body = None;
+                }
             }
-        }
 
-        let mut interface_scope_names = imported
-            .interface_types
-            .keys()
-            .chain(imported.interface_arrays.keys())
-            .cloned()
-            .collect::<Vec<_>>();
-        interface_scope_names.sort_unstable();
-        interface_scope_names.dedup();
+            // A native default value is not evidence of a representable symbolic
+            // body. Keep failed declaration lowerings visible to contract checking.
+            for function in functions.values_mut() {
+                if !declaration_subroutines
+                    .iter()
+                    .any(|subroutine| subroutine.name == function.name)
+                {
+                    function.body = None;
+                }
+            }
 
-        Ok(Self {
-            name,
-            program,
-            interface_scope_names,
-            parameters,
-            ports,
-            signals,
-            instances,
-            assignments,
-            comb_processes,
-            ff_processes,
-            initial_processes,
-            locals,
-            subroutines,
-            dpi_imports,
-            constant_functions: const_functions::installed(&syntax_tree.state.const_functions),
-            symbolic_functions: functions,
-            declaration_subroutines,
-            imported_parameters,
-            symbols,
-        })
+            let mut interface_scope_names = imported
+                .interface_types
+                .keys()
+                .chain(imported.interface_arrays.keys())
+                .cloned()
+                .collect::<Vec<_>>();
+            interface_scope_names.sort_unstable();
+            interface_scope_names.dedup();
+            let interface_handles = virtual_interfaces::handles(session, &imported, &ports);
+
+            Ok(Self {
+                name,
+                program,
+                interface_scope_names,
+                interface_handles,
+                parameters,
+                ports,
+                signals,
+                instances,
+                assignments,
+                comb_processes,
+                ff_processes,
+                initial_processes,
+                locals,
+                subroutines,
+                dpi_imports,
+                constant_functions: syntax_tree.functions.clone(),
+                symbolic_functions: functions,
+                declaration_subroutines,
+                imported_parameters,
+                symbols,
+            })
+        })(session);
+        generate::restore(session, previous);
+        module
     }
 
     pub(crate) fn interface_scope_names(&self) -> &[String] {
         &self.interface_scope_names
+    }
+
+    pub(crate) fn interface_handles(&self) -> &[crate::ir::InterfaceHandle] {
+        &self.interface_handles
     }
 
     pub fn name(&self) -> &str {
@@ -1783,7 +2055,7 @@ impl Parameter {
 
     pub(crate) fn resolved_value(
         &self,
-        state: &AnalysisState,
+        functions: &const_functions::ConstantFunctions,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
     ) -> Option<i128> {
@@ -1801,7 +2073,7 @@ impl Parameter {
         let value: crate::ir::ConstExpr = value.into();
         let environment = const_functions::Environment {
             constants,
-            functions: &state.const_functions,
+            functions,
         };
         let mut value = if self.has_declared_type && typecheck::const_expr_has_real_type(&value) {
             // An explicitly integral parameter supplies an integer assignment
@@ -1822,23 +2094,29 @@ impl Parameter {
     /// literal after two-state conversion or dependency substitution.
     pub(crate) fn resolved_value_and_literal(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
     ) -> (Option<i128>, Option<Expr>) {
+        let functions = &tree.functions;
         if self.floating.is_some() {
             return (
                 None,
-                self.resolved_literal(state, constants, parameter_types, literals),
+                self.resolved_literal(tree, session, constants, parameter_types, literals),
             );
         }
-        if let Some(value) = self.resolved_value(state, constants, parameter_types) {
+        if let Some(value) = self.resolved_value(&tree.functions, constants, parameter_types) {
             return (Some(value), None);
         }
-        let literal = self.resolved_literal(state, constants, parameter_types, literals);
+        let literal = self.resolved_literal(tree, session, constants, parameter_types, literals);
         let value = literal.as_ref().and_then(|literal| {
-            eval_ast_const_expr(state, &expr_to_const(state, literal.clone())?, constants)
+            eval_ast_const_expr(
+                functions,
+                &expr_to_const(session, literal.clone())?,
+                constants,
+            )
         });
         if value.is_some() {
             (value, None)
@@ -1849,7 +2127,8 @@ impl Parameter {
 
     pub(crate) fn resolved_literal(
         &self,
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
         constants: &HashMap<String, i128>,
         parameter_types: &HashMap<String, ExprType>,
         literals: &HashMap<String, Expr>,
@@ -1885,13 +2164,15 @@ impl Parameter {
             parameter.declared_signed = Some(ty.signed);
         }
         let value = parameter_value_env(
-            state,
+            tree,
+            session,
             std::slice::from_ref(&parameter),
             &evaluation_constants,
         )
         .remove(self.name())?;
         let value = substitute_expr_idents(value, literals);
-        let value = fold_const_integral_expr_preserving_mask(state, value, &evaluation_constants);
+        let value =
+            fold_const_integral_expr_preserving_mask(tree, session, value, &evaluation_constants);
         matches!(value, Expr::Literal(_)).then_some(value)
     }
 
@@ -2261,29 +2542,16 @@ pub struct Type {
     signed_element_depth: Option<usize>,
     /// The class of an object handle type.
     class: Option<Arc<str>>,
-    /// The typedef that names an enumeration, struct or union type.
-    nominal: Nominal,
+    /// The interface of a virtual interface type (IEEE 1800-2023 25.9).
+    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     /// The members of an unpacked structure type (IEEE 1800-2023 7.2).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
-}
-
-/// The declaration that names an enumeration, struct or union type, which
-/// tells it apart from another type of the same structure (IEEE 1800-2023
-/// 6.19, 6.22.1) where a class specialization is keyed by its type
-/// arguments (8.25). Type equality does not compare it.
-#[derive(Debug, Clone, Default)]
-struct Nominal(Option<Arc<str>>);
-
-impl PartialEq for Nominal {
-    fn eq(&self, _: &Self) -> bool {
-        true
-    }
-}
-
-impl Eq for Nominal {}
-
-impl std::hash::Hash for Nominal {
-    fn hash<H: std::hash::Hasher>(&self, _: &mut H) {}
+    /// The typedef that names an enumeration, struct or union type, and how
+    /// `$typename` spells the type where its structure does not tell.
+    spelling: type_names::Spelling,
+    /// A `chandle` (IEEE 1800-2023 6.14): an opaque 64-bit C pointer, held
+    /// as 2-state bits, whose uses the analyzer restricts.
+    chandle: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2309,9 +2577,11 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            virtual_interface: None,
             container: None,
-            nominal: Nominal::default(),
             unpacked_struct: None,
+            spelling: type_names::Spelling::default(),
+            chandle: false,
         }
     }
 
@@ -2327,26 +2597,39 @@ impl Type {
             members: Vec::new(),
             signed_element_depth: None,
             class: None,
+            virtual_interface: None,
             container: None,
             unpacked_struct: None,
-            nominal: Nominal::default(),
+            spelling: type_names::Spelling::default(),
+            chandle: false,
         }
     }
 
     /// Name an enumeration, struct or union type after typedef `name`,
     /// unless an earlier typedef already named it (`typedef A B` names the
-    /// type of `A`).
-    fn name_declaration(&mut self, name: impl FnOnce() -> String) {
+    /// type of `A`). `typename` is how `$typename` writes the name.
+    fn name_declaration(&mut self, name: impl FnOnce() -> (String, type_names::TypedefName)) {
         if (self.is_enum || !self.members.is_empty() || self.unpacked_struct.is_some())
-            && self.nominal.0.is_none()
+            && self.spelling.declaration().is_none()
         {
-            self.nominal = Nominal(Some(name().into()));
+            let (name, typename) = name();
+            self.spelling.name(name.into(), typename);
         }
     }
 
     /// The typedef that names this enumeration, struct or union type.
     fn declaration_name(&self) -> Option<&str> {
-        self.nominal.0.as_deref()
+        self.spelling.declaration()
+    }
+
+    /// Whether the type is a chandle or an unpacked structure with a
+    /// chandle member, which no port may have and no randomization fill
+    /// (IEEE 1800-2023 6.14).
+    pub(in crate::ast) fn holds_chandle(&self) -> bool {
+        self.chandle
+            || self
+                .unpacked_struct()
+                .is_some_and(|aggregate| aggregate.leaves().iter().any(|leaf| leaf.r#type.chandle))
     }
 
     /// The members of an unpacked structure type.
@@ -2354,9 +2637,34 @@ impl Type {
         self.unpacked_struct.as_ref()
     }
 
+    pub(crate) fn structure_identity(&self) -> Option<&str> {
+        self.unpacked_struct.as_ref().map(|ty| ty.identity())
+    }
+
+    /// Non-storage aggregate paths, including the root, retained for member typing.
+    pub(crate) fn structure_aggregates(&self, base: &str) -> Vec<(String, Self)> {
+        self.unpacked_struct
+            .as_ref()
+            .map_or_else(Vec::new, |_| unpacked_structs::aggregates(base, self))
+    }
+
+    pub(crate) fn structure_leaves(&self) -> Vec<(String, Self)> {
+        self.unpacked_struct.as_ref().map_or_else(Vec::new, |ty| {
+            ty.leaves()
+                .into_iter()
+                .map(|leaf| (leaf.path.join("."), leaf.r#type))
+                .collect()
+        })
+    }
+
     /// The class of an object handle type.
     pub fn class(&self) -> Option<&str> {
         self.class.as_deref()
+    }
+
+    /// The interface of a virtual interface type.
+    pub fn virtual_interface(&self) -> Option<&virtual_interfaces::VirtualInterface> {
+        self.virtual_interface.as_deref()
     }
 
     pub fn kind(&self) -> TypeKind {
@@ -2404,6 +2712,17 @@ impl Type {
             ..Self::new(kind)
         }
     }
+
+    /// Whether the type is a `chandle`.
+    pub(crate) fn is_chandle(&self) -> bool {
+        self.chandle
+    }
+
+    /// The type, a `chandle` if `chandle` (see [`crate::ir::Type::is_chandle`]).
+    pub fn with_chandle(mut self, chandle: bool) -> Self {
+        self.chandle = chandle;
+        self
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2417,6 +2736,9 @@ pub enum TypeKind {
     Object,
     /// A scheduler-owned process reference (9.7), independent of the heap.
     Process,
+    /// A handle of the synchronization object of a named event (15.5), or
+    /// `null`.
+    Event,
     Bit,
     Logic,
     Reg,
@@ -2532,10 +2854,11 @@ pub enum ConstExpr {
 
 impl ConstExpr {
     /// Effectful calls get distinct sites; analyzer-created copies retain them.
-    fn call(state: &AnalysisState, callee: Callee, args: Vec<ConstExpr>) -> Self {
-        let site = callee
-            .is_effectful()
-            .then(|| state.next_call_site.replace(state.next_call_site.get() + 1));
+    fn call(callee: Callee, args: Vec<ConstExpr>, session: &mut Session) -> Self {
+        let site = callee.is_effectful().then(|| {
+            session.next_call_site += 1;
+            session.next_call_site - 1
+        });
         ConstExpr::Function { callee, args, site }
     }
 }
@@ -2642,6 +2965,12 @@ pub struct CombProcess {
 }
 
 impl CombProcess {
+    /// Where an `always` procedure is written, for diagnostics about it as
+    /// a process.
+    pub fn process_site(&self) -> Option<&crate::procedural::ProcessSite> {
+        self.process_site.as_ref()
+    }
+
     pub fn site(&self) -> Option<&crate::procedural::SourceSpan> {
         self.site.as_ref()
     }
@@ -2879,6 +3208,8 @@ struct Function {
     return_string: bool,
     /// Whether the function returns a class handle.
     return_handle: bool,
+    /// The function returns a `chandle`.
+    return_chandle: bool,
     name: String,
     params: Vec<FunctionParam>,
     /// The function's value as one expression of its arguments, or `None`
@@ -2895,6 +3226,10 @@ struct Function {
     return_is_2state: bool,
     /// The members of an enumerated return type, for its methods.
     return_enum_domain: Option<Arc<enums::EnumDomain>>,
+    /// The class of a class handle result.
+    return_class: Option<String>,
+    /// The function returns a virtual interface of this type.
+    return_virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
 }
 
 fn function_argument_metadata(params: &[FunctionParam]) -> Arc<[FunctionArgumentMetadata]> {
@@ -2914,7 +3249,11 @@ fn dpi_argument_metadata(import: &crate::ir::DpiImport) -> Arc<[FunctionArgument
         .iter()
         .map(|argument| FunctionArgumentMetadata {
             name: argument.name().to_string(),
-            direction: ParamDirection::Input,
+            direction: if argument.is_output() {
+                ParamDirection::Output
+            } else {
+                ParamDirection::Input
+            },
             has_default: false,
         })
         .collect()
@@ -3066,12 +3405,13 @@ fn parameter_packed_dimensions_with_imported(
 /// The literal values of `parameters`, and of the package parameters and
 /// enum members a scope imports.
 fn parameter_value_env_with_imported(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
     imported: &scope::ScopeSymbols,
 ) -> HashMap<String, Expr> {
-    let mut values = parameter_value_env(state, parameters, const_env);
+    let mut values = parameter_value_env(tree, session, parameters, const_env);
     let local_names: HashSet<_> = parameters.iter().map(Parameter::name).collect();
     for (name, value) in &imported.parameter_values {
         if !local_names.contains(name.as_str()) {
@@ -3114,6 +3454,8 @@ struct VariableDimensions {
     string: bool,
     /// The class of an object handle variable.
     class: Option<String>,
+    /// The interface of a virtual interface variable.
+    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
     packed: Vec<PackedDimension>,
     unpacked: Vec<UnpackedDimension>,
     signed: bool,
@@ -3124,6 +3466,10 @@ struct VariableDimensions {
     /// A variable of unpacked structure type: the names of its members
     /// are variables (see [`unpacked_structs`]).
     unpacked_struct: Option<Arc<unpacked_structs::UnpackedStruct>>,
+    /// The declared type, for `$typename`.
+    declared: type_names::Declared,
+    /// A `chandle` variable (see [`Type::chandle`]).
+    chandle: bool,
 }
 
 type VariablePackedDimensions = HashMap<String, VariableDimensions>;
@@ -3146,10 +3492,17 @@ struct FunctionReturnMetadata {
     is_2state: bool,
     /// The function returns a `string`.
     string: bool,
+    /// The function returns a `chandle` (IEEE 1800-2023 6.14).
+    chandle: bool,
     /// Declared aggregate type, available before function bodies are inlined.
     pattern_type: Option<Type>,
     /// The members of an enumerated return type, for its methods.
     enum_domain: Option<Arc<enums::EnumDomain>>,
+    /// The class of a class handle result, whose members a call may select
+    /// (IEEE 1800-2023 8.4).
+    class: Option<String>,
+    /// The function returns a virtual interface of this type.
+    virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -3176,18 +3529,30 @@ struct PackedDimensions {
     subroutine_param_names: Arc<HashMap<String, Vec<String>>>,
     /// The class whose method is being bound.
     class_scope: Option<String>,
+    /// Where array locator methods declare their iterator locals; `None`
+    /// outside a procedural body.
+    locator_locals: Option<locators::LocalSink>,
+    /// The iterators of the enclosing `with` expressions, innermost last.
+    locator_iterators: Arc<Vec<locators::Iterator>>,
+    /// The values of the operands whose side effects a procedural body has
+    /// already executed before their statement (see [`effects`]).
+    effect_values: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
+    /// The class property expression whose select is being bound against
+    /// the property's template; every other property is read through its
+    /// object.
+    property_select_base: Option<celox_sv_syntax::ExprId>,
 }
 
 impl PackedDimensions {
     fn new(
         variables: impl Into<ScopedMap<VariableDimensions>>,
-        const_env: &HashMap<String, i128>,
-        type_aliases: &HashMap<String, Type>,
+        const_env: impl ToShared<i128>,
+        type_aliases: impl ToShared<Type>,
     ) -> Self {
         Self {
             variables: variables.into(),
-            const_env: const_env.clone().into(),
-            type_aliases: type_aliases.clone().into(),
+            const_env: const_env.to_shared(),
+            type_aliases: type_aliases.to_shared(),
             function_return_types: SharedMap::default(),
             functions: Arc::default(),
             parameter_values: SharedMap::default(),
@@ -3200,6 +3565,10 @@ impl PackedDimensions {
             subroutine_directions: Arc::default(),
             subroutine_param_names: Arc::default(),
             class_scope: None,
+            locator_locals: None,
+            locator_iterators: Arc::default(),
+            effect_values: Arc::default(),
+            property_select_base: None,
         }
     }
 }

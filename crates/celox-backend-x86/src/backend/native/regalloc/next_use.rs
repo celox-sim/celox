@@ -1,7 +1,7 @@
 //! Braun--Hack section 4.1: CFG-global next-use distances.
 
 use std::cmp::Ordering;
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, BinaryHeap};
 use std::sync::Arc;
 
 use crate::native::mir::{BlockId, MFunction, VReg};
@@ -105,6 +105,8 @@ pub(super) struct NextUseAnalysis {
     use_positions: Vec<HashMap<VReg, Vec<usize>>>,
     #[cfg(test)]
     region_work: RegionAggregationWork,
+    #[cfg(test)]
+    block_visits: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,10 +209,22 @@ pub(super) fn analyze(
     let mut exit = vec![DistanceMap::default(); func.blocks.len()];
     // Every block starts with one shared empty set.
     let mut anticipated_after_phis = vec![AnticipatedSet::default(); func.blocks.len()];
-    let mut queue = (0..func.blocks.len()).rev().collect::<VecDeque<_>>();
+    // Blocks are numbered in reverse postorder, so visiting the highest
+    // queued index first settles a loop's body before the blocks that enter
+    // it, and a branch sees the updates of all its arms at once. In first-in
+    // first-out order a block was revisited for every distinct number of
+    // blocks over which an update reached it, quadratic in a loop's size.
+    // The least fixpoint, and so the allocation, does not depend on order.
+    let mut queue = (0..func.blocks.len()).collect::<BinaryHeap<_>>();
     let mut queued = vec![true; func.blocks.len()];
-    while let Some(block) = queue.pop_front() {
+    #[cfg(test)]
+    let mut block_visits = 0;
+    while let Some(block) = queue.pop() {
         queued[block] = false;
+        #[cfg(test)]
+        {
+            block_visits += 1;
+        }
         // With one ordinary edge and no phi-edge uses, the exit is exactly
         // the successor entry. Share its immutable storage rather than encode
         // another copy of every live value for this block.
@@ -311,7 +325,7 @@ pub(super) fn analyze(
             anticipated_after_phis[block] = next_anticipated;
             for &predecessor in &cfg.predecessors[block] {
                 if !queued[predecessor] {
-                    queue.push_back(predecessor);
+                    queue.push(predecessor);
                     queued[predecessor] = true;
                 }
             }
@@ -352,6 +366,8 @@ pub(super) fn analyze(
         use_positions,
         #[cfg(test)]
         region_work,
+        #[cfg(test)]
+        block_visits,
     })
 }
 
@@ -1988,26 +2004,30 @@ mod tests {
         }
     }
 
+    /// A linear congruential generator for [`generated_function`].
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self, bound: u64) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (self.0 >> 33) % bound
+        }
+    }
+
     /// A generated function: branches, jumps forward and back, phis at
     /// joins, and up to `max_instructions` stores and adds per block over a
     /// small set of values.
     fn generated_function(seed: u64, max_instructions: u64) -> MFunction {
-        let state = std::cell::Cell::new(seed);
-        let next = |bound: u64| {
-            state.set(
-                state
-                    .get()
-                    .wrapping_mul(6364136223846793005)
-                    .wrapping_add(1442695040888963407),
-            );
-            (state.get() >> 33) % bound
-        };
+        let mut rng = Lcg(seed);
         const VALUES: u32 = 48;
         let mut vregs = VRegAllocator::new();
         let values = (0..VALUES).map(|_| vregs.alloc()).collect::<Vec<_>>();
-        let pick = || values[next(u64::from(VALUES)) as usize];
+        let pick = |rng: &mut Lcg| values[rng.next(u64::from(VALUES)) as usize];
         let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); VALUES as usize]);
-        let count = 2 + next(10) as usize;
+        let count = 2 + rng.next(10) as usize;
         let mut defined = 8;
         let mut blocks = (0..count)
             .map(|index| MBlock::new(BlockId(index as u32)))
@@ -2020,19 +2040,19 @@ mod tests {
         }
         let mut targets = vec![Vec::new(); count];
         for (index, block) in blocks.iter_mut().enumerate() {
-            for _ in 0..next(max_instructions + 1) {
-                if next(3) == 0 && defined < VALUES as usize {
+            for _ in 0..rng.next(max_instructions + 1) {
+                if rng.next(3) == 0 && defined < VALUES as usize {
                     block.push(MInst::Add {
                         dst: values[defined],
-                        lhs: pick(),
-                        rhs: pick(),
+                        lhs: pick(&mut rng),
+                        rhs: pick(&mut rng),
                     });
                     defined += 1;
                 } else {
                     block.push(MInst::Store {
                         base: BaseReg::SimState,
                         offset: 0,
-                        src: pick(),
+                        src: pick(&mut rng),
                         size: OpSize::S64,
                     });
                 }
@@ -2044,14 +2064,14 @@ mod tests {
                 continue;
             }
             let following = BlockId(index as u32 + 1);
-            let other = BlockId(1 + next(count as u64 - 1) as u32);
-            if next(2) == 0 || other == following {
+            let other = BlockId(1 + rng.next(count as u64 - 1) as u32);
+            if rng.next(2) == 0 || other == following {
                 targets[index].push(following);
                 block.push(MInst::Jump { target: following });
             } else {
                 targets[index].extend([following, other]);
                 block.push(MInst::Branch {
-                    cond: pick(),
+                    cond: pick(&mut rng),
                     true_bb: following,
                     false_bb: other,
                 });
@@ -2064,7 +2084,7 @@ mod tests {
             if predecessors.len() < 2 {
                 continue;
             }
-            for _ in 0..next(3) {
+            for _ in 0..rng.next(3) {
                 if defined == VALUES as usize {
                     break;
                 }
@@ -2072,7 +2092,7 @@ mod tests {
                     dst: values[defined],
                     sources: predecessors
                         .iter()
-                        .map(|&block| (BlockId(block as u32), pick()))
+                        .map(|&block| (BlockId(block as u32), pick(&mut rng)))
                         .collect(),
                 });
                 defined += 1;
@@ -2711,6 +2731,98 @@ mod tests {
         assert_eq!(error.rule, "NEXT_USE.DATAFLOW_EQUATION");
         assert_eq!(error.block, Some(BlockId(1)));
         assert_eq!(error.values, vec![value]);
+    }
+
+    /// A loop around a chain of `diamonds` branches. The short arm of
+    /// diamond `index` is one block of 16 stores, the long arm `index % 7 + 1`
+    /// blocks with one store, so the arm with more blocks carries the nearer
+    /// next uses around the loop.
+    fn diamond_loop(diamonds: u32) -> MFunction {
+        let mut vregs = VRegAllocator::new();
+        let condition = vregs.alloc();
+        let values = (0..2 * diamonds).map(|_| vregs.alloc()).collect::<Vec<_>>();
+        let mut func = MFunction::new(vregs, vec![SpillDesc::transient(); values.len() + 1]);
+        let store = |block: &mut MBlock, src| {
+            block.push(MInst::Store {
+                base: BaseReg::SimState,
+                offset: 0,
+                src,
+                size: OpSize::S64,
+            });
+        };
+        let mut next_id = 0;
+        let mut fresh = || {
+            next_id += 1;
+            BlockId(next_id - 1)
+        };
+        let mut entry = MBlock::new(fresh());
+        for &dst in std::iter::once(&condition).chain(&values) {
+            entry.push(MInst::LoadImm { dst, value: 1 });
+        }
+        let header = fresh();
+        entry.push(MInst::Jump { target: header });
+        let mut blocks = vec![entry];
+        let mut current = MBlock::new(header);
+        for (index, pair) in values.chunks(2).enumerate() {
+            let short = fresh();
+            let long = (0..index % 7 + 1).map(|_| fresh()).collect::<Vec<_>>();
+            let join = fresh();
+            current.push(MInst::Branch {
+                cond: condition,
+                true_bb: short,
+                false_bb: long[0],
+            });
+            blocks.push(current);
+            let mut short_block = MBlock::new(short);
+            for _ in 0..16 {
+                store(&mut short_block, pair[0]);
+            }
+            short_block.push(MInst::Jump { target: join });
+            blocks.push(short_block);
+            for (position, &id) in long.iter().enumerate() {
+                let mut block = MBlock::new(id);
+                let target = long.get(position + 1).copied().unwrap_or_else(|| {
+                    store(&mut block, pair[1]);
+                    join
+                });
+                block.push(MInst::Jump { target });
+                blocks.push(block);
+            }
+            current = MBlock::new(join);
+        }
+        let exit = fresh();
+        current.push(MInst::Branch {
+            cond: condition,
+            true_bb: header,
+            false_bb: exit,
+        });
+        blocks.push(current);
+        let mut exit_block = MBlock::new(exit);
+        exit_block.push(MInst::Return);
+        blocks.push(exit_block);
+        func.blocks = blocks;
+        func
+    }
+
+    /// Next-use distances settle in a bounded number of visits per block.
+    /// A first-in first-out worklist visited each block once for every
+    /// distinct number of blocks over which a nearer use reached it around
+    /// the loop: 76 visits per block with 256 diamonds, quadratic in the
+    /// loop's size.
+    #[test]
+    fn loop_distances_settle_in_a_bounded_number_of_visits() {
+        for diamonds in [8, 64, 256] {
+            let mut func = diamond_loop(diamonds);
+            let cfg = super::super::cfg::normalize(&mut func).unwrap();
+            let analysis = analyze(&func, &cfg).unwrap();
+            analysis.verify(&func, &cfg).unwrap();
+            assert!(
+                analysis.block_visits <= 3 * func.blocks.len(),
+                "{diamonds} diamonds: {} visits of {} blocks",
+                analysis.block_visits,
+                func.blocks.len()
+            );
+        }
     }
 
     #[test]

@@ -856,7 +856,7 @@ where
 }
 
 fn lower_logic_path_expr<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
@@ -878,7 +878,7 @@ fn lower_logic_path_expr<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
 }
 
 fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     node: NodeId,
@@ -907,7 +907,7 @@ fn lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>
 }
 
 fn pre_lower_logic_path_node<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     node: NodeId,
@@ -942,7 +942,7 @@ fn static_access_offset<Addr: Eq + Hash>(
 }
 
 fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
@@ -1024,6 +1024,7 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                 return;
             }
             let emit = |builder: &mut SIRBuilder<Addr>,
+                        lowerer: &mut crate::SLTToSIRLowerer,
                         lower_cache: &mut HashMap<NodeId, RegisterId>| {
                 let regs = args
                     .iter()
@@ -1059,19 +1060,19 @@ fn emit_logic_path_store_with_result<Addr: Clone + Eq + Ord + Hash + Debug + Cop
                 // Values first lowered inside the guarded block do not
                 // dominate the join; later paths must not reuse them.
                 let dominating_cache = lower_cache.clone();
-                emit(builder, lower_cache);
+                emit(builder, lowerer, lower_cache);
                 *lower_cache = dominating_cache;
                 builder.seal_block(SIRTerminator::Jump(done_block, vec![]));
                 builder.switch_to_block(done_block);
             } else {
-                emit(builder, lower_cache);
+                emit(builder, lowerer, lower_cache);
             }
         }
     }
 }
 
 fn emit_logic_path_store<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     path: &LogicPath<Addr>,
     arena: &SLTNodeArena<Addr>,
@@ -1108,7 +1109,7 @@ fn invalidate_logic_path_target<Addr: Clone + Eq + Ord + Hash + Debug + Copy + D
 
 #[allow(clippy::too_many_arguments)]
 fn emit_scheduled_guard_region<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     condition: NodeId,
     paths: &[usize],
@@ -1147,9 +1148,9 @@ fn emit_scheduled_guard_region<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Di
         .filter_map(|node| lower_cache.get(node).copied().map(|value| (*node, value)))
         .collect::<Vec<_>>();
 
-    let emit_arm = |builder: &mut SIRBuilder<Addr>,
-                    lower_cache: &mut HashMap<NodeId, RegisterId>,
-                    take_true: bool| {
+    let mut emit_arm = |builder: &mut SIRBuilder<Addr>,
+                        lower_cache: &mut HashMap<NodeId, RegisterId>,
+                        take_true: bool| {
         let mut inserted = Vec::new();
         for &path in paths {
             let (_, then_expr, else_expr) = scheduled_root_mux(&input[path], arena)
@@ -2240,7 +2241,7 @@ fn best_weighted_fold_family<Addr: Clone + Eq + Hash>(
 fn jointly_lower_fold_group_families<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display>(
     indices: &[usize],
     schedule_index: &FoldGroupScheduleIndex<Addr>,
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
@@ -2312,7 +2313,7 @@ fn prepare_atomic_fold_group_results<Addr: Clone + Eq + Ord + Hash + Debug + Cop
     indices: &[usize],
     input: &[LogicPath<Addr>],
     fold_group_schedule_index: &FoldGroupScheduleIndex<Addr>,
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
@@ -2747,7 +2748,7 @@ fn flush_pending_fold_paths<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Displ
     pending: &mut Vec<usize>,
     input: &[LogicPath<Addr>],
     fold_group_schedule_index: &FoldGroupScheduleIndex<Addr>,
-    lowerer: &crate::SLTToSIRLowerer,
+    lowerer: &mut crate::SLTToSIRLowerer,
     builder: &mut SIRBuilder<Addr>,
     arena: &SLTNodeArena<Addr>,
     lower_cache: &mut HashMap<NodeId, RegisterId>,
@@ -3490,7 +3491,6 @@ struct WorkLoweringContext<'a, Addr: Clone + Eq + Hash> {
     fold_group_schedule_index: &'a FoldGroupScheduleIndex<Addr>,
     unpacked_element_widths: &'a HashMap<Addr, usize>,
     direct_ff_writes_by_action: &'a [Vec<VarAtomBase<Addr>>],
-    lowerer: &'a crate::SLTToSIRLowerer,
     four_state: bool,
     /// Start a new execution unit when one grows past [`EU_BLOCK_LIMIT`].
     /// Shared comb/FF lowering keeps one unit because its staged FF state
@@ -3894,6 +3894,7 @@ fn whole_variable_copy<Addr: Clone + Eq + Hash + Copy>(
 /// builder. Register numbers and the expression cache are local to it.
 struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
     context: &'a WorkLoweringContext<'a, Addr>,
+    lowerer: &'a mut crate::SLTToSIRLowerer,
     builder: SIRBuilder<Addr>,
     lower_cache: HashMap<NodeId, RegisterId>,
     dep_memo: HashMap<NodeId, HashSet<Addr>>,
@@ -3914,9 +3915,13 @@ struct WorkLowering<'a, Addr: Clone + Eq + Hash> {
 }
 
 impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a, Addr> {
-    fn new(context: &'a WorkLoweringContext<'a, Addr>) -> Self {
+    fn new(
+        context: &'a WorkLoweringContext<'a, Addr>,
+        lowerer: &'a mut crate::SLTToSIRLowerer,
+    ) -> Self {
         Self {
             context,
+            lowerer,
             builder: SIRBuilder::new(),
             lower_cache: HashMap::default(),
             dep_memo: HashMap::default(),
@@ -4225,7 +4230,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             &mut self.pending_fold_indices,
             context.input,
             context.fold_group_schedule_index,
-            context.lowerer,
+            self.lowerer,
             &mut self.builder,
             context.arena,
             &mut self.lower_cache,
@@ -4248,7 +4253,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             &mut self.inverse_dep_memo,
         );
         emit_logic_path_store(
-            context.lowerer,
+            self.lowerer,
             &mut self.builder,
             path,
             context.arena,
@@ -4281,7 +4286,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
             ScheduledWork::GuardedComb { condition, paths } => {
                 self.flush_pending_folds();
                 emit_scheduled_guard_region(
-                    context.lowerer,
+                    self.lowerer,
                     &mut self.builder,
                     *condition,
                     paths,
@@ -4447,7 +4452,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                     let path = &input[idx];
                     let Some(target) = path.target.var() else {
                         emit_logic_path_store(
-                            context.lowerer,
+                            self.lowerer,
                             &mut self.builder,
                             path,
                             context.arena,
@@ -4483,7 +4488,7 @@ impl<'a, Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display> WorkLowering<'a
                     );
                     // b. Compute the new value
                     let new_val_reg = lower_logic_path_expr(
-                        context.lowerer,
+                        self.lowerer,
                         &mut self.builder,
                         path,
                         context.arena,
@@ -4702,7 +4707,7 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         .flatten()
         .copied()
         .collect();
-    let lowerer = crate::SLTToSIRLowerer::new(four_state)
+    let mut lowerer = crate::SLTToSIRLowerer::new(four_state)
         .with_unpacked_input_types(arena, unpacked_element_widths);
     let context = WorkLoweringContext {
         input: &prepared.input,
@@ -4714,11 +4719,10 @@ fn sort_impl<Addr: Clone + Eq + Ord + Hash + Debug + Copy + Display, E>(
         fold_group_schedule_index: &prepared.fold_group_schedule_index,
         unpacked_element_widths,
         direct_ff_writes_by_action: &prepared.direct_ff_writes_by_action,
-        lowerer: &lowerer,
         four_state,
         split_large_units: ff.is_none(),
     };
-    let mut lowering = WorkLowering::new(&context);
+    let mut lowering = WorkLowering::new(&context, &mut lowerer);
     if let Some(ff_lowering) = ff.as_deref_mut() {
         ff_lowering
             .begin(&mut lowering.builder, &prepared.direct_ff_writes_by_action)
@@ -6020,7 +6024,7 @@ mod tests {
             &[0, 1],
             &paths,
             &schedule_index,
-            &SLTToSIRLowerer::new(false),
+            &mut SLTToSIRLowerer::new(false),
             &mut builder,
             &arena,
             &mut cache,

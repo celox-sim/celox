@@ -1,0 +1,61 @@
+{
+  "cases": [
+    {
+      "category": "Operators",
+      "detail": "Verilator 5.052 rejects an increment or decrement operator in an arm of the conditional operator and in the right operand of -> (\"Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\"). IEEE 1800-2023 11.4.2 allows the operators in any expression, and 11.4.7 and 11.4.11 decide when such an operand is evaluated; Icarus 13.0 and xezim 0.11.3 compile both cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_increment_decrement_conditional_operands.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_increment_in_conditional_operand",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects an increment or decrement operator in an arm of the conditional operator and in the right operand of -> (\"Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\"). IEEE 1800-2023 11.4.2 allows the operators in any expression, and 11.4.7 and 11.4.11 decide when such an operand is evaluated; Icarus 13.0 and xezim 0.11.3 compile both cases.",
+        "upstream": []
+      },
+      "name": "increment_decrement::increment_decrement_conditional_arms",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "four-state expectations",
+      "expectation": "Simulation",
+      "name": "increment_decrement::increment_decrement_four_state",
+      "phase": "compile",
+      "status": "unsupported",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Operators",
+      "detail": "Verilator 5.052 rejects an increment or decrement operator in an arm of the conditional operator and in the right operand of -> (\"Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\"). IEEE 1800-2023 11.4.2 allows the operators in any expression, and 11.4.7 and 11.4.11 decide when such an operand is evaluated; Icarus 13.0 and xezim 0.11.3 compile both cases.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_unsupported",
+        "evidence": [
+          "verification/repros/sv_increment_decrement_conditional_operands.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_verilator_increment_in_conditional_operand",
+        "observed_version": "Verilator 5.052 2026-09-05 rev v5.052",
+        "phase": "compile",
+        "reason": "Verilator 5.052 rejects an increment or decrement operator in an arm of the conditional operator and in the right operand of -> (\"Unsupported: Pre/post increment/decrement operator within a logical expression (&&, ||, ?:, etc.)\"). IEEE 1800-2023 11.4.2 allows the operators in any expression, and 11.4.7 and 11.4.11 decide when such an operand is evaluated; Icarus 13.0 and xezim 0.11.3 compile both cases.",
+        "upstream": []
+      },
+      "name": "increment_decrement::increment_decrement_implication",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

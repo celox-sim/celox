@@ -1,0 +1,16 @@
+{
+  "tool": "verilator",
+  "version": "Verilator 5.052 2026-09-05 rev v5.052",
+  "source": "sv_virtual_interface_event_verilator.sv",
+  "standard": "IEEE 1800-2023 9.4.2, 25.9",
+  "command": "verilator --binary --timing -Wno-fatal sv_virtual_interface_event_verilator.sv --top-module Top",
+  "expected_output": "edge 1",
+  "observations": [
+    {
+      "build_exit_code": 0,
+      "exit_code": 1,
+      "output": "%Error: sv_virtual_interface_event_verilator.sv:9: Null pointer dereferenced\nAborting...\n"
+    }
+  ],
+  "note": "A static virtual interface variable is assigned before `@(posedge va.clk)`, so the event control waits on the clock of instance `a`, which rises at time 1. Verilator 5.052 builds the design but aborts at the event control. Celox and xezim 0.11.3 print edge 1."
+}

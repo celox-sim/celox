@@ -77,7 +77,7 @@ pub(super) struct ProcModule<'a> {
     warnings: &'a mut Vec<crate::warning::PendingWarning>,
     /// Whether a call of each subroutine asked about can make a host
     /// request, by name.
-    requesting_subroutines: std::cell::RefCell<HashMap<String, bool>>,
+    requesting_subroutines: HashMap<String, bool>,
 }
 
 /// One word a memory file writes: its bits in the destination, value, and
@@ -104,11 +104,20 @@ impl<'a> ProcModule<'a> {
                 .name_to_id
                 .get(name)
                 .and_then(|id| self.variables.get(id))
-                .is_some_and(|variable| variable.value_kind == celox_design::ValueKind::StrRef),
+                .is_some_and(|variable| {
+                    variable.value_kind == celox_design::ValueKind::StrRef
+                        && variable.array_dims.is_empty()
+                }),
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::String(op),
                 ..
             } => op.returns_string(),
+            sv::ir::Expr::Call {
+                callee: sv::ir::Callee::Subroutine(name),
+                ..
+            } if self.dpi_imports.contains_key(name) => {
+                self.dpi_imports[name].return_type() == Some(sv::ir::DpiType::String)
+            }
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Object(op),
                 ..
@@ -116,6 +125,13 @@ impl<'a> ProcModule<'a> {
                 matches!(**op, sv::ir::ObjectOp::Load(field)
                 if field.handle == Some(sv::ir::HandleProperty::String))
                     || matches!(**op, sv::ir::ObjectOp::Container { op: sv::ir::ContainerOp::Get | sv::ir::ContainerOp::PopFront | sv::ir::ContainerOp::PopBack, layout } if layout.handle == Some(sv::ir::HandleProperty::String))
+                    || matches!(**op, sv::ir::ObjectOp::Pattern(_))
+                    || matches!(
+                        **op,
+                        sv::ir::ObjectOp::Stream(
+                            sv::ir::StreamOp::ToString | sv::ir::StreamOp::TakeString { .. }
+                        )
+                    )
             }
             sv::ir::Expr::Call {
                 callee: sv::ir::Callee::Subroutine(name),
@@ -278,7 +294,7 @@ impl<'a> ProcModule<'a> {
     /// Whether evaluating `expr` can make a host request, which suspends
     /// the process: it calls a function that makes one directly, in the
     /// defaults of omitted arguments, or through the subroutines it calls.
-    pub fn makes_host_request(&self, expr: &sv::ir::Expr) -> bool {
+    pub fn makes_host_request(&mut self, expr: &sv::ir::Expr) -> bool {
         let mut calls = Vec::new();
         collect_calls(expr, &mut calls);
         while let Some((callee, args)) = calls.pop() {
@@ -303,8 +319,8 @@ impl<'a> ProcModule<'a> {
 
     /// Whether the body of subroutine `name` can make a host request,
     /// including through the calls it makes and their omitted defaults.
-    fn subroutine_makes_host_request(&self, name: &str) -> bool {
-        if let Some(&known) = self.requesting_subroutines.borrow().get(name) {
+    fn subroutine_makes_host_request(&mut self, name: &str) -> bool {
+        if let Some(&known) = self.requesting_subroutines.get(name) {
             return known;
         }
         let mut pending = vec![name.to_string()];
@@ -343,20 +359,19 @@ impl<'a> ProcModule<'a> {
                     }
                     sv::ir::Callee::Object(_)
                     | sv::ir::Callee::Checked { .. }
-                    | sv::ir::Callee::Lookup { .. } => {}
+                    | sv::ir::Callee::Lookup { .. }
+                    | sv::ir::Callee::Stream(_) => {}
                 }
             }
         }
-        self.requesting_subroutines
-            .borrow_mut()
-            .insert(name.to_string(), found);
+        self.requesting_subroutines.insert(name.to_string(), found);
         found
     }
 
     /// Whether a process calls a system function that reads the state of
     /// the simulation, such as `$urandom` or `$time`, including through user
     /// subroutines and omitted argument defaults.
-    pub fn reads_simulation_state(&self, body: &[sv::ir::Stmt]) -> bool {
+    pub fn reads_simulation_state(&mut self, body: &[sv::ir::Stmt]) -> bool {
         let mut calls = Vec::new();
         for stmt in body {
             stmt.walk(&mut |stmt| stmt_calls(stmt, &mut calls));
@@ -370,14 +385,18 @@ impl<'a> ProcModule<'a> {
                     }
                     continue;
                 }
-                // A lookup is a value of its operands.
-                sv::ir::Callee::Lookup { .. } => continue,
+                // A lookup or a stream is a value of its operands.
+                sv::ir::Callee::Lookup { .. } | sv::ir::Callee::Stream(_) => continue,
                 // String operations use the simulator's heap.
                 sv::ir::Callee::String(_)
                 | sv::ir::Callee::Object(_)
                 | sv::ir::Callee::Checked { .. } => return true,
                 sv::ir::Callee::Subroutine(name) => name,
             };
+            // A call lowered as its constant value runs nothing.
+            if args.is_empty() && self.constant_functions.value(&name).is_some() {
+                continue;
+            }
             if let Some(subroutine) = self.subroutine(&name) {
                 if !subroutine.persistent_locals.is_empty() {
                     return true;
@@ -800,10 +819,18 @@ impl<'a> ProcModule<'a> {
     ) -> Result<(SourceVarId, Vec<MemoryWord>), sv::AnalyzerError> {
         let name = sv::ir::SystemTask::Readmem(format).name();
         let radix = format.base();
-        let Some(sv::ir::SystemTaskArg::Str(filename)) = args.first() else {
-            return Err(unsupported(format!(
-                "`{name}` with a file name that is not a string literal"
-            )));
+        let filename = match args.first() {
+            Some(sv::ir::SystemTaskArg::Str(filename)) => unescape(filename),
+            Some(sv::ir::SystemTaskArg::Expr(sv::ir::Expr::Literal(value)))
+                if let Some(filename) = literal_characters(value) =>
+            {
+                filename
+            }
+            _ => {
+                return Err(unsupported(format!(
+                    "`{name}` with a file name that is not a constant string"
+                )));
+            }
         };
         // Veryl also emits a constant element select, which loads from that
         // element on.
@@ -866,7 +893,7 @@ impl<'a> ProcModule<'a> {
                 "{name}: address range [{start}:{finish}] is outside the destination range [{low}:{high}]"
             )));
         }
-        let content = std::fs::read_to_string(unescape(filename)).map_err(|error| {
+        let content = std::fs::read_to_string(&filename).map_err(|error| {
             sv::AnalyzerError::MemoryFile(format!("{name}: failed to read {filename}: {error}"))
         })?;
         let parsed = celox_frontend_core::memory_file::parse_memory_range(
@@ -882,7 +909,7 @@ impl<'a> ProcModule<'a> {
                 .warning
                 .map(|detail| crate::FrontendWarningKind::MemoryFileWordCount {
                     task: name.to_string(),
-                    file: unescape(filename),
+                    file: filename.clone(),
                     detail,
                 });
         let writes = parsed.writes;
@@ -1231,7 +1258,7 @@ impl<'a> ProcModule<'a> {
     pub fn is_callee(&self, callee: &sv::ir::Callee) -> bool {
         match callee {
             sv::ir::Callee::System(function) => function.reads_simulation_state(),
-            sv::ir::Callee::Lookup { .. } => false,
+            sv::ir::Callee::Lookup { .. } | sv::ir::Callee::Stream(_) => false,
             sv::ir::Callee::String(_)
             | sv::ir::Callee::Object(_)
             | sv::ir::Callee::Checked { .. } => true,
@@ -1243,11 +1270,11 @@ impl<'a> ProcModule<'a> {
 
     /// Whether an expression contains a call whose evaluation has effects.
     pub fn lvalue_calls(&self, lvalue: &sv::ir::LValue) -> bool {
-        lvalue_calls(lvalue, &|callee| self.is_callee(callee))
+        lvalue_calls(lvalue, &mut |callee| self.is_callee(callee))
     }
 
     pub fn const_calls(&self, expr: &sv::ir::ConstExpr) -> bool {
-        const_calls(expr, &|callee| self.is_callee(callee))
+        const_calls(expr, &mut |callee| self.is_callee(callee))
     }
 
     /// The largest subexpressions of `expr` that call a subroutine and also
@@ -1258,12 +1285,17 @@ impl<'a> ProcModule<'a> {
         other: &sv::ir::ConstExpr,
     ) -> Vec<&'e sv::ir::ConstExpr> {
         let mut shared = Vec::new();
-        shared_calls(expr, other, &|callee| self.is_callee(callee), &mut shared);
+        shared_calls(
+            expr,
+            other,
+            &mut |callee| self.is_callee(callee),
+            &mut shared,
+        );
         shared
     }
 
     pub fn calls(&self, expr: &sv::ir::Expr) -> bool {
-        expr_calls(expr, &|callee| self.is_callee(callee))
+        expr_calls(expr, &mut |callee| self.is_callee(callee))
     }
 
     /// The local index of the extern function `import` links to. Imports
@@ -1274,6 +1306,12 @@ impl<'a> ProcModule<'a> {
             sv::ir::DpiType::Bit => ExternType::Bit,
             sv::ir::DpiType::Logic => ExternType::Logic,
             sv::ir::DpiType::Integer { width, signed } => ExternType::Integer { width, signed },
+            sv::ir::DpiType::String => unreachable!("only a builtin passes a string"),
+            // A pointer, 64 bits on the supported hosts.
+            sv::ir::DpiType::Chandle => ExternType::Integer {
+                width: 64,
+                signed: false,
+            },
         };
         let function = ExternFunction {
             name: import.c_name().to_string(),
@@ -1677,6 +1715,19 @@ pub(super) fn system_task_template(
     (template, values)
 }
 
+/// The characters of a constant integral value that holds a character
+/// string, such as a `string` parameter substituted as its bytes: one per
+/// byte, most significant first, without the zero bytes that only pad it
+/// (IEEE 1800-2023 21.4, 6.16). `None` for a value with unknown bits.
+fn literal_characters(value: &str) -> Option<String> {
+    let literal = sv::typecheck::parse_integral_literal(value)?;
+    if literal.mask != BigUint::from(0u8) {
+        return None;
+    }
+    let bytes = literal.value.to_bytes_be();
+    String::from_utf8(bytes.into_iter().filter(|byte| *byte != 0).collect()).ok()
+}
+
 /// The value of a string literal's escape sequences (IEEE 1800-2023 5.9.1).
 pub(super) fn unescape(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
@@ -1786,18 +1837,16 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
         // Evaluate `top` from the operand values known so far. The first
         // operand it needs that is not yet evaluated is pushed, and `top` is
         // evaluated again once that operand is known.
-        let missing = std::cell::Cell::new(None);
-        let child = |id: NodeId| match values.get(&id) {
+        let mut missing = None;
+        let mut child = |id: NodeId| match values.get(&id) {
             Some(value) => value.clone(),
             None => {
-                if missing.get().is_none() {
-                    missing.set(Some(id));
-                }
+                missing.get_or_insert(id);
                 None
             }
         };
-        let value = slt_const4_node(arena, top, &child);
-        match missing.get() {
+        let value = slt_const4_node(arena, top, &mut child);
+        match missing {
             Some(operand) => stack.push(operand),
             None => {
                 values.insert(top, value);
@@ -1812,7 +1861,7 @@ pub(super) fn slt_const4<A: std::hash::Hash + Eq + Clone>(
 fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
     arena: &SLTNodeArena<A>,
     node: NodeId,
-    child: &dyn Fn(NodeId) -> Option<Const4>,
+    child: &mut dyn FnMut(NodeId) -> Option<Const4>,
 ) -> Option<Const4> {
     let width = celox_slt::get_width(node, arena);
     let all = mask_of(width);
@@ -1850,7 +1899,7 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
             let (value, mask, inner_width) = child(*inner)?;
             let inner_all = mask_of(inner_width);
             match op {
-                UnaryOp::Float { .. } => return None,
+                UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => return None,
                 UnaryOp::Ident => (value, mask, width),
                 UnaryOp::ToTwoState => (
                     (&value & (&inner_all ^ &mask)) & &all,
@@ -2162,7 +2211,7 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
             then_expr,
             else_expr,
         } => {
-            let merge_arms = || -> Option<Const4> {
+            let merge_arms = |child: &mut dyn FnMut(NodeId) -> Option<Const4>| -> Option<Const4> {
                 let (tv, tm, _) = child(*then_expr)?;
                 let (ev, em, _) = child(*else_expr)?;
                 // Bits equal in both arms (an unknown bit too) keep their
@@ -2179,7 +2228,7 @@ fn slt_const4_node<A: std::hash::Hash + Eq + Clone>(
                 Some(condition) => match truth(&condition) {
                     Some(true) => child(*then_expr)?,
                     Some(false) => child(*else_expr)?,
-                    None => merge_arms()?,
+                    None => merge_arms(child)?,
                 },
                 // A run-time condition selecting between equal constants.
                 None => {
@@ -2665,7 +2714,7 @@ pub(super) fn expr_idents(expr: &sv::ir::Expr, names: &mut HashSet<String>) {
 /// calls a subroutine.
 pub(super) fn const_calls(
     expr: &sv::ir::ConstExpr,
-    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
+    is_callee: &mut dyn FnMut(&sv::ir::Callee) -> bool,
 ) -> bool {
     use sv::ir::ConstExpr;
     match expr {
@@ -2735,7 +2784,7 @@ fn const_contains(expr: &sv::ir::ConstExpr, part: &sv::ir::ConstExpr) -> bool {
 fn shared_calls<'e>(
     expr: &'e sv::ir::ConstExpr,
     other: &sv::ir::ConstExpr,
-    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
+    is_callee: &mut dyn FnMut(&sv::ir::Callee) -> bool,
     shared: &mut Vec<&'e sv::ir::ConstExpr>,
 ) {
     use sv::ir::ConstExpr;
@@ -2782,7 +2831,7 @@ fn shared_calls<'e>(
 /// Whether the select positions of an assignment target call a subroutine.
 pub(super) fn lvalue_calls(
     lvalue: &sv::ir::LValue,
-    is_callee: &dyn Fn(&sv::ir::Callee) -> bool,
+    is_callee: &mut dyn FnMut(&sv::ir::Callee) -> bool,
 ) -> bool {
     match lvalue {
         sv::ir::LValue::Ident(_) => false,
@@ -2793,7 +2842,10 @@ pub(super) fn lvalue_calls(
 }
 
 /// Whether an expression calls a user subroutine.
-pub(super) fn expr_calls(expr: &sv::ir::Expr, is_callee: &dyn Fn(&sv::ir::Callee) -> bool) -> bool {
+pub(super) fn expr_calls(
+    expr: &sv::ir::Expr,
+    is_callee: &mut dyn FnMut(&sv::ir::Callee) -> bool,
+) -> bool {
     match expr {
         sv::ir::Expr::Ident(_) | sv::ir::Expr::Literal(_) => false,
         sv::ir::Expr::Select { expr, msb, lsb, .. } => {
@@ -2920,7 +2972,7 @@ pub(super) fn written_names_with_calls(
     names: &mut HashSet<String>,
 ) {
     super::kernel_written_names(
-        module.subroutines(),
+        &super::DriverScan::of(module),
         stmts,
         names,
         &mut HashSet::default(),
@@ -2938,6 +2990,22 @@ pub(super) fn written_system_arguments(
     args.iter()
         .enumerate()
         .filter(|(position, _)| function.writes_argument(*position))
+        .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
+        .flatten()
+        .collect()
+}
+
+/// The variables a call of DPI-C import `import` writes through its output
+/// arguments (IEEE 1800-2023 35.5.1.2).
+pub(super) fn written_dpi_arguments(
+    import: &sv::ir::DpiImport,
+    args: &[Option<sv::ir::Expr>],
+) -> Vec<sv::ir::LValue> {
+    import
+        .arguments()
+        .iter()
+        .zip(args)
+        .filter(|(argument, _)| argument.is_output())
         .filter_map(|(_, arg)| arg.as_ref().and_then(lvalue_from_expr))
         .flatten()
         .collect()

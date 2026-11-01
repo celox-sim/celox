@@ -3,7 +3,7 @@
 use super::*;
 
 pub(super) fn expr_type_from_type(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     r#type: &Type,
     const_env: &HashMap<String, i128>,
 ) -> Option<ExprType> {
@@ -14,8 +14,8 @@ pub(super) fn expr_type_from_type(
         .packed_ranges()
         .iter()
         .try_fold(1usize, |width, range| {
-            let left = eval_ast_const_expr(state, range.left(), const_env)?;
-            let right = eval_ast_const_expr(state, range.right(), const_env)?;
+            let left = eval_ast_const_expr(functions, range.left(), const_env)?;
+            let right = eval_ast_const_expr(functions, range.right(), const_env)?;
             width.checked_mul(usize::try_from(left.abs_diff(right)).ok()?.checked_add(1)?)
         })?;
     Some(ExprType {
@@ -48,7 +48,7 @@ pub(super) enum RuntimeCastTarget {
 /// an assignment to a variable of the target type. Casts to two-state types
 /// turn unknown bits into zero.
 pub(super) fn runtime_cast_target_expr(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     target: RuntimeCastTarget,
     expr: Expr,
     packed_dimensions: &PackedDimensions,
@@ -84,7 +84,7 @@ pub(super) fn runtime_cast_target_expr(
             });
         }
         RuntimeCastTarget::Signing(signed) => {
-            let width = expr_static_width(state, &expr, packed_dimensions).ok_or_else(|| {
+            let width = expr_static_width(tree, &expr, packed_dimensions).ok_or_else(|| {
                 unsupported("signedness cast of an operand without a static width")
             })?;
             let operand_signed =
@@ -137,7 +137,8 @@ pub(super) fn runtime_cast_target_expr(
 /// Constant sizing, source-sign preservation and mask conversion independent
 /// of the syntax adapter that supplied its target and operand.
 pub(super) fn cast_constant_target(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     operand: ConstExpr,
     target: RuntimeCastTarget,
     const_env: &HashMap<String, i128>,
@@ -149,7 +150,7 @@ pub(super) fn cast_constant_target(
             TypeKind::Real
         };
         return expr_to_const(
-            state,
+            session,
             parameters::real_literal(&operand, kind, const_env, &HashMap::default())?,
         );
     }
@@ -215,7 +216,7 @@ pub(super) fn cast_constant_target(
             &ir_parameter_types,
         )
         .or_else(|| {
-            let operand_value = eval_ast_const_expr(state, &operand, const_env)?;
+            let operand_value = eval_ast_const_expr(&tree.functions, &operand, const_env)?;
             let operand_literal = format_typed_parameter_literal(
                 operand_value,
                 operand_type.width,

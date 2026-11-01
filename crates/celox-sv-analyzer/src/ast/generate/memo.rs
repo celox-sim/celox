@@ -2,53 +2,34 @@
 //!
 //! The collectors of a module each ask for the active items of the same
 //! scope. A window opened for the module keeps each elaboration, keyed by its
-//! arguments and by the revisions of the analysis state that elaboration
-//! reads (imported symbols, constant functions, active interface instances,
-//! time scopes), so a change of that state makes earlier results unreachable.
+//! arguments and by the parts of its context that elaboration reads: the
+//! imports, package, constant functions, active interface instances and time
+//! scopes, so a change of any of them makes earlier results unreachable.
 //! A repeated elaboration allocates as many call sites as the first one did,
 //! so later calls keep their sites.
 use super::*;
-use std::cell::Cell;
 
 mod sites;
 pub(in crate::ast) use sites::CallSites;
 
-/// Names a value of analysis state that elaboration reads. Each change gives
-/// a new revision; a guard that restores the previous value restores its
-/// revision too, so equal revisions mean equal state.
+/// The window of the module being analyzed, if one is open.
 #[derive(Default)]
-pub(in crate::ast) struct Revision {
-    current: Cell<u64>,
-    last: Cell<u64>,
-}
+pub(in crate::ast) struct State(Option<Window>);
 
-impl Revision {
-    /// Record a change, returning the revision to restore with the value.
-    pub(in crate::ast) fn change(&self) -> u64 {
-        self.last.set(self.last.get() + 1);
-        self.current.replace(self.last.get())
-    }
-
-    pub(in crate::ast) fn restore(&self, previous: u64) {
-        self.current.set(previous);
-    }
-
-    pub(in crate::ast) fn get(&self) -> u64 {
-        self.current.get()
-    }
-}
-
-#[derive(Default)]
-pub(in crate::ast) struct State(RefCell<Option<Window>>);
-
-struct Window {
-    /// The syntax tree of the module, borrowed by the [`Memoized`] guard.
+pub(in crate::ast) struct Window {
+    /// The syntax tree of the module.
     tree: usize,
     entries: Vec<Entry>,
 }
 
 struct Entry {
-    revisions: [u64; 3],
+    /// The symbols the scope imported and the package it was in.
+    imported: Arc<scope::ScopeSymbols>,
+    package: Option<Arc<str>>,
+    functions: const_functions::ConstantFunctions,
+    active_interfaces: Arc<Vec<interface_ast::ActiveInstance>>,
+    timescale: Arc<timescales::QueryContext>,
+    interface_instance: Option<Arc<str>>,
     literal_use: LiteralUse,
     overrides: HashMap<String, ConstExpr>,
     env: HashMap<String, i128>,
@@ -58,101 +39,89 @@ struct Entry {
     sites: usize,
 }
 
-/// Keeps elaborations of `tree` until dropped; the previous window, of an
-/// enclosing analysis, is restored then.
-pub(in crate::ast) struct Memoized<'a> {
-    state: std::rc::Rc<AnalysisState>,
-    previous: Option<Window>,
-    _tree: &'a SyntaxTree,
-}
-
-impl Drop for Memoized<'_> {
-    fn drop(&mut self) {
-        // The items retain the state; release them outside the borrow.
-        let window = self.state.generate_items.0.replace(self.previous.take());
-        drop(window);
-    }
-}
-
-pub(in crate::ast) fn memoize<'a>(tree: &AnalysisContext<'a>) -> Memoized<'a> {
+/// Opens a window that keeps the elaborations of `tree`, giving back the
+/// window of an enclosing analysis for [`restore`].
+pub(in crate::ast) fn memoize(tree: &AnalysisContext<'_>, session: &mut Session) -> Option<Window> {
     let window = Window {
         tree: address(tree.syntax_tree),
         entries: Vec::new(),
     };
-    Memoized {
-        state: tree.state.clone(),
-        previous: tree.state.generate_items.0.replace(Some(window)),
-        _tree: tree.syntax_tree,
-    }
+    session.generate_items.0.replace(window)
+}
+
+/// Closes the window [`memoize`] opened, reopening `previous`.
+pub(in crate::ast) fn restore(session: &mut Session, previous: Option<Window>) {
+    session.generate_items.0 = previous;
 }
 
 fn address(tree: &SyntaxTree) -> usize {
     tree as *const SyntaxTree as usize
 }
 
-fn revisions(state: &AnalysisState) -> [u64; 3] {
-    [
-        state.revision.get(),
-        const_functions::revision(&state.const_functions).get(),
-        timescales::revision(&state.timescales).get(),
-    ]
-}
-
 /// The items `elaborate` gives for these arguments, elaborated once per window.
 pub(super) fn items(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
     literal_use: LiteralUse,
-    elaborate: impl FnOnce() -> Result<Vec<Item>, AnalyzerError>,
+    elaborate: impl FnOnce(&mut Session) -> Result<Vec<Item>, AnalyzerError>,
 ) -> Result<Vec<Item>, AnalyzerError> {
     #[cfg(test)]
-    let elaborate = || {
+    let elaborate = |session: &mut Session| {
         tests::ELABORATIONS.with(|count| count.set(count.get() + 1));
-        elaborate()
+        elaborate(session)
     };
     #[cfg(test)]
-    if tests::DISABLED.with(Cell::get) {
-        return elaborate();
+    if tests::DISABLED.with(std::cell::Cell::get) {
+        return elaborate(session);
     }
-    let state = &tree.state;
     let applies = |window: &Window| window.tree == address(tree.syntax_tree);
-    {
-        let window = state.generate_items.0.borrow();
-        let Some(window) = window.as_ref().filter(|window| applies(window)) else {
-            drop(window);
-            return elaborate();
-        };
-        let current = revisions(state);
-        if let Some(entry) = window.entries.iter().find(|entry| {
-            entry.revisions == current
-                && entry.literal_use == literal_use
-                && entry.overrides == *tree.parameter_overrides
-                && entry.env == *env
-                && entry.aliases == *aliases
-        }) {
-            let next = state.next_call_site.get() + entry.sites;
-            state.next_call_site.set(next);
-            return Ok(entry.items.clone());
-        }
-    }
-    let first_site = state.next_call_site.get();
-    let current = revisions(state);
-    let items = elaborate()?;
-    // Elaboration that leaves the state changed is not repeatable.
-    if revisions(state) != current {
+    let Some(window) = session
+        .generate_items
+        .0
+        .as_ref()
+        .filter(|window| applies(window))
+    else {
+        return elaborate(session);
+    };
+    if let Some(entry) = window.entries.iter().find(|entry| {
+        Arc::ptr_eq(&entry.imported, &tree.imported)
+            && entry.package == tree.package
+            && entry.functions.same(&tree.functions)
+            && Arc::ptr_eq(&entry.active_interfaces, &tree.active_interfaces)
+            && Arc::ptr_eq(&entry.timescale, &tree.timescale)
+            && entry.interface_instance == tree.interface_instance
+            && entry.literal_use == literal_use
+            && entry.overrides == *tree.parameter_overrides
+            && entry.env == *env
+            && entry.aliases == *aliases
+    }) {
+        let items = entry.items.clone();
+        session.next_call_site += entry.sites;
         return Ok(items);
     }
-    let sites = first_site..state.next_call_site.get();
+    let first_site = session.next_call_site;
+    let items = elaborate(session)?;
+    let sites = first_site..session.next_call_site;
     // Effectful calls the items retain must get new sites when they are
     // elaborated again.
     if !sites.is_empty() && sites::refer_to(&items, sites.clone()) {
         return Ok(items);
     }
-    let mut window = state.generate_items.0.borrow_mut();
-    if let Some(window) = window.as_mut().filter(|window| applies(window)) {
+    if let Some(window) = session
+        .generate_items
+        .0
+        .as_mut()
+        .filter(|window| applies(window))
+    {
         window.entries.push(Entry {
-            revisions: current,
+            imported: tree.imported.clone(),
+            package: tree.package.clone(),
+            functions: tree.functions.clone(),
+            active_interfaces: tree.active_interfaces.clone(),
+            timescale: tree.timescale.clone(),
+            interface_instance: tree.interface_instance.clone(),
             literal_use,
             overrides: tree.parameter_overrides.clone().into_owned(),
             env: env.clone(),
@@ -167,6 +136,7 @@ pub(super) fn items(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     thread_local! {
         pub(super) static DISABLED: Cell<bool> = const { Cell::new(false) };

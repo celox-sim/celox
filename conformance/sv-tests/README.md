@@ -71,6 +71,15 @@ and `9.7--process_cls_suspend_resume` now pass. CI reports only these four
 fail-to-pass transitions per mode; the same sources also pass the local
 simulation driver in both modes. No failure expectation is broadened.
 
+Static task locals that keep their value update two expectations: both state
+modes of `13.3.1--task-static` now pass. Its `int a = 0;` in a static task is
+initialized once and shared by the four calls, which print 1, 2, 3 and 4 in
+the local simulation driver; the full run reports no other change.
+
+The `chandle` type updates two expectations: both state modes of
+`6.14--chandle`, which declares a chandle variable, now pass. It is the only
+fail-to-pass transition in the full local run; no failure expectation is broadened.
+
 The official runner’s process exit code is separate from the case verdict.
 The wrapper reads its `PASS`/`FAIL` log messages; it does not reconstruct their
 rules from tool exit codes or `should_fail` metadata. A negative test may pass
@@ -213,6 +222,102 @@ change events. Native-image/checkpoint tests cover the new runtime operations.
 Associative ordering is prohibited by 7.12.2; fixed-array ordering, `shuffle`,
 `with` expressions and iterator arguments remain unsupported.
 
+Array locator methods (7.12.1) update 22 more rows: both state modes of the
+ten `chapter-7/arrays/associative/locator-methods` cases and of
+`chapter-7/arrays/unpacked/index.sv` (`item.index`, 7.12.4) change from fail
+to pass. Each was simulated in both modes and its displayed values checked
+against 7.12.1, including the first occurrence that `unique_index` keeps.
+Full official runs at the pinned revision report 1277 passing cases in 2state
+and 1288 in 4state, and change only these 22 verdicts.
+
+Increment and decrement operators in expressions (11.4.2) update 4 more rows:
+both state modes of `chapter-11/11.3.6--assign_in_expression.sv` and
+`11.3.6--assign_in_expression-sim.sv`, which assign `(++a)`, change from fail
+to pass. Each was simulated in both modes and leaves `a` and `b` at 1. Full
+official runs at the pinned revision report 1283 passing cases in 2state and
+1294 in 4state, and change only these 4 verdicts.
+
+Streaming concatenations of fixed-size data (11.4.14) update 22 more rows:
+both state modes of the `chapter-11/11.4.14.1` to `11.4.14.3` pack, re-order,
+unpack and padding cases and of `simple/11.4.14.3--simple_unpack_stream-sim.sv`
+change from fail to pass. Each was simulated in both modes: the `-sim` cases
+assert their values, and the bit-reversed `{<<{a, b, c}}` of the other
+`unpack_stream` cases was checked against 11.4.14.2 in 96 and, left-aligned,
+128 bits. `11.4.14.3--unpack_stream_inv.sv` still fails to compile, as it must:
+its 96-bit stream is wider than the 32-bit target. The `11.4.14.4` cases stream
+dynamic arrays and queues, which remain unsupported. Full official runs at the
+pinned revision report 1294 passing cases in 2state and 1305 in 4state, and
+change only these 22 verdicts.
+
+Streaming concatenations of dynamically sized data (11.4.14.4) update 6 more
+rows: both state modes of `11.4.14.4--dynamic_array_stream.sv`,
+`dynamic_array_stream-sim.sv` and `dynamic_array_stream_with.sv` change from
+fail to pass. Each was simulated in both modes and unpacks the packet's header,
+length, payload and checksum as they were packed, greedily and with
+`with [0 +: o_len]`. Full official runs at the pinned revision report 1297
+passing cases in 2state and 1308 in 4state, and change only these 6 verdicts.
+
+Repeated identical literal drivers on resolved nets (6.6.1, 10.3.1) update
+46 rows in `generated/equality_operators_sim`: all 26 cases now pass in 4state
+and 20 pass in 2state. These cases declare a wire with an initializer and drive
+it again with the same literal in an `assign`; their comparisons were previously
+blocked by the multiple-driver diagnostic. A focused official simulation run
+checked all 52 case/mode combinations. Six 2state cases remain failures because
+their expected comparisons depend on retaining X/Z values in the nets. This
+change does not implement general resolution of differing or dynamic drivers,
+and does not coalesce `uwire` or variable drivers.
+
+Queue slices (7.10.1, 7.10.4) update 10 rows: both modes of
+`chapter-7/queues/delete_assign.sv`, `insert_assign.sv`, `pop_back_assing.sv`,
+`pop_front_assign.sv`, and `slice.sv` change from fail to pass. A focused official
+run of all 18 queue cases in both modes reports 17 passes and the existing
+`persistence.sv` failure per mode; only these 10 verdicts change. Shared cases
+check runtime clipping, empty queues, `$` bounds, copies, string elements,
+argument side effects, wide signed/unsigned bounds, and unknown bounds and elements.
+Element-reference persistence remains unsupported.
+
+Sampled-value functions in Boolean concurrent assertions (16.9.3) update
+10 rows: both state modes of the generated `20.13--past`, `rose`, `fell`,
+`stable` and `changed` cases change from fail to pass. The focused official
+run checked all 16 `generated/sampled_functions` files in both modes: each
+mode has 6 passes and 10 failures. The ten global-clock (`*_gclk`) functions
+remain unsupported; this is not a full-corpus measurement. Shared regressions
+cover sampled/history nesting, gated histories, X/Z transitions, history while
+assertions are disabled, and sampling before NBA and Reactive actions.
+
+Assignment expressions (11.3.6) update 16 rows: both modes of the eight
+`chapter-11/11.3.6` previously unsupported assignment-expression cases change from fail
+to pass. A focused official run checks all 11 cases in both modes; all 22
+verdicts pass, including the existing negative case, which remains rejected.
+Shared cases cover destination sizing, signedness, two-state conversion,
+concatenated targets, saved results, nested assignments, short-circuit guards,
+loop conditions, and indices with extracted increments. Targets selected through
+other side-effecting expressions, selected targets with effectful right-hand
+sides, unpacked aggregate results, and selected nominal target types remain
+explicitly unsupported.
+
+Blocking intra-assignment controls (9.4.5, 10.4.1) update 12 rows: six of the
+seven `chapter-9/9.4.5--event_*` cases now pass in both state modes. The focused
+official run checked all 14 combinations. Several upstream filenames say
+`nonblocking`, but their source uses blocking `=` assignments; the actual
+`<= #10` case remains unsupported in both modes. Shared regressions check
+RHS sampling and destination conversion before suspension, LHS evaluation
+after suspension, delay/event/repeat controls, nonpositive and X/Z repeat
+counts, and concurrent automatic tasks. Nonblocking controls, implicit
+intra-assignment events, cycle controls, nonintegral targets, concatenations,
+and indirect writes such as object properties or dynamic-container elements
+remain explicitly unsupported.
+Repeat counts must be integral and at most 64 bits; wider counts are rejected
+rather than truncated. This is not a full-corpus measurement.
+
+Procedural net-write rejection (10.3 Table 10-1) restores the existing pass for
+`chapter-10/10.3--proc-assignment--bad.sv` in both modes and improves both modes
+of `chapter-14/14.3--clocking-block-signals-error.sv` from fail to pass. These
+are negative tests: assigning procedurally to their nets now causes the
+required rejection. The broader review recheck covered 1,478 pinned files in
+both modes (2,956 verdicts), excluding 172 source/path UVM-related cases.
+After the two reviewed expectation updates, all selected verdicts match.
+
 ## Running locally
 
 Use the locked development shell and install the pinned [`requirements.txt`](requirements.txt) in a Python environment.
@@ -226,14 +331,16 @@ git -C ../sv-tests submodule update --init --depth 1 \
     third_party/tests/uvm third_party/tests/uvm-1.2 \
     third_party/tests/easyUVM third_party/tests/uvm-examples
 work/sv-tests-venv/bin/python conformance/sv-tests/prepare.py ../sv-tests
-cargo build --locked --release -p celox --features systemverilog --example sv_tests
+CARGO_PROFILE_RELEASE_LTO=off cargo build --locked --release -p celox --features systemverilog --example sv_tests
 PYTHONDONTWRITEBYTECODE=1 work/sv-tests-venv/bin/python conformance/sv-tests/run.py ../sv-tests \
     --driver target/release/examples/sv_tests --out-dir work/sv-tests --jobs 4 \
     --expected conformance/sv-tests/expected.tsv --report work/sv-tests-report.tsv
 ```
 
-Use the release driver to reproduce CI: upstream time limits also cover compiler
-execution, so slower build profiles can change timeout outcomes.
+Use the release driver with LTO disabled to reproduce CI. LTO is unnecessary
+for this conformance runner and adds link time. Keep release optimization enabled:
+upstream time limits also cover compiler execution, so slower build profiles can
+change timeout outcomes.
 
 `--jobs` is a positive integer controlling independent official runner processes
 (default: 1). CI uses 4 jobs to match the public Ubuntu runner’s
@@ -242,6 +349,14 @@ and state mode has separate logs, and upstream `BaseRunner` creates unique
 work directories. Reports and expectations are sorted regardless of completion
 order. A runner infrastructure error cancels pending work and cannot update
 expectations.
+
+`--shard INDEX/COUNT` runs and compares only one of COUNT disjoint shards
+(1-based). Tests are dealt round-robin from their sorted names, so that
+neighbouring tests, such as the UVM testbenches, spread over the shards; a test
+that `expected.tsv` lists but the corpus lost belongs to one shard, which
+reports it missing. With `--update`, a shard replaces only its own rows. CI
+builds the driver once and runs three shards (`sv-tests conformance (N/3)`),
+each with 4 jobs, and retains one report per shard.
 
 Both state modes run by default. Use `--state-mode 2state` or
 `--state-mode 4state` to run and compare only one; `--state-mode both` explicitly
@@ -314,10 +429,16 @@ state modes for `5.13-builtin-methods-strings`, `6.16--string`, the sixteen
 `11.4.12.2--string_concat_op` and `11.4.12.2--string_repl_op` change from fail
 to pass. Each was simulated and its values checked, not only elaborated. Full
 official runs at the pinned revision report 507 passing cases in 2state and 509
-in 4state. No passing case regresses. The `12.7.3--foreach`, `12.7.4--while` and
-`12.7.5--dowhile` cases keep failing: they use an unpacked array of strings,
-which is rejected because its element and character selects are not yet told
-apart.
+in 4state. No passing case regresses.
+
+Fixed unpacked string arrays additionally update six reviewed expectation rows:
+`12.7.3--foreach`, `12.7.4--while` and `12.7.5--dowhile` pass simulation in both
+state modes. This is a focused official-runner result, not a new full-corpus
+measurement. Shared cases cover assignment patterns, copies and slices,
+multidimensional and invalid indices, character reads, read-only methods,
+module ports, automatic locals across suspension and heap collections. State
+file round trips are also checked. Array-element mutating methods, character
+writes and array-valued string subroutine interfaces remain unsupported.
 
 The real system-function extension updates twenty expectation rows: `$realtime`
 passes elaboration and the nine `20.8` probes for `atan2`, `ceil`, `exp`, `floor`,
@@ -474,3 +595,11 @@ only literal tags, reported as `meta_tags_expanded: false`. The existing summary
 supplies the corpus revision and incomplete-collection provenance. Without a
 completeness marker in that summary, offline reports use `complete: null`
 (unknown), not a claim that every case ran. Missing logs stay unclassified.
+
+Integral unpacked-structure member initial values update two reviewed expectation
+rows: `chapter-7/structures/unpacked/default-value.sv` passes simulation in both
+state modes. This is a focused official-runner result, not a new full-corpus
+measurement. Shared cases additionally check nested types, explicit-initializer
+suppression, declaration scopes, parameter specializations, constant functions,
+assignment sizing, four-state values, local lifetimes and class properties.
+The supported boundaries are documented in the language reference.

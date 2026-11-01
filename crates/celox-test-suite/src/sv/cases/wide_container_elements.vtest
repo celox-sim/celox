@@ -1,0 +1,122 @@
+(group wide_container_elements (category types))
+
+; IEEE 1800-2023 7.5, 7.8, 7.10: dynamic arrays, associative arrays and queues
+; of packed integral elements wider than 64 bits hold every bit of each
+; element, with its signedness; a new or missing element has the default of
+; its type (X for 4-state, 7.8.6).
+
+(case wide_elements_keep_every_bit
+  (source "wide_elements.sv" #"
+module Top(output bit done);
+    typedef logic signed [129:0] w_t;
+    w_t q[$];
+    bit [99:0] d[];
+    w_t m[string];
+    w_t e;
+    w_t found[$];
+    int at[$];
+    initial begin
+        e = -130'sd5;
+        q.push_back(e);
+        q.push_back(130'h2_0000_0000_0000_0000_0000_0000_0000_0001);
+        $display("q %0d %0d %h", q.size(), q[0], q[1]);
+        e = q.pop_back();
+        $display("pop %h %0d", e, q.size());
+        q[0] = 130'sd7;
+        q.insert(0, 130'sd3);
+        foreach (q[i]) $display("each %0d %0d", i, q[i]);
+        d = new[3];
+        d[2] = 100'hf_0000_0000_0000_0000_0000_000f;
+        $display("d %h %h", d[0], d[2]);
+        m["a"] = 130'h3_0000_0000_0000_0000_0000_0000_0000_0000;
+        $display("m %h %0d %0d", m["a"], m.exists("b"), m.num());
+        q = '{130'sd5, -130'sd6};
+        $display("literal %0d %0d", q.size(), q[1]);
+        q.push_back(-130'sd8);
+        found = q.find() with (item < 0);
+        at = q.find_first_index() with (item < -130'sd7);
+        $display("find %0d %0d %0d", found.size(), found[1], at[0]);
+        found = q.find() with (item[129]);
+        at = q.find_index() with (item[3:0] == 4'h8);
+        $display("selects %0d %0d", found.size(), at[0]);
+        found = q.min() with (item[64 +: 8]);
+        $display("keys %0d %0d", found.size(), found[0]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "q 2 -5 200000000000000000000000000000001\npop 200000000000000000000000000000001 1\neach 0 3\neach 1 7\nd 0000000000000000000000000 f00000000000000000000000f\nm 300000000000000000000000000000000 0 1\nliteral 2 -6\nfind 2 -8 2\nselects 2 2\nkeys 1 5\n"))
+
+(case wide_elements_default_to_x
+  (four_state)
+  (source "wide_element_states.sv" #"
+module Top(output bit done);
+    logic [129:0] q[$];
+    logic [129:0] d[];
+    logic [129:0] m[int];
+    logic [129:0] e;
+    initial begin
+        e = 130'b0;
+        e[129] = 1'bz;
+        e[3:0] = 4'b1zx0;
+        q.push_back(e);
+        d = new[2];
+        $display("%0d %0d %0d", q[0] === e, $isunknown(d[1]), d[1] === 'x);
+        $display("%0d", m[5] === 'x);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "1 1 1\n1\n"))
+
+(case wide_elements_of_parameterized_classes
+  (source "wide_element_classes.sv" #"
+module Top(output bit done);
+    typedef logic signed [4095:0] stream_t;
+    class Pool #(type T = int);
+        T values[string];
+        T history[$];
+        function void set(string key, T value);
+            values[key] = value;
+            history.push_back(value);
+        endfunction
+        function T get(string key);
+            return values[key];
+        endfunction
+    endclass
+    Pool #(stream_t) pool;
+    initial begin
+        pool = new;
+        pool.set("a", -4096'sd3);
+        pool.set("b", 4096'sd1 << 4000);
+        $display("%0d %0d %0d", pool.get("a"), pool.get("b") == 4096'sd1 << 4000, pool.history.size());
+        $display("%0d", pool.history[0]);
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "-3 1 2\n-3\n"))
+
+(case wide_elements_extend_by_the_value_signedness
+  (source "wide_element_extension.sv" #"
+module Top(output bit done);
+    logic signed [129:0] q[$];
+    bit [199:0] u[$];
+    int minus_one = -1;
+    int unsigned all_ones = 32'hffff_ffff;
+    initial begin
+        q.push_back(minus_one);
+        q.push_back(all_ones);
+        u.push_back(minus_one);
+        u = '{u[0], all_ones};
+        $display("%0d %0d %0d %0d", q[0], q[1], &u[0], u[1]);
+        $display("%0d %0d", $dimensions(q), $dimensions(u));
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1)
+  (expect_output "-1 4294967295 1 4294967295\n2 2\n"))

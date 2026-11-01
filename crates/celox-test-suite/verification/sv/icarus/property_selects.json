@@ -1,0 +1,165 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_property_selects.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_property_selects",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+        "upstream": []
+      },
+      "name": "property_selects::property_selects_compound_indices_evaluate_once",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_property_selects.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_property_selects",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+        "upstream": []
+      },
+      "name": "property_selects::property_selects_compound_receivers_evaluate_once",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_property_selects.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_property_selects",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+        "upstream": []
+      },
+      "name": "property_selects::property_selects_evaluate_the_object_and_value_once",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_property_selects.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_property_selects",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+        "upstream": []
+      },
+      "name": "property_selects::property_selects_keep_unknown_bits",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/sv/limitations/icarus.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_parameterized_classes",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters.",
+        "upstream": []
+      },
+      "name": "property_selects::property_selects_of_parameterized_classes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_property_selects.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_property_selects",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+        "upstream": []
+      },
+      "name": "property_selects::property_selects_through_handles_and_this",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "category": "simulator_compile_limitation",
+        "evidence": [
+          "verification/repros/sv_icarus_property_selects.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ],
+        "id": "sv_icarus_property_selects",
+        "observed_version": "Celox SV frontend; Verilator 5.052 / Icarus 13.0",
+        "phase": "compile",
+        "reason": "Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method (\"error: Index expressions don't apply to this type of property.\"). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang.",
+        "upstream": []
+      },
+      "name": "property_selects::wide_property_selects_pack_and_unpack",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

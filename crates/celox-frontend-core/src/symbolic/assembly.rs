@@ -859,6 +859,7 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         module_names,
         root_id,
         packages,
+        instance_values,
     } = symbolic;
     let time_precision = modules
         .values()
@@ -891,7 +892,25 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .values()
         .map(|module| modules[module].processes.len())
         .sum();
-    let scheduler_slots = declare_scheduler_slots(&mut modules, root_id, process_count);
+    // At most one event per trigger signal of each instance's domains;
+    // instances connected to one clock share its event. A design with more
+    // events than its slots hold runs without the compiled scheduler.
+    let expected_events = instance_modules
+        .values()
+        .map(|module| {
+            let module = &modules[module];
+            module
+                .eval_apply_ff_blocks
+                .keys()
+                .chain(module.eval_only_ff_blocks.keys())
+                .chain(module.apply_ff_blocks.keys())
+                .flat_map(|triggers| std::iter::once(&triggers.clock).chain(&triggers.resets))
+                .collect::<HashSet<_>>()
+                .len()
+        })
+        .sum::<usize>();
+    let scheduler_slots =
+        declare_scheduler_slots(&mut modules, root_id, process_count, expected_events);
     // Each package with variables is one instance outside the hierarchy,
     // named by a path segment no instance name can take.
     let mut package_instances = HashMap::default();
@@ -2015,6 +2034,26 @@ pub fn schedule_symbolic_rtl_reporting_loops(
         .chain(bound_initials)
         .map(|(_, init)| init)
         .collect();
+    for value in instance_values {
+        let instance_id = *expanded.get(&InstancePath(value.path)).ok_or_else(|| {
+            ParserError::illegal_context(
+                "instance value",
+                "a value of an instance that does not exist".to_string(),
+                None,
+            )
+        })?;
+        let width = modules[&instance_modules[&instance_id]].variables[&value.variable]
+            .metadata
+            .width;
+        initial_memory_values.push(InitialStateValue {
+            address: bindings.locate(instance_id, value.variable),
+            data: InitialStateData::Packed {
+                value: value.value,
+                mask: BigUint::default(),
+                written_mask: (BigUint::from(1u8) << width) - 1u8,
+            },
+        });
+    }
     if let Some(settle) = &settle_flags {
         // Every partition runs at the first settle.
         let partitions = settle_partitions.len();
@@ -2733,12 +2772,15 @@ fn declare_settle_flags(
 
 /// Declare the hidden objects a compiled scheduler exchanges with the
 /// runtime (`RuntimeSchema::scheduler`) as variables of the top module, for
-/// a design with `process_count` process kernels. A design without kernels
-/// has them too: host clocks may run in a compiled scheduler.
+/// a design with `process_count` process kernels and about
+/// `expected_events` events, whose edge and level masks hold one bit per
+/// event in whole 64-bit words. A design without kernels has them too: host
+/// clocks may run in a compiled scheduler.
 fn declare_scheduler_slots(
     modules: &mut HashMap<ModuleId, SimModule>,
     root: ModuleId,
     process_count: usize,
+    expected_events: usize,
 ) -> Option<celox_design::SchedulerSlots<SourceVarId>> {
     let variables = &mut modules.get_mut(&root)?.variables;
     let mut next = variables.keys().map(|id| id.0 + 1).max().unwrap_or(0);
@@ -2770,18 +2812,22 @@ fn declare_scheduler_slots(
     use celox_design::{
         SCHEDULER_CLOCKS as CLOCKS, SCHEDULER_FLAG_WIDTH as FLAG, SCHEDULER_TIME_WIDTH as TIME,
     };
+    let events = expected_events.next_multiple_of(TIME).max(TIME);
     Some(celox_design::SchedulerSlots {
         limit: declare("limit".into(), TIME),
         now: declare("now".into(), TIME),
         exit: declare("exit".into(), FLAG),
-        exit_arg: declare("exit_arg".into(), TIME),
+        exit_arg: declare("exit_arg".into(), events),
         finish: declare("finish".into(), FLAG),
         cont: declare("cont".into(), FLAG),
         dirty: declare("dirty".into(), FLAG),
         defer_limit_settle: declare("defer_limit_settle".into(), FLAG),
         count: declare("count".into(), TIME),
+        budget: declare("budget".into(), TIME),
+        events: declare("events".into(), TIME),
         current: declare("current".into(), TIME),
-        levels: declare("levels".into(), TIME),
+        levels: declare("levels".into(), events),
+        unknown_levels: declare("unknown_levels".into(), events),
         ready: declare("ready".into(), TIME),
         wake: (0..process_count)
             .map(|index| declare(format!("wake[{index}]"), TIME))
@@ -3635,8 +3681,8 @@ fn build_fused_ff_actions(
     result
 }
 
-/// always_comb starts after every initial procedure has reached its first
-/// suspension or completion (IEEE 1800-2023 9.2.2.2). Initial status is zero
+/// always_comb starts after every initial and always procedure has reached its
+/// first suspension or completion (IEEE 1800-2023 9.2.2.2). Initial status is zero
 /// until that happens; all control slots are ordinary checkpointed state.
 fn after_initial_processes(
     unit: &ExecutionUnit<AbsoluteAddr>,
@@ -3737,17 +3783,27 @@ fn relocate_units(
     let mut extern_function_indices = HashMap::<String, usize>::default();
     let mut next_runtime_error_code = 2000;
     let mut parallel_ff_units = parallel_ff_units;
-    let mut initial_statuses: Vec<_> = expanded
+    let mut startup_statuses: Vec<_> = expanded
         .values()
         .flat_map(|id| {
             modules[&instance_modules[id]]
                 .processes
                 .iter()
+                // Only automatically started procedures participate in the
+                // time-zero barrier (IEEE 1800-2023 9.2.2.2). Final procedures
+                // wait for termination, and callable kernels wait for a caller;
+                // neither can release a startup dependency.
+                .filter(|process| match process.slots.kind {
+                    celox_design::ProcessKind::Initializer | celox_design::ProcessKind::Regular => {
+                        true
+                    }
+                    celox_design::ProcessKind::Final | celox_design::ProcessKind::Callable => false,
+                })
                 .map(|process| bindings.locate(*id, process.slots.status))
         })
         .collect();
-    initial_statuses.sort();
-    initial_statuses.dedup();
+    startup_statuses.sort();
+    startup_statuses.dedup();
 
     for (path, id) in expanded {
         let module_id = &instance_modules[id];
@@ -3952,8 +4008,8 @@ fn relocate_units(
                     &runtime_event_site_map,
                     &extern_function_map,
                 );
-                if *after_initials && !initial_statuses.is_empty() {
-                    **unit = after_initial_processes(unit, &initial_statuses);
+                if *after_initials && !startup_statuses.is_empty() {
+                    **unit = after_initial_processes(unit, &startup_statuses);
                 }
             }
         }
@@ -4386,10 +4442,12 @@ fn select_nba_paths(
     processes: &mut [RelocatedProcess],
 ) {
     let mut staged = staged.clone();
-    // Fork activations can reach one NBA site concurrently. Always queue its
+    // Future updates must be queued at issue time rather than staged for
+    // publication in the current slot. Fork activations can reach one NBA site
+    // concurrently. Always queue its
     // captured value, rather than leaving one shared pending slot per kernel.
     for site in &timing.nba_sites {
-        if processes[site.process].frame.is_some() {
+        if site.delay > 0 || processes[site.process].frame.is_some() {
             for switch in &timing.nba_switches {
                 if switch.value == site.value {
                     staged.remove(&switch.switch);

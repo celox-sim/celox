@@ -1,0 +1,131 @@
+(group logic_gates (category combinational))
+
+; IEEE 1800-2023 28.3 and 10.11: output terminals accept net concatenations.
+(case scalar_concatenated_outputs
+  (source "concatenated.sv" #"
+module Top(input logic a,b, output wire [5:0] y);
+  and ({y[0]},a,b);
+  nand ({{y[1]}},a,b);
+  or ({y[2]},a,b);
+  nor ({{{y[3]}}},a,b);
+  xor ({y[4]},a,b);
+  xnor ({{y[5]}},a,b);
+endmodule
+"#)
+  (top Top)
+  (for (va vb expected) (list (0 0 42) (0 1 22) (1 0 22) (1 1 37))
+    (modify (set a va) (set b vb)) (assert_eq y expected)))
+
+; IEEE 1800-2023 28.4, Table 28-3. Named, unnamed, and multiple instances.
+(case scalar_truth_tables
+  (four_state)
+  (source "gates.sv" #"
+module Top(input logic a,b, output wire ya,yn,yo,yr,yx,ye,single_a,single_x);
+  and named_gate(ya,a,b), single_gate(single_a,a);
+  nand ({{yn}},a,b);
+  if (1) begin : generated
+    or (yo,a,b);
+    nor (yr,a,b);
+  end
+  xor (yx,a,b), (single_x,a);
+  xnor (ye,a,b);
+endmodule
+"#)
+  (top Top)
+  (for (av am bv bm va ma vn mn vo mo vr mr vx mx ve me vs ms)
+    (list
+      (0 0 0 0 0 0 1 0 0 0 1 0 0 0 1 0 0 0)
+      (0 0 1 0 0 0 1 0 1 0 0 0 1 0 0 0 0 0)
+      (0 0 1 1 0 0 1 0 1 1 1 1 1 1 1 1 0 0)
+      (0 0 0 1 0 0 1 0 1 1 1 1 1 1 1 1 0 0)
+      (1 0 0 0 0 0 1 0 1 0 0 0 1 0 0 0 1 0)
+      (1 0 1 0 1 0 0 0 1 0 0 0 0 0 1 0 1 0)
+      (1 0 1 1 1 1 1 1 1 0 0 0 1 1 1 1 1 0)
+      (1 0 0 1 1 1 1 1 1 0 0 0 1 1 1 1 1 0)
+      (1 1 0 0 0 0 1 0 1 1 1 1 1 1 1 1 1 1)
+      (1 1 1 0 1 1 1 1 1 0 0 0 1 1 1 1 1 1)
+      (1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1)
+      (1 1 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1)
+      (0 1 0 0 0 0 1 0 1 1 1 1 1 1 1 1 1 1)
+      (0 1 1 0 1 1 1 1 1 0 0 0 1 1 1 1 1 1)
+      (0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1)
+      (0 1 0 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1)
+    )
+    (modify (set a (fourstate av am)) (set b (fourstate bv bm)))
+    (assert_eq ya (fourstate va ma)) (assert_eq yn (fourstate vn mn))
+    (assert_eq yo (fourstate vo mo)) (assert_eq yr (fourstate vr mr))
+    (assert_eq yx (fourstate vx mx)) (assert_eq ye (fourstate ve me))
+    (assert_eq single_a (fourstate vs ms)) (assert_eq single_x (fourstate vs ms))))
+
+(case scalar_three_inputs
+  (source "three.sv" #"
+module Top(input logic a,b,c, output wire y);
+  wire intermediate;
+  and (intermediate,a,b,c);
+  xor (y,intermediate,c);
+endmodule
+"#)
+  (top Top)
+  (for (va vb vc expected) (list
+    (0 0 0 0)
+    (0 0 1 1)
+    (0 1 0 0)
+    (0 1 1 1)
+    (1 0 0 0)
+    (1 0 1 1)
+    (1 1 0 0)
+    (1 1 1 0)
+  ) (modify (set a va) (set b vb) (set c vc)) (assert_eq y expected)))
+
+(case scalar_two_state_truth_tables
+  (source "gates.sv" #"
+module Top(input logic a,b, output wire ya,yn,yo,yr,yx,ye,single_a,single_x);
+  and named_gate(ya,a,b), single_gate(single_a,a);
+  nand (yn,a,b);
+  if (1) begin : generated
+    or (yo,a,b);
+    nor (yr,a,b);
+  end
+  xor (yx,a,b), (single_x,a);
+  xnor (ye,a,b);
+endmodule
+"#)
+  (top Top)
+  (for (av am bv bm va ma vn mn vo mo vr mr vx mx ve me vs ms)
+    (list
+      (0 0 0 0 0 0 1 0 0 0 1 0 0 0 1 0 0 0)
+      (0 0 1 0 0 0 1 0 1 0 0 0 1 0 0 0 0 0)
+      (1 0 0 0 0 0 1 0 1 0 0 0 1 0 0 0 1 0)
+      (1 0 1 0 1 0 0 0 1 0 0 0 0 0 1 0 1 0)
+    )
+    (modify (set a (fourstate av am)) (set b (fourstate bv bm)))
+    (assert_eq ya (fourstate va ma)) (assert_eq yn (fourstate vn mn))
+    (assert_eq yo (fourstate vo mo)) (assert_eq yr (fourstate vr mr))
+    (assert_eq yx (fourstate vx mx)) (assert_eq ye (fourstate ve me))
+    (assert_eq single_a (fourstate vs ms)) (assert_eq single_x (fourstate vs ms))))
+
+(case scalar_expressions_in_generate_loops
+  (source "selected.sv" #"
+module Top(input logic [1:0] a,b, output wire [1:0] y, output wire inverted);
+  for (genvar i=0; i<2; i++) begin : gates
+    and (y[i],a[i],b[i]);
+  end
+  xor (inverted,(a[0] | b[1]),1'b1);
+endmodule
+"#)
+  (top Top)
+  (for (va vb expected inv) (list (0 0 0 1) (3 2 2 0) (1 1 1 0) (2 1 0 1))
+    (modify (set a va) (set b vb)) (assert_eq y expected) (assert_eq inverted inv)))
+
+(case scalar_two_state_member
+  (four_state)
+  (source "member.sv" #"
+typedef struct packed { bit clean; logic other; } pair_t;
+module Top(input logic a, output pair_t y);
+  and (y.clean,a);
+  assign y.other=1'b0;
+endmodule
+"#)
+  (top Top)
+  (for (v m expected) (list (0 0 0) (1 0 2) (1 1 0) (0 1 0))
+    (modify (set a (fourstate v m))) (assert_eq y (fourstate expected 0))))

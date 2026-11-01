@@ -5,16 +5,17 @@
       "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
       "expectation": "Simulation",
       "known_issue": {
+        "id": "sv_icarus_boolean_concurrent_assertions",
         "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+        "upstream": [],
         "evidence": [
+          "verification/repros/sv_sampled_history.json",
           "verification/repros/sv_concurrent_regions.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_boolean_concurrent_assertions",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
-        "upstream": []
+        ]
       },
       "name": "concurrent_assertions::assume_cover_and_generate",
       "phase": "skip",
@@ -28,16 +29,17 @@
       "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
       "expectation": "Simulation",
       "known_issue": {
+        "id": "sv_icarus_boolean_concurrent_assertions",
         "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+        "upstream": [],
         "evidence": [
+          "verification/repros/sv_sampled_history.json",
           "verification/repros/sv_concurrent_regions.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_boolean_concurrent_assertions",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
-        "upstream": []
+        ]
       },
       "name": "concurrent_assertions::disable_iff_after_nba",
       "phase": "skip",
@@ -51,18 +53,43 @@
       "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
       "expectation": "Simulation",
       "known_issue": {
+        "id": "sv_icarus_boolean_concurrent_assertions",
         "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+        "upstream": [],
         "evidence": [
+          "verification/repros/sv_sampled_history.json",
           "verification/repros/sv_concurrent_regions.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_boolean_concurrent_assertions",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
-        "upstream": []
+        ]
       },
       "name": "concurrent_assertions::predicates_before_all_actions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 compiles but vvp cannot execute $past and $sampled: System task/function is not defined by any module. IEEE 1800-2023 16.9.3 defines these sampled-value functions. Verilator 5.052 and Celox pass the unchanged case; the independent xezim selection disagreement remains executed evidence.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_sampled_functions",
+        "category": "simulator_unsupported",
+        "phase": "execute",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 compiles but vvp cannot execute $past and $sampled: System task/function is not defined by any module. IEEE 1800-2023 16.9.3 defines these sampled-value functions. Verilator 5.052 and Celox pass the unchanged case; the independent xezim selection disagreement remains executed evidence.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_sampled_history.json",
+          "verification/repros/sv_sampled_history.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "concurrent_assertions::sampled_history_explicit_nesting",
       "phase": "skip",
       "status": "ignored",
       "stronger_than_sv": false,
@@ -74,16 +101,113 @@
       "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
       "expectation": "Simulation",
       "known_issue": {
+        "id": "sv_icarus_boolean_concurrent_assertions",
         "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+        "upstream": [],
         "evidence": [
+          "verification/repros/sv_sampled_history.json",
           "verification/repros/sv_concurrent_regions.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
+        ]
+      },
+      "name": "concurrent_assertions::sampled_history_gates_and_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+      "expectation": "Simulation",
+      "known_issue": {
         "id": "sv_icarus_boolean_concurrent_assertions",
-        "observed_version": "Icarus 13.0",
+        "category": "simulator_unsupported",
         "phase": "compile",
+        "observed_version": "Icarus 13.0",
         "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
-        "upstream": []
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_sampled_history.json",
+          "verification/repros/sv_concurrent_regions.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "concurrent_assertions::sampled_history_predicates",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_boolean_concurrent_assertions",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_sampled_history.json",
+          "verification/repros/sv_concurrent_regions.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "concurrent_assertions::sampled_history_unknown_transitions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_boolean_concurrent_assertions",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_sampled_history.json",
+          "verification/repros/sv_concurrent_regions.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "concurrent_assertions::sampled_history_while_disabled",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_icarus_boolean_concurrent_assertions",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_sampled_history.json",
+          "verification/repros/sv_concurrent_regions.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
       },
       "name": "concurrent_assertions::sampled_predicate_live_action",
       "phase": "skip",
@@ -97,16 +221,17 @@
       "detail": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
       "expectation": "Simulation",
       "known_issue": {
+        "id": "sv_icarus_boolean_concurrent_assertions",
         "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Icarus 13.0",
+        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
+        "upstream": [],
         "evidence": [
+          "verification/repros/sv_sampled_history.json",
           "verification/repros/sv_concurrent_regions.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_icarus_boolean_concurrent_assertions",
-        "observed_version": "Icarus 13.0",
-        "phase": "compile",
-        "reason": "Icarus 13.0 rejects concurrent assertion items and property syntax. IEEE 1800-2023 16.5 and 16.14.1 permit these explicitly clocked Boolean assert/assume/cover properties and their actions. Assertions stay enabled; no -gno-assertions workaround is used.",
-        "upstream": []
+        ]
       },
       "name": "concurrent_assertions::unknown_predicates_and_disable_conditions",
       "phase": "skip",

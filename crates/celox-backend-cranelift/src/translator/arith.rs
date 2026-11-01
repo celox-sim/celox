@@ -1395,6 +1395,36 @@ impl SIRTranslator {
         }
     }
 
+    /// `ToPlanes` and `FromPlanes` move whole 64-bit words between the value
+    /// and mask chunks of a four-state register and one two-state register.
+    fn translate_planes_inst(
+        &self,
+        state: &mut TranslationState,
+        dst: &RegisterId,
+        op: &UnaryOp,
+        rhs: &RegisterId,
+    ) {
+        let source = state.regs[rhs].clone();
+        let mut values = source.load_value_chunks(state.builder);
+        let result = if *op == UnaryOp::ToPlanes {
+            let masks = source.load_mask_chunks(state.builder).unwrap_or_else(|| {
+                (0..values.len())
+                    .map(|_| state.builder.ins().iconst(types::I64, 0))
+                    .collect()
+            });
+            values.extend(masks);
+            TransValue::TwoState(values)
+        } else {
+            let masks = values.split_off(values.len() / 2);
+            if self.options.four_state {
+                TransValue::FourState { values, masks }
+            } else {
+                TransValue::TwoState(values)
+            }
+        };
+        state.regs.insert(*dst, result);
+    }
+
     pub(super) fn translate_unary_inst(
         &self,
         state: &mut TranslationState,
@@ -1420,6 +1450,10 @@ impl SIRTranslator {
             self.translate_count_unary_inst(state, dst, op, rhs);
             return;
         }
+        if matches!(op, UnaryOp::ToPlanes | UnaryOp::FromPlanes) {
+            self.translate_planes_inst(state, dst, op, rhs);
+            return;
+        }
 
         // 1. 各オペランドの「論理幅」を取得
         let r_width = state.register_map[rhs].width();
@@ -1437,7 +1471,9 @@ impl SIRTranslator {
             let r = promote_to_physical(state, r_val, r_width, r_is_signed, common_ty);
 
             let res_v = match op {
-                UnaryOp::Float { .. } => unreachable!("lowered separately"),
+                UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+                    unreachable!("lowered separately")
+                }
                 UnaryOp::Minus => state.builder.ins().ineg(r),
                 UnaryOp::Ident | UnaryOp::ToTwoState => r,
                 UnaryOp::BitNot => {
@@ -1499,7 +1535,9 @@ impl SIRTranslator {
                 let r_m = promote_to_physical(state, r_m_val, r_width, r_is_signed, common_ty);
 
                 let res_m = match op {
-                    UnaryOp::Float { .. } => unreachable!("lowered separately"),
+                    UnaryOp::Float { .. } | UnaryOp::ToPlanes | UnaryOp::FromPlanes => {
+                        unreachable!("lowered separately")
+                    }
                     UnaryOp::Ident | UnaryOp::BitNot => r_m,
                     UnaryOp::ToTwoState => state.builder.ins().iconst(common_ty, 0),
                     UnaryOp::LogicNot | UnaryOp::Or => {

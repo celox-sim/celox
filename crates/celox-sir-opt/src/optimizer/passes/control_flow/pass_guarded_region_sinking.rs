@@ -2073,6 +2073,15 @@ fn apply_deferred_value_diamond(
 }
 
 fn form_coupled_store_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
+    form_coupled_store_regions_verified_by(eu, verify_coupled_store_batch);
+}
+
+/// [`form_coupled_store_regions`] with the batch check passed in, so tests
+/// can observe how often it runs.
+fn form_coupled_store_regions_verified_by(
+    eu: &mut ExecutionUnit<RegionedAbsoluteAddr>,
+    verify: impl FnOnce(&ExecutionUnit<RegionedAbsoluteAddr>),
+) {
     let uses = collect_uses(eu);
     let mut block_ids = eu.blocks.keys().copied().collect::<Vec<_>>();
     block_ids.sort_unstable_by_key(|id| id.0);
@@ -2132,18 +2141,11 @@ fn form_coupled_store_regions(eu: &mut ExecutionUnit<RegionedAbsoluteAddr>) {
     // Plans belong to distinct original blocks and were collected before any
     // mutation. Check the completed batch once rather than rescanning every
     // unrelated definition after each local rewrite.
-    verify_coupled_store_batch(eu);
+    verify(eu);
 }
 
 fn verify_coupled_store_batch(eu: &ExecutionUnit<RegionedAbsoluteAddr>) {
-    debug_assert_eq!(
-        {
-            #[cfg(test)]
-            tests::COUPLED_BATCH_VERIFICATIONS.with(|count| count.set(count.get() + 1));
-            eu.verify_result()
-        },
-        Ok(())
-    );
+    debug_assert_eq!(eu.verify_result(), Ok(()));
 }
 
 fn best_coupled_store_plan(
@@ -4111,10 +4113,6 @@ fn instruction_has_effect(inst: &SIRInstruction<RegionedAbsoluteAddr>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    thread_local! {
-        pub(super) static COUPLED_BATCH_VERIFICATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-    }
-
     use super::*;
     use crate::ir::{DomainKind, InstanceId, SIRValue, TriggerIdWithKind};
     use celox_design::StateObjectId as VarId;
@@ -4658,9 +4656,12 @@ mod tests {
         };
         eu.verify_result().unwrap();
         let before = eu.clone();
-        COUPLED_BATCH_VERIFICATIONS.with(|count| count.set(0));
-        form_coupled_store_regions(&mut eu);
-        assert_eq!(COUPLED_BATCH_VERIFICATIONS.with(|count| count.get()), 1);
+        let mut verifications = 0;
+        form_coupled_store_regions_verified_by(&mut eu, |eu| {
+            verifications += 1;
+            verify_coupled_store_batch(eu);
+        });
+        assert_eq!(verifications, 1);
         assert_eq!(
             eu.blocks.len(),
             COUNT * 4,

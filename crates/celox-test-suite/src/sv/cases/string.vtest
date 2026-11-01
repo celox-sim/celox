@@ -1,5 +1,177 @@
 (group string (category types))
 
+(case fixed_array_loops_and_copy
+  (source "string_arrays.sv" #"
+    module Top(output int total, while_index, do_index, output bit same);
+      string words[4] = '{"111", "222", "333", "444"};
+      string saved[4], empty[2];
+      initial begin
+        foreach(words[i]) begin
+          total += words[i].len();
+          $display("%0d:%s", i, words[i]);
+        end
+        while(words[while_index] != "222") while_index++;
+        do do_index++; while(words[do_index] != "222");
+        saved = words;
+        words[0] = "changed";
+        same = saved[0] == "111" && words[0] == "changed"
+               && empty[0] == "" && empty[1] == "";
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0)
+  (assert_eq total 12) (assert_eq while_index 1) (assert_eq do_index 1)
+  (assert_eq same 1)
+  (expect_output "0:111\n1:222\n2:333\n3:444\n"))
+
+(case fixed_array_pattern_rows
+  (source "string_pattern_rows.sv" #"
+    module Top(output bit same);
+      string row[2] = '{"first", "second"};
+      string singleton[1] = '{"only"};
+      string matrix[2][2], defaults[2][2], repeated[2][2], narrow[2][1];
+      initial begin
+        matrix = '{row, row};
+        defaults = '{default:row};
+        repeated = '{2{row}};
+        narrow = '{singleton, singleton};
+        row[0] = "changed";
+        same = matrix[0][0] == "first" && matrix[0][1] == "second"
+          && matrix[1][0] == "first" && matrix[1][1] == "second"
+          && defaults[0][0] == "first" && defaults[1][1] == "second"
+          && repeated[0][1] == "second" && repeated[1][0] == "first"
+          && narrow[0][0] == "only" && narrow[1][0] == "only";
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1))
+
+(case fixed_array_continuous_elements
+  (source "string_continuous_elements.sv" #"
+    module Top(input bit choose, output bit same, output int length);
+      string words[2];
+      assign words[0] = choose ? "abc" : "longer";
+      assign words[1] = words[0];
+      always_comb begin
+        same = words[0] == (choose ? "abc" : "longer") && words[1] == words[0];
+        length = words[1].len();
+      end
+    endmodule
+  "#)
+  (top Top)
+  (for (choice size) (list (0 6) (1 3) (0 6))
+    (modify (set choose choice))
+    (assert_eq same 1) (assert_eq length size)))
+
+(case fixed_array_multidimensional_slices
+  (source "string_arrays.sv" #"
+    module Top(output bit same, output int character);
+      string words[2:1][0:0] = '{'{"A"}, '{"BC"}};
+      string row[0:0], singleton[0:0];
+      string flat[2] = '{"X", "Y"};
+      initial begin
+        row = words[1];
+        singleton = flat[1:1];
+        character = words[1][0][1];
+        same = row[0] == "BC" && singleton[0] == "Y" && words[2][0] == "A";
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1) (assert_eq character 67))
+
+(case fixed_array_invalid_indices
+  (source "string_arrays.sv" #"
+    module Top(output bit outer_empty, inner_empty, unchanged);
+      string words[2:1][0:0] = '{'{"A"}, '{"BC"}};
+      initial begin
+        words[0][0] = "ignored";
+        words[2][1] = "ignored";
+        outer_empty = words[0][0] == "";
+        inner_empty = words[2][1] == "";
+        unchanged = words[2][0] == "A" && words[1][0] == "BC";
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0)
+  (assert_eq outer_empty 1) (assert_eq inner_empty 1) (assert_eq unchanged 1))
+
+(case fixed_array_dynamic_indices
+  (source "string_arrays.sv" #"
+    module Top(output bit same, output int index);
+      string words[2:1] = '{default:"old"};
+      string selected;
+      initial begin
+        index = 1;
+        words[index++] = "new";
+        selected = words[index--];
+        words[0] = "ignored";
+        same = words[1] == "new" && words[2] == "old"
+          && selected == "old" && words[0] == ""
+          && words[index].toupper() == "NEW";
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 0) (assert_eq same 1) (assert_eq index 1))
+
+(case fixed_array_unknown_indices
+  (source "string_arrays.sv" #"
+    module Top(output bit same);
+      string words[2] = '{"first", "second"};
+      logic index;
+      initial begin
+        index = 1'bx;
+        words[index] = "ignored x";
+        same = words[index] == "";
+        index = 1'bz;
+        words[index] = "ignored z";
+        same = same && words[index] == ""
+          && words[0] == "first" && words[1] == "second";
+      end
+    endmodule
+  "#)
+  (four_state) (top Top) (run_until 0) (assert_eq same 1))
+
+(case fixed_array_survives_heap_collections
+  (source "string_arrays.sv" #"
+    module Top(output int n, output bit same);
+      logic clk = 0;
+      string words[3], text;
+      always #1 clk = ~clk;
+      initial begin
+        words[0] = {"ke", "pt"};
+        words[1] = {"al", "so"};
+        words[2] = {"sa", "fe"};
+      end
+      always @(posedge clk) begin
+        text.itoa(n);
+        text = {"value ", text};
+        n++;
+      end
+      initial begin
+        #6000;
+        same = words[0] == "kept" && words[1] == "also" && words[2] == "safe";
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 6000) (assert_eq n 3000) (assert_eq same 1))
+
+(case fixed_array_ports_and_local_lifetime
+  (source "string_arrays.sv" #"
+    module Child(input string words[2], output bit same);
+      always_comb same = words[0] == "first" && words[1] == "second";
+    endmodule
+    module Top(output bit same, output bit local_same);
+      string words[2] = '{"first", "second"};
+      Child child(words, same);
+      initial begin : block_scope
+        automatic string local_words[2] = '{"left", "right"};
+        #2;
+        local_same = local_words[0] == "left" && local_words[1] == "right";
+      end
+    endmodule
+  "#)
+  (top Top) (run_until 2) (assert_eq same 1) (assert_eq local_same 1))
+
 (case assignment_and_display
   (source "string.sv" #"
 module Top(output bit done);

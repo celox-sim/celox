@@ -143,6 +143,7 @@ pub(super) fn const_expr_from_i128(value: i128) -> ConstExpr {
 pub(super) fn parameters_from_native(
     authored: &[&celox_sv_syntax::Parameter],
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameters: &mut Vec<Parameter>,
     is_local: bool,
     base_const_env: &HashMap<String, i128>,
@@ -150,7 +151,8 @@ pub(super) fn parameters_from_native(
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<(), AnalyzerError> {
     let mut environment = ParameterEnvironment::new(
-        &syntax_tree.state,
+        syntax_tree,
+        session,
         parameters,
         base_const_env,
         &authored
@@ -161,6 +163,7 @@ pub(super) fn parameters_from_native(
     parameters_from_native_with_environment(
         authored,
         syntax_tree,
+        session,
         parameters,
         is_local,
         base_const_env,
@@ -192,7 +195,8 @@ pub(super) struct ParameterEnvironment<'a> {
 
 impl<'a> ParameterEnvironment<'a> {
     pub(super) fn new(
-        state: &AnalysisState,
+        tree: &AnalysisContext<'_>,
+        session: &mut Session,
         parameters: &[Parameter],
         base: &'a HashMap<String, i128>,
         shadowed: &[String],
@@ -210,7 +214,7 @@ impl<'a> ParameterEnvironment<'a> {
         }
         let mut values = HashMap::default();
         let mut types = parameter_types_from_const_env(&bindings);
-        let mut literals = scope::imported(state)
+        let mut literals = scope::imported(tree)
             .parameter_values
             .iter()
             .filter(|(name, value)| {
@@ -225,7 +229,14 @@ impl<'a> ParameterEnvironment<'a> {
             .map(|(name, value)| (name.clone(), value.clone()))
             .collect();
         for parameter in parameters {
-            bind_parameter(state, &mut bindings, &mut types, &mut literals, parameter);
+            bind_parameter(
+                tree,
+                session,
+                &mut bindings,
+                &mut types,
+                &mut literals,
+                parameter,
+            );
             for key in binding_keys(parameter.name(), &bindings, parameter.packed_ranges.len()) {
                 if let Some(value) = bindings.get(&key) {
                     values.insert(key, *value);
@@ -253,9 +264,10 @@ impl<'a> ParameterEnvironment<'a> {
         }
     }
 
-    fn append(&mut self, state: &AnalysisState, parameter: &Parameter) {
+    fn append(&mut self, tree: &AnalysisContext<'_>, session: &mut Session, parameter: &Parameter) {
         let bound = bind_parameter(
-            state,
+            tree,
+            session,
             &mut self.bindings,
             &mut self.types,
             &mut self.literals,
@@ -334,6 +346,7 @@ impl<'a> ParameterEnvironment<'a> {
 pub(super) fn parameters_from_native_with_environment(
     authored: &[&celox_sv_syntax::Parameter],
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameters: &mut Vec<Parameter>,
     is_local: bool,
     base_const_env: &HashMap<String, i128>,
@@ -351,6 +364,7 @@ pub(super) fn parameters_from_native_with_environment(
     let parameter_width = parameter_declared_width(
         authored,
         syntax_tree,
+        session,
         base_const_env,
         environment,
         type_aliases,
@@ -370,7 +384,8 @@ pub(super) fn parameters_from_native_with_environment(
             .unwrap_or_else(|| native_prefix.signed())
     });
     let parameter_signed_element_depth = native_prefix.signed_element_depth();
-    let parameter_ranges = native_prefix.ranges(syntax_tree, base_const_env, type_aliases)?;
+    let parameter_ranges =
+        native_prefix.ranges(syntax_tree, session, base_const_env, type_aliases)?;
     let simple_bit_vector = parameter_ranges.len() <= 1
         && declared_alias
             .as_ref()
@@ -391,9 +406,10 @@ pub(super) fn parameters_from_native_with_environment(
         if array_parameters::uses_signal_representation(
             native,
             syntax_tree,
+            session,
             &environment.constants,
             type_aliases,
-        )? || scope::imported(&syntax_tree.state)
+        )? || scope::imported(syntax_tree)
             .pattern_parameter_bindings
             .contains_key(&native.id)
         {
@@ -418,7 +434,7 @@ pub(super) fn parameters_from_native_with_environment(
         let mut value = if replaced_pattern {
             parameter_overrides.get(&name).cloned()
         } else if ownership::default(native).is_some() {
-            let imported = scope::imported(&syntax_tree.state);
+            let imported = scope::imported(syntax_tree);
             let mut proof_context = PackedDimensions::new(
                 parameter_packed_dimensions_with_imported(parameters, &imported),
                 const_env,
@@ -441,7 +457,8 @@ pub(super) fn parameters_from_native_with_environment(
             proof_context
                 .parameter_values
                 .extend(parameter_value_env_filtered(
-                    &syntax_tree.state,
+                    syntax_tree,
+                    session,
                     parameters,
                     const_env,
                     Some(&resolved_numeric),
@@ -457,12 +474,13 @@ pub(super) fn parameters_from_native_with_environment(
                     AnalyzerError::Parse("native parameter default is missing".into())
                 })?,
                 syntax_tree,
+                session,
                 &proof_context,
             )? {
                 Some(value)
             } else if native_prefix.floating().is_none()
                 && skipped::needs_selected(
-                    &syntax_tree.state,
+                    syntax_tree,
                     ownership::default(native)
                         .ok_or_else(|| unsupported("native parameter default is missing"))?,
                     syntax_tree.declarations(),
@@ -474,7 +492,8 @@ pub(super) fn parameters_from_native_with_environment(
                     type_aliases,
                 );
                 dimensions.parameter_values = parameter_value_env_with_imported(
-                    &syntax_tree.state,
+                    syntax_tree,
+                    session,
                     parameters,
                     const_env,
                     &imported,
@@ -488,6 +507,7 @@ pub(super) fn parameters_from_native_with_environment(
                         AnalyzerError::Parse("native parameter default is missing".into())
                     })?,
                     syntax_tree,
+                    session,
                     &dimensions,
                     parameter_width,
                 ) {
@@ -504,6 +524,7 @@ pub(super) fn parameters_from_native_with_environment(
                         AnalyzerError::Parse("native parameter default is missing".into())
                     })?,
                     syntax_tree,
+                    session,
                     &proof_context,
                 )?
             }
@@ -536,7 +557,7 @@ pub(super) fn parameters_from_native_with_environment(
                 &environment.literals,
             );
             if !matches!(
-                fold_const_integral_expr_preserving_mask(&syntax_tree.state, lowered, const_env),
+                fold_const_integral_expr_preserving_mask(syntax_tree, session, lowered, const_env),
                 Expr::Literal(_)
             ) {
                 return Err(AnalyzerError::Unsupported(format!(
@@ -567,7 +588,7 @@ pub(super) fn parameters_from_native_with_environment(
                 const_expr_to_expr(parameter.value()?.clone()),
                 &environment.literals,
             );
-            let expr = expr_to_const(&syntax_tree.state, expanded)?;
+            let expr = expr_to_const(session, expanded)?;
             typecheck::const_expr_has_real_type(&expr.into()).then_some(TypeKind::Real)
         });
         parameter.packed_ranges = parameter_ranges.clone();
@@ -582,7 +603,7 @@ pub(super) fn parameters_from_native_with_environment(
                 .resolved_type(&environment.types)
                 .map(|ty| ty.width),
         )?;
-        environment.append(&syntax_tree.state, &parameter);
+        environment.append(syntax_tree, session, &parameter);
         parameters.push(parameter);
     }
     Ok(())
@@ -603,6 +624,7 @@ fn validate_parameter_materialization_width(width: Option<usize>) -> Result<(), 
 fn parameter_declared_width(
     authored: &[&celox_sv_syntax::Parameter],
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     base_const_env: &HashMap<String, i128>,
     environment: &ParameterEnvironment<'_>,
     type_aliases: &HashMap<String, Type>,
@@ -611,7 +633,7 @@ fn parameter_declared_width(
 ) -> Converted<Option<usize>> {
     let declared_alias = native.alias.clone();
     if declared_alias.is_none() && native.data.packed_dimensions.is_empty() {
-        return Ok(native.scalar_width(&syntax_tree.state));
+        return Ok(native.scalar_width(&syntax_tree.functions));
     }
     // With the same immutable base and no inherited numeric value shadowed
     // by a nonnumeric literal, both former copies have exactly the contents
@@ -620,6 +642,7 @@ fn parameter_declared_width(
     if std::ptr::eq(environment.base, base_const_env) && !environment.has_inherited_literal_shadow {
         return parameter_width_from_environments(
             syntax_tree,
+            session,
             type_aliases,
             &environment.constants,
             &environment.constants,
@@ -644,6 +667,7 @@ fn parameter_declared_width(
                         ownership::default(native)?,
                         syntax_tree.declarations(),
                         syntax_tree,
+                        session,
                         &range_env,
                         type_aliases,
                     )
@@ -651,7 +675,7 @@ fn parameter_declared_width(
                     .flatten()
                 })
             })
-            .and_then(|value| eval_ast_const_expr(&syntax_tree.state, &value, &range_env));
+            .and_then(|value| eval_ast_const_expr(&syntax_tree.functions, &value, &range_env));
         if let Some(value) = value {
             range_env.insert(name, value);
         }
@@ -670,30 +694,31 @@ fn parameter_declared_width(
             .iter()
             .map(|(name, value)| (name.clone(), *value)),
     );
-    parameter_width_from_environments(syntax_tree, type_aliases, &range_env, &env, native)
+    parameter_width_from_environments(syntax_tree, session, type_aliases, &range_env, &env, native)
 }
 
 fn parameter_width_from_environments(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     type_aliases: &HashMap<String, Type>,
     range_env: &HashMap<String, i128>,
     env: &HashMap<String, i128>,
     native: &declaration_types::Prefix<'_>,
 ) -> Converted<Option<usize>> {
     let prefix = native;
-    let ranges = prefix.ranges(syntax_tree, range_env, type_aliases)?;
+    let ranges = prefix.ranges(syntax_tree, session, range_env, type_aliases)?;
     if ranges.is_empty() {
         return Ok(if prefix.alias.is_some() {
             Some(1)
         } else {
-            prefix.scalar_width(&syntax_tree.state)
+            prefix.scalar_width(&syntax_tree.functions)
         });
     }
     let mut width = 1usize;
     for range in ranges {
         let (Some(left), Some(right)) = (
-            eval_ast_const_expr(&syntax_tree.state, range.left(), env),
-            eval_ast_const_expr(&syntax_tree.state, range.right(), env),
+            eval_ast_const_expr(&syntax_tree.functions, range.left(), env),
+            eval_ast_const_expr(&syntax_tree.functions, range.right(), env),
         ) else {
             return Ok(None);
         };
@@ -740,33 +765,44 @@ fn normalize_unbased_unsized_parameter_value(
 }
 
 pub(super) fn const_env_from_parameters(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameters: &[Parameter],
 ) -> HashMap<String, i128> {
     let mut env = HashMap::default();
-    extend_const_env_with_parameters(state, &mut env, parameters);
+    extend_const_env_with_parameters(tree, session, &mut env, parameters);
     env
 }
 
 pub(super) fn extend_const_env_with_parameters(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &mut HashMap<String, i128>,
     parameters: &[Parameter],
 ) {
     let mut parameter_types = parameter_types_from_const_env(env);
     let mut literals = HashMap::default();
     for parameter in parameters {
-        bind_parameter(state, env, &mut parameter_types, &mut literals, parameter);
+        bind_parameter(
+            tree,
+            session,
+            env,
+            &mut parameter_types,
+            &mut literals,
+            parameter,
+        );
     }
 }
 
 pub(super) fn bind_parameter(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     env: &mut HashMap<String, i128>,
     types: &mut HashMap<String, ExprType>,
     literals: &mut HashMap<String, Expr>,
     parameter: &Parameter,
 ) -> bool {
+    let functions = &tree.functions;
     #[cfg(test)]
     PARAMETER_BINDINGS.with(|count| count.set(count.get() + 1));
     for key in binding_keys(parameter.name(), env, parameter.packed_ranges.len()) {
@@ -798,10 +834,11 @@ pub(super) fn bind_parameter(
             };
             env.insert(parameter_rank_marker(parameter.name()), rank as i128);
         }
-        insert_parameter_dimension_markers(state, env, parameter);
+        insert_parameter_dimension_markers(functions, env, parameter);
         return true;
     }
-    let (value, literal) = parameter.resolved_value_and_literal(state, env, types, literals);
+    let (value, literal) =
+        parameter.resolved_value_and_literal(tree, session, env, types, literals);
     if value.is_none() && literal.is_none() {
         return false;
     }
@@ -822,7 +859,7 @@ pub(super) fn bind_parameter(
         // Shadow a numeric inherited binding with the four-state declaration.
         env.remove(parameter.name());
         literals.insert(parameter.name().to_string(), literal);
-        insert_parameter_dimension_markers(state, env, parameter);
+        insert_parameter_dimension_markers(functions, env, parameter);
         return true;
     }
     let value = value.expect("a known value or a resolved literal was checked above");
@@ -831,13 +868,13 @@ pub(super) fn bind_parameter(
     if parameter.is_local {
         env.insert(local_parameter_marker(parameter.name()), value);
     }
-    insert_parameter_dimension_markers(state, env, parameter);
+    insert_parameter_dimension_markers(functions, env, parameter);
     true
 }
 
 /// Record packed bounds for parameter selects and array queries.
 fn insert_parameter_dimension_markers(
-    state: &AnalysisState,
+    functions: &const_functions::ConstantFunctions,
     env: &mut HashMap<String, i128>,
     parameter: &Parameter,
 ) {
@@ -850,8 +887,8 @@ fn insert_parameter_dimension_markers(
         .iter()
         .map(|range| {
             Some((
-                eval_ast_const_expr(state, range.left(), env)?,
-                eval_ast_const_expr(state, range.right(), env)?,
+                eval_ast_const_expr(functions, range.left(), env)?,
+                eval_ast_const_expr(functions, range.right(), env)?,
             ))
         })
         .collect::<Option<Vec<_>>>()
@@ -984,6 +1021,7 @@ pub(super) fn enum_initializer_fits_base_type(
 /// implicit successors and type coercion retain the existing semantic kernel.
 pub(super) fn enum_member_constants_from_scope(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
@@ -991,6 +1029,7 @@ pub(super) fn enum_member_constants_from_scope(
     let items = syntax_tree.body_membership()?;
     enum_member_constants_from_items(
         syntax_tree,
+        session,
         &items,
         base_const_env,
         type_aliases,
@@ -1000,6 +1039,7 @@ pub(super) fn enum_member_constants_from_scope(
 
 pub(super) fn enum_member_constants_from_items(
     syntax_tree: &AnalysisContext<'_>,
+    session: &mut Session,
     declarations: &[celox_sv_syntax::BodyItemId],
     base_const_env: &HashMap<String, i128>,
     type_aliases: &HashMap<String, Type>,
@@ -1031,6 +1071,7 @@ pub(super) fn enum_member_constants_from_items(
             parameters_from_native(
                 &authored,
                 syntax_tree,
+                session,
                 &mut parameters,
                 local,
                 &eval_env,
@@ -1041,9 +1082,10 @@ pub(super) fn enum_member_constants_from_items(
                     parameter_overrides
                 },
             )?;
-            extend_const_env_with_parameters(&syntax_tree.state, &mut eval_env, &parameters);
+            extend_const_env_with_parameters(syntax_tree, session, &mut eval_env, &parameters);
             resolved_type_aliases = types::type_aliases_from_body_with_env(
                 syntax_tree,
+                session,
                 declarations,
                 &eval_env,
                 &resolved_type_aliases,
@@ -1060,6 +1102,7 @@ pub(super) fn enum_member_constants_from_items(
             Some(id) => type_binding::enum_constant_base(
                 *id,
                 syntax_tree,
+                session,
                 &eval_env,
                 &resolved_type_aliases,
             )?,
@@ -1070,10 +1113,11 @@ pub(super) fn enum_member_constants_from_items(
             id,
             native,
             syntax_tree,
+            session,
             &PackedDimensions::new(HashMap::default(), &eval_env, &resolved_type_aliases),
             &member_base,
         )?;
-        let member_type = expr_type_from_type(&syntax_tree.state, &member_base, &eval_env)
+        let member_type = expr_type_from_type(&syntax_tree.functions, &member_base, &eval_env)
             .ok_or_else(|| unsupported("enum base type"))?;
         let mut next_enum_value = 0i128;
         for new in items {
@@ -1086,6 +1130,7 @@ pub(super) fn enum_member_constants_from_items(
                     id,
                     syntax_tree.declarations(),
                     syntax_tree,
+                    session,
                     &eval_env,
                     &resolved_type_aliases,
                 )?
@@ -1113,8 +1158,8 @@ pub(super) fn enum_member_constants_from_items(
                     .ok_or_else(|| {
                         AnalyzerError::Unsupported(format!("enum member `{name}` value type"))
                     })?;
-            let number =
-                eval_ast_const_expr(&syntax_tree.state, &value, &eval_env).ok_or_else(|| {
+            let number = eval_ast_const_expr(&syntax_tree.functions, &value, &eval_env)
+                .ok_or_else(|| {
                     AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
                 })?;
             if !enum_initializer_fits_base_type(number, value_type, member_type) {
@@ -1143,6 +1188,7 @@ pub(super) fn enum_member_constants_from_items(
         // before resolving a subsequent enum base through that typedef.
         resolved_type_aliases = types::type_aliases_from_body_with_env(
             syntax_tree,
+            session,
             declarations,
             &eval_env,
             &resolved_type_aliases,
@@ -1152,17 +1198,19 @@ pub(super) fn enum_member_constants_from_items(
 }
 
 pub(super) fn parameter_value_env(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
 ) -> HashMap<String, Expr> {
-    parameter_value_env_filtered(state, parameters, const_env, None)
+    parameter_value_env_filtered(tree, session, parameters, const_env, None)
 }
 
 /// Materialize only referenced values and their initializer dependencies.
 /// Preserve the full declaration-order type prefix, including unused parameters.
 pub(super) fn parameter_value_env_for_references(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
     references: &HashSet<String>,
@@ -1176,7 +1224,7 @@ pub(super) fn parameter_value_env_for_references(
         return HashMap::default();
     }
     if needed.iter().all(|name| const_env.contains_key(name)) {
-        return parameter_value_env_filtered(state, parameters, const_env, Some(&needed));
+        return parameter_value_env_filtered(tree, session, parameters, const_env, Some(&needed));
     }
     // Include all declarations of a name so the projection preserves even
     // repeated-name prefixes used during preliminary collection.
@@ -1232,11 +1280,12 @@ pub(super) fn parameter_value_env_for_references(
             }
         }
     }
-    parameter_value_env_filtered(state, parameters, const_env, Some(&needed))
+    parameter_value_env_filtered(tree, session, parameters, const_env, Some(&needed))
 }
 
 fn parameter_value_env_filtered(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
     parameters: &[Parameter],
     const_env: &HashMap<String, i128>,
     needed: Option<&HashSet<String>>,
@@ -1305,9 +1354,10 @@ fn parameter_value_env_filtered(
             }
         } else if let Some(value) = parameter.value().cloned() {
             let value = substitute_typed_parameter_literals(value, const_env, &parameter_types);
-            let value = replace_oob_const_selects_with_unknown(state, value, const_env);
+            let value = replace_oob_const_selects_with_unknown(tree, value, const_env);
             let value = substitute_expr_constants_with_parameter_literals(
-                state,
+                tree,
+                session,
                 const_expr_to_expr(value),
                 const_env,
                 &values,
@@ -1348,17 +1398,18 @@ fn parameter_value_env_filtered(
                 expr: Box::new(value),
             };
         }
-        value = fold_const_integral_expr_preserving_mask(state, value, const_env);
+        value = fold_const_integral_expr_preserving_mask(tree, session, value, const_env);
         values.insert(parameter.name().to_string(), value);
     }
     values
 }
 
 fn replace_oob_const_selects_with_unknown(
-    state: &AnalysisState,
+    tree: &AnalysisContext<'_>,
     expr: ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> ConstExpr {
+    let functions = &tree.functions;
     match expr {
         ConstExpr::SelectRange {
             expr,
@@ -1367,23 +1418,23 @@ fn replace_oob_const_selects_with_unknown(
             signed,
         } => ConstExpr::SelectRange {
             expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *expr, const_env,
+                tree, *expr, const_env,
             )),
             msb: Box::new(replace_oob_const_selects_with_unknown(
-                state, *msb, const_env,
+                tree, *msb, const_env,
             )),
             lsb: Box::new(replace_oob_const_selects_with_unknown(
-                state, *lsb, const_env,
+                tree, *lsb, const_env,
             )),
             signed,
         },
         ConstExpr::Select { expr, bit } => {
-            let expr = replace_oob_const_selects_with_unknown(state, *expr, const_env);
-            let bit = replace_oob_const_selects_with_unknown(state, *bit, const_env);
+            let expr = replace_oob_const_selects_with_unknown(tree, *expr, const_env);
+            let bit = replace_oob_const_selects_with_unknown(tree, *bit, const_env);
             if let ConstExpr::Literal(literal) = &expr
                 && let Some(width) =
                     typecheck::parse_integral_literal(literal).map(|literal| literal.width)
-                && match eval_ast_const_expr(state, &bit, const_env) {
+                && match eval_ast_const_expr(functions, &bit, const_env) {
                     Some(bit_index) => {
                         usize::try_from(bit_index).map_or(true, |bit_index| bit_index >= width)
                     }
@@ -1403,7 +1454,7 @@ fn replace_oob_const_selects_with_unknown(
             site,
             args: args
                 .into_iter()
-                .map(|arg| replace_oob_const_selects_with_unknown(state, arg, const_env))
+                .map(|arg| replace_oob_const_selects_with_unknown(tree, arg, const_env))
                 .collect(),
         },
         ConstExpr::Resize {
@@ -1412,7 +1463,7 @@ fn replace_oob_const_selects_with_unknown(
             signed,
         } => ConstExpr::Resize {
             expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *expr, const_env,
+                tree, *expr, const_env,
             )),
             width,
             signed,
@@ -1420,16 +1471,16 @@ fn replace_oob_const_selects_with_unknown(
         ConstExpr::Unary { op, expr } => ConstExpr::Unary {
             op,
             expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *expr, const_env,
+                tree, *expr, const_env,
             )),
         },
         ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
             left: Box::new(replace_oob_const_selects_with_unknown(
-                state, *left, const_env,
+                tree, *left, const_env,
             )),
             op,
             right: Box::new(replace_oob_const_selects_with_unknown(
-                state, *right, const_env,
+                tree, *right, const_env,
             )),
         },
         ConstExpr::Mux {
@@ -1438,13 +1489,13 @@ fn replace_oob_const_selects_with_unknown(
             else_expr,
         } => ConstExpr::Mux {
             condition: Box::new(replace_oob_const_selects_with_unknown(
-                state, *condition, const_env,
+                tree, *condition, const_env,
             )),
             then_expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *then_expr, const_env,
+                tree, *then_expr, const_env,
             )),
             else_expr: Box::new(replace_oob_const_selects_with_unknown(
-                state, *else_expr, const_env,
+                tree, *else_expr, const_env,
             )),
         },
         ConstExpr::Ident(name) => ConstExpr::Ident(name),
@@ -1706,14 +1757,28 @@ pub(super) fn infer_const_expr_type(
     expr: &ConstExpr,
     parameter_types: &HashMap<String, ExprType>,
 ) -> Option<ExprType> {
-    infer_const_expr_type_inner(expr, parameter_types, false)
+    infer_const_expr_type_inner(expr, &|name| parameter_types.get(name).copied(), false)
+}
+
+/// [`infer_const_expr_type`] with the types of the parameters the
+/// expression reads looked up in `const_env`, rather than collected from
+/// all of it.
+pub(super) fn infer_const_expr_type_in(
+    expr: &ConstExpr,
+    const_env: &HashMap<String, i128>,
+) -> Option<ExprType> {
+    infer_const_expr_type_inner(
+        expr,
+        &|name| dimensions::parameter_type_from_const_env(const_env, name),
+        false,
+    )
 }
 
 // Only the bounded proof may infer a logical result without resolving its
 // opaque skipped operands. Ordinary type queries must resolve both operands.
 fn infer_const_expr_type_inner(
     expr: &ConstExpr,
-    parameter_types: &HashMap<String, ExprType>,
+    parameter_types: &dyn Fn(&str) -> Option<ExprType>,
     bounded_proof: bool,
 ) -> Option<ExprType> {
     match expr {
@@ -1724,7 +1789,7 @@ fn infer_const_expr_type_inner(
                 signed: literal.signed,
             })
         }
-        ConstExpr::Ident(name) => parameter_types.get(name).copied(),
+        ConstExpr::Ident(name) => parameter_types(name),
         ConstExpr::SelectRange {
             msb, lsb, signed, ..
         } => Some(ExprType {
@@ -1861,7 +1926,7 @@ pub(super) fn real_literal(
     literals: &HashMap<String, Expr>,
 ) -> Option<Expr> {
     let expanded = substitute_expr_idents(const_expr_to_expr(expr.clone()), literals);
-    let expr = expr_to_const(&AnalysisState::default(), expanded)?;
+    let expr = expr_to_const(&mut Session::default(), expanded)?;
     let value = typecheck::eval_real_const_expr(&expr.into(), constants)?;
     let value = if kind == TypeKind::Shortreal {
         f64::from(value as f32)

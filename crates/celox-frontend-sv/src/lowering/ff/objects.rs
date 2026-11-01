@@ -27,14 +27,19 @@ impl Ff<'_, '_> {
             for (index, arg) in args.iter_mut().enumerate() {
                 // A record is built from a flat structure value, not a handle.
                 if let ObjectOp::Box(record) = op {
-                    *arg = self.heap_operand(arg, Some((record.width(), false)), None)?;
+                    // The value extends by its own signedness (IEEE
+                    // 1800-2023 10.7).
+                    let signed = self.expr_signed(arg);
+                    *arg = self.heap_operand(arg, Some((record.width(), signed)), None)?;
                     continue;
                 }
                 let (width, signed) = if index == 0 {
                     (32, false)
                 } else {
                     match op {
-                        ObjectOp::Store(field) => (field.width as usize, field.signed),
+                        // A stored value extends by its own signedness
+                        // (IEEE 1800-2023 10.7).
+                        ObjectOp::Store(field) => (field.width as usize, self.expr_signed(arg)),
                         ObjectOp::Randomize(_) if index == 1 => (1, false),
                         ObjectOp::ConstraintModeSet(_)
                         | ObjectOp::ModeSet(_)
@@ -98,6 +103,13 @@ impl Ff<'_, '_> {
                 )
             }
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
+            ObjectOp::Locator(_) => unreachable!("handled by locator"),
+            ObjectOp::Pattern(_) => unreachable!("handled by aggregate_pattern"),
+            ObjectOp::Concat(_) => unreachable!("handled by container_concat"),
+            // Each declaration of an event creates a synchronization object
+            // (IEEE 1800-2023 15.5).
+            ObjectOp::NewEvent => self.heap_call(ops::EVENT_NEW, &[]),
+            ObjectOp::Stream(_) => unreachable!("handled by stream_call"),
             ObjectOp::New {
                 class,
                 size,
@@ -157,10 +169,11 @@ impl Ff<'_, '_> {
                 // the record's handle is only used after them.
                 let expr = self.hoist(&args[0])?;
                 let width = record.width();
+                let signed = self.expr_signed(&expr);
                 let mut arena = SLTNodeArena::new();
-                let node = self.expr_slt(&expr, Some((width, false)), &mut arena)?;
+                let node = self.expr_slt(&expr, Some((width, signed)), &mut arena)?;
                 let node =
-                    coerce_node_width(&mut arena, node, Some(width), false).map_err(slt_error)?;
+                    coerce_node_width(&mut arena, node, Some(width), signed).map_err(slt_error)?;
                 let value = self.lower_slt(&arena, node)?;
                 // A record is not seeded: it has no random state, and seeding
                 // would draw from the creating process's RNG.
@@ -202,7 +215,16 @@ impl Ff<'_, '_> {
             ObjectOp::Store(field) if field.four_state && self.m.four_state => {
                 let object = self.handle(&args[0])?;
                 let expr = self.hoist(&args[1])?;
-                let value = self.eval(&expr, Some((field.width as usize, field.signed)))?;
+                let signed = self.expr_signed(&expr);
+                let value = self.eval(&expr, Some((field.width as usize, signed)))?;
+                self.store_field(object, *field, value);
+                self.constant64(0)
+            }
+            ObjectOp::Store(field) if field.width > 64 => {
+                let object = self.handle(&args[0])?;
+                let expr = self.hoist(&args[1])?;
+                let signed = self.expr_signed(&expr);
+                let value = self.eval(&expr, Some((field.width as usize, signed)))?;
                 self.store_field(object, *field, value);
                 self.constant64(0)
             }
@@ -210,7 +232,8 @@ impl Ff<'_, '_> {
                 let object = self.handle(&args[0])?;
                 let place =
                     self.constant64(u64::from(field.offset) | u64::from(field.bytes()) << 32);
-                let value = self.integer_of_width(&args[1], field.width as usize, field.signed)?;
+                let signed = self.expr_signed(&args[1]);
+                let value = self.integer_of_width(&args[1], field.width as usize, signed)?;
                 self.heap_call(ops::OBJECT_STORE, &[object, place, value])
             }
             ObjectOp::RandomCyclic { offset, count } => {
@@ -279,6 +302,10 @@ impl Ff<'_, '_> {
         let (temp, name) = self.m.temp("object", width, signed, false);
         let kind = match op {
             ObjectOp::Container { .. } => unreachable!("handled by container_call"),
+            ObjectOp::Locator(_) => unreachable!("handled by locator"),
+            ObjectOp::Pattern(_) => unreachable!("handled by aggregate_pattern"),
+            ObjectOp::Concat(_) => unreachable!("handled by container_concat"),
+            ObjectOp::Stream(_) => unreachable!("handled by stream_call"),
             ObjectOp::New { .. } | ObjectOp::Copy | ObjectOp::Box(_) => {
                 Some(celox_design::ValueKind::ObjRef)
             }
@@ -301,7 +328,8 @@ impl Ff<'_, '_> {
             | ObjectOp::ModePop
             | ObjectOp::ModeSelect(..)
             | ObjectOp::ModeSelected(_)
-            | ObjectOp::ModeSet(_) => None,
+            | ObjectOp::ModeSet(_)
+            | ObjectOp::NewEvent => None,
         };
         if let Some(kind) = kind {
             self.m.variables.get_mut(&temp).unwrap().value_kind = kind;
@@ -319,12 +347,31 @@ impl Ff<'_, '_> {
             ops::OBJECT_LOAD
         };
         let width = field.width as usize;
+        if field.width > 64 {
+            let four_state = field.four_state && self.m.four_state;
+            let planes = if four_state {
+                vec![0, field.bytes()]
+            } else {
+                vec![0]
+            };
+            let planes = planes
+                .into_iter()
+                .map(|plane| self.load_wide_plane(object, opcode, field, plane, four_state))
+                .collect::<Vec<_>>();
+            if four_state {
+                return self.join_wide_planes(planes[0], planes[1], width);
+            }
+            let value = self.b.alloc_bit(width, field.signed);
+            self.b
+                .emit(SIRInstruction::Unary(value, UnaryOp::Ident, planes[0]));
+            return value;
+        }
         if field.four_state && self.m.four_state {
             let [value, mask] = [0, field.bytes()].map(|plane| {
                 let offset = self.constant64(u64::from(field.offset + plane));
                 let count = self.constant64(u64::from(field.bytes()));
                 let stored = self.heap_call(opcode, &[object, offset, count]);
-                self.complement(stored)
+                self.complement(stored, field.width)
             });
             return self.container_join(value, mask, width, true);
         }
@@ -336,14 +383,150 @@ impl Ff<'_, '_> {
         value
     }
 
+    /// The value and mask planes of `value` as two-state registers of `width`
+    /// bits, moved in whole words rather than bit by bit.
+    fn split_wide_planes(&mut self, value: RegisterId, width: usize) -> (RegisterId, RegisterId) {
+        let words = width.next_multiple_of(64);
+        let padded = self.b.alloc_logic(words);
+        if words > width {
+            let zero = self.b.alloc_logic(words - width);
+            self.b
+                .emit(SIRInstruction::Imm(zero, SIRValue::new(BigUint::zero())));
+            self.b
+                .emit(SIRInstruction::Concat(padded, vec![zero, value]));
+        } else {
+            self.b
+                .emit(SIRInstruction::Unary(padded, UnaryOp::Ident, value));
+        }
+        let planes = self.b.alloc_bit(2 * words, false);
+        self.b
+            .emit(SIRInstruction::Unary(planes, UnaryOp::ToPlanes, padded));
+        let [value, mask] = [0, words].map(|lsb| {
+            let plane = self.b.alloc_bit(width, false);
+            self.b
+                .emit(SIRInstruction::Slice(plane, planes, lsb, width));
+            plane
+        });
+        (value, mask)
+    }
+
+    /// The four-state register of `width` bits whose value and mask planes
+    /// are two-state registers `value` and `mask`.
+    fn join_wide_planes(
+        &mut self,
+        value: RegisterId,
+        mask: RegisterId,
+        width: usize,
+    ) -> RegisterId {
+        let words = width.next_multiple_of(64);
+        let mut parts = Vec::new();
+        for plane in [mask, value] {
+            if words > width {
+                let zero = self.b.alloc_bit(words - width, false);
+                self.b
+                    .emit(SIRInstruction::Imm(zero, SIRValue::new(BigUint::zero())));
+                parts.push(zero);
+            }
+            parts.push(plane);
+        }
+        let planes = self.b.alloc_bit(2 * words, false);
+        self.b.emit(SIRInstruction::Concat(planes, parts));
+        let padded = self.b.alloc_logic(words);
+        self.b
+            .emit(SIRInstruction::Unary(padded, UnaryOp::FromPlanes, planes));
+        let joined = self.b.alloc_logic(width);
+        self.b.emit(SIRInstruction::Slice(joined, padded, 0, width));
+        joined
+    }
+
+    /// The plane at byte `plane` of a `field` wider than 64 bits, read in
+    /// words of at most 8 bytes: a register of the field's width.
+    fn load_wide_plane(
+        &mut self,
+        object: RegisterId,
+        opcode: u64,
+        field: sv::ir::ObjectField,
+        plane: u32,
+        complemented: bool,
+    ) -> RegisterId {
+        let mut words = Vec::new();
+        for first in (0..field.width).step_by(64) {
+            let bits = (field.width - first).min(64);
+            let offset = self.constant64(u64::from(field.offset + plane + first / 8));
+            let count = self.constant64(u64::from(bits.div_ceil(8)));
+            let loaded = self.heap_call(opcode, &[object, offset, count]);
+            let loaded = if complemented {
+                self.complement(loaded, bits)
+            } else {
+                loaded
+            };
+            let word = self.b.alloc_bit(bits as usize, false);
+            self.b
+                .emit(SIRInstruction::Slice(word, loaded, 0, bits as usize));
+            words.push(word);
+        }
+        // Concatenation lists the most significant word first.
+        words.reverse();
+        let value = self.b.alloc_bit(field.width as usize, false);
+        self.b.emit(SIRInstruction::Concat(value, words));
+        value
+    }
+
+    /// Store `plane`, a two-state register of `field`'s width, at byte `at` of
+    /// the object in 64-bit `object`, in words of at most 8 bytes.
+    fn store_wide_plane(
+        &mut self,
+        object: RegisterId,
+        field: sv::ir::ObjectField,
+        at: u32,
+        plane: RegisterId,
+        complemented: bool,
+    ) {
+        for first in (0..field.width).step_by(64) {
+            let bits = (field.width - first).min(64);
+            let word = self.b.alloc_bit(bits as usize, false);
+            self.b.emit(SIRInstruction::Slice(
+                word,
+                plane,
+                first as usize,
+                bits as usize,
+            ));
+            let wide = self.b.alloc_bit(64, false);
+            self.b
+                .emit(SIRInstruction::Unary(wide, UnaryOp::Ident, word));
+            let wide = if complemented {
+                self.complement(wide, bits)
+            } else {
+                wide
+            };
+            let place = self.constant64(
+                u64::from(field.offset + at + first / 8) | u64::from(bits.div_ceil(8)) << 32,
+            );
+            self.heap_call(ops::OBJECT_STORE, &[object, place, wide]);
+        }
+    }
+
     /// Store register `value` of `field`'s width into `field` of the object in
     /// 64-bit `object`.
     fn store_field(&mut self, object: RegisterId, field: sv::ir::ObjectField, value: RegisterId) {
+        if field.width > 64 {
+            if field.four_state && self.m.four_state {
+                let (value, mask) = self.split_wide_planes(value, field.width as usize);
+                self.store_wide_plane(object, field, 0, value, true);
+                self.store_wide_plane(object, field, field.bytes(), mask, true);
+            } else {
+                let known = self.b.alloc_bit(field.width as usize, false);
+                self.b
+                    .emit(SIRInstruction::Unary(known, UnaryOp::ToTwoState, value));
+                self.store_wide_plane(object, field, 0, known, false);
+            }
+            return;
+        }
         let planes = if field.four_state && self.m.four_state {
             let (value, mask) = self.container_split(value);
             vec![
-                (0, self.complement(value)),
-                (field.bytes(), self.complement(mask)),
+                (0, self.complement(value, field.width)),
+                (field.bytes(), self.complement(mask, field.width)),
             ]
         } else {
             let known = self.b.alloc_bit(field.width as usize, false);
@@ -363,10 +546,19 @@ impl Ff<'_, '_> {
 
     /// A 4-state property holds the complement of its value and mask planes,
     /// so the zeroed bytes of a new object read as X (IEEE 1800-2023 6.8).
-    fn complement(&mut self, plane: RegisterId) -> RegisterId {
+    /// Bits past `width` stay zero, so a default value is all zero bytes.
+    fn complement(&mut self, plane: RegisterId, width: u32) -> RegisterId {
         let complement = self.b.alloc_bit(64, false);
         self.b
             .emit(SIRInstruction::Unary(complement, UnaryOp::BitNot, plane));
-        complement
+        let bits = self.constant64(u64::MAX >> (64 - width.min(64)));
+        let masked = self.b.alloc_bit(64, false);
+        self.b.emit(SIRInstruction::Binary(
+            masked,
+            complement,
+            BinaryOp::And,
+            bits,
+        ));
+        masked
     }
 }

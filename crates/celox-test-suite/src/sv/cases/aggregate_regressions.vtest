@@ -301,3 +301,38 @@
   (top Top)
   (run_until 0)
   (expect_output "1 2 3 1 2 3 00000001 00000002 00000003 00000001 00000002 00000003\n4 5 98 4 5 98 00000004 00000005 0000006X 00000004 00000005 0000006X\n789\n"))
+
+; Regression for #2719: value writes must clear masks across packed word
+; boundaries and padded element slots, preserving unwritten elements.
+(case wide_unpacked_ff_array_masks
+  (four_state)
+  (source "wide_array_masks.sv" #"
+    module Top(input logic clk, input logic [2:0] index,
+      output logic [19:0] a, b, c, d, e, untouched);
+      logic [19:0] p [6], q [6], u [6];
+      logic [19:0] matrix [2][3];
+      always_ff @(posedge clk) begin
+        p[0] <= 20'h11;
+        for (int k = 0; k < 6; k++) u[k] <= 20'(k + 1);
+        q[0] <= 20'h1; q[1] <= 20'h2; q[5] <= 20'h6;
+        for (int i = 0; i < 2; i++)
+          for (int j = 0; j < 3; j++) matrix[i][j] <= 20'(i * 3 + j + 1);
+      end
+      assign a = p[0]; assign b = q[0]; assign c = u[index];
+      assign d = q[5]; assign e = matrix[1][2]; assign untouched = q[3];
+    endmodule
+  "#)
+  (top Top)
+  (modify (set index 0))
+  (for iteration (range 0 2)
+    (tick clk)
+    (assert_eq a 0x11) (assert_eq b 1) (assert_eq d 6) (assert_eq e 6)
+    (for i (range 0 6)
+      (modify (set index i))
+      (assert_eq c (+ i 1))
+      (assert (== (xmask (get c)) 0)))
+    (assert (== (xmask (get a)) 0))
+    (assert (== (xmask (get b)) 0))
+    (assert (== (xmask (get d)) 0))
+    (assert (== (xmask (get e)) 0))
+    (assert (== (xmask (get untouched)) 0xfffff))))

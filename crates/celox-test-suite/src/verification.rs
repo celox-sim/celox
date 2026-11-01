@@ -420,6 +420,23 @@ fn store_cached(directory: &Path, key: &str, context: &str, row: &Value) -> Resu
     Ok(())
 }
 
+// Prefer the dependency graph so changing an embedded case does not invalidate
+// unrelated results. A cold scoped Cargo build may lack archives needed by
+// workspace-wide offline metadata; the complete verifier binary remains a
+// conservative identity of the code that actually performs verification.
+fn verifier_build_fingerprint(
+    build: &str,
+    read_executable: impl FnOnce() -> Option<Vec<u8>>,
+) -> Option<String> {
+    if build != "unavailable" {
+        return Some(build.to_owned());
+    }
+    Some(fingerprint(&[
+        b"celox-verification-executable-v1",
+        &read_executable()?,
+    ]))
+}
+
 #[allow(
     clippy::disallowed_methods,
     reason = "External-tool identity is read at the CLI boundary, not as simulator diagnostics"
@@ -430,10 +447,9 @@ fn context_fingerprint(
     version: &str,
     include_ignored: bool,
 ) -> Option<String> {
-    let build = env!("CELOX_VERIFICATION_BUILD_HASH");
-    if build == "unavailable" {
-        return None;
-    }
+    let build = verifier_build_fingerprint(env!("CELOX_VERIFICATION_BUILD_HASH"), || {
+        std::fs::read(std::env::current_exe().ok()?).ok()
+    })?;
     let tools: &[&str] = match tool {
         Tool::Verilator => &["verilator", "verilator_bin", "make", "c++", "timeout"],
         Tool::Icarus => &["iverilog", "vvp", "iverilog-vpi", "c++", "timeout"],
@@ -890,6 +906,41 @@ mod script_failure_tests {
 #[cfg(test)]
 mod incremental_tests {
     use super::*;
+
+    #[test]
+    fn cold_build_identity_reuses_only_the_same_complete_verifier() {
+        let original = verifier_build_fingerprint("unavailable", || Some(b"verifier one".to_vec()));
+        assert!(original.is_some());
+        assert_eq!(
+            original,
+            verifier_build_fingerprint("unavailable", || Some(b"verifier one".to_vec()))
+        );
+        assert_ne!(
+            original,
+            verifier_build_fingerprint("unavailable", || Some(b"verifier two".to_vec()))
+        );
+        let directory = tempfile::tempdir().unwrap();
+        let original = original.unwrap();
+        let row = json!({"name": "case", "status": "passed", "case_fingerprint": "case-key"});
+        store_cached(directory.path(), "case-key", &original, &row).unwrap();
+        let path = directory.path().join("case-key.json");
+        assert_eq!(read_cached(&path, Some(&original), "case"), Some(row));
+        let changed =
+            verifier_build_fingerprint("unavailable", || Some(b"verifier two".to_vec())).unwrap();
+        assert!(read_cached(&path, Some(&changed), "case").is_none());
+        assert!(read_cached(&path, None, "case").is_none());
+        assert_eq!(verifier_build_fingerprint("unavailable", || None), None);
+    }
+
+    #[test]
+    fn dependency_graph_identity_does_not_read_the_embedded_case_binary() {
+        assert_eq!(
+            verifier_build_fingerprint("complete graph", || panic!(
+                "should not read the executable"
+            )),
+            Some("complete graph".to_string())
+        );
+    }
 
     #[test]
     fn local_reuse_is_default_and_ci_can_require_fresh_execution() {

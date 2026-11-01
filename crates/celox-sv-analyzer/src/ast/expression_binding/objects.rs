@@ -14,10 +14,17 @@ use crate::system_functions::ObjectOp;
 /// The class `name`, laid out.
 pub(in crate::ast) fn class(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     name: &str,
 ) -> Converted<Rc<Class>> {
-    classes::class(tree, name, &dimensions.const_env, &dimensions.type_aliases)
+    classes::shared_class(
+        tree,
+        name,
+        &dimensions.const_env,
+        &dimensions.type_aliases,
+        session,
+    )
 }
 
 /// The class of native expression `id` when it is an object handle, judged
@@ -25,97 +32,19 @@ pub(in crate::ast) fn class(
 /// handles, or a handle property.
 pub(in crate::ast) fn native_class(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Option<String> {
-    let id = ungroup(id, native);
-    if let ExprKind::Call { expression, .. } = &native.expression(id).kind
-        && let ExprKind::Member {
-            expression: base,
-            separator,
-            name,
-        } = &native.expression(*expression).kind
-        && separator == "::"
-        && name.spelling == "self"
-        && super::super::processes::scope(tree, *base, native, dimensions)
-    {
-        return Some(super::super::processes::CLASS.to_owned());
-    }
-    // A class handle member of an unpacked structure variable.
-    if let Some(name) = unpacked_structs::native_member(ungroup(id, native), native, dimensions) {
-        return dimensions.get(&name)?.class.clone();
-    }
-    // A class handle member of a container element of unpacked structure type.
-    if let Ok(Some((ty, _))) = containers::element_member(id, native, tree, dimensions) {
-        return ty.class().map(str::to_owned);
-    }
-    let expression = native.expression(ungroup(id, native));
-    if let ExprKind::Select {
-        expression,
-        dimension,
-    } = &expression.kind
-        && matches!(dimension.kind, celox_sv_syntax::DimensionKind::Index(_))
-    {
-        if let Some(ty) = containers::native_type(*expression, native, tree, dimensions)
-            .ok()
-            .flatten()
-        {
-            return ty.element.class().map(str::to_owned);
-        }
-        let ExprKind::Name(name) = &native.expression(ungroup(*expression, native)).kind else {
-            return None;
-        };
-        let ty = dimensions.get(&instances::normalize_identifier(&name.spelling))?;
-        return ty
-            .container
-            .as_ref()
-            .and_then(|ty| ty.element.class().map(str::to_owned))
-            .or_else(|| ty.class.clone().filter(|_| !ty.unpacked.is_empty()));
-    }
-    if let ExprKind::Name(name) = &expression.kind {
-        let name = instances::normalize_identifier(&name.spelling);
-        if let Some(ty) = dimensions.get(&name) {
-            return ty.class.clone();
-        }
-        if name == "super" {
-            return super_class(tree, dimensions);
-        }
-    }
-    // The receiver of `h.p` is resolved once for both kinds of property, so
-    // a chain `a.b.c` takes one walk.
-    if let ExprKind::Member {
-        expression: receiver,
-        separator,
-        name,
-    } = &expression.kind
-        && separator == "."
-        // Otherwise a member of a property of unpacked structure type, found
-        // as a property below.
-        && let Some(owner) = native_class(tree, *receiver, native, dimensions)
-    {
-        let member = instances::normalize_identifier(&name.spelling);
-        let receiver = (!is_super(*receiver, native)).then_some(*receiver);
-        if let Some((property, _)) =
-            property_in(tree, dimensions, &owner, &member, receiver).ok()?
-        {
-            return property.r#type.class().map(str::to_owned);
-        }
-        return class(tree, dimensions, &owner)
-            .ok()?
-            .static_property(&member)
-            .and_then(|property| property.r#type.class().map(str::to_owned));
-    }
-    if let Some(class) = static_property_class(tree, id, native, dimensions).ok()? {
-        return Some(class);
-    }
-    let (property, _) = property(tree, id, native, dimensions).ok()??;
-    property.r#type.class().map(str::to_owned)
+    let ty = expression_types::type_of(tree, session, id, native, dimensions)?;
+    expression_types::class_name(&session.types, ty)
 }
 
 /// Access depends on the lexical class, not the class of the receiver (8.18).
 pub(in crate::ast) fn check_access(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     owner: &str,
     name: &str,
@@ -128,8 +57,9 @@ pub(in crate::ast) fn check_access(
     if let Some(scope) = dimensions.class_scope.as_deref() {
         if scope == owner
             || (!local
-                && class(tree, dimensions, scope)?.derives_from(
+                && class(tree, session, dimensions, scope)?.derives_from(
                     tree,
+                    session,
                     owner,
                     &dimensions.const_env,
                     &dimensions.type_aliases,
@@ -153,9 +83,13 @@ pub(in crate::ast) fn scope_class(dimensions: &PackedDimensions) -> Option<Strin
 
 /// The base of the scope class, which `super` refers to inside a method that
 /// has an object (IEEE 1800-2023 8.15).
-fn super_class(tree: &AnalysisContext<'_>, dimensions: &PackedDimensions) -> Option<String> {
+pub(in crate::ast) fn super_class(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    session: &mut Session,
+) -> Option<String> {
     dimensions.get(THIS)?;
-    class(tree, dimensions, &scope_class(dimensions)?)
+    class(tree, session, dimensions, &scope_class(dimensions)?)
         .ok()?
         .base
         .clone()
@@ -163,7 +97,7 @@ fn super_class(tree: &AnalysisContext<'_>, dimensions: &PackedDimensions) -> Opt
 
 /// Whether native expression `id` is `super`, which passes the enclosing
 /// method's `this`.
-fn is_super(id: ExprId, native: &Declarations) -> bool {
+pub(in crate::ast) fn is_super(id: ExprId, native: &Declarations) -> bool {
     matches!(&native.expression(ungroup(id, native)).kind,
         ExprKind::Name(name) if name.spelling == "super")
 }
@@ -173,6 +107,7 @@ fn is_super(id: ExprId, native: &Declarations) -> bool {
 /// defaults of a parameterized class make (IEEE 1800-2023 8.25.1).
 pub(in crate::ast) fn named_class(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -185,7 +120,20 @@ pub(in crate::ast) fn named_class(
             name,
         } if separator == "::" => {
             let ExprKind::Name(package) = &native.expression(*expression).kind else {
-                return Ok(None);
+                // A type of a class scope that is itself qualified or
+                // specialized, `p::C::T` or `C#(int)::T` (8.23).
+                return Ok(
+                    match named_class(tree, session, *expression, native, dimensions)? {
+                        Some(scope_class) => classes::specializations::member_type(
+                            tree,
+                            session,
+                            &scope_class,
+                            &instances::normalize_identifier(&name.spelling),
+                        )
+                        .and_then(|ty| ty.class().map(str::to_owned)),
+                        None => None,
+                    },
+                );
             };
             let scope_name = instances::normalize_identifier(&package.spelling);
             let member_name = instances::normalize_identifier(&name.spelling);
@@ -193,14 +141,14 @@ pub(in crate::ast) fn named_class(
                 .type_aliases
                 .get(&scope_name)
                 .and_then(|ty| ty.class().map(str::to_owned))
-                .or_else(|| classes::resolve(tree, &scope_name))
+                .or_else(|| classes::resolve(tree, session, &scope_name))
                 && let Some(ty) =
-                    classes::specializations::member_type(tree, &scope_class, &member_name)
+                    classes::specializations::member_type(tree, session, &scope_class, &member_name)
                 && let Some(class) = ty.class()
             {
                 return Ok(Some(class.to_owned()));
             }
-            let class = scope::qualified_name(&tree.state, &scope_name, &member_name);
+            let class = scope::qualified_name(tree, &scope_name, &member_name);
             // A typedef of the package may name a class or a specialization.
             if let Some(aliased) = dimensions
                 .type_aliases
@@ -209,13 +157,13 @@ pub(in crate::ast) fn named_class(
             {
                 return Ok(Some(aliased));
             }
-            if classes::handle_type(tree, &class).is_some() {
+            if classes::handle_type(tree, session, &class).is_some() {
                 return Ok(Some(class));
             }
             // Inside its package, `p::C` is a name of the package itself,
             // whose classes are declared under their qualified names.
-            return Ok(classes::resolve(tree, &class)
-                .filter(|class| classes::handle_type(tree, class).is_some()));
+            return Ok(classes::resolve(tree, session, &class)
+                .filter(|class| classes::handle_type(tree, session, class).is_some()));
         }
         ExprKind::Name(name) => (instances::normalize_identifier(&name.spelling), None),
         ExprKind::Parameterized {
@@ -258,7 +206,7 @@ pub(in crate::ast) fn named_class(
             .get(&classes::specializations::scope_key(&name))
             .or_else(|| {
                 // A class of a package is declared under its qualified name.
-                let class = classes::resolve(tree, &name)?;
+                let class = classes::resolve(tree, session, &name)?;
                 dimensions
                     .type_aliases
                     .get(&classes::specializations::scope_key(&class))
@@ -268,10 +216,10 @@ pub(in crate::ast) fn named_class(
     {
         return Ok(Some(class));
     }
-    let Some(name) = classes::resolve(tree, &name) else {
+    let Some(name) = classes::resolve(tree, session, &name) else {
         return Ok(None);
     };
-    if !classes::is_parameterized(tree, &name) {
+    if !classes::is_parameterized(tree, session, &name) {
         if arguments.is_some_and(|arguments| !arguments.is_empty()) {
             return Err(unsupported(format!(
                 "parameter value assignment of class `{name}`, which has no parameters"
@@ -284,13 +232,14 @@ pub(in crate::ast) fn named_class(
     let Some(arguments) = arguments else {
         return Err(AnalyzerError::UnspecializedClassScope { class: name });
     };
-    classes::specializations::specialize(tree, &name, arguments, dimensions).map(Some)
+    classes::specializations::specialize(tree, session, &name, arguments, dimensions).map(Some)
 }
 
 /// The value of the class parameter that native expression `id` names,
 /// `h.p` or `C::p` (IEEE 1800-2023 8.25), as a literal.
 pub(in crate::ast) fn class_parameter(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -304,13 +253,13 @@ pub(in crate::ast) fn class_parameter(
         return Ok(None);
     };
     let class = match separator.as_str() {
-        "." => native_class(tree, *expression, native, dimensions),
-        "::" => named_class(tree, *expression, native, dimensions)?,
+        "." => native_class(tree, session, *expression, native, dimensions),
+        "::" => named_class(tree, session, *expression, native, dimensions)?,
         _ => None,
     };
     Ok(class.and_then(|class| {
         classes::specializations::parameter(
-            tree,
+            session,
             &class,
             &instances::normalize_identifier(&name.spelling),
         )
@@ -322,10 +271,26 @@ pub(in crate::ast) fn class_parameter(
 /// method of the class is renamed to it where the method's scope begins.
 pub(in crate::ast) fn static_property(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
+    Ok(
+        static_property_declaration(tree, session, id, native, dimensions)?
+            .map(|property| property.variable),
+    )
+}
+
+/// The static property that native expression `id` names, `h.p` or `C::p`,
+/// as its class declares it.
+pub(in crate::ast) fn static_property_declaration(
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+) -> Converted<Option<classes::StaticProperty>> {
     let ExprKind::Member {
         expression,
         separator,
@@ -335,40 +300,55 @@ pub(in crate::ast) fn static_property(
         return Ok(None);
     };
     let class_name = match separator.as_str() {
-        "." => native_class(tree, *expression, native, dimensions),
-        "::" => named_class(tree, *expression, native, dimensions)?,
+        "." => native_class(tree, session, *expression, native, dimensions),
+        "::" => named_class(tree, session, *expression, native, dimensions)?,
         _ => None,
     };
     let Some(class_name) = class_name else {
         return Ok(None);
     };
-    if class_name == super::super::processes::CLASS {
+    if classes::builtin(&class_name) {
         return Ok(None);
     }
-    let class = class(tree, dimensions, &class_name)?;
+    let class = class(tree, session, dimensions, &class_name)?;
     let Some(property) = class.static_property(&instances::normalize_identifier(&name.spelling))
     else {
         return Ok(None);
     };
     check_access(
         tree,
+        session,
         dimensions,
         &property.owner,
         &property.name,
         property.local,
         property.protected,
     )?;
-    Ok(Some(property.variable.clone()))
+    Ok(Some(property.clone()))
 }
 
 /// The class of the handle that the static property native expression `id`
 /// names holds, `h.p` or `C::p`.
 fn static_property_class(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<String>> {
+    Ok(static_property_type(tree, id, native, dimensions, session)?
+        .and_then(|ty| ty.class().map(str::to_owned)))
+}
+
+/// The type of the static property that native expression `id` names,
+/// `h.p` or `C::p`.
+pub(in crate::ast) fn static_property_type(
+    tree: &AnalysisContext<'_>,
+    id: ExprId,
+    native: &Declarations,
+    dimensions: &PackedDimensions,
+    session: &mut Session,
+) -> Converted<Option<Type>> {
     let ExprKind::Member {
         expression,
         separator,
@@ -378,16 +358,37 @@ fn static_property_class(
         return Ok(None);
     };
     let class_name = match separator.as_str() {
-        "." => native_class(tree, *expression, native, dimensions),
-        "::" => named_class(tree, *expression, native, dimensions)?,
+        "." => native_class(tree, session, *expression, native, dimensions),
+        "::" => named_class(tree, session, *expression, native, dimensions)?,
         _ => None,
     };
     let Some(class_name) = class_name else {
         return Ok(None);
     };
-    Ok(class(tree, dimensions, &class_name)?
+    Ok(class(tree, session, dimensions, &class_name)?
         .static_property(&instances::normalize_identifier(&name.spelling))
-        .and_then(|property| property.r#type.class().map(str::to_owned)))
+        .map(|property| property.r#type.clone()))
+}
+
+/// The type of property `member` of class `owner`, an instance property
+/// read through `receiver` or a static one.
+pub(in crate::ast) fn member_type(
+    tree: &AnalysisContext<'_>,
+    dimensions: &PackedDimensions,
+    owner: &str,
+    member: &str,
+    receiver: Option<ExprId>,
+    session: &mut Session,
+) -> Option<Type> {
+    if let Some((property, _)) =
+        property_in(tree, session, dimensions, owner, member, receiver).ok()?
+    {
+        return Some(property.r#type);
+    }
+    class(tree, session, dimensions, owner)
+        .ok()?
+        .static_property(member)
+        .map(|property| property.r#type.clone())
 }
 
 /// The property that native expression `id` names, `h.p` or an unqualified
@@ -395,36 +396,39 @@ fn static_property_class(
 /// the handle, or `None` for the enclosing method's `this`.
 pub(in crate::ast) fn property(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<(classes::Property, Option<ExprId>)>> {
-    let Some((class, name, receiver)) = member_chain(tree, id, native, dimensions)? else {
+    let Some((class, name, receiver)) = member_chain(tree, session, id, native, dimensions)? else {
         return Ok(None);
     };
-    property_of(tree, dimensions, &class, &name, receiver)
+    property_of(tree, session, dimensions, &class, &name, receiver)
 }
 
 /// The instance property `name` of class `class_name`, read through
 /// `receiver` as [`property`] returns it.
 fn property_in(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     class_name: &str,
     name: &str,
     receiver: Option<ExprId>,
 ) -> Converted<Option<(classes::Property, Option<ExprId>)>> {
-    if class_name == super::super::processes::CLASS {
+    if classes::builtin(class_name) {
         return Ok(None);
     }
-    let class = class(tree, dimensions, class_name)?;
-    property_of(tree, dimensions, &class, name, receiver)
+    let class = class(tree, session, dimensions, class_name)?;
+    property_of(tree, session, dimensions, &class, name, receiver)
 }
 
 /// The instance property `name` of `class`, read through `receiver` as
 /// [`property`] returns it.
 fn property_of(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     class: &Class,
     name: &str,
@@ -434,6 +438,7 @@ fn property_of(
         if let Some(property) = class.static_property(name) {
             check_access(
                 tree,
+                session,
                 dimensions,
                 &property.owner,
                 &property.name,
@@ -445,6 +450,7 @@ fn property_of(
     };
     check_access(
         tree,
+        session,
         dimensions,
         &property.owner,
         &property.name,
@@ -464,11 +470,12 @@ fn property_of(
 /// expression `id` names, with the receiver as for [`property`].
 pub(in crate::ast) fn aggregate_property(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Option<(classes::AggregateProperty, Rc<Class>, Option<ExprId>)>> {
-    let Some((class, name, receiver)) = member_chain(tree, id, native, dimensions)? else {
+    let Some((class, name, receiver)) = member_chain(tree, session, id, native, dimensions)? else {
         return Ok(None);
     };
     let Some(aggregate) = class.aggregate(&name).cloned() else {
@@ -476,6 +483,7 @@ pub(in crate::ast) fn aggregate_property(
     };
     check_access(
         tree,
+        session,
         dimensions,
         &aggregate.owner,
         &aggregate.name,
@@ -528,6 +536,7 @@ pub(in crate::ast) fn aggregate_load(
 /// member of a property of unpacked structure type.
 fn member_chain(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -542,7 +551,7 @@ fn member_chain(
                 name,
             } if separator == "." => {
                 names.push(instances::normalize_identifier(&name.spelling));
-                if let Some(class) = native_class(tree, *expression, native, dimensions) {
+                if let Some(class) = native_class(tree, session, *expression, native, dimensions) {
                     break (
                         class,
                         (!is_super(*expression, native)).then_some(*expression),
@@ -565,12 +574,13 @@ fn member_chain(
         }
     };
     names.reverse();
-    // A process handle has no properties (IEEE 1800-2023 9.7).
-    if class_name == super::super::processes::CLASS {
+    // A process or event handle has no properties (IEEE 1800-2023 9.7,
+    // 15.5).
+    if classes::builtin(&class_name) {
         return Ok(None);
     }
     Ok(Some((
-        class(tree, dimensions, &class_name)?,
+        class(tree, session, dimensions, &class_name)?,
         names.join("."),
         receiver,
     )))
@@ -579,14 +589,21 @@ fn member_chain(
 /// The handle of the object that `receiver` of [`property`] refers to.
 pub(in crate::ast) fn receiver(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     receiver: Option<ExprId>,
     native: &Declarations,
     dimensions: &PackedDimensions,
 ) -> Converted<Expr> {
     match receiver {
-        Some(receiver) => bind_value(receiver, native, tree, dimensions, None),
+        Some(receiver) => bind_value(receiver, native, tree, session, dimensions, None),
         None => Ok(this()),
     }
+}
+
+/// The local a select of property `property` is written in: the property
+/// is read into it, the select assigned, and the local stored back.
+pub(in crate::ast) fn select_template(property: &classes::Property) -> String {
+    format!("$property_select${}${}", property.owner, property.name)
 }
 
 /// A read of property `property` of the object `handle`.
@@ -598,6 +615,7 @@ pub(in crate::ast) fn load(property: &classes::Property, handle: Expr) -> Expr {
 /// names one of its properties: a read through `this`.
 pub(in crate::ast) fn unqualified_property(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     name: &str,
 ) -> Converted<Option<Expr>> {
@@ -607,14 +625,15 @@ pub(in crate::ast) fn unqualified_property(
     let Some(class_name) = scope_class(dimensions) else {
         return Ok(None);
     };
-    if class_name == super::super::processes::CLASS {
+    if classes::builtin(&class_name) {
         return Ok(None);
     }
-    let class = class(tree, dimensions, &class_name)?;
+    let class = class(tree, session, dimensions, &class_name)?;
     let Some(property) = class.property(name) else {
         if let Some(property) = class.static_property(name) {
             check_access(
                 tree,
+                session,
                 dimensions,
                 &property.owner,
                 &property.name,
@@ -626,6 +645,7 @@ pub(in crate::ast) fn unqualified_property(
     };
     check_access(
         tree,
+        session,
         dimensions,
         &property.owner,
         &property.name,
@@ -659,6 +679,7 @@ pub(in crate::ast) enum Receiver {
 /// 1800-2023 8.15, 8.20).
 pub(in crate::ast) fn method(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -669,7 +690,8 @@ pub(in crate::ast) fn method(
             expression,
             separator,
             name,
-        } if separator == "." => match native_class(tree, *expression, native, dimensions) {
+        } if separator == "." => match native_class(tree, session, *expression, native, dimensions)
+        {
             Some(class) if is_super(*expression, native) => {
                 through_super = true;
                 (class, name, Receiver::This)
@@ -681,10 +703,12 @@ pub(in crate::ast) fn method(
             expression,
             separator,
             name,
-        } if separator == "::" => match named_class(tree, *expression, native, dimensions)? {
-            Some(class) => (class, name, Receiver::Static),
-            None => return Ok(None),
-        },
+        } if separator == "::" => {
+            match named_class(tree, session, *expression, native, dimensions)? {
+                Some(class) => (class, name, Receiver::Static),
+                None => return Ok(None),
+            }
+        }
         ExprKind::Name(name) => {
             let normalized = instances::normalize_identifier(&name.spelling);
             if dimensions.get(&normalized).is_some() {
@@ -697,10 +721,10 @@ pub(in crate::ast) fn method(
         }
         _ => return Ok(None),
     };
-    if class_name == super::super::processes::CLASS {
+    if classes::builtin(&class_name) {
         return Ok(None);
     }
-    let class = class(tree, dimensions, &class_name)?;
+    let class = class(tree, session, dimensions, &class_name)?;
     let method_name = instances::normalize_identifier(&method_name.spelling);
     if method_name == "new" {
         return match receiver {
@@ -733,6 +757,7 @@ pub(in crate::ast) fn method(
     };
     check_access(
         tree,
+        session,
         dimensions,
         &method.owner,
         &method.name,
@@ -779,16 +804,17 @@ pub(in crate::ast) fn method(
 /// binding (IEEE 1800-2023 8.16, 8.26.5).
 pub(in crate::ast) fn check_assignment(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
     target: &str,
     context: impl FnOnce() -> String,
 ) -> Converted<()> {
-    let Some(source) = native_class(tree, id, native, dimensions) else {
+    let Some(source) = native_class(tree, session, id, native, dimensions) else {
         return Ok(());
     };
-    if derives_from(tree, dimensions, &source, target)? {
+    if derives_from(tree, session, dimensions, &source, target)? {
         return Ok(());
     }
     Err(AnalyzerError::IncompatibleClassHandle {
@@ -801,6 +827,7 @@ pub(in crate::ast) fn check_assignment(
 /// Whether class `class_name` derives from or implements `ancestor`.
 fn derives_from(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     class_name: &str,
     ancestor: &str,
@@ -808,11 +835,12 @@ fn derives_from(
     if class_name == ancestor {
         return Ok(true);
     }
-    if class_name == super::super::processes::CLASS || ancestor == super::super::processes::CLASS {
+    if classes::builtin(class_name) || classes::builtin(ancestor) {
         return Ok(false);
     }
-    Ok(class(tree, dimensions, class_name)?.derives_from(
+    Ok(class(tree, session, dimensions, class_name)?.derives_from(
         tree,
+        session,
         ancestor,
         &dimensions.const_env,
         &dimensions.type_aliases,
@@ -838,6 +866,7 @@ pub(in crate::ast) enum Cast {
 /// array element of a class handle type.
 pub(in crate::ast) fn cast(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     arguments: &[celox_sv_syntax::Argument],
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -853,20 +882,20 @@ pub(in crate::ast) fn cast(
     ) else {
         return Ok(None);
     };
-    let Some(target) = native_class(tree, destination, native, dimensions) else {
+    let Some(target) = native_class(tree, session, destination, native, dimensions) else {
         return Ok(None);
     };
-    if property(tree, destination, native, dimensions)?.is_some() {
+    if property(tree, session, destination, native, dimensions)?.is_some() {
         return Err(unsupported("`$cast` to a class property"));
     }
-    class(tree, dimensions, &target)?;
+    class(tree, session, dimensions, &target)?;
     // The source's class may be a base of the destination's, or an interface
     // class, whose object the call checks; any other class's cannot be
     // assigned (8.16).
-    if let Some(source_class) = native_class(tree, source, native, dimensions)
-        && !derives_from(tree, dimensions, &source_class, &target)?
-        && !derives_from(tree, dimensions, &target, &source_class)?
-        && !class(tree, dimensions, &source_class)?.is_interface
+    if let Some(source_class) = native_class(tree, session, source, native, dimensions)
+        && !derives_from(tree, session, dimensions, &source_class, &target)?
+        && !derives_from(tree, session, dimensions, &target, &source_class)?
+        && !class(tree, session, dimensions, &source_class)?.is_interface
     {
         return Ok(Some(Cast::Fails));
     }
@@ -889,6 +918,7 @@ pub(in crate::ast) fn this() -> Expr {
 /// it and returns it.
 pub(in crate::ast) fn constructor(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -898,27 +928,27 @@ pub(in crate::ast) fn constructor(
     // of its class; handles are copied, not the objects they refer to (IEEE
     // 1800-2023 8.12).
     if let ExprKind::Copy(source) = &native.expression(ungroup(id, native)).kind {
-        if class_name == super::super::processes::CLASS {
-            return Err(unsupported("constructing a process with new"));
+        if classes::builtin(class_name) {
+            return Err(unsupported("copying a process or event with new"));
         }
 
-        let source_class = match native_class(tree, *source, native, dimensions) {
+        let source_class = match native_class(tree, session, *source, native, dimensions) {
             Some(class) => Some(class),
-            None => static_property_class(tree, *source, native, dimensions)?,
+            None => static_property_class(tree, session, *source, native, dimensions)?,
         };
         let Some(source_class) = source_class else {
             return Err(unsupported(
                 "shallow copy of a value that is not a class handle",
             ));
         };
-        if !derives_from(tree, dimensions, &source_class, class_name)? {
+        if !derives_from(tree, session, dimensions, &source_class, class_name)? {
             return Err(AnalyzerError::IncompatibleClassHandle {
                 context: "shallow copy".to_owned(),
                 actual: source_class,
                 target: class_name.to_owned(),
             });
         }
-        let handle = bind_value(*source, native, tree, dimensions, None)?;
+        let handle = bind_value(*source, native, tree, session, dimensions, None)?;
         return Ok(Some(classes::object_call(ObjectOp::Copy, vec![handle])));
     }
     let (callee, arguments): (ExprId, &[celox_sv_syntax::Argument]) =
@@ -936,9 +966,9 @@ pub(in crate::ast) fn constructor(
             separator,
             name,
         } if separator == "::" && name.spelling == "new" => {
-            match named_class(tree, *expression, native, dimensions)? {
+            match named_class(tree, session, *expression, native, dimensions)? {
                 Some(class) => {
-                    if !derives_from(tree, dimensions, &class, class_name)? {
+                    if !derives_from(tree, session, dimensions, &class, class_name)? {
                         return Err(AnalyzerError::IncompatibleClassHandle {
                             context: format!("`{class}::new`"),
                             actual: class,
@@ -952,13 +982,29 @@ pub(in crate::ast) fn constructor(
         }
         _ => return Ok(None),
     };
-    if class_name == super::super::processes::CLASS {
-        return Err(unsupported("constructing a process with new"));
+    if class_name == super::super::semaphores::CLASS {
+        return super::super::semaphores::new(tree, session, arguments, native, dimensions)
+            .map(Some);
     }
-    let class = class(tree, dimensions, &class_name)?;
+    if super::super::mailboxes::is_class(&class_name) {
+        return super::super::mailboxes::new(
+            tree,
+            session,
+            arguments,
+            native,
+            dimensions,
+            &class_name,
+        )
+        .map(Some);
+    }
+    if classes::builtin(&class_name) {
+        return Err(unsupported("constructing a process or event with new"));
+    }
+    let class = class(tree, session, dimensions, &class_name)?;
     if let Some(method) = class.method("new") {
         check_access(
             tree,
+            session,
             dimensions,
             &method.owner,
             &method.name,
@@ -973,15 +1019,30 @@ pub(in crate::ast) fn constructor(
     }
     let mut args = vec![Some(class.allocation())];
     let (actuals, order) = class.constructor_arguments(arguments)?;
-    for actual in actuals {
+    // The object is the first formal.
+    let name = Class::subroutine_name(&class_name, "new");
+    for (position, actual) in actuals.into_iter().enumerate() {
+        if let Some(value) = actual {
+            direct::check_argument(
+                &name,
+                position + 1,
+                position + 1,
+                value,
+                native,
+                tree,
+                dimensions,
+                session,
+            )?;
+        }
+        let target = super::direct::copied_in_target(dimensions, &name, position + 1);
         args.push(
             actual
-                .map(|value| bind_value(value, native, tree, dimensions, None))
+                .map(|value| bind_value(value, native, tree, session, dimensions, target))
                 .transpose()?,
         );
     }
     Ok(Some(Expr::Call {
-        callee: Callee::Subroutine(Class::subroutine_name(&class_name, "new")),
+        callee: Callee::Subroutine(name),
         args,
         // The allocation is passed first; the actuals are evaluated in the
         // order they are written (13.5.4).
@@ -995,13 +1056,14 @@ pub(in crate::ast) fn constructor(
 /// the caller's scope (18.11). Bit zero distinguishes an explicit empty set.
 pub(super) fn random_selection(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     name: &str,
     arguments: &[celox_sv_syntax::Argument],
     native: &Declarations,
 ) -> Converted<Expr> {
     let owner = name.strip_suffix("::randomize").expect("randomize method");
-    let class = class(tree, dimensions, owner)?;
+    let class = class(tree, session, dimensions, owner)?;
     let mut bits = vec!['0'; class.properties.len() + 1];
     if !arguments.is_empty() {
         bits[0] = '1';
@@ -1025,7 +1087,7 @@ pub(super) fn random_selection(
                         ))
                     })?;
                 let property = &class.properties[index];
-                check_random_access(tree, dimensions, property)?;
+                check_random_access(tree, session, dimensions, property)?;
                 if property.constant {
                     return Err(unsupported("randomize argument is a const property"));
                 }
@@ -1035,6 +1097,7 @@ pub(super) fn random_selection(
                     return Err(unsupported("randomization of a 4-state class property"));
                 }
                 if property.field.handle.is_some()
+                    || property.r#type.holds_chandle()
                     || (property.r#type.is_enum && property.r#type.enum_domain.is_none())
                     || (property.randc && property.cyclic_domain_size().is_none())
                 {
@@ -1061,6 +1124,7 @@ pub(super) fn random_selection(
 /// Constraint block modes are independent of member rand_mode and inline constraints (18.9).
 pub(in crate::ast) fn constraint_mode_call(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -1079,11 +1143,11 @@ pub(in crate::ast) fn constraint_mode_call(
             separator,
             name,
         } if separator == "." && name.spelling == "constraint_mode" => {
-            if let Some(owner) = native_class(tree, *expression, native, dimensions) {
+            if let Some(owner) = native_class(tree, session, *expression, native, dimensions) {
                 (
                     owner,
                     None,
-                    receiver(tree, Some(*expression), native, dimensions)?,
+                    receiver(tree, session, Some(*expression), native, dimensions)?,
                 )
             } else {
                 match &native.expression(ungroup(*expression, native)).kind {
@@ -1092,13 +1156,14 @@ pub(in crate::ast) fn constraint_mode_call(
                         separator,
                         name,
                     } if separator == "." => {
-                        let Some(owner) = native_class(tree, *object, native, dimensions) else {
+                        let Some(owner) = native_class(tree, session, *object, native, dimensions)
+                        else {
                             return Ok(None);
                         };
                         (
                             owner,
                             Some(name.spelling.clone()),
-                            receiver(tree, Some(*object), native, dimensions)?,
+                            receiver(tree, session, Some(*object), native, dimensions)?,
                         )
                     }
                     ExprKind::Name(name)
@@ -1130,7 +1195,7 @@ pub(in crate::ast) fn constraint_mode_call(
         }
         _ => return Ok(None),
     };
-    let class = class(tree, dimensions, &owner)?;
+    let class = class(tree, session, dimensions, &owner)?;
     if class.constraints.iter().any(|(_, block)| {
         block
             .as_ref()
@@ -1168,7 +1233,14 @@ pub(in crate::ast) fn constraint_mode_call(
             "constraint_mode setter requires one on_off argument",
         ));
     }
-    let enabled = bind_value(args[0].value.unwrap(), native, tree, dimensions, None)?;
+    let enabled = bind_value(
+        args[0].value.unwrap(),
+        native,
+        tree,
+        session,
+        dimensions,
+        None,
+    )?;
     Ok(Some(classes::object_call(
         ObjectOp::ConstraintModeSet(index),
         vec![handle, enabled],
@@ -1179,6 +1251,7 @@ pub(in crate::ast) fn constraint_mode_call(
 /// A getter requires one random property; only the setter accepts an object.
 pub(in crate::ast) fn rand_mode_call(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -1197,24 +1270,25 @@ pub(in crate::ast) fn rand_mode_call(
             separator,
             name,
         } if separator == "." && name.spelling == "rand_mode" => {
-            let property_target = property(tree, *expression, native, dimensions)?;
+            let property_target = property(tree, session, *expression, native, dimensions)?;
             if let Some((property, object)) = property_target.filter(|(property, _)| {
                 property.rand || property.randc || property.r#type.class().is_none()
             }) {
-                check_random_access(tree, dimensions, &property)?;
+                check_random_access(tree, session, dimensions, &property)?;
                 if !property.rand && !property.randc {
                     return Err(unsupported("rand_mode requires a rand or randc property"));
                 }
                 (
                     Some(property),
                     None,
-                    receiver(tree, object, native, dimensions)?,
+                    receiver(tree, session, object, native, dimensions)?,
                 )
-            } else if let Some(owner) = native_class(tree, *expression, native, dimensions) {
+            } else if let Some(owner) = native_class(tree, session, *expression, native, dimensions)
+            {
                 (
                     None,
                     Some(owner),
-                    bind_value(*expression, native, tree, dimensions, None)?,
+                    bind_value(*expression, native, tree, session, dimensions, None)?,
                 )
             } else {
                 return Err(unsupported(
@@ -1251,7 +1325,14 @@ pub(in crate::ast) fn rand_mode_call(
     if args.len() != 1 || args[0].name.is_some() || args[0].value.is_none() {
         return Err(unsupported("rand_mode setter requires one on_off argument"));
     }
-    let enabled = bind_value(args[0].value.unwrap(), native, tree, dimensions, None)?;
+    let enabled = bind_value(
+        args[0].value.unwrap(),
+        native,
+        tree,
+        session,
+        dimensions,
+        None,
+    )?;
     Ok(Some(match property {
         Some(property) => classes::object_call(
             ObjectOp::ModeSet(property.field.offset),
@@ -1267,11 +1348,13 @@ pub(in crate::ast) fn rand_mode_call(
 
 fn check_random_access(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     dimensions: &PackedDimensions,
     property: &classes::Property,
 ) -> Converted<()> {
     check_access(
         tree,
+        session,
         dimensions,
         &property.owner,
         &property.name,
@@ -1282,6 +1365,7 @@ fn check_random_access(
 
 pub(super) fn randomize_with(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     expression: ExprId,
     constraints: Option<&[ExprId]>,
     native: &Declarations,
@@ -1294,11 +1378,11 @@ pub(super) fn randomize_with(
         } => (*expression, arguments.as_slice()),
         _ => (expression, &[][..]),
     };
-    let (method_name, _, receiver) = method(tree, callee, native, dimensions)?
+    let (method_name, _, receiver) = method(tree, session, callee, native, dimensions)?
         .filter(|(name, _, _)| name.ends_with("::randomize"))
         .ok_or_else(|| unsupported("inline constraints require class randomize"))?;
     let owner = method_name.strip_suffix("::randomize").unwrap();
-    let class = class(tree, dimensions, owner)?;
+    let class = class(tree, session, dimensions, owner)?;
     // Inline constraints need the solver even on otherwise unconstrained classes.
     class.constraint_program()?;
     let constraint_ids = constraints.ok_or_else(|| unsupported("inline constraint form"))?;
@@ -1359,6 +1443,11 @@ pub(super) fn randomize_with(
         let variable = dimensions
             .get(&name)
             .ok_or_else(|| unsupported(format!("inline local variable `{name}`")))?;
+        if variable.chandle {
+            return Err(AnalyzerError::IllegalChandleUse {
+                detail: "a chandle in a constraint".into(),
+            });
+        }
         if variable.real
             || variable.string
             || variable.class.is_some()
@@ -1371,7 +1460,7 @@ pub(super) fn randomize_with(
             ));
         }
         let value = Expr::Ident(name);
-        let width = expr_static_width(&tree.state, &value, dimensions)
+        let width = expr_static_width(tree, &value, dimensions)
             .filter(|width| (1..=64).contains(width))
             .ok_or_else(|| unsupported("inline input width"))?;
         let mut ty = classes::unsigned_type(width);
@@ -1386,6 +1475,7 @@ pub(super) fn randomize_with(
             classes::constraints::bind_inputs(
                 id,
                 tree,
+                session,
                 &class.properties,
                 &dimensions.const_env,
                 &inputs,
@@ -1393,14 +1483,14 @@ pub(super) fn randomize_with(
             .map_err(|reason| unsupported(format!("inline constraints: {reason}")))
         })
         .collect::<Converted<Vec<_>>>()?;
-    let selection = random_selection(tree, dimensions, &method_name, arguments, native)?;
+    let selection = random_selection(tree, session, dimensions, &method_name, arguments, native)?;
     let handle = match receiver {
-        Receiver::Handle(id) => bind_value(id, native, tree, dimensions, None)?,
+        Receiver::Handle(id) => bind_value(id, native, tree, session, dimensions, None)?,
         Receiver::This => this(),
         Receiver::Static => return Err(unsupported("inline randomize object receiver")),
     };
-    let key = tree.state.next_call_site.get();
-    tree.state.next_call_site.set(key + 1);
+    let key = session.next_call_site;
+    session.next_call_site = key + 1;
     let inline = classes::constraints::Inline {
         key,
         class,
@@ -1420,7 +1510,7 @@ pub(super) fn randomize_with(
             arg_order: Vec::new(),
         }
     };
-    tree.state.inline_randomizations.borrow_mut().push(inline);
+    session.inline_randomizations.push(inline);
     Ok(Expr::Call {
         callee: Callee::Subroutine(name),
         args: [vec![Some(handle), Some(selection)], input_values].concat(),
@@ -1432,6 +1522,7 @@ pub(super) fn randomize_with(
 /// `id` names (`h.m`, `C::m`, or unqualified inside a method), when known.
 pub(in crate::ast) fn method_result(
     tree: &AnalysisContext<'_>,
+    session: &mut Session,
     id: ExprId,
     native: &Declarations,
     dimensions: &PackedDimensions,
@@ -1442,8 +1533,14 @@ pub(in crate::ast) fn method_result(
             separator,
             name,
         } => match separator.as_str() {
-            "." => (native_class(tree, *expression, native, dimensions), name),
-            "::" => (named_class(tree, *expression, native, dimensions)?, name),
+            "." => (
+                native_class(tree, session, *expression, native, dimensions),
+                name,
+            ),
+            "::" => (
+                named_class(tree, session, *expression, native, dimensions)?,
+                name,
+            ),
             _ => return Ok(None),
         },
         ExprKind::Name(name)
@@ -1455,10 +1552,10 @@ pub(in crate::ast) fn method_result(
         }
         _ => return Ok(None),
     };
-    let Some(class_name) = class_name.filter(|name| name != super::super::processes::CLASS) else {
+    let Some(class_name) = class_name.filter(|name| !classes::builtin(name)) else {
         return Ok(None);
     };
-    Ok(class(tree, dimensions, &class_name)?
+    Ok(class(tree, session, dimensions, &class_name)?
         .method(&instances::normalize_identifier(&name.spelling))
         .and_then(|method| method.result.clone().flatten()))
 }

@@ -2,19 +2,20 @@
   "cases": [
     {
       "category": "Sequential",
-      "detail": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
+      "detail": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases. The sampled-history case similarly skips a newly enabled evaluation after NBA (passed=1 instead of 2); pinned xezim 0.11.4 gives passed=2, failed=1.",
       "expectation": "Simulation",
       "known_issue": {
+        "id": "sv_verilator_concurrent_regions",
         "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases. The sampled-history case similarly skips a newly enabled evaluation after NBA (passed=1 instead of 2); pinned xezim 0.11.4 gives passed=2, failed=1.",
+        "upstream": [],
         "evidence": [
+          "verification/repros/sv_sampled_history.json",
           "verification/repros/sv_concurrent_regions.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
-        "id": "sv_verilator_concurrent_regions",
-        "observed_version": "Verilator 5.052",
-        "phase": "execute",
-        "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
-        "upstream": []
+        ]
       },
       "name": "concurrent_assertions::disable_iff_after_nba",
       "phase": "skip",
@@ -25,19 +26,68 @@
     },
     {
       "category": "Sequential",
-      "detail": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
+      "detail": "Verilator 5.052 rejects the third (gate) argument of $past: Unsupported: $past expr2 and/or clock arguments. IEEE 1800-2023 16.9.3 permits this gating expression. Pinned xezim 0.11.4 and Celox pass the unchanged case.",
       "expectation": "Simulation",
       "known_issue": {
-        "category": "simulator_disagreement",
+        "id": "sv_verilator_gated_past",
+        "category": "simulator_unsupported",
+        "phase": "compile",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 rejects the third (gate) argument of $past: Unsupported: $past expr2 and/or clock arguments. IEEE 1800-2023 16.9.3 permits this gating expression. Pinned xezim 0.11.4 and Celox pass the unchanged case.",
+        "upstream": [],
         "evidence": [
+          "verification/repros/sv_sampled_history.json",
+          "verification/repros/sv_sampled_history.sv",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      },
+      "name": "concurrent_assertions::sampled_history_gates_and_indices",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases. The sampled-history case similarly skips a newly enabled evaluation after NBA (passed=1 instead of 2); pinned xezim 0.11.4 gives passed=2, failed=1.",
+      "expectation": "Simulation",
+      "known_issue": {
+        "id": "sv_verilator_concurrent_regions",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases. The sampled-history case similarly skips a newly enabled evaluation after NBA (passed=1 instead of 2); pinned xezim 0.11.4 gives passed=2, failed=1.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_sampled_history.json",
           "verification/repros/sv_concurrent_regions.json",
           "LIMITATIONS.md#systemverilog-suite"
-        ],
+        ]
+      },
+      "name": "concurrent_assertions::sampled_history_while_disabled",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Sequential",
+      "detail": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases. The sampled-history case similarly skips a newly enabled evaluation after NBA (passed=1 instead of 2); pinned xezim 0.11.4 gives passed=2, failed=1.",
+      "expectation": "Simulation",
+      "known_issue": {
         "id": "sv_verilator_concurrent_regions",
-        "observed_version": "Verilator 5.052",
+        "category": "simulator_disagreement",
         "phase": "execute",
-        "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases.",
-        "upstream": []
+        "observed_version": "Verilator 5.052",
+        "reason": "Verilator 5.052 runs a concurrent assertion action before its clocked NBA update (action_value=0 instead of 1), and fails an assertion whose disable iff becomes true in NBA (failed=1 instead of 0). IEEE 1800-2023 16.5/16.5.1/16.12/16.14.1 require the unsampled disable condition after NBA and actions in Reactive. Standalone Top and Wrapped reproduce both results; installed xezim agrees with the strict expectations for these cases. The sampled-history case similarly skips a newly enabled evaluation after NBA (passed=1 instead of 2); pinned xezim 0.11.4 gives passed=2, failed=1.",
+        "upstream": [],
+        "evidence": [
+          "verification/repros/sv_sampled_history.json",
+          "verification/repros/sv_concurrent_regions.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
       },
       "name": "concurrent_assertions::sampled_predicate_live_action",
       "phase": "skip",

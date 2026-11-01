@@ -386,12 +386,48 @@ record these differences. Icarus also rejects explicit static locals in automati
 functions and output function arguments. Only the affected tool/case pairs are
 excluded; their original assertions remain available through `--include-ignored`.
 
+Static task locals are shared by every call, also calls that overlap in time
+(IEEE 1800-2023 6.21, 13.3.1). Icarus 13.0 rejects the explicit static locals
+of automatic tasks, as it does in functions, together with the class and the
+package-scoped call of the same case (`sv_icarus_explicit_static_task_local`, see
+the [observations](verification/repros/sv_static_task_declared_locals_icarus.json)).
+xezim 0.11.3 gives each call its own copy of an implicitly static local of a
+static task while an explicit `static` one is shared
+(`sv_static_task_implicit_local` in the xezim review, see the
+[probe](verification/repros/sv_static_task_implicit_local_xezim.json)).
+
+Handles declared with a class-scoped typedef of a registry specialization
+(`typedef Registry #(C, "c") type_id;`, as `uvm_object_utils` declares it) and
+string class parameters passed on by name are checked against IEEE 1800-2023
+8.25. Icarus 13.0 does not parse parameterized classes or pure virtual methods
+and rejects those cases at compile time. xezim 0.11.3 gives specializations that
+typedefs of different classes name the value parameters of one of them
+(`sv_class_typedef_specialization_values`, see the
+[probe](verification/repros/sv_class_typedef_specialization_values_xezim.json)),
+and gives `Name #(S)` inside a class the default of `S` instead of its value
+(`sv_class_parameter_passed_by_name`, see the
+[probe](verification/repros/sv_class_parameter_passed_by_name_xezim.json)).
+Class scopes that are themselves specialized or qualified, `C #(byte)::type_id`
+and `p::C::type_id`, are checked against 8.23 and 8.25.1; xezim 0.11.3 reads
+static properties through such a typedef with unknown bits
+(`sv_class_scoped_typedef_static_properties`, see the
+[probe](verification/repros/sv_class_scoped_typedef_static_properties_xezim.json)).
+
 The new `$dist_uniform` seed-width case is excluded for Verilator 5.052 and
 Icarus 13.0. Verilator generates an invalid C++ reference binding for converted
 seed arguments; Icarus rejects the `shortint` seed at startup. IEEE 1800-2023
 20.14.2 permits an integral seed variable. The unchanged case passes Celox's
 backends; the source and observed failures are retained in
 [`sv_dist_uniform_seed_width.json`](verification/repros/sv_dist_uniform_seed_width.json).
+
+`class::static_initializers_run_once_before_time_zero` initializes static
+locals of class methods and tasks, a static property and a package variable
+with constructor and function calls, which run once before any procedure
+starts (IEEE 1800-2023 6.8, 6.21). Celox, Verilator 5.052 and xezim 0.11.3 pass
+it. Icarus 13.0 does not compile it: it reports "Overriding the default
+variable lifetime is not yet supported" for the `static` locals of the methods
+and the `automatic` locals of the `initial` block. This is an executed compile
+failure.
 
 Verilator 5.052 executes `always @*` once at time zero in
 `latch::classic_star_declaration_startup`, before any sensitivity input changes.
@@ -549,6 +585,12 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_interfaces` | compile | icarus | 16 | Icarus 13.0 rejects interface port declarations (syntax error in port declarations), modport function imports ("sorry: modport task/function ports are not yet supported") and multidimensional interface instance arrays ("sorry: Multi-dimensional arrays of instances are not yet supported"). Verilator passes these cases. The implicit named interface cases have [focused pre-exclusion evidence](verification/sv/limitations/implicit-interface-ports-icarus.json). The mixed module-contract/local-interface case retains its [port-declaration diagnostics](verification/repros/sv_mixed_interface_connections_icarus.json). |
 | `sv_icarus_packed_inner_index_range` | execute | icarus | 1 | Icarus 13.0 flattens an out-of-range inner index of a multidimensional packed array into the neighbouring element: a read gives a known value instead of X, and a write lands in that element; IEEE 1800-2023 7.4.6 and 11.5.1 make the select out of range. Verilator cannot check four-state values, and it truncates out-of-range packed indices. |
 | `sv_icarus_string_methods` | compile | icarus | 4 | Icarus 13.0 does not implement the string methods getc, putc, compare, icompare, toupper, tolower, substr, atoi/atohex/atooct/atobin and itoa/hextoa/octtoa/bintoa ("Method getc is not a string method"), and requires a constant replication count for a string ("A reference to a net or variable is not allowed in a constant expression"). IEEE 1800-2023 6.16 defines the methods and 11.4.12.2 permits a non-constant count for a string replication. Verilator passes the cases. |
+| `sv_icarus_string_array_row_patterns` | compile | icarus | 1 | Icarus 13.0 rejects the array-valued default and replicated row items in this multidimensional string-array assignment pattern with syntax errors. IEEE 1800-2023 10.9.1 permits array-valued subarray items, defaults and whole-dimension replication. Verilator passes the case. |
+| `sv_icarus_continuous_string_array_elements` | compile | icarus | 1 | Icarus 13.0 aborts in eval_vec4.c:1359 (draw_eval_vec4: ivl_expr_value must be BOOL or VECTOR) while compiling these continuous assignments to string-array elements. IEEE 1800-2023 10.3.2 permits continuous assignments to variables; Celox, Verilator and Xezim pass the case. |
+| `sv_xezim_string_array_row_patterns` | execute | xezim | 1 | Xezim 0.11.4 returns 0 instead of 1 for the checks after copying existing rows into multidimensional string-array assignment patterns. The case exercises row-valued items, an array-valued default, row replication and singleton rows. IEEE 1800-2023 10.9.1 evaluates each item as an assignment to its corresponding element or subarray type. Celox and Verilator pass the case. |
+| `sv_icarus_fixed_string_arrays` | compile | icarus | 5 | Icarus 13.0 rejects whole-array and subarray string copies as string/array type mismatches, rejects the default assignment pattern, does not implement automatic block-variable lifetime overrides, and aborts after returning X for an out-of-bounds string element. IEEE 1800-2023 7.4.5 requires the empty string for an invalid string-array index. The retained evidence lists the five affected cases; unknown-index handling and heap-lifetime cases pass. |
+| `sv_xezim_fixed_string_array_selects` | execute | xezim | 2 | Xezim 0.11.4 evaluates words[1][0][1] of a multidimensional string array containing "BC" as 1 instead of character "C" (67), and returns unknown bits when comparing an out-of-bounds string-array element to the empty string. IEEE 1800-2023 6.16 defines string character indexing and 7.4.5 specifies the empty string for an invalid array index. Array copies and slices satisfy their assertions before the character check fails. |
+| `sv_verilator_fixed_string_array_invalid_indices` | execute | verilator | 1 | Verilator 5.052 reads words[0][0] as the existing words[1][0] element of string words[2:1][0:0], so its comparison to the empty string is false. IEEE 1800-2023 7.4.5 requires an invalid string-array read to return the empty string. Only the invalid-index case is excluded; normal multidimensional copies, slices and character reads pass. |
 | `sv_icarus_unpacked_subroutine_ports` | compile | icarus | 2 | Icarus 13.0 reports that subroutine ports with unpacked dimensions are not yet supported. Verilator passes the valid case. |
 | `sv_icarus_classes` | compile | icarus | 5 | Icarus 13.0 does not support extern methods ("sorry: External methods are not yet supported") or string methods called on a class property ("Can't find task itoa in class Named") or comparisons of class handles ("SORRY: Compare class handles not implemented"), aborts on a failed assertion in dup_expr.cc while compiling objects_referring_to_objects, and crashes with a segmentation fault while compiling implicit_constructors_and_this. IEEE 1800-2023 8.4, 8.7, 8.8 and 8.24 define these constructs. Verilator passes all but the string-method case, see sv_verilator_class_property_string_methods. |
 | `sv_icarus_nested_class_members` | execute | icarus | 1 | Icarus 13.0 reads an empty string through a nested property path (kept.inner.text) after reporting "sorry: Nested member path not yet supported for class properties" for its assignment. IEEE 1800-2023 8.5 permits accessing a property of an object referred to by a property. Verilator passes the case. |
@@ -560,8 +602,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_cast` | execute | icarus | 1 | Icarus 13.0 does not implement $cast ("System task/function $cast() is not defined by any module"), which IEEE 1800-2023 6.24.2 and 8.16 define. Verilator passes the case. |
 | `sv_verilator_class_specialization_identity` | execute | verilator | 1 | Verilator 5.052 makes a separate specialization of a parameterized class for each way a parameter value assignment is written, so Box#(2, int)::made and Box#(.N(2), .T(int))::made read 0 after an object of Box#(.T(int), .N(2)) was constructed; the adapter-free source prints 0 1 0 where IEEE 1800-2023 8.25 requires 1 1 1, as the three assignments give the same values. Celox prints 1 1 1. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes. |
 | `sv_verilator_untyped_class_parameters` | execute | verilator | 1 | Verilator 5.052 gives a class parameter declared without a type the 32-bit type of its default even when a specialization assigns it a sized value, so $bits(V) of Sized#(8'h1) is 32; the adapter-free source prints 32 32 where IEEE 1800-2023 6.20.2 requires 8 32, as the parameter takes the type of its final value after overrides. Celox prints 8 32. Icarus rejects parameterized classes, see sv_icarus_parameterized_classes. |
-| `sv_icarus_parameterized_classes` | compile | icarus | 13 | Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters. |
-| `sv_icarus_shallow_copies` | compile | icarus | 1 | Icarus 13.0 does not parse a shallow copy (second = new first; is a syntax error, "Malformed statement"), which IEEE 1800-2023 8.12 defines; the case also compares class handles, which Icarus does not implement, see sv_icarus_classes. Verilator passes the case. |
+| `sv_icarus_parameterized_classes` | compile | icarus | 15 | Icarus 13.0 does not parse a parameter port list of a class (class Box #(int N = 4); is a syntax error), which IEEE 1800-2023 8.25 defines; each case declares a parameterized class. Verilator passes all but two cases, see sv_verilator_class_specialization_identity and sv_verilator_untyped_class_parameters. |
+| `sv_icarus_shallow_copies` | compile | icarus | 2 | Icarus 13.0 does not parse a shallow copy (second = new first; is a syntax error, "Malformed statement"), which IEEE 1800-2023 8.12 defines; the case also compares class handles, which Icarus does not implement, see sv_icarus_classes. Verilator passes the case. |
 | `sv_verilator_class_property_string_methods` | compile | verilator | 1 | Verilator 5.052 stops with an internal error ("AstNode is not of expected type, but instead has type 'MEMBERSEL'") on a string method called on a class property, n.name.itoa(42), which IEEE 1800-2023 6.16 and 8.5 permit. Icarus rejects the case too, see sv_icarus_classes. |
 | `sv_icarus_unpacked_array_patterns` | compile | icarus | 1 | Icarus 13.0 reports that an assignment pattern with unpacked array items assigned to a multidimensional unpacked array is not yet supported ("Procedural assignment of array or array slice"), so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_display_field_width` | execute | icarus | 1 | Icarus 13.0 zero-pads a value wider than an explicit field width of %h or %o to the argument's full width (%3h of 32'h1234 prints 00001234); IEEE 1800-2023 21.2.1.2 expands the field to the value without leading zeros (1234). Verilator agrees with the expected value. |
@@ -572,7 +614,7 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_short_circuit_calls` | execute | verilator | 1 | Verilator 5.052 runs a function call in the right operand of && in a select index when the left operand is false, so its output argument is written; IEEE 1800-2023 11.4.7 does not evaluate that operand. Icarus cannot compile the design (sv_icarus_function_outputs). |
 | `sv_verilator_function_outputs` | compile | verilator | 1 | Verilator 5.052 fails with an internal error (V3DfgSynthesize: Non-ReadOnly reference) on output and inout function arguments. |
 | `sv_verilator_generate_name_collision` | compile | verilator | 1 | Verilator 5.052 rejects a generate block named like a port with an "Unsupported" diagnostic instead of a duplicate-name error, so the run cannot count it as a language rejection. The design is invalid (IEEE 1800-2023 5.6.1, 23.9) and Icarus rejects it as a duplicate declaration. |
-| `sv_verilator_part_select_write_overhang` | execute | verilator | 4 | Verilator 5.052 writes bits that IEEE 1800-2023 11.5.1 discards: the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) lands in bit 7, a constant part-select wholly outside the vector (comb_out[11:8]) writes its low bits, a partly outside one of an ascending vector (comb_up[6:9]) takes the wrong end of the value, and run-time selects within one array element whose positions are known at compile time reach past it. Icarus agrees with the expected values. |
+| `sv_verilator_part_select_write_overhang` | execute | verilator | 5 | Verilator 5.052 writes bits that IEEE 1800-2023 11.5.1 discards: the out-of-range bit of a partially out-of-range indexed part-select (minus_write[i -: 2] with i = 0) lands in bit 7, a constant part-select wholly outside the vector (comb_out[11:8]) writes its low bits, a partly outside one of an ascending vector (comb_up[6:9]) takes the wrong end of the value, and run-time selects within one array element whose positions are known at compile time reach past it. Icarus agrees with the expected values. |
 | `sv_verilator_unpacked_array_extension` | compile | verilator | 2 | Verilator 5.052 rejects an unpacked array argument or assignment pattern item with a narrower element type through "EXTEND unexpected in assignment to unpacked array" (EXTENDS for a signed element), a diagnostic about its own width extension rather than the element types, so the run cannot count it as a language rejection. The designs are invalid (IEEE 1800-2023 7.6, 10.8). |
 | `sv_icarus_dimensions_type_queries` | compile | icarus | 2 | Icarus 13.0 rejects data type arguments to `$dimensions`, with syntax/type-name errors and an assertion for a multidimensional cast. IEEE 1800-2023 20.7 permits these queries. Verilator passes the integral/string/real type case. |
 | `sv_verilator_chandle_dimensions` | execute | verilator | 1 | Verilator 5.052 returns 1 for `$dimensions(chandle)`; IEEE 1800-2023 6.14 and 20.7 require 0 for this nonarray pointer type. |
@@ -620,6 +662,8 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_verilator_program_items` | compile | verilator | 2 | Verilator 5.052 rejects an `always` procedure and a module instance in a program with syntax errors, which the run cannot count as language rejections. Both are illegal (IEEE 1800-2023 24.3); Icarus 13.0 rejects them with diagnostics that name the rule. |
 | `sv_icarus_iff_event_controls` | compile | icarus | 15 | Icarus 13.0 rejects `iff` in an event control with "syntax error" and "Malformed event control expression." IEEE 1800-2023 9.4.2.3 and A.6.5 permit `@(posedge clk iff en)`; [Standalone probe](verification/repros/sv_iff_event_controls_icarus.json); Verilator 5.052 runs the cases and gives the asserted counts. |
 | `sv_icarus_static_property_wait` | execute | icarus | 1 | Icarus 13.0 compiles a `wait` on a static class property in a class task but vvp cannot load the result ("unresolved vvp_net reference", "Program not runnable"); IEEE 1800-2023 8.9 and 9.4.3 make the property one variable that the wait watches. [Standalone probe](verification/repros/sv_static_property_wait_icarus.json); Verilator 5.052 and xezim 0.11.3 pass the case. |
+| `sv_icarus_virtual_interfaces` | compile | icarus | 32 | Icarus 13.0 does not parse virtual interface declarations ("syntax error" at `virtual bus_if v;`), which IEEE 1800-2023 25.9 defines. [Standalone probe](verification/repros/sv_virtual_interfaces_icarus.json); Verilator 5.052 and xezim 0.11.3 run the simulation cases. |
+| `sv_verilator_virtual_interface_wait` | execute | verilator | 6 | Verilator 5.052 aborts with "Null pointer dereferenced" at an event control or a `wait` on a member through a static virtual interface variable, even one assigned before the wait; IEEE 1800-2023 9.4.2, 9.4.3 and 25.9 wait on the member of the instance the variable denotes. Standalone probes for an [event control](verification/repros/sv_virtual_interface_event_verilator.json) and a [`wait`](verification/repros/sv_virtual_interface_wait_verilator.json); Celox passes the cases. |
 | `sv_verilator_iff_late_conditions` | execute | verilator | 4 | Verilator 5.052 judges an `iff` condition after the process that writes the event signal suspends, not at the write: with `clk = 1; en = 0;` from en = 1 it counts no event, with nonblocking updates `clk <= 1; en <= 0;` from en = 1 it counts none either, and an always_comb that writes `en = a; clk = a; en = 0;` gives no event of its `clk` write while `en` is 1. IEEE 1800-2023 9.4.2.3 judges the condition when the event occurs, and 10.4.2 applies nonblocking updates in issue order, so all three are events. [Standalone probes](verification/repros/sv_iff_late_conditions_verilator.json) print n=0, n=1 and n=0 in Verilator where the spec gives 1, 2 and 1; Icarus 13.0 rejects `iff` in event controls. |
 | `sv_verilator_string_character_signedness` | execute | verilator | 1 | Verilator 5.052 reads a string character (`s[i]`, `s.getc(i)`) as unsigned, so code 255 converts to `int` 255. IEEE 1800-2023 6.16 makes a character a `byte`, which 6.11 makes signed (-1); xezim 0.11.3 agrees, Icarus 13.0 also reads 255. [Standalone probe](verification/repros/sv_string_character_signedness.json). |
 | `sv_icarus_string_conditional` | compile | icarus | 1 | Icarus 13.0 aborts with an assertion in `eval_vec4.c` (`draw_eval_vec4`) on a conditional operator whose operands are strings, also with two `string` variables. IEEE 1800-2023 11.4.11 permits operands of equivalent nonintegral types; Verilator 5.052 and xezim 0.11.3 give the expected output. |
@@ -627,12 +671,39 @@ four-state expectations; the assertions remain enabled on all Celox variants.
 | `sv_icarus_integral_format_string` | execute | icarus | 1 | Icarus 13.0 compiles `$sformatf` with a `bit` vector variable as the format, then `vvp` stops: "$sformatf's first argument must be a string or a register." IEEE 1800-2023 21.3.3 reads the content of an integral format expression as the format; Verilator 5.052 gives the expected output, xezim 0.11.3 prints the format as a value (`sv_integral_format_string` in the xezim review). |
 | `sv_icarus_string_associative_arrays_and_property_queue_methods` | compile | icarus | 2 | Icarus 13.0 rejects associative arrays with `string` and `bit [63:0]` indices and queue methods called on a class property ("Can't find task push_back in class Log"), which IEEE 1800-2023 7.8 and 7.10 define; Verilator 5.052 and xezim 0.11.3 compile the cases. |
 | `sv_verilator_associative_index_cast` | execute | verilator | 1 | Verilator 5.052 evaluates an associative index `x + 32'd1` at 32 bits and stores key 0; IEEE 1800-2023 7.8.4 evaluates it as a cast to the `bit [63:0]` index type (6.24.1), giving `64'h100000000`. xezim 0.11.3 also stores key 0 (`sv_associative_index_cast` in its review). [Evidence](verification/repros/sv_associative_index_cast.json). |
-| `sv_icarus_unpacked_structs` | compile | icarus | 21 | Icarus 13.0 does not support unpacked structures ("sorry: Unpacked structs not supported."), which IEEE 1800-2023 7.2 defines; the standalone source reproduces the diagnostic. Verilator passes all but the nested default pattern, see sv_verilator_nested_struct_default. |
+| `sv_verilator_struct_member_constant_function` | compile | verilator | 1 | Verilator 5.052 aborts with an internal Unlinked task error when a constant function is used for an unpacked-structure member initial value in a parameterized module. IEEE 1800-2023 7.2.2 permits constant expressions as member initial values. |
+| `sv_verilator_struct_member_initial_sizing` | execute | verilator | 1 | Verilator 5.052 evaluates a 32-bit shift before converting it to the 64-bit member type, yielding 0 for 32'd1 << 40, and zero-extends -32'sd1 to 0x00000000ffffffff. IEEE 1800-2023 7.2.2 and 11.8.2 require assignment-context sizing; the expected values are 0x10000000000 and 0xffffffffffffffff. |
+| `sv_xezim_struct_member_initial_values` | execute | xezim | 6 | Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes. |
+| `sv_icarus_struct_member_initial_values` | compile | icarus | 7 | Icarus 13.0 rejects these unpacked-structure member-initializer cases with "sorry: Unpacked structs not supported." IEEE 1800-2023 7.2 and 7.2.2 define unpacked structures and constant member initial values. Additional diagnostics cover automatic local lifetime overrides. |
+| `sv_icarus_unpacked_structs` | compile | icarus | 26 | Icarus 13.0 does not support unpacked structures ("sorry: Unpacked structs not supported."), which IEEE 1800-2023 7.2 defines; the standalone source reproduces the diagnostic. Verilator passes all but the nested default pattern, see sv_verilator_nested_struct_default. |
 | `sv_icarus_nested_containers` | compile | icarus | 4 | Icarus 13.0 rejects an associative array whose index type is a type name ("Type names are not valid expressions here."), as for the class-handle and string indices of these nested containers, does not support a dynamic array of dynamic arrays ("Sorry: Dynamic array of type `dynamic array of ...` is not yet supported."), and does not support unpacked structures (see sv_icarus_unpacked_structs). IEEE 1800-2023 7.4.5, 7.8 and 7.8.5 define these. Verilator passes these cases. |
-| `sv_verilator_nested_struct_default` | execute | verilator | 1 | Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 ("5 0000 1" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101. |
-| `sv_verilator_pattern_format` | execute | verilator | 2 | Verilator 5.052 prints `%p` of integral container elements and integral associative keys in hexadecimal (`'h1`, and `'hfffffffe` for the `int` key -2) and a string literal as its packed value. IEEE 1800-2023 21.2.1.6 prints singular values as unformatted `$display` prints them, in decimal, and a string literal in quotes; xezim 0.11.3 prints the queue and dynamic array case as expected. |
+| `sv_icarus_container_formals` | compile | icarus | 10 | Icarus 13.0 cannot pass a queue, dynamic array or associative array to a subroutine formal that holds a copy: an input aborts compilation ("draw_eval_function_argument: Assertion `0' failed."), a function's output or inout gives "Function arguments must be input ports", and a task's "elaborate.cc:4342: failed assertion 0"; the cases also use associative indices of type names, queues of class handles and queues in classes, which it rejects (see sv_icarus_nested_containers). IEEE 1800-2023 13.5.1 defines these copies; the standalone source reproduces the input abort. Verilator passes all but the empty concatenation argument, see sv_verilator_empty_concatenation_argument. |
+| `sv_icarus_property_selects` | compile | icarus | 6 | Icarus 13.0 rejects bit-selects and part-selects of class properties that are written, or read through `this` in a method ("error: Index expressions don't apply to this type of property."). IEEE 1800-2023 11.5.1 defines selects of vectors, which class properties of packed types are (8.4); the standalone source reproduces the diagnostic. xezim 0.11.3 passes all but a write through an element of an array of handles in an instantiated module (sv_handle_array_property_writes in xezim-review.json); Verilator 5.052 passes all but an out-of-range write, see sv_verilator_part_select_write_overhang. |
+| `sv_verilator_compound_part_select_index` | execute | verilator | 1 | Verilator 5.052 evaluates the index of an indexed part-select target of an assignment operator twice: v[next_bit() +: 2] += 2'd1 calls next_bit() once for the read and again for the write, so the sum lands in other bits. IEEE 1800-2023 11.4.1 evaluates a left-hand index expression of an assignment operator only once; Verilator does so for a bit-select target, and the standalone source reproduces the difference. xezim 0.11.3 calls it once. |
+| `sv_verilator_queue_argument_extension` | execute | verilator | 1 | Verilator 5.052 zero-extends a signed value passed to push_back or insert of a queue whose elements are wider than the value: push_back of an int of -1 into a bit [199:0] or bit [47:0] queue stores 'hffff_ffff zero-extended instead of all ones. IEEE 1800-2023 7.10.2 and 13.5.1 copy the item argument as by assignment, which extends a signed value by its sign (10.7); Verilator sign-extends the same value assigned to an element or a variable, and the standalone source reproduces the difference. xezim 0.11.3 passes the case. |
+| `sv_icarus_container_dimensions` | execute | icarus | 1 | Icarus 13.0 returns 0 for $dimensions of a queue or a dynamic array. IEEE 1800-2023 20.7 counts the unpacked dimension of the container and the packed dimensions of its element type, so int q[$] and logic [7:0] d[] both have 2; the standalone source reproduces the 0. Verilator 5.052 and xezim 0.11.3 return 2. |
+| `sv_verilator_empty_concatenation_argument` | compile | verilator | 1 | Verilator 5.052 rejects {} passed to an input queue formal ("%Error-UNSUPPORTED: ... Unsupported/Illegal: empty queue ('{}') in this context"). Passing a value to an input argument is an assignment-like context (IEEE 1800-2023 10.8), where {} is an empty queue (10.10); xezim 0.11.3 passes the case. |
+| `sv_verilator_nested_struct_default` | execute | verilator | 2 | Verilator 5.052 applies '{default: 5, ...} to the int member of a nested unpacked structure but leaves its bit [3:0] member 0 ("5 0000 1" in the standalone source; a top-level '{default: 5} sets both). IEEE 1800-2023 10.9.2 applies the default recursively to each member of an unmatched substructure and evaluates it in the context of an assignment to a simple bit vector member, giving 4'b0101. |
+| `sv_verilator_pattern_format` | execute | verilator | 4 | Verilator 5.052 prints `%p` of integral container elements, integral associative keys and the integral members of unpacked structures in hexadecimal (`'h1`, and `'hfffffffe` for the `int` key -2), enum members, elements and keys too instead of their names, and a string literal as its packed value. IEEE 1800-2023 21.2.1.6 prints singular values as unformatted `$display` prints them, in decimal, and a string literal in quotes; xezim 0.11.3 prints the queue and dynamic array case as expected. |
 | `sv_icarus_pattern_format` | execute | icarus | 1 | Icarus 13.0 compiles `%p` of queues and dynamic arrays, then `vvp` stops: "$display does not support argument type (116)." IEEE 1800-2023 21.2.1.6 prints them as assignment patterns. |
-| `sv_icarus_associative_arrays_and_class_queues` | compile | icarus | 1 | Icarus 13.0 rejects associative arrays with `int` and `string` indices ("Type names are not valid expressions here") and queues of class handles, which IEEE 1800-2023 7.8 and 7.10 define. |
+| `sv_icarus_associative_arrays_and_class_queues` | compile | icarus | 3 | Icarus 13.0 rejects associative arrays with `int` and `string` indices ("Type names are not valid expressions here") and queues of class handles, which IEEE 1800-2023 7.8 and 7.10 define. |
+| `sv_icarus_array_locators` | compile | icarus | 10 | Icarus 13.0 does not parse an array method call with a `with` clause ("syntax error", "Malformed statement"), so every locator method of IEEE 1800-2023 7.12.1 is rejected, and it does not support the unpacked structure elements of one case; Verilator 5.052 and xezim 0.11.3 compile the cases. The [pre-exclusion diagnostics](verification/sv/limitations/array-locators-icarus.json) retain a reduced source. |
+| `sv_verilator_array_locator_index_argument` | compile | verilator | 1 | Verilator 5.052 rejects the index argument of `q.find(e, pos) with (...)` and an omitted iterator argument before it; IEEE 1800-2023 7.12 (Syntax 7-5) permits both and 7.12.4 renames the index method. xezim 0.11.3 compiles the case but finds no element. [Standalone probe](verification/repros/sv_array_locator_index_argument.json). |
+| `sv_verilator_array_locator_associative_order` | execute | verilator | 1 | Verilator 5.052 orders `int` associative indices as unsigned (its `foreach` visits 3, 10, -5), so `find_index` returns 3 before -5 and `max with (item.index)` selects the element at -5. IEEE 1800-2023 7.8.4 orders a signed index type numerically as signed. xezim 0.11.3 returns empty queues for associative arrays. [Standalone probe](verification/repros/sv_array_locator_associative_order.json). |
+| `sv_verilator_wide_signed_associative_order` | execute | verilator | 1 | Verilator 5.052 orders the indices of an associative array with a signed `bit [127:0]` index as unsigned (its `foreach` visits 0, 5, -1). IEEE 1800-2023 7.8.4 orders an integral index of any width numerically by the signedness of the index type; Verilator orders unsigned `bit [64:0]` and packed structure indices as expected. xezim 0.11.3 orders neither (`wide_associative_keys` in its review). [Standalone probe](verification/repros/sv_wide_associative_keys.json). |
+| `sv_verilator_array_locator_fixed_indices` | execute | verilator | 1 | Verilator 5.052 gives locator methods of `int down[3:0]` and `byte bytes[2:5]` element positions from the right bound instead of indices, so `find_first_index` searches from the right and `item.index` never equals 4, and `min` of `byte` elements `{1, -2, 3, -4}` returns 1. IEEE 1800-2023 7.12.1 and 7.12.4 use the declared indices from the leftmost one, and 6.11 makes `byte` signed. xezim 0.11.3 shares the index errors. [Standalone probe](verification/repros/sv_array_locator_fixed_indices.json). |
+| `sv_verilator_typename_spelling` | execute | verilator | 4 | Verilator 5.052 spells `$typename` differently from IEEE 1800-2023 20.6.1: it drops a signing other than the default (`logic signed [0:7]` gives `logic[0:7]`, `int unsigned` gives `int`), writes `shortreal` as `real` and `bit [3:0][1:0]` as `bit[1:0][3:0]`, writes enumeration values in hex separated by semicolons without the base type (`enum{R=2'h0;G=2'h2;}`), drops `packed` and `signed` from structs, and writes a variable of a class type parameter as `PARAMTYPEDTYPE 'T'`. xezim 0.11.3 deviates too (`sv_typename` in its review). Reduced sources: [vectors](verification/repros/sv_typename_vectors.json), [aggregates](verification/repros/sv_typename_aggregates.json), [classes](verification/repros/sv_typename_classes.json), [constants](verification/repros/sv_typename_constant.json). |
+| `sv_icarus_typename_operands` | compile | icarus | 5 | Icarus 13.0 rejects a data type operand of `$typename` ("Type names are not valid expressions here."), a class-scoped type operand such as `$typename(Holder::T)` and the class parameter port lists `#(type T = int)` and `#(typename_scope_pkg::count_t N = 3)` (syntax errors), and an unpacked structure ("sorry: Unpacked structs not supported."), which IEEE 1800-2023 20.6.1, 8.23, 8.25 and 7.2 define; the same reduced sources and the [scoped-operand source](verification/repros/sv_typename_scopes.json) record them. |
+| `sv_verilator_typename_method_call` | compile | verilator | 1 | Verilator 5.052 rejects a string method on the result of `$typename` (`$typename(int).len()`: "Not expecting BASICDTYPE under a ATTROF in dotted expression"). IEEE 1800-2023 20.6.1 returns a string, 6.16.1 defines `len()` and A.8.2 permits a system function call as a method call root; xezim 0.11.3 compiles the case but deviates (`sv_typename` in its review). [Reduced source](verification/repros/sv_typename_scopes.json). |
+| `sv_verilator_increment_in_conditional_operand` | compile | verilator | 2 | Verilator 5.052 rejects `++` and `--` in an arm of `?:` and in the right operand of `->` ("Unsupported: Pre/post increment/decrement operator within a logical expression"). IEEE 1800-2023 11.4.2 allows them in any expression; Icarus 13.0 and xezim 0.11.3 compile both cases. [Standalone probe](verification/repros/sv_increment_decrement_conditional_operands.json). |
+| `sv_icarus_increment_operands` | compile | icarus | 2 | Icarus 13.0 rejects `++` used as a value of a vector narrower than `int`, an array element or a packed structure member ("sorry: ++ operation is not yet supported on vector slice."), lacks queues and associative arrays in classes, and aborts on `++` of a class property in an expression. IEEE 1800-2023 11.4.2 allows the operators on any integral or real variable. The [pre-exclusion diagnostics](verification/sv/limitations/increment-decrement-icarus.json) retain a reduced source. |
+| `sv_icarus_implication_short_circuit` | execute | icarus | 1 | Icarus 13.0 evaluates the right operand of `->` when the left one is false, so `(i == 0) -> (j++ > 0)` increments `j`; IEEE 1800-2023 11.4.7 skips it. xezim 0.11.3 shares the error. [Standalone probe](verification/repros/sv_increment_decrement_conditional_operands.json). |
+| `sv_icarus_streaming_concatenation` | compile | icarus | 11 | Icarus 13.0 does not support streaming concatenation: it reports "sorry: Streaming concatenation not supported." for `{>>{...}}` and `{<<{...}}`, also as an assignment target, and rejects a stream with a slice size or a `with` range with syntax errors. IEEE 1800-2023 11.4.14 defines the streaming operators as expressions and assignment targets; Verilator 5.052 and xezim 0.11.3 compile the cases. The [pre-exclusion diagnostics](verification/sv/limitations/streaming-icarus.json) retain a reduced source. |
+| `sv_verilator_streaming_with_range` | compile | verilator | 2 | Verilator 5.052 rejects `{>>{up with [1 +: 2]}}`, `{>>{down with [4:2]}}` and the dynamic array ranges `i_data with [1 +: 3]` and `o_data with [0 +: o_len]` ("Unsupported: with[] stream expression"). IEEE 1800-2023 11.4.14.4 (Syntax 11-5) permits a `with` range after a one-dimensional unpacked array and packs only the specified items, giving `32'h22330000`, and the nonexistent-entry value of Table 7-1 for an index outside `byte down [3:0]`, giving `32'h00112200`; an unpack resizes a dynamic array to the range. xezim 0.11.3 compiles the cases but ignores the ranges. Standalone probes: [fixed-size](verification/repros/sv_streaming_with_range.json), [dynamic](verification/repros/sv_streaming_dynamic_with.json). |
+| `sv_verilator_streaming_partial_block_unpack` | execute | verilator | 1 | Verilator 5.052 unpacks `{<< 3 {x, z}} = 8'b1101_0011` (`logic [3:0] x, z`) into x = `4'b0110`, z = `4'b1011` by applying the pack's re-ordering to the source, so packing x and z again gives `8'b0111_0101`. IEEE 1800-2023 11.4.14.3 makes the unpack the reverse of the pack of 11.4.14.2, giving x = `4'b1110`, z = `4'b0110`, which pack back to the source; the orders differ only when the last block is partial. xezim 0.11.3 gives Verilator's values. [Standalone probe](verification/repros/sv_streaming_partial_block_unpack.json). |
+| `sv_verilator_streaming_dynamic_target` | compile | verilator | 1 | Verilator 5.052 generates C++ that g++ rejects for `d = {<< byte {32'h11223344}}` with `byte d[]`: it assigns the packed constant to the dynamic array ("no match for 'operator='"). IEEE 1800-2023 11.4.14 resizes a dynamically sized target to hold the stream. Its probes also right-align the stream of a queue in a wider fixed-size target, which 11.4.14 fills with zero bits on the right. [Standalone probes](verification/repros/sv_streaming_dynamic_verilator.json). |
+| `sv_verilator_streaming_empty_queue_operand` | compile | verilator | 1 | Verilator 5.052 generates C++ that g++ rejects for `i = {>>{q, 16'h1234}}` with an empty `byte q[$]` ("invalid cast from type 'VlQueue<unsigned char>' to type 'IData'"). IEEE 1800-2023 11.4.14.1 streams every element of a queue operand, none of an empty one, giving `32'h12340000`; xezim 0.11.3 passes the case. [Standalone probes](verification/repros/sv_streaming_dynamic_verilator.json). |
+| `sv_verilator_streaming_dynamic_unpack` | compile | verilator | 1 | Verilator 5.052 stops with an internal error ("V3Expand.cpp:574: Width mismatch") at `{<< 8 {o_header, o_len, o_data, o_crc}} = pkt` with `byte o_data[]`, and generates a `VL_STREAML_RII` call that g++ rejects for `{>> {o_data}} = {<< byte {o_data}}`. IEEE 1800-2023 11.4.14.4 and 6.24.3 make the unpack greedy: the dynamic array takes the bytes left after the fixed-size items. [Standalone probes](verification/repros/sv_streaming_dynamic_verilator.json). |
 
 The `string_format` cases compare `$sformatf`, `$sformat` and `$swrite` with
 `$display` / `$write` of the same format and arguments. The [Icarus observations](verification/sv/limitations/string-format-icarus.json)
@@ -640,8 +711,43 @@ retain the three failing runs with reduced adapter-free sources; the remaining
 cases pass in all three tools, except that Verilator 5.052 does not run the
 four-state case. `%m` is checked only in Celox, as each adapter wraps the
 design in its own testbench hierarchy. The `pattern_format` cases print `%p`
-of containers, strings and class handles; the [observations](verification/sv/limitations/pattern-format.json)
+of containers, strings, enum values and class handles; the [observations](verification/sv/limitations/pattern-format.json)
 retain the standalone Verilator, Icarus and xezim outputs.
+
+The `array_locators` cases check the locator methods of IEEE 1800-2023 7.12.1
+on queues, dynamic, associative and fixed-size arrays. Icarus 13.0 does not
+parse them; Verilator 5.052 passes the remaining cases, except that it does
+not run the four-state case. xezim 0.11.3 fails on locator results used as
+operands, string `min`, associative arrays, enum methods of the iterator,
+whole-structure comparisons of the iterator, `unique` of X and Z values and
+the index argument (`sv_array_locator_*` in the xezim review), as the
+[standalone probe](verification/repros/sv_array_locator_operands_xezim.json)
+shows.
+
+The `increment_decrement` cases use `++` and `--` as statements and inside
+expressions (IEEE 1800-2023 11.4.2). xezim 0.11.3 evaluates the right operand
+of `->` when the left one is false and runs the side effects of a `repeat`
+count twice (`sv_implication_short_circuit` and
+`sv_repeat_count_evaluated_twice` in the xezim review, see the
+[repeat probe](verification/repros/sv_increment_decrement_repeat_count.json)).
+
+The `streaming` cases pack and unpack streaming concatenations (IEEE 1800-2023
+11.4.14). Icarus 13.0 does not support them; Verilator 5.052 passes the other
+fixed-size cases and fails to build every dynamically sized one. xezim 0.11.3
+ignores `with` ranges, unpacks an unpacked array source from its right index,
+shares Verilator's partial-block unpack, leaves an unpacked subarray target
+such as `sub[0]` unwritten, pads a string target with NUL characters, makes a
+one-element queue of a cast to a module's queue typedef in an instantiated
+module, sizes the dynamic array of a greedy unpack one element short and
+never writes a nonblocking streaming target such as
+`{<< 4 {hi, lo}} <= a` (`sv_streaming_*` in the xezim review, see the
+[array order](verification/repros/sv_streaming_unpack_array_order_xezim.json),
+[subarray](verification/repros/sv_streaming_subarray_target_xezim.json),
+[string](verification/repros/sv_streaming_string_target_xezim.json),
+[typedef](verification/repros/sv_streaming_module_queue_typedef_xezim.json),
+[greedy unpack](verification/repros/sv_streaming_dynamic_unpack_xezim.json)
+and [nonblocking target](verification/repros/sv_streaming_nonblocking_target_xezim.json)
+probes).
 
 The [system-function edge-case evidence](verification/repros/system_function_edge_cases.json)
 retains the failed Icarus runs and minimal sources. Cover comparisons enable
@@ -658,11 +764,12 @@ interface. Verilator 5.052 executes the same emitted Veryl design successfully.
 The [retained diagnostic](verification/repros/interface_nested_icarus.json)
 records this compile limitation.
 
-Class randomization (`sv_icarus_class_randomize`) excludes the two cases
-`class::unconstrained_randomize` and `class::randomize_without_rand_members`
-from Icarus 13.0. It rejects the built-in `randomize` and `srandom` methods
-during elaboration; [the original diagnostics](verification/repros/sv_class_randomize_icarus.json)
-remain available. Both cases pass Verilator and Celox.
+Class randomization (`sv_icarus_class_randomize`) excludes the three cases
+`class::unconstrained_randomize`, `class::randomize_without_rand_members` and
+`wide_class_properties::wide_random_properties_fill_every_word` from Icarus
+13.0. It rejects the built-in `randomize` and `srandom` methods during
+elaboration; [the original diagnostics](verification/repros/sv_class_randomize_icarus.json)
+remain available. The cases pass Verilator and Celox.
 
 ## Veryl analyzer floating-point constant expressions
 
@@ -1058,6 +1165,13 @@ failures remain executed results. The adapter-free
 and its adjacent JSON reproduce premature completion as Top and Wrapped;
 xezim is reviewed as `sv_process-X6`.
 
+`fork_control::process_handles_index_associative_arrays` indexes associative
+arrays with process handles (IEEE 1800-2023 7.8, 9.7), as UVM's `uvm_tlm_fifo`
+tracks its blocked getters. Verilator 5.052 and xezim 0.11.3 pass it; Icarus
+13.0 rejects its `mailbox` property and process declarations, and that exact
+compile failure remains an executed result in
+[the Icarus report](verification/sv/icarus/fork_control.json).
+
 The mutual status-wait regression must advance to the cancellation at 3 and
 report `checks=2`, `observed_at=3`. xezim passes; Verilator reports zero for both
 outputs, also in the adapter-free
@@ -1118,6 +1232,40 @@ sources and a regenerated dependency lock, without simulator source changes.
 Its exact mismatch remains an executed failure in
 [the xezim class report](verification/sv/xezim/class.json).
 No assertions or exclusions are weakened.
+
+### Property writes through handle-array elements in xezim
+
+`property_selects::property_selects_evaluate_the_object_and_value_once` writes
+`hs[next()].p[7:4]`, where `hs[0]` holds the handle `a`: the write calls
+`next()` once and changes `a.p` (IEEE 1800-2023 8.4 and 11.5.1). Verilator
+5.052 passes. Icarus 13.0 rejects the selects (`sv_icarus_property_selects`).
+
+xezim 0.11.3 leaves `a.p` unchanged under the suite's testbench. The
+[adapter-free source](verification/repros/sv_handle_array_property_writes_xezim.sv)
+and [observations](verification/repros/sv_handle_array_property_writes_xezim.json)
+show that every property write through an element of a handle array, whole or
+selected, is lost when the module is instantiated (top `Wrapped`) and works as
+the top module. The review records it as `sv_handle_array_property_writes` in
+[the xezim review](verification/xezim-review.json); the exact mismatch remains
+an executed failure in
+[the xezim property-select report](verification/sv/xezim/property_selects.json).
+
+### Assignment-operator indices in xezim
+
+`property_selects::property_selects_compound_indices_evaluate_once` evaluates
+`a.p[i] += move_index()`, where `move_index()` sets `i = 1`. IEEE 1800-2023
+11.4.1 evaluates a left-hand index expression of an assignment operator only
+once, so bit 0 is read and written and `a.p` stays `8'h01`. Verilator 5.052
+passes. Icarus 13.0 rejects the selects (`sv_icarus_property_selects`).
+
+xezim 0.11.3 writes the sum into bit 1. The
+[adapter-free source](verification/repros/sv_compound_assignment_index_xezim.sv)
+and [observations](verification/repros/sv_compound_assignment_index_xezim.json)
+show the same for a module variable, as Top and as Wrapped. The review records
+it as `sv_compound_assignment_index` in
+[the xezim review](verification/xezim-review.json); the exact mismatch remains
+an executed failure in
+[the xezim property-select report](verification/sv/xezim/property_selects.json).
 
 ### Package-class specializations requested by other scopes
 
@@ -1229,6 +1377,27 @@ evidence, not an exclusion. [Top/Wrapped reproductions](verification/repros/sv_c
 identify the actual installed xezim binary; the current flake pin's stale dependency
 lock prevented building that pin. No current-pin conformance is claimed.
 
+### Sampled history in assertions
+
+The five `concurrent_assertions::sampled_history_*` cases check IEEE 1800-2023
+16.9.3, including nested sampling, gated history, selected history operands,
+X/Z transitions and histories advancing while assertions are disabled.
+[Focused observations and standalone probes](verification/repros/sv_sampled_history.json)
+retain the external results without weakening assertions:
+
+- Verilator 5.052 passes the basic predicates and explicit nesting. It rejects
+  the gate argument of `$past`, reports the four-state case as unsupported, and
+  evaluates `disable iff` before NBA: the disabled-history case passes once
+  instead of twice. The latter extends the existing scheduling exclusion.
+- Icarus 13.0 rejects all four concurrent-property cases. Its standalone clocked
+  procedure compiles, but vvp reports undefined `$past` and `$sampled` functions.
+- Pinned xezim 0.11.4 passes all four concurrent-property cases, including gates
+  and disabled histories. It returns 1 instead of 0 for the first
+  `$sampled(bits_value[$past(index)])` with `index=1` and `bits_value=4'b1010`:
+  the default previous `bit` index is 0. Verilator and Celox return 0. The
+  adapter-free probe reproduces this difference, which remains an executed
+  mismatch rather than an exclusion.
+
 ### Class method ranges of module declarations
 
 `class::method_ranges_of_scope_declarations` declares a module variable whose
@@ -1313,7 +1482,287 @@ the pinned xezim 0.11.3 pass. Icarus 13.0 does not support `automatic` on a
 variable of an `initial` block and rejects the module's `C::queue_t`
 declaration; its exact compile diagnostic remains an
 executed failure in [the Icarus class report](verification/sv/icarus/class.json).
+
+### Named events
+
+The 4 `events::*` cases check named events (IEEE 1800-2023 15.5): a trigger
+unblocks only the processes already waiting (15.5.2), the `triggered` state lasts
+until time advances (15.5.3), an event control lists several events with `or`, and
+each object has its own event for each event property. Celox, Verilator 5.052 and
+xezim pass all of them on every backend.
+
+Icarus 13.0 compiles 2. It rejects `blast.triggered` with "Event name blast can't
+have member names (triggered)" and an `event` class property with "Invalid class
+item". The two failures remain executed evidence in the
+[Icarus report](verification/sv/icarus/events.json).
+
+Aliasing by assignment (15.5.5.1), `null` events (15.5.5.2), events passed as
+task arguments and `->>` are tested on Celox only. Verilator rejects assigning an
+event outside a class, and neither Verilator nor xezim wakes a process waiting
+for an event passed as a task argument. They also disagree about `->>`: in
+Verilator a `->>` waiter misses a nonblocking assignment issued before the
+trigger, and in xezim a `->` waiter sees it. 15.5.1 orders both the other way.
 No assertions or exclusions are weakened.
+
+### Container formals
+
+The `container_formals` cases pass dynamic arrays, queues and associative arrays
+to formals that hold copies (13.5.1): inputs from variables, properties,
+elements of containers, patterns, `{}` and defaults; outputs and inouts copied
+back, also after a task waits; class handle and string elements; virtual
+methods, static subroutines and typedef formals. Celox passes all of them on
+every backend. Verilator 5.052 passes all but the `{}` argument
+(`sv_verilator_empty_concatenation_argument`), and Icarus 13.0 cannot pass these
+containers by copy at all (`sv_icarus_container_formals`). xezim 0.11.3 does not
+copy back an output of a container typedef declared in an instantiated module
+(`sv_container_typedef_output`) and gives a one-element queue for an element of
+an associative array of queues passed to an input (`sv_container_element_input`);
+the [typedef](verification/repros/sv_xezim_container_typedef_output.sv) and
+[element](verification/repros/sv_xezim_container_element_input.sv) sources
+reproduce them, and they remain executed mismatches in
+[the report](verification/sv/xezim/container_formals.json).
+
+### DPI-C exports
+
+`procedural::dpi_exports_leave_subroutines_unchanged` exports a package
+function, a module function under a C name and a module task, and calls them
+from SystemVerilog; an export does not change a subroutine (IEEE 1800-2023
+35.7), so the sum is 110. Verilator 5.052 and the pinned xezim 0.11.3 pass.
+Icarus 13.0 does not parse the `export "DPI-C"` declaration; its exact compile
+diagnostic remains an executed failure in
+[the Icarus procedural report](verification/sv/icarus/procedural.json).
+No assertions or exclusions are weakened.
+
+### Members of call results
+
+`class::members_of_call_results` selects methods and properties of class
+handles that calls return: of a package function, of a static method, and of
+an unqualified virtual method inside a class, also chained
+(`report_object().report_object().n`), as UVM's `uvm_report_begin` macro
+does with its default `uvm_get_report_object()` (IEEE 1800-2023 8.4); the sum
+is 55522. Verilator 5.052 and the pinned xezim 0.11.3 pass. Icarus 13.0 does
+not parse a method call on a call result; its exact compile diagnostic remains
+an executed failure in [the Icarus class report](verification/sv/icarus/class.json).
+No assertions or exclusions are weakened.
+
+### Compound element assignments
+
+`containers::compound_element_assignments` applies compound assignment
+operators to elements of associative arrays (string and class keys, including
+a class property), a dynamic array, queues (also the `$` element) and a queue
+property, as UVM's objection counters do with `m_total_count[obj] += count`
+(IEEE 1800-2023 11.4.1); the sum is 1102042774, with the byte element wrapping
+modulo 256. Verilator 5.052 and the pinned xezim 0.11.3 pass. Icarus 13.0
+rejects the class-keyed associative array declaration (`int unsigned m[C]`)
+and stops with an internal error; its exact compile diagnostic remains an
+executed failure in [the Icarus containers report](verification/sv/icarus/containers.json).
+
+### String indices from calls
+
+`containers::string_indices_from_calls` indexes a string-keyed associative
+array with the results of a virtual method, a static method and a package
+function that return `string`, as UVM's factory does with
+`obj.get_type_name()` (IEEE 1800-2023 7.8.2); the sum is 3724. Verilator 5.052
+and the pinned xezim 0.11.3 pass. Icarus 13.0 does not support `automatic` on
+a variable of an `initial` block and rejects the indexed assignment that
+follows; its exact compile diagnostic remains an executed failure in
+[the Icarus containers report](verification/sv/icarus/containers.json).
+No assertions or exclusions are weakened.
+
+### Array items in concatenations
+
+`containers::array_items_in_concatenations` assigns unpacked array
+concatenations whose items are queues, mixed with elements, to a queue of
+class handles in a method, a dynamic array, an `int` queue and a string queue,
+as UVM's factory does with `{m_type_overrides, m_inst_overrides}` (IEEE
+1800-2023 10.10); the sum is 14394313. Verilator 5.052 and the pinned xezim
+0.11.3 pass. Icarus 13.0 does not support `automatic` on a variable of an
+`initial` block; its exact compile diagnostic remains an executed failure in
+[the Icarus containers report](verification/sv/icarus/containers.json).
+No assertions or exclusions are weakened.
+
+### Semaphores
+
+The 3 `semaphores::*` cases check semaphores (IEEE 1800-2023 15.3): a semaphore
+of one key admits one process at a time, `try_get` takes keys only when enough
+are available, and `get` takes available keys at once and otherwise blocks until
+enough are put. Celox, Verilator 5.052 and xezim pass all of them on every
+backend. Icarus 13.0 compiles none: it does not know the `semaphore` type
+("semaphore doesn't name a type", "Invalid module instantiation"). The failures
+remain executed evidence in the [Icarus report](verification/sv/icarus/semaphores.json).
+
+That the waiting processes obtain keys in arrival order (15.3.3), so a later
+small request waits behind an earlier large one, is tested on Celox only:
+Verilator and xezim unblock any waiting process whose request the keys meet.
+
+### Mailboxes
+
+The 4 `mailboxes::*` cases check parameterized mailboxes (IEEE 1800-2023 15.4):
+messages come out in put order, `get` and a `put` into a full bounded mailbox
+block, the `try_*` methods return 0 instead of blocking, and mailboxes of strings
+and of class handles inside a parameterized class, as `uvm_tlm_fifo` uses them.
+Celox, Verilator 5.052 and xezim pass all of them on every backend. Icarus 13.0
+compiles none: it does not know the `mailbox` type ("Invalid module
+instantiation", "Invalid module item"). The failures remain executed evidence in
+the [Icarus report](verification/sv/icarus/mailboxes.json).
+
+That peeks and gets are woken in arrival order, that four-state messages keep
+their unknown bits, and that a message keeps its object alive across heap
+collections are tested on Celox only.
+
+### Formatted strings into integral outputs
+
+`string_format::formatted_strings_into_integral_outputs` writes `$swrite` and
+`$sformat` results into integral variables of several widths and signedness,
+into a class property and into the 1024-bit result of a function, as UVM's
+`uvm_string_to_bits` does (IEEE 1800-2023 21.3.3): each is assigned as a string
+literal is (5.9), right-justified with zeros on the left, and a string longer
+than the variable keeps its rightmost characters (`"XYZ"` into 8 bits is
+`8'h5a`). The pinned xezim 0.11.3 passes. Verilator 5.052 keeps the leftmost
+character instead (`8'h58`) for `$swrite`, although it assigns the same literal
+directly as `8'h5a`; the
+[adapter-free source](verification/repros/sv_verilator_swrite_integral_truncation.sv)
+prints `swrite=58 literal=5a` with Verilator and `swrite=5a literal=5a` with
+Celox and xezim. Its exact mismatch remains an executed failure in
+[the Verilator string_format report](verification/sv/verilator/string_format.json).
+Icarus 13.0 does not accept a `bit` vector as the `$swrite` output and exits
+before `$finish`; that runtime failure is retained in
+[the Icarus string_format report](verification/sv/icarus/string_format.json).
+No assertions or exclusions are weakened.
+
+### Unpacked array assignments through selects and calls
+
+`types::unpacked_array_assignments_through_selects_and_calls` assigns unpacked
+arrays of equivalent element types through slices on both sides, a conditional
+operator, a function result, a formal default, an enumeration array and a
+hierarchical name (IEEE 1800-2023 6.22.2, 7.6); the sum is 18324313.
+Verilator 5.052 passes. The pinned xezim 0.11.3 yields an array of zeros for
+`h = s ? c : d` (18330343), recorded in [the review](verification/xezim-review.json)
+with an [adapter-free source](verification/repros/sv_conditional_unpacked_arrays_xezim.sv);
+its exact mismatch remains an executed failure in
+[the xezim types report](verification/sv/xezim/types.json). Icarus 13.0 does
+not support unpacked array formals; its exact compile diagnostic remains an
+executed failure in [the Icarus types report](verification/sv/icarus/types.json).
+No assertions or exclusions are weakened.
+
+### Chandles
+
+`types::chandles_hold_null_and_copies` checks the uses IEEE 1800-2023 6.14 allows
+for a `chandle`: it starts as `null`, compares with another chandle or `null`,
+tests as a Boolean, and is copied through a class property, an associative array
+and subroutine arguments and results. Verilator 5.052 and the installed xezim
+0.11.3 build pass it. Icarus 13.0 rejects the `chandle` class property with
+"Invalid class item"; that compile failure remains executed evidence in
+[the Icarus report](verification/sv/icarus/types.json).
+
+
+### Queue slices
+
+IEEE 1800-2023 7.10.1 defines an inclusive queue slice, clipped to the source
+queue; negative singleton bounds, reversed ranges and unknown bounds can yield
+an empty queue. A slice of an empty queue is empty.
+
+The standalone [queue slice reproduction](verification/repros/sv_queue_slices.sv)
+prints a size of 6 for `q[-2:-2]` on both Verilator 5.052 and Icarus 13.0,
+where 0 is required. Icarus also returns all six elements for `q[1:1]`, where
+one is required. With `EMPTY_QUEUE` defined, Verilator segfaults on `q[0:$]`
+and Icarus rejects the slice syntax. Verilator's shared update case instead
+aborts in the checked `std::deque::operator[]` access. `VlQueue::slice` compares
+signed indices against an unsigned size, and can access index -1 of an empty
+queue.
+
+The exclusions cover only `queue_slice_runtime_bounds`,
+`queue_slice_updates_and_copies`, and (for Icarus) `queue_slice_wide_and_unknown_bounds`
+in the `containers` group. The four-state case remains unsupported by Verilator.
+The Celox cases retain their bounds, copy, side-effect and X/Z assertions.
+
+### Assignment expressions
+
+IEEE 1800-2023 11.3.6 permits blocking assignments inside procedural expressions.
+The right-hand value is converted to the destination type and saved before the
+destination is updated; the saved value is the expression's result. Concatenated
+targets return an unsigned integral value with their combined width.
+
+The standalone [assignment expression reproduction](verification/repros/sv_assignment_expressions.sv)
+prints 14 for `(a=5)+(a=7)` with Verilator 5.052, where 12 is required regardless
+of operand order. With `CONCAT` defined, Verilator rejects a concatenated target;
+with `SELECTED`, it stops in `V3Width.cpp:10272` on an incremented array index.
+The exclusions cover only the corresponding `assignment_expression_stacked_results`,
+`assignment_expression_concat_value`, and `assignment_expression_selected_index_once`
+cases. The ordinary typed-value, compound-operator and guard/loop cases pass
+Verilator; its four-state case is unsupported.
+
+Icarus 13.0 rejects both simple and compound assignment expressions in the default
+standalone source. Its exclusions cover all seven `operators::assignment_expression_*`
+cases. Celox retains the value, type, index-evaluation and short-circuit assertions.
+
+### Blocking intra-assignment controls
+
+The seven `timing::blocking_intra_assignment_*` cases preserve RHS values and
+assignment conversion before suspension, while evaluating the destination after
+the timing control (IEEE 1800-2023 9.4.5, 10.4.1, 11.8.2 and 6.11.2). The
+[standalone source](verification/repros/sv_blocking_intra_assignment.sv) and
+[focused observations](verification/repros/sv_blocking_intra_assignment.json)
+retain these external results:
+
+- Verilator 5.052 passes the ordinary delays, events and automatic task case.
+  It rejects repeated event controls, and evaluates the destination index
+  increment before the delay: the standalone probe prints `early index=1`
+  and `selected=0029` instead of `early index=0` and `selected=2900`.
+  The two four-state cases report unsupported.
+- Icarus 13.0 passes five cases, including late destination evaluation and
+  four-state values. It rejects the automatic task's reference port. With
+  X, Z or mixed unknown repeat counts, it waits for an event instead of
+  assigning immediately; the isolated probes retain `result=0 done=0`
+  where 9.4.5 requires `result=9 done=1`.
+- Pinned xezim 0.11.4 passes four cases. It loses the carry of the 8-bit
+  addition saved for a 16-bit delayed assignment (`0000` instead of `0100`),
+  retains X in a `bit` output (`X9` instead of `89`), and times out on the
+  shared negative repeat count. Adapter-free probes reproduce each difference:
+  the signed count -3 does not complete within a bounded wall-clock run,
+  while isolated X/Z counts complete correctly. These failures remain
+  executed focused evidence, without changing the historical xezim baseline.
+
+The four new Verilator/Icarus exclusions name only the observed cases and have
+matching retained rows. Celox's assertions and all existing retained results
+remain unchanged. Nonblocking intra-assignment controls, implicit event and
+cycle controls, nonintegral targets, concatenations, indirect writes such as
+object properties or dynamic-container elements, and repeat counts that are
+nonintegral or wider than 64 bits remain explicitly unsupported.
+
+
+The [intra-assignment review regressions](verification/repros/sv_intra_assignment_review.json)
+check late destination tag validation, early source tag validation, procedural
+net-write rejection and local variables shadowing nets. Verilator 5.052 accepts
+the invalid selected output-net write; only that negative case is excluded.
+Icarus 13.0 rejects the tagged-union syntax; only the new tagged timing case
+extends its exclusions. The remaining negative net cases retain actual
+source rejections: the adapters recognize only the observed attributed
+PROCASSWIRE diagnostic or a matching Icarus net-declaration note, including
+task elaboration context. Unattributed or mixed tool errors still fail closed.
+
+Pinned xezim 0.11.4 rejects the new tagged constructors, rejects the legal local
+shadow of a net, and accepts the illegal task net write. Its direct net-write
+rejections have no source location, so they remain compile errors in focused
+evidence rather than being promoted to attributed language rejections. These
+observations remain executed evidence; no xezim exclusions or historical
+baseline rows are changed.
+
+### Primitive outputs to two-state struct members
+
+`logic_gates::scalar_two_state_member` retains the implicit conversion when a
+logic gate drives a `bit` member of a packed structure variable. IEEE
+1800-2023 6.5 includes primitive outputs driving independent structure elements
+and requires automatic assignment type conversion. The case runs on all Celox
+backends, including the interpreter.
+
+Icarus 13.0 rejects the standalone
+[`sv_gate_two_state_member.sv`](verification/repros/sv_gate_two_state_member.sv)
+with a non-default-strength driver diagnostic even though no explicit strength
+is specified. Its exact case ID is excluded only on Icarus. The
+[retained observation](verification/repros/sv_gate_two_state_member.json) also
+records Verilator 5.052 accepting the source in lint mode; this does not claim
+four-state execution agreement. `--include-ignored` reruns the Icarus failure.
 
 ## veryl-native-queue-components
 

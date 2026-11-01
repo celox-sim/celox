@@ -21,15 +21,6 @@ jobs:
       - name: Dispatch full CI on develop
         run: gh workflow run ci.yml --repo "$GITHUB_REPOSITORY" --ref develop
 
-  queue-external-develop:
-    name: Queue develop external comparisons
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Dispatch external comparisons on develop
-        run: gh workflow run external-comparisons.yml --repo "$GITHUB_REPOSITORY" --ref develop
-
   # Lydite core validation also runs on develop; bridge gates are disabled.
   queue-lydite-develop:
     name: Queue develop Lydite validation
@@ -39,18 +30,6 @@ jobs:
     steps:
       - name: Dispatch Lydite core validation on develop
         run: gh workflow run lydite-checks.yml --repo "$GITHUB_REPOSITORY" --ref develop
-
-  # heliodor-bench.yml schedules the stable master lane directly. Dispatch the
-  # develop ref here for the small pinned/HEAD Linux boot compatibility gates.
-  queue-heliodor-develop:
-    name: Queue develop Linux boot compatibility
-    runs-on: ubuntu-latest
-    env:
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Dispatch the Veryl HEAD compatibility lane
-        shell: bash
-        run: gh workflow run heliodor-bench.yml --repo "$GITHUB_REPOSITORY" --ref develop
 
   queue:
     name: Queue ${{ matrix.channel }}

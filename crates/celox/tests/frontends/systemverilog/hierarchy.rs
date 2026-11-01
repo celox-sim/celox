@@ -1,6 +1,12 @@
 use super::*;
 
 sv_backends! {
+    fn coalesces_repeated_literal_net_drivers(sim) {
+        @case "hierarchy::coalesces_repeated_literal_net_drivers";
+    }
+    fn repeated_literal_net_drivers_preserve_four_state_equality(sim) {
+        @case "hierarchy::repeated_literal_net_drivers_preserve_four_state_equality";
+    }
     fn coalesces_repeated_net_aliases(sim) {
         @case "hierarchy::coalesces_repeated_net_aliases";
     }
@@ -746,7 +752,11 @@ fn rejects_malformed_non_ansi_port_declarations() {
         ),
         (
             "module Top(a); input [3:0] a; wire [7:0] a; endmodule",
-            "its net or variable declaration differ",
+            "its net or variable declaration of `a` differ",
+        ),
+        (
+            "module Top(a); parameter N = 8; input [3:0] a; wire [N-1:0] a; endmodule",
+            "its net or variable declaration of `a` differ",
         ),
         (
             "module Top(a); input a; wire [3:0] a; endmodule",
@@ -780,5 +790,9 @@ fn rejects_malformed_non_ansi_port_declarations() {
 sv_backends! {
     fn many_sibling_parameter_specializations(sim) {
         @case "hierarchy::many_sibling_parameter_specializations";
+    }
+
+    fn non_ansi_port_ranges_compare_bounds(sim) {
+        @case "hierarchy::non_ansi_port_ranges_compare_bounds";
     }
 }

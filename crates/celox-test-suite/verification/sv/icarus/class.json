@@ -979,6 +979,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 14; see <case>/build.log\n<case>/source_0.sv:17: syntax error\n<case>/source_0.sv:17: error: Malformed statement\n<case>/source_0.sv:35: syntax error\n<case>/source_0.sv:35: error: Malformed statement\n<case>/source_1.sv:5: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:6: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_1.sv:8: syntax error\n<case>/source_1.sv:8: error: Malformed statement\n<case>/source_1.sv:10: syntax error\n<case>/source_1.sv:11: error: Malformed statement\n<case>/testbench.sv:50: syntax error\n<case>/testbench.sv:50: error: Syntax error in task/function port declaration.\n<case>/testbench.sv:51: syntax error\n<case>/testbench.sv:51: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::members_of_call_results",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:9: syntax error\n<case>/source_0.sv:9: error: Invalid module item.\n<case>/source_0.sv:11: syntax error\n<case>/source_0.sv:11: error: Syntax error in continuous assignment\n",
       "expectation": "Simulation",
       "name": "class::method_ranges_of_scope_declarations",
@@ -1212,6 +1223,28 @@
       "name": "class::parameter_defaults_bind_where_the_class_is_declared",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 9; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid module item.\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:5: error: Invalid module item.\n<case>/source_0.sv:6: error: 's' has already been declared in this scope.\n<case>/source_0.sv:4:      : It was declared here as a function.\n<case>/source_0.sv:7: syntax error\n<case>/source_0.sv:7: error: Malformed statement\n<case>/source_0.sv:10: syntax error\n<case>/source_0.sv:11: error: Invalid module item.\n",
+      "expectation": "Simulation",
+      "name": "class::parameter_literals_hide_module_constants",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::parameter_strings_wider_than_a_constant",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
@@ -1494,6 +1527,17 @@
     },
     {
       "category": "Types",
+      "detail": "Icarus build exit status: 4; see <case>/build.log\n<case>/source_0.sv:4: syntax error\n<case>/source_0.sv:4: error: Invalid class item.\n<case>/source_0.sv:7: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::scoped_typedef_handles",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
       "detail": "Icarus 13.0 does not parse a shallow copy (second = new first; is a syntax error, \"Malformed statement\"), which IEEE 1800-2023 8.12 defines; the case also compares class handles, which Icarus does not implement, see sv_icarus_classes. Verilator passes the case.",
       "expectation": "Simulation",
       "known_issue": {
@@ -1672,6 +1716,39 @@
       "name": "class::specializations_with_their_own_handles",
       "phase": "skip",
       "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::specialized_scope_typedef_calls",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 2; see <case>/build.log\n<case>/source_0.sv:3: syntax error\nI give up.\n",
+      "expectation": "Simulation",
+      "name": "class::specialized_scope_typedef_properties",
+      "phase": "compile",
+      "status": "compile_error",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "Icarus build exit status: 10; see <case>/build.log\n<case>/source_0.sv:10: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:27: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:38: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:39: sorry: Overriding the default variable lifetime is not yet supported.\n<case>/source_0.sv:42: syntax error\n<case>/source_0.sv:42: error: Malformed statement\n<case>/source_0.sv:43: syntax error\n<case>/source_0.sv:43: error: Malformed statement\n<case>/source_0.sv:44: syntax error\n<case>/source_0.sv:44: error: Malformed statement\n",
+      "expectation": "Simulation",
+      "name": "class::static_initializers_run_once_before_time_zero",
+      "phase": "compile",
+      "status": "compile_error",
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []

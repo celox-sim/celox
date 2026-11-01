@@ -39,6 +39,9 @@ pub enum PortTypeKind {
     Logic,
     Bit,
     Other,
+    Real,
+    ShortReal,
+    String,
 }
 
 /// Source-independent metadata for one elaborated design variable.
@@ -449,7 +452,8 @@ pub enum ProcessStatus {
     /// ran no statement and waits at the same site.
     Pending,
     /// The process staged one nonblocking assignment. The delay slot holds
-    /// the index of its [`NbaSite`]. The runtime queues the staged value and
+    /// the index of its [`NbaSite`]. The runtime queues the staged value for
+    /// the site's update time and
     /// resumes the process at once.
     Nba,
     /// The process returned so the runtime can charge its time-slot budget.
@@ -479,6 +483,9 @@ pub enum ProcessStatus {
     AssertionObserved,
     /// Resume an assertion action in Reactive after every Observed predicate.
     AssertionReactive,
+    /// Continue in the same Active/Reactive region after other runnable work.
+    /// This is an implementation scheduling boundary, not an HDL wait (4.7).
+    DeferActive,
 }
 
 impl ProcessStatus {
@@ -504,6 +511,7 @@ impl ProcessStatus {
             Self::EventProbe => 16,
             Self::AssertionObserved => 17,
             Self::AssertionReactive => 18,
+            Self::DeferActive => 19,
         }
     }
 
@@ -527,6 +535,7 @@ impl ProcessStatus {
             16 => Some(Self::EventProbe),
             17 => Some(Self::AssertionObserved),
             18 => Some(Self::AssertionReactive),
+            19 => Some(Self::DeferActive),
             _ => None,
         }
     }
@@ -582,7 +591,8 @@ impl HostRequestKind {
     }
 }
 
-/// Operations on the built-in process class (IEEE 1800-2023 9.7).
+/// Operations on the built-in process class (IEEE 1800-2023 9.7) and the
+/// other synchronization objects the scheduler owns.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u32)]
 pub enum ProcessOp {
@@ -597,8 +607,71 @@ pub enum ProcessOp {
     SetRandstate,
     /// Begin evaluation of a level-wait predicate; clear its old observations.
     Observe,
+    /// `-> e`: unblock the processes waiting for named event `e` (IEEE
+    /// 1800-2023 15.5.1).
+    Trigger,
+    /// `->> e`: trigger `e` in the nonblocking assignment region.
+    TriggerNonblocking,
+    /// `@ e`, `@(e1 or e2)`: block until one of the events is triggered
+    /// (15.5.2).
+    WaitEvent,
+    /// `e.triggered`: whether `e` was triggered in the current time step
+    /// (15.5.3).
+    Triggered,
+    /// `wait(e.triggered)`: block unless `e` was triggered in the current time
+    /// step, until it is.
+    WaitTriggered,
+    /// `new(keyCount)` of a semaphore: its handle (IEEE 1800-2023 15.3.1).
+    SemaphoreNew,
+    /// `s.put(keyCount)`: return keys, unblocking the waiting processes they
+    /// suffice for in arrival order (15.3.2).
+    SemaphorePut,
+    /// `s.get(keyCount)`: obtain keys if they are available, or else wait
+    /// for them behind the processes already waiting (15.3.3).
+    SemaphoreGet,
+    /// `s.try_get(keyCount)`: obtain keys if they are available; 1 if so, 0
+    /// otherwise (15.3.4).
+    SemaphoreTryGet,
+    /// `new(bound)` of a mailbox whose messages have the container layout
+    /// of the second argument: its handle (15.4.1).
+    MailboxNew,
+    /// `m.num()`: the number of messages (15.4.2).
+    MailboxNum,
+    /// `m.put(message)`: 1 when the message was placed; otherwise 0, and the
+    /// process waits until there may be room and then calls it again (15.4.3).
+    MailboxPut,
+    /// `m.try_put(message)`: 1 when the message was placed, 0 when the
+    /// mailbox is full (15.4.4).
+    MailboxTryPut,
+    /// `m.get(message)`: 1 and the first message, removed; otherwise 0, and
+    /// the process waits until there may be one and then calls it again
+    /// (15.4.5).
+    MailboxGet,
+    /// `m.try_get(message)`: 1 and the first message, removed, or 0 when the
+    /// mailbox is empty (15.4.6).
+    MailboxTryGet,
+    /// `m.peek(message)`: like `get` without removing the message (15.4.7).
+    MailboxPeek,
+    /// `m.try_peek(message)`: like `try_get` without removing the message
+    /// (15.4.8).
+    MailboxTryPeek,
 }
 impl ProcessOp {
+    /// Whether it is an operation on a mailbox.
+    pub fn is_mailbox(self) -> bool {
+        matches!(
+            self,
+            Self::MailboxNew
+                | Self::MailboxNum
+                | Self::MailboxPut
+                | Self::MailboxTryPut
+                | Self::MailboxGet
+                | Self::MailboxTryGet
+                | Self::MailboxPeek
+                | Self::MailboxTryPeek
+        )
+    }
+
     pub fn from_code(code: u32) -> Option<Self> {
         Some(match code {
             0 => Self::SelfHandle,
@@ -611,6 +684,23 @@ impl ProcessOp {
             7 => Self::GetRandstate,
             8 => Self::SetRandstate,
             9 => Self::Observe,
+            10 => Self::Trigger,
+            11 => Self::TriggerNonblocking,
+            12 => Self::WaitEvent,
+            13 => Self::Triggered,
+            14 => Self::WaitTriggered,
+            15 => Self::SemaphoreNew,
+            16 => Self::SemaphorePut,
+            17 => Self::SemaphoreGet,
+            18 => Self::SemaphoreTryGet,
+            19 => Self::MailboxNew,
+            20 => Self::MailboxNum,
+            21 => Self::MailboxPut,
+            22 => Self::MailboxTryPut,
+            23 => Self::MailboxGet,
+            24 => Self::MailboxTryGet,
+            25 => Self::MailboxPeek,
+            26 => Self::MailboxTryPeek,
             _ => return None,
         })
     }
@@ -1033,6 +1123,9 @@ impl<A: Copy> WaitSite<A> {
 /// sites in its delay slot.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NbaSite<A> {
+    /// Global precision ticks from evaluation to the NBA update.
+    #[serde(default)]
+    pub delay: u64,
     /// Index of the process in [`RuntimeSchema::processes`].
     pub process: usize,
     /// The assigned object and the static part of the assigned bit range.
@@ -1063,6 +1156,7 @@ pub struct NbaSite<A> {
 impl<A: Copy> NbaSite<A> {
     pub fn map<B>(&self, mut map: impl FnMut(A) -> B) -> NbaSite<B> {
         NbaSite {
+            delay: self.delay,
             process: self.process,
             target: map(self.target),
             lsb: self.lsb,
@@ -1325,7 +1419,7 @@ pub struct DerivedEdgeUnits<A> {
 /// Width of [`SchedulerSlots::limit`], [`SchedulerSlots::now`],
 /// [`SchedulerSlots::exit_arg`], [`SchedulerSlots::count`],
 /// [`SchedulerSlots::current`], [`SchedulerSlots::levels`],
-/// [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
+/// [`SchedulerSlots::unknown_levels`], [`SchedulerSlots::ready`], [`SchedulerSlots::clock_value`],
 /// [`SchedulerSlots::clock_armed`] and every
 /// [`SchedulerSlots::wake`] object, and of each element of
 /// [`SchedulerSlots::clock_next`] and [`SchedulerSlots::clock_period`].
@@ -1368,11 +1462,22 @@ pub struct SchedulerSlots<A> {
     pub defer_limit_settle: A,
     /// The number of time slots the run ran.
     pub count: A,
+    /// The most time slots the run may run: it returns at the end of the
+    /// slot that reaches this count, as at its limit.
+    pub budget: A,
+    /// The runtime events the run recorded. It returns at the end of the
+    /// slot in which they reach an eighth of the ring buffer, so that the
+    /// host can drain it before it overflows.
+    pub events: A,
     /// The kernel running when the run returned, `u64::MAX` for none.
     pub current: A,
     /// The levels of the event signals at the start of the last slot, one
     /// bit per event in event order.
     pub levels: A,
+    /// Which of [`Self::levels`] are unknown (x or z) in a four-state
+    /// design, one bit per event as there; the level's bit then tells x
+    /// from z.
+    pub unknown_levels: A,
     /// The kernels ready to run in the current slot, one bit per kernel in
     /// kernel order.
     pub ready: A,
@@ -1406,8 +1511,11 @@ impl<A> SchedulerSlots<A> {
             dirty: map(self.dirty),
             defer_limit_settle: map(self.defer_limit_settle),
             count: map(self.count),
+            budget: map(self.budget),
+            events: map(self.events),
             current: map(self.current),
             levels: map(self.levels),
+            unknown_levels: map(self.unknown_levels),
             ready: map(self.ready),
             wake: self.wake.into_iter().map(&mut map).collect(),
             waiting: self.waiting.into_iter().map(&mut map).collect(),
@@ -1431,8 +1539,11 @@ impl<A> SchedulerSlots<A> {
             &self.dirty,
             &self.defer_limit_settle,
             &self.count,
+            &self.budget,
+            &self.events,
             &self.current,
             &self.levels,
+            &self.unknown_levels,
             &self.ready,
             &self.clock_next,
             &self.clock_period,
@@ -1970,6 +2081,14 @@ pub enum UnaryOp {
     /// Convert a four-state value to two-state form. Unknown bits become zero:
     /// `(value, mask) -> (value & !mask, 0)`.
     ToTwoState,
+    /// The planes of a four-state value as a two-state value of twice its
+    /// width: `(value, mask) -> mask << width | value`. A two-state operand
+    /// has a zero mask plane. The bits move unchanged, in whole 64-bit
+    /// words: the operand width is a nonzero multiple of 64.
+    ToPlanes,
+    /// The four-state value whose planes `ToPlanes` gives: the low half of
+    /// the operand is the value plane and the high half the mask plane.
+    FromPlanes,
     Minus,
     BitNot,
     LogicNot,
@@ -2006,6 +2125,8 @@ impl UnaryOp {
             UnaryOp::Ident | UnaryOp::ToTwoState | UnaryOp::Minus | UnaryOp::BitNot => {
                 operand_width
             }
+            UnaryOp::ToPlanes => operand_width * 2,
+            UnaryOp::FromPlanes => operand_width / 2,
             UnaryOp::PopCount | UnaryOp::CountLeadingZeros | UnaryOp::CountTrailingZeros => {
                 usize::BITS as usize - operand_width.leading_zeros() as usize
             }
@@ -2019,6 +2140,8 @@ impl fmt::Display for UnaryOp {
             UnaryOp::Float { op, precision } => return write!(f, "Float{precision:?}{op:?}"),
             UnaryOp::Ident => "Ident",
             UnaryOp::ToTwoState => "ToTwoState",
+            UnaryOp::ToPlanes => "ToPlanes",
+            UnaryOp::FromPlanes => "FromPlanes",
             UnaryOp::Minus => "Minus",
             UnaryOp::BitNot => "BitNot",
             UnaryOp::LogicNot => "LogicNot",

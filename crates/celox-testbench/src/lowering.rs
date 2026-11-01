@@ -4,7 +4,8 @@
 use crate::{ExprBytecode, ExprOpcode, StateLocation, TestbenchOperator as Op};
 use celox_design::{BinaryOp, UnaryOp};
 use celox_sir::{
-    RegisterId, SIRBuilder, SIRInstruction as Inst, SIROffset, SIRTerminator, SIRValue,
+    RegisterId, RegisterType, SIRBuilder, SIRInstruction as Inst, SIROffset, SIRTerminator,
+    SIRValue,
 };
 use num_bigint::BigUint;
 
@@ -14,8 +15,16 @@ pub struct Value {
     pub string: bool,
 }
 
+/// In a four-state build, values that can hold unknown bits live in logic
+/// registers, as the HDL's do: loads of four-state storage, constants with
+/// unknown bits and every result computed from one. Everything else, and
+/// everything in a two-state build, uses bit registers.
 pub struct Expressions<'a, A> {
     pub builder: &'a mut SIRBuilder<A>,
+    pub four_state: bool,
+    /// Whether loads of this storage keep its unknown bits: false for every
+    /// address in a two-state build.
+    pub logic: &'a dyn Fn(&A) -> bool,
 }
 impl<A: Clone> Expressions<'_, A> {
     fn bits(&mut self, width: usize, value: impl Into<BigUint>) -> Value {
@@ -26,8 +35,51 @@ impl<A: Clone> Expressions<'_, A> {
             string: false,
         }
     }
+    /// A `width`-bit register for a result computed from `operands`: a logic
+    /// register when one of them is.
+    fn alloc(&mut self, width: usize, signed: bool, operands: &[RegisterId]) -> RegisterId {
+        if operands.iter().any(|operand| self.is_logic(operand)) {
+            self.builder.alloc_logic(width.max(1))
+        } else {
+            self.builder.alloc_bit(width.max(1), signed)
+        }
+    }
+    fn is_logic(&self, register: &RegisterId) -> bool {
+        matches!(self.builder.register(register), RegisterType::Logic { .. })
+    }
+    /// The truth of `value` as a condition: a value with no known one bit is
+    /// false, whatever its unknown bits (IEEE 1800-2023 12.4).
+    pub fn condition(&mut self, value: RegisterId) -> RegisterId {
+        if !self.is_logic(&value) {
+            return value;
+        }
+        let any = self.builder.alloc_logic(1);
+        self.builder.emit(Inst::Unary(any, UnaryOp::Or, value));
+        let known = self.builder.alloc_bit(1, false);
+        self.builder
+            .emit(Inst::Unary(known, UnaryOp::ToTwoState, any));
+        known
+    }
+    /// `value` with its unknown bits read as 0.
+    fn two_state(&mut self, value: Value) -> Value {
+        if !self.is_logic(&value.register) {
+            return value;
+        }
+        let width = self.builder.register(&value.register).width();
+        let register = self.builder.alloc_bit(width, false);
+        self.builder
+            .emit(Inst::Unary(register, UnaryOp::ToTwoState, value.register));
+        Value { register, ..value }
+    }
+    fn load(&mut self, location: &StateLocation<A>, width: usize) -> RegisterId {
+        if (self.logic)(&location.address) {
+            self.builder.alloc_logic(width.max(1))
+        } else {
+            self.builder.alloc_bit(width.max(1), false)
+        }
+    }
     fn unary(&mut self, op: UnaryOp, value: Value, width: usize, signed: bool) -> Value {
-        let register = self.builder.alloc_bit(width.max(1), signed);
+        let register = self.alloc(width, signed, &[value.register]);
         if op == UnaryOp::Ident && width < self.builder.register(&value.register).width() {
             self.builder
                 .emit(Inst::Slice(register, value.register, 0, width.max(1)));
@@ -40,7 +92,7 @@ impl<A: Clone> Expressions<'_, A> {
         }
     }
     fn binary(&mut self, op: BinaryOp, lhs: Value, rhs: Value, width: usize) -> Value {
-        let register = self.builder.alloc_bit(width.max(1), false);
+        let register = self.alloc(width, false, &[lhs.register, rhs.register]);
         self.builder
             .emit(Inst::Binary(register, lhs.register, op, rhs.register));
         Value {
@@ -84,6 +136,23 @@ impl<A: Clone> Expressions<'_, A> {
             string: true,
         }
     }
+    /// Whether both arms of a conditional can be evaluated and combined, as
+    /// an unknown condition requires (IEEE 1800-2023 11.4.11), even when the
+    /// condition is known: they write nothing, are not strings and load no
+    /// unchecked dynamic address. Other arms run as the condition's known
+    /// bits select, so an unknown condition runs the second one.
+    fn selectable(code: &[ExprOpcode<StateLocation<A>>]) -> bool {
+        !code.iter().any(|op| {
+            matches!(
+                op,
+                ExprOpcode::StoreU64 { .. }
+                    | ExprOpcode::StoreString { .. }
+                    | ExprOpcode::ConstString(_)
+                    | ExprOpcode::LoadString { .. }
+                    | ExprOpcode::LoadIndexed { .. }
+            )
+        })
+    }
     fn pop(stack: &mut Vec<Value>) -> Result<Value, String> {
         stack
             .pop()
@@ -122,12 +191,35 @@ impl<A: Clone> Expressions<'_, A> {
                 ExprOpcode::ConstWide(value) => {
                     self.bits((value.bits() as usize).max(65), value.clone())
                 }
+                ExprOpcode::ConstLogic {
+                    payload,
+                    mask,
+                    width,
+                } => {
+                    if self.four_state {
+                        let register = self.builder.alloc_logic((*width).max(1));
+                        self.builder.emit(Inst::Imm(
+                            register,
+                            SIRValue::new_four_state(payload.clone(), mask.clone()),
+                        ));
+                        Value {
+                            register,
+                            string: false,
+                        }
+                    } else {
+                        self.bits(*width, payload ^ (payload & mask))
+                    }
+                }
+                ExprOpcode::ToTwoState => {
+                    let value = Self::pop(stack)?;
+                    self.two_state(value)
+                }
                 ExprOpcode::LoadU64 {
                     location,
                     byte_size,
                     mask,
                 } => {
-                    let register = self.builder.alloc_bit((byte_size * 8).max(1), false);
+                    let register = self.load(location, byte_size * 8);
                     self.builder.emit(Inst::Load(
                         register,
                         location.address.clone(),
@@ -138,13 +230,21 @@ impl<A: Clone> Expressions<'_, A> {
                         register,
                         string: false,
                     };
-                    let mask = self.bits(64, *mask);
-                    self.binary(BinaryOp::And, value, mask, 64)
+                    let width = mask.trailing_ones() as usize;
+                    if self.is_logic(&register) && mask.count_ones() as usize == width {
+                        // Keep the low bits by moving them, not with a
+                        // four-state AND, which reads a Z bit as X.
+                        let value = self.unary(UnaryOp::Ident, value, width.max(1), false);
+                        self.unary(UnaryOp::Ident, value, 64, false)
+                    } else {
+                        let mask = self.bits(64, *mask);
+                        self.binary(BinaryOp::And, value, mask, 64)
+                    }
                 }
                 ExprOpcode::LoadWide {
                     location, width, ..
                 } => {
-                    let register = self.builder.alloc_bit((*width).max(1), false);
+                    let register = self.load(location, *width);
                     self.builder.emit(Inst::Load(
                         register,
                         location.address.clone(),
@@ -164,7 +264,26 @@ impl<A: Clone> Expressions<'_, A> {
                         .register(&lhs.register)
                         .width()
                         .max(self.builder.register(&rhs.register).width());
-                    self.operation(*op, lhs, rhs, width, width, width, false, false)?
+                    // A selection keeps its low bits with a constant mask.
+                    // Move them instead, as a four-state AND reads a Z bit
+                    // as X.
+                    let selected = match code.get(cursor.wrapping_sub(2)) {
+                        Some(ExprOpcode::ConstU64(mask))
+                            if *op == Op::BitAnd
+                                && self.is_logic(&lhs.register)
+                                && mask.count_ones() == mask.trailing_ones() =>
+                        {
+                            Some(mask.trailing_ones() as usize)
+                        }
+                        _ => None,
+                    };
+                    match selected {
+                        Some(bits) => {
+                            let value = self.unary(UnaryOp::Ident, lhs, bits.max(1), false);
+                            self.unary(UnaryOp::Ident, value, width, false)
+                        }
+                        None => self.operation(*op, lhs, rhs, width, width, width, false, false)?,
+                    }
                 }
                 ExprOpcode::TypedBinOp {
                     op,
@@ -276,7 +395,8 @@ impl<A: Clone> Expressions<'_, A> {
                             result_width - part_width,
                             false,
                         );
-                        let register = self.builder.alloc_bit((*result_width).max(1), false);
+                        let register =
+                            self.alloc(*result_width, false, &[lhs.register, rhs.register]);
                         self.builder
                             .emit(Inst::Concat(register, vec![lhs.register, rhs.register]));
                         Value {
@@ -292,10 +412,54 @@ impl<A: Clone> Expressions<'_, A> {
                         .and_then(|x| x.checked_add(*else_len))
                         .filter(|x| *x <= code.len())
                         .ok_or("invalid testbench conditional lengths")?;
+                    let (then_code, else_code) = (
+                        &code[cursor..cursor + then_len],
+                        &code[cursor + then_len..end],
+                    );
+                    if self.is_logic(&condition.register)
+                        && Self::selectable(then_code)
+                        && Self::selectable(else_code)
+                    {
+                        // An unknown condition combines both arms bit by
+                        // bit (IEEE 1800-2023 11.4.11), as `Mux` does.
+                        let mut left = stack.clone();
+                        self.block(then_code, &mut left)?;
+                        let mut right = stack.clone();
+                        self.block(else_code, &mut right)?;
+                        if left.len() != stack.len() + 1 || right.len() != stack.len() + 1 {
+                            return Err("testbench conditional stack mismatch".into());
+                        }
+                        let (yes, no) = (Self::pop(&mut left)?, Self::pop(&mut right)?);
+                        let width = self
+                            .builder
+                            .register(&yes.register)
+                            .width()
+                            .max(self.builder.register(&no.register).width());
+                        let yes = self.unary(UnaryOp::Ident, yes, width, false);
+                        let no = self.unary(UnaryOp::Ident, no, width, false);
+                        let register = self.alloc(
+                            width,
+                            false,
+                            &[condition.register, yes.register, no.register],
+                        );
+                        self.builder.emit(Inst::Mux(
+                            register,
+                            condition.register,
+                            yes.register,
+                            no.register,
+                        ));
+                        stack.push(Value {
+                            register,
+                            string: false,
+                        });
+                        cursor = end;
+                        continue;
+                    }
+                    let condition = self.condition(condition.register);
                     let yes = self.builder.new_block();
                     let no = self.builder.new_block();
                     self.builder.seal_block(SIRTerminator::Branch {
-                        cond: condition.register,
+                        cond: condition,
                         true_block: (yes, vec![]),
                         false_block: (no, vec![]),
                     });
@@ -323,7 +487,7 @@ impl<A: Clone> Expressions<'_, A> {
                             .register(&l.register)
                             .width()
                             .max(self.builder.register(&r.register).width());
-                        let register = self.builder.alloc_bit(width, false);
+                        let register = self.alloc(width, false, &[l.register, r.register]);
                         params.push(register);
                         merged.push(Value {
                             register,
@@ -337,13 +501,19 @@ impl<A: Clone> Expressions<'_, A> {
                             .into_iter()
                             .zip(&merged)
                             .map(|(value, target)| {
-                                self.unary(
-                                    UnaryOp::Ident,
-                                    value,
-                                    self.builder.register(&target.register).width(),
-                                    false,
-                                )
-                                .register
+                                let width = self.builder.register(&target.register).width();
+                                if self.is_logic(&target.register) {
+                                    // A known arm joins as a logic value.
+                                    let register = self.builder.alloc_logic(width);
+                                    self.builder.emit(Inst::Unary(
+                                        register,
+                                        UnaryOp::Ident,
+                                        value.register,
+                                    ));
+                                    register
+                                } else {
+                                    self.unary(UnaryOp::Ident, value, width, false).register
+                                }
                             })
                             .collect();
                         self.builder.seal_block(SIRTerminator::Jump(join, values));
@@ -360,20 +530,59 @@ impl<A: Clone> Expressions<'_, A> {
                     element_width,
                 } => {
                     let index = Self::pop(stack)?;
+                    // An index with unknown bits is invalid and reads x, or
+                    // 0 from two-state storage (IEEE 1800-2023 11.5.1). Its
+                    // known bits address the load, which stays in range.
+                    let (index, valid) = if self.is_logic(&index.register) {
+                        let known = self.two_state(index);
+                        let valid = self.builder.alloc_bit(1, false);
+                        self.builder.emit(Inst::Binary(
+                            valid,
+                            index.register,
+                            BinaryOp::EqCase,
+                            known.register,
+                        ));
+                        (known, Some(valid))
+                    } else {
+                        (index, None)
+                    };
                     let stride = self.bits(64, *stride_bits as u64);
                     let offset = self.binary(BinaryOp::Mul, index, stride, 64);
                     let base = self.bits(64, (location.byte_offset * 8 + base_bit_offset) as u64);
                     let offset = self.binary(BinaryOp::Add, offset, base, 64);
-                    let register = self.builder.alloc_bit((*element_width).max(1), false);
+                    let register = self.load(location, *element_width);
                     self.builder.emit(Inst::Load(
                         register,
                         location.address.clone(),
                         SIROffset::Dynamic(offset.register),
                         *element_width,
                     ));
-                    Value {
-                        register,
-                        string: false,
+                    match valid {
+                        None => Value {
+                            register,
+                            string: false,
+                        },
+                        Some(valid) => {
+                            let width = (*element_width).max(1);
+                            let invalid = if self.is_logic(&register) {
+                                let ones = (BigUint::from(1u8) << width) - BigUint::from(1u8);
+                                let unknown = self.builder.alloc_logic(width);
+                                self.builder.emit(Inst::Imm(
+                                    unknown,
+                                    SIRValue::new_four_state(ones.clone(), ones),
+                                ));
+                                unknown
+                            } else {
+                                self.bits(width, 0u8).register
+                            };
+                            let result = self.alloc(width, false, &[register, invalid]);
+                            self.builder
+                                .emit(Inst::Mux(result, valid, register, invalid));
+                            Value {
+                                register: result,
+                                string: false,
+                            }
+                        }
                     }
                 }
                 ExprOpcode::LoadBitSelect {
@@ -388,7 +597,7 @@ impl<A: Clone> Expressions<'_, A> {
                     if width == 0 || *select_width == 0 {
                         self.bits((*select_width).max(1), 0u8)
                     } else {
-                        let register = self.builder.alloc_bit(width, false);
+                        let register = self.load(location, width);
                         self.builder.emit(Inst::Load(
                             register,
                             location.address.clone(),
@@ -408,6 +617,13 @@ impl<A: Clone> Expressions<'_, A> {
                     byte_size,
                 } => {
                     let value = Self::pop(stack)?;
+                    // Two-state storage keeps no unknown bits (IEEE
+                    // 1800-2023 6.11.2).
+                    let value = if (self.logic)(&location.address) {
+                        value
+                    } else {
+                        self.two_state(value)
+                    };
                     self.builder.emit(Inst::Store(
                         location.address.clone(),
                         SIROffset::Static(location.byte_offset * 8),
@@ -432,6 +648,8 @@ impl<A: Clone> Expressions<'_, A> {
                 }
                 ExprOpcode::LoadString { location, elements } => {
                     let offset = Self::pop(stack)?;
+                    // Unknown offset bits must not address memory.
+                    let offset = self.two_state(offset);
                     let shift = self.bits(64, celox_design::HANDLE_WIDTH.trailing_zeros() as u64);
                     let index = self.binary(BinaryOp::Shr, offset, shift, 64);
                     let limit = self.bits(64, *elements as u64);
@@ -523,11 +741,15 @@ impl<A: Clone> Expressions<'_, A> {
             let mut result = self.bits(width, 1u8);
             let mut factor = self.resize(lhs, lw, width, false);
             for bit in 0..rw {
-                let predicate = self.builder.alloc_bit(1, false);
+                let predicate = self.alloc(1, false, &[rhs.register]);
                 self.builder
                     .emit(Inst::Slice(predicate, rhs.register, bit, 1));
                 let product = self.binary(BinaryOp::Mul, result, factor, width);
-                let register = self.builder.alloc_bit(width.max(1), false);
+                let register = self.alloc(
+                    width,
+                    false,
+                    &[predicate, product.register, result.register],
+                );
                 self.builder.emit(Inst::Mux(
                     register,
                     predicate,
@@ -572,8 +794,11 @@ impl<A: Clone> Expressions<'_, A> {
             Op::LogicShiftL | Op::ArithShiftL => (BinaryOp::Shl, false, false),
             Op::LogicShiftR => (BinaryOp::Shr, false, false),
             Op::ArithShiftR => (if ls { BinaryOp::Sar } else { BinaryOp::Shr }, false, false),
-            Op::Eq | Op::EqWildcard => (BinaryOp::Eq, true, false),
-            Op::Ne | Op::NeWildcard => (BinaryOp::Ne, true, false),
+            Op::Eq => (BinaryOp::Eq, true, false),
+            Op::Ne => (BinaryOp::Ne, true, false),
+            // The right operand's unknown bits match anything (11.4.6).
+            Op::EqWildcard => (BinaryOp::EqWildcard, true, false),
+            Op::NeWildcard => (BinaryOp::NeWildcard, true, false),
             Op::Less => (
                 if signed { BinaryOp::LtS } else { BinaryOp::LtU },
                 true,
@@ -614,6 +839,8 @@ mod tests {
         let mut builder = SIRBuilder::new();
         let value = Expressions {
             builder: &mut builder,
+            four_state: false,
+            logic: &|_| false,
         }
         .compile(&ExprBytecode::new(ops))
         .unwrap();

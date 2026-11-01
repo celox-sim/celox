@@ -2091,17 +2091,17 @@ fn prove_group(
 
     // The recovered loop runs exactly the proven iterations, so its variable
     // stays within their values. Indices proven in range then need no check.
-    let _loop_range = super::LoopRangeScope::with_max(
-        &scratch,
+    let mut loop_range = super::LoopRangeScope::with_max(
+        &mut scratch,
         first_iteration.loop_var,
         iterations.iter().map(|iteration| iteration.value).max()?,
     );
+    let scoped = &mut *loop_range;
     let mut dynamic = first_template;
     if !rewrite_statements(&mut dynamic, first_iteration.loop_var, RewriteMode::Dynamic) {
         return None;
     }
-    let (proof_updates, _, _) =
-        eval_chunk_outputs_with_facts(module, &dynamic, &targets, &mut scratch)?;
+    let (proof_updates, _, _) = eval_chunk_outputs_with_facts(module, &dynamic, &targets, scoped)?;
 
     // Canonical proof bits depend only on an immutable arena node and its bit
     // position.  The arena is append-only, so results remain valid while later
@@ -2116,7 +2116,7 @@ fn prove_group(
                     update,
                     Some((first_iteration.loop_var, iteration.value)),
                     None,
-                    &mut scratch,
+                    scoped,
                     &mut dynamic_cache,
                 )
             })
@@ -2124,12 +2124,12 @@ fn prove_group(
         let mut actual_cache = HashMap::default();
         let canonical_actual = actual_outputs
             .iter()
-            .map(|&actual| specialize_slt_node(actual, None, None, &mut scratch, &mut actual_cache))
+            .map(|&actual| specialize_slt_node(actual, None, None, scoped, &mut actual_cache))
             .collect::<Option<Vec<_>>>()?;
         if !proof_outputs_match(
             &specialized_updates,
             &canonical_actual,
-            &mut scratch,
+            scoped,
             &mut proof_bits,
         )? {
             return None;
@@ -2143,14 +2143,14 @@ fn prove_group(
         first_iteration.loop_var,
         initial_store,
         production_arena,
-        &mut scratch,
+        scoped,
     )?;
-    let update_sources = collect_slt_input_sources(&updates, &scratch)?;
+    let update_sources = collect_slt_input_sources(&updates, scoped)?;
 
     let mut input_variables = HashSet::default();
     let mut visited = HashSet::default();
     for &update in &updates {
-        if !collect_template_inputs(update, &scratch, &mut visited, &mut input_variables) {
+        if !collect_template_inputs(update, scoped, &mut visited, &mut input_variables) {
             return None;
         }
     }
@@ -2183,7 +2183,7 @@ fn prove_group(
         initial_store,
         statements,
         production_arena,
-        &scratch,
+        scoped,
         &proof_updates,
         &targets,
         first_iteration.loop_var,
@@ -2192,6 +2192,8 @@ fn prove_group(
         return None;
     }
 
+    // Leave the scope so the proven arena no longer records the bound.
+    drop(loop_range);
     Some(ProvenGroup {
         arena: scratch,
         updates,
@@ -2988,11 +2990,34 @@ fn exhaustive_binary_case_mask(
     masks: &HashMap<NodeId, BigUint>,
     budget: &mut FeedbackProofBudget,
 ) -> Option<BigUint> {
+    let mut result = BigUint::zero();
+    for arm in exhaustive_binary_case(root, arena, budget)? {
+        let SLTNode::Mux {
+            cond, then_expr, ..
+        } = arena.get(arm)
+        else {
+            unreachable!("case arms are muxes");
+        };
+        if !masks[cond].is_zero() {
+            return None;
+        }
+        result |= &masks[then_expr];
+    }
+    Some(result)
+}
+
+/// The muxes of a case chain rooted at `root` whose distinct constant labels
+/// cover every binary selector value; the last one completes the labels.
+fn exhaustive_binary_case(
+    root: NodeId,
+    arena: &SLTNodeArena<VarId>,
+    budget: &mut FeedbackProofBudget,
+) -> Option<Vec<NodeId>> {
     let width = get_width(root, arena);
     let mut current = root;
     let mut selector = None;
     let mut labels = HashSet::default();
-    let mut result = BigUint::zero();
+    let mut arms = Vec::new();
     loop {
         budget.edges = budget.edges.checked_sub(1)?;
         let SLTNode::Mux {
@@ -3003,7 +3028,7 @@ fn exhaustive_binary_case_mask(
         else {
             return None;
         };
-        if !masks[cond].is_zero() || get_width(*then_expr, arena) != width {
+        if get_width(*then_expr, arena) != width {
             return None;
         }
         let mut condition = *cond;
@@ -3040,12 +3065,111 @@ fn exhaustive_binary_case_mask(
             return None;
         }
         labels.insert(label);
-        result |= &masks[then_expr];
+        arms.push(current);
         if labels.len() == 1usize << bits {
-            return Some(result);
+            return Some(arms);
         }
         current = *else_expr;
     }
+}
+
+/// Two-state builds only: end every complete binary case chain at the arm
+/// that completes its labels. A two-state selector always matches one of
+/// them, so the dropped unmatched branch, the value retained from the
+/// previous activation, could never be selected. The paths change only when
+/// the result is proved combinational.
+pub(crate) fn complete_binary_cases(
+    paths: &mut [LogicPath<VarId>],
+    arena: &mut SLTNodeArena<VarId>,
+) -> bool {
+    let original = paths.iter().map(|path| path.expr).collect::<Vec<_>>();
+    let mut budget = FeedbackProofBudget {
+        nodes: 65_536,
+        bits: 16_777_216,
+        edges: 262_144,
+    };
+    let Some(nodes) = feedback_proof_nodes(&original, arena, &mut budget) else {
+        return false;
+    };
+    // Children precede their users in NodeId order.
+    let mut mapped: HashMap<NodeId, NodeId> = HashMap::default();
+    for node in nodes {
+        let rebuilt = match exhaustive_binary_case(node, arena, &mut budget) {
+            Some(arms) => {
+                let (&last, rest) = arms.split_last().expect("a complete case has arms");
+                let SLTNode::Mux { then_expr, .. } = arena.get(last) else {
+                    unreachable!("case arms are muxes");
+                };
+                let mut chain = mapped[then_expr];
+                for &arm in rest.iter().rev() {
+                    let SLTNode::Mux {
+                        cond, then_expr, ..
+                    } = arena.get(arm).clone()
+                    else {
+                        unreachable!("case arms are muxes");
+                    };
+                    let Ok(id) = arena.alloc(SLTNode::Mux {
+                        cond: mapped[&cond],
+                        then_expr: mapped[&then_expr],
+                        else_expr: chain,
+                    }) else {
+                        return false;
+                    };
+                    chain = id;
+                }
+                chain
+            }
+            None => {
+                let map = |id: &mut NodeId| *id = mapped[id];
+                let mut copy = arena.get(node).clone();
+                match &mut copy {
+                    SLTNode::Input { index, .. } => {
+                        index.iter_mut().for_each(|index| map(&mut index.node));
+                    }
+                    SLTNode::Binary(lhs, _, rhs) => {
+                        map(lhs);
+                        map(rhs);
+                    }
+                    SLTNode::Unary(_, inner)
+                    | SLTNode::Capture { expr: inner, .. }
+                    | SLTNode::Slice { expr: inner, .. } => map(inner),
+                    SLTNode::Mux {
+                        cond,
+                        then_expr,
+                        else_expr,
+                    } => {
+                        map(cond);
+                        map(then_expr);
+                        map(else_expr);
+                    }
+                    SLTNode::Concat(parts) => parts.iter_mut().for_each(|(part, _)| map(part)),
+                    SLTNode::Constant(..) => {}
+                    SLTNode::ForFold { .. } | SLTNode::ForFoldGroup { .. } => {
+                        unreachable!("feedback proofs reject folds")
+                    }
+                }
+                if &copy == arena.get(node) {
+                    node
+                } else {
+                    let Ok(id) = arena.alloc(copy) else {
+                        return false;
+                    };
+                    id
+                }
+            }
+        };
+        mapped.insert(node, rebuilt);
+    }
+    for path in paths.iter_mut() {
+        path.expr = mapped[&path.expr];
+    }
+    if proves_combinational(paths, arena) {
+        return true;
+    }
+    for (path, expr) in paths.iter_mut().zip(original) {
+        path.expr = expr;
+    }
+    false
 }
 
 fn specialize_slt_node(
@@ -3847,7 +3971,9 @@ fn proof_node_signed(
                 | UnaryOp::Xor
                 | UnaryOp::PopCount
                 | UnaryOp::CountLeadingZeros
-                | UnaryOp::CountTrailingZeros,
+                | UnaryOp::CountTrailingZeros
+                | UnaryOp::ToPlanes
+                | UnaryOp::FromPlanes,
                 _,
             ) => Rule::Known(false),
             SLTNode::Unary(
@@ -4022,7 +4148,9 @@ fn specialized_unary_result_signed(op: UnaryOp, inner: &SpecializedConstant) -> 
         | UnaryOp::Xor
         | UnaryOp::PopCount
         | UnaryOp::CountLeadingZeros
-        | UnaryOp::CountTrailingZeros => false,
+        | UnaryOp::CountTrailingZeros
+        | UnaryOp::ToPlanes
+        | UnaryOp::FromPlanes => false,
     }
 }
 
@@ -4299,6 +4427,7 @@ fn specialize_unary_constant(
         return None;
     }
     let value = match op {
+        UnaryOp::ToPlanes | UnaryOp::FromPlanes => return None,
         UnaryOp::Float { op, precision } => BigUint::from(celox_design::eval_float_unary(
             op,
             precision,
@@ -4675,7 +4804,21 @@ mod tests {
                 pre_lower_nodes: Vec::new(),
             };
             assert!(!proves_combinational(std::slice::from_ref(&path), &arena));
-            assert_eq!(proves_binary_combinational(&[path], &arena), expected);
+            assert_eq!(
+                proves_binary_combinational(std::slice::from_ref(&path), &arena),
+                expected
+            );
+            // Two-state lowering drops the unmatched branch only for
+            // complete labels; otherwise the retained value stays.
+            let mut paths = [path];
+            assert_eq!(complete_binary_cases(&mut paths, &mut arena), expected);
+            assert_eq!(paths[0].expr == expr, !expected);
+            assert_eq!(
+                proves_combinational(&paths, &arena),
+                expected,
+                "{}",
+                arena.display(paths[0].expr)
+            );
         }
     }
 

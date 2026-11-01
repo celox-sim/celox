@@ -1,0 +1,130 @@
+{
+  "schemaVersion": 1,
+  "contract": "taxi-cocotb-v1",
+  "repository": "https://github.com/fpganinja/taxi.git",
+  "revision": "cc70b270b910d369ab1ad7b3855e76399fd461f1",
+  "seed": 12345,
+  "samples": 3,
+  "cases": {
+    "lfsr64": {
+      "top": "taxi_lfsr_descramble",
+      "module": "test_taxi_lfsr_descramble",
+      "testDirectory": "src/lfsr/tb/taxi_lfsr_descramble",
+      "sources": [
+        "src/lfsr/rtl/taxi_lfsr_descramble.sv",
+        "src/lfsr/rtl/taxi_lfsr.sv"
+      ],
+      "parameters": {
+        "LFSR_W": "58",
+        "LFSR_POLY": "58'h8000000001",
+        "LFSR_INIT": "'1",
+        "LFSR_GALOIS": "1'b0",
+        "REVERSE": "1'b1",
+        "DATA_W": "64",
+        "SELF_SYNC": "1'b1"
+      },
+      "tests": 1
+    },
+    "phy64": {
+      "top": "taxi_eth_phy_10g",
+      "module": "test_taxi_eth_phy_10g",
+      "testDirectory": "src/eth/tb/taxi_eth_phy_10g",
+      "sources": [
+        "src/eth/rtl/taxi_eth_phy_10g.sv",
+        "src/eth/rtl/taxi_eth_phy_10g_rx.sv",
+        "src/eth/rtl/taxi_eth_phy_10g_rx_if.sv",
+        "src/eth/rtl/taxi_eth_phy_10g_rx_ber_mon.sv",
+        "src/eth/rtl/taxi_eth_phy_10g_rx_frame_sync.sv",
+        "src/eth/rtl/taxi_eth_phy_10g_rx_watchdog.sv",
+        "src/lfsr/rtl/taxi_lfsr.sv",
+        "src/eth/rtl/taxi_xgmii_baser_dec.sv",
+        "src/eth/rtl/taxi_eth_phy_10g_tx.sv",
+        "src/eth/rtl/taxi_eth_phy_10g_tx_if.sv",
+        "src/eth/rtl/taxi_xgmii_baser_enc.sv"
+      ],
+      "parameters": {
+        "DATA_W": "64",
+        "CTRL_W": "8",
+        "HDR_W": "2",
+        "TX_GBX_IF_EN": "0",
+        "RX_GBX_IF_EN": "0",
+        "BIT_REVERSE": "1'b0",
+        "SCRAMBLER_DISABLE": "1'b0",
+        "PRBS31_EN": "1'b1",
+        "TX_SERDES_PIPELINE": "2",
+        "RX_SERDES_PIPELINE": "2",
+        "BITSLIP_HIGH_CYCLES": "0",
+        "BITSLIP_LOW_CYCLES": "7",
+        "COUNT_125US": "195"
+      },
+      "tests": 3
+    },
+    "rx16": {
+      "top": "test_taxi_axis_basex_rx_16",
+      "module": "test_taxi_axis_basex_rx_16",
+      "testDirectory": "src/eth/tb/taxi_axis_basex_rx_16",
+      "sources": [
+        "src/eth/tb/taxi_axis_basex_rx_16/test_taxi_axis_basex_rx_16.sv",
+        "src/eth/rtl/taxi_axis_basex_rx_16.sv",
+        "src/lfsr/rtl/taxi_lfsr.sv",
+        "src/axis/rtl/taxi_axis_if.sv"
+      ],
+      "parameters": {
+        "DATA_W": "16",
+        "GBX_IF_EN": "1",
+        "SGMII_EN": "1",
+        "AN_EN": "1",
+        "PTP_TS_EN": "1",
+        "PTP_TS_FMT_TOD": "1",
+        "PTP_TS_W": "96"
+      },
+      "tests": 78
+    },
+    "rx8": {
+      "top": "test_taxi_axis_basex_rx_8",
+      "module": "test_taxi_axis_basex_rx_8",
+      "testDirectory": "src/eth/tb/taxi_axis_basex_rx_8",
+      "sources": [
+        "src/eth/tb/taxi_axis_basex_rx_8/test_taxi_axis_basex_rx_8.sv",
+        "src/eth/rtl/taxi_axis_basex_rx_8.sv",
+        "src/lfsr/rtl/taxi_lfsr.sv",
+        "src/axis/rtl/taxi_axis_if.sv"
+      ],
+      "parameters": {
+        "DATA_W": "8",
+        "GBX_IF_EN": "1",
+        "SGMII_EN": "1",
+        "AN_EN": "1",
+        "PTP_TS_EN": "1",
+        "PTP_TS_FMT_TOD": "1",
+        "PTP_TS_W": "96"
+      },
+      "tests": 78
+    },
+    "rx32": {
+      "top": "test_taxi_axis_baser_rx_32",
+      "module": "test_taxi_axis_baser_rx_32",
+      "testDirectory": "src/eth/tb/taxi_axis_baser_rx_32",
+      "sources": [
+        "src/eth/tb/taxi_axis_baser_rx_32/test_taxi_axis_baser_rx_32.sv",
+        "src/eth/rtl/taxi_axis_baser_rx_32.sv",
+        "src/lfsr/rtl/taxi_lfsr.sv",
+        "src/axis/rtl/taxi_axis_if.sv"
+      ],
+      "parameters": {
+        "DATA_W": "32",
+        "HDR_W": "2",
+        "GBX_IF_EN": "1",
+        "GBX_CNT": "1",
+        "USXGMII_EN": "1",
+        "PTP_TS_EN": "1",
+        "PTP_TS_FMT_TOD": "1",
+        "PTP_TS_W": "96",
+        "PTP_TS_COR_EN": "1",
+        "PTP_TS_COR_W": "20"
+      },
+      "tests": 312,
+      "timescale": "1ns/1fs"
+    }
+  }
+}

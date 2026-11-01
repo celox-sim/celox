@@ -77,7 +77,7 @@ pub mod timing {
         }
     }
 
-    pub use imp::now;
+    pub use imp::{Instant, now};
 }
 
 /// Cost-model threshold for preferring chunked memory shifts.

@@ -24,6 +24,7 @@ struct ScopeItems<'p> {
     /// their tokens counts as declared.
     opaque: Vec<TokenRange>,
     assigns: Vec<AssignId>,
+    gate_terminals: Vec<ExprId>,
     /// The generate blocks in the scope, each a scope of its own.
     blocks: Vec<BodyItemId>,
 }
@@ -32,10 +33,7 @@ impl Parser<'_> {
     /// Declare the implicit nets of the continuous assignments of `unit`.
     pub(super) fn declare_implicit_nets(&mut self, unit: &mut Unit) -> Result<()> {
         // Implicit nets of interfaces stay unsupported.
-        if unit.external
-            || !matches!(unit.kind, UnitKind::Module | UnitKind::Program)
-            || unit.assign_statements.is_empty()
-        {
+        if unit.external || !matches!(unit.kind, UnitKind::Module | UnitKind::Program) {
             return Ok(());
         }
         let implicit = self.implicit_nets(unit);
@@ -117,16 +115,20 @@ impl Parser<'_> {
             let wildcard =
                 scope.declared.contains(WILDCARD) || chain.last().is_some_and(|(_, wild)| *wild);
             let mut nets: Vec<(&Name, TokenRange)> = Vec::new();
-            for &id in scope.assigns.iter().filter(|_| !wildcard) {
-                for assignment in &self.assign_statements[id.0].assignments {
-                    for (name, tokens) in self.target_names(assignment.left) {
-                        let value = name.value();
-                        if !self.declares(&scope, value)
-                            && !chain.iter().any(|(outer, _)| self.declares(outer, value))
-                            && !nets.iter().any(|(other, _)| other.value() == value)
-                        {
-                            nets.push((name, tokens));
-                        }
+            let targets = scope
+                .assigns
+                .iter()
+                .flat_map(|id| &self.assign_statements[id.0].assignments)
+                .map(|assignment| assignment.left)
+                .chain(scope.gate_terminals.iter().copied());
+            for target in targets.filter(|_| !wildcard) {
+                for (name, tokens) in self.target_names(target) {
+                    let value = name.value();
+                    if !self.declares(&scope, value)
+                        && !chain.iter().any(|(outer, _)| self.declares(outer, value))
+                        && !nets.iter().any(|(other, _)| other.value() == value)
+                    {
+                        nets.push((name, tokens));
                     }
                 }
             }
@@ -217,6 +219,16 @@ impl Parser<'_> {
                         .parameters
                         .iter()
                         .for_each(|parameter| insert(declared, &parameter.name));
+                }
+                BodyItemKind::LogicGate(gate) => {
+                    for instance in &gate.instances {
+                        if let Some(name) = &instance.name {
+                            insert(declared, name);
+                        }
+                        scope
+                            .gate_terminals
+                            .extend(instance.terminals.iter().copied());
+                    }
                 }
                 BodyItemKind::Assign(id) => scope.assigns.push(*id),
                 BodyItemKind::Subroutine(id) => insert(declared, &self.subroutines[id.0].name),

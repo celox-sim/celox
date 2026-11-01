@@ -57,3 +57,38 @@ fn cross_codegen_can_capture_native_ir_without_loading_target_code() {
     assert!(trace.reactive_event_graph.is_some());
     assert!(trace.native_state_layout.is_some());
 }
+
+#[test]
+fn cross_codegen_defaults_keep_unpacked_arrays_strided() {
+    let source = r#"
+        module Top (clk: input clock, index: input logic<3>, q: output logic<20>) {
+            var mem: logic<20> [6];
+            always_ff (clk) { mem[index] = 20'd17; }
+            assign q = mem[index];
+        }
+    "#;
+    fn run<B: celox::SimBackend>(mut sim: celox::Simulator<B>) {
+        assert!(sim.signal("mem").array_layout.is_some());
+        let clk = sim.event("clk");
+        let index = sim.signal("index");
+        sim.modify(|io| io.set(index, 5u8)).unwrap();
+        sim.tick(clk).unwrap();
+        assert_eq!(
+            sim.get_four_state(sim.signal("q")),
+            (17u8.into(), 0u8.into())
+        );
+    }
+    run(Simulator::builder(source, "Top")
+        .four_state(true)
+        .build()
+        .unwrap());
+    run(Simulator::builder(source, "Top")
+        .four_state(true)
+        .build_with_trace()
+        .res
+        .unwrap());
+    run(Simulator::builder(source, "Top")
+        .four_state(true)
+        .build_tiered()
+        .unwrap());
+}

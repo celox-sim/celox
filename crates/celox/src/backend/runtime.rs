@@ -666,7 +666,6 @@ impl JitBackend {
         let mut four_state_inits = Vec::new();
         if options.four_state {
             for (addr, &offset) in &engine.layout().offsets {
-                let width = engine.layout().widths[addr];
                 let is_4state = sir
                     .design
                     .state_objects
@@ -675,13 +674,12 @@ impl JitBackend {
                     .unwrap_or(false);
 
                 if is_4state {
-                    let allocated_size = super::get_byte_size(width);
+                    let allocated_size = engine.layout().plane_size(addr);
                     four_state_inits.push((offset, allocated_size));
                 }
             }
             for (addr, &rel_offset) in &engine.layout().working_offsets {
                 let offset = engine.layout().working_base_offset + rel_offset;
-                let width = engine.layout().widths[addr];
                 let is_4state = sir
                     .design
                     .state_objects
@@ -690,7 +688,7 @@ impl JitBackend {
                     .unwrap_or(false);
 
                 if is_4state {
-                    let allocated_size = super::get_byte_size(width);
+                    let allocated_size = engine.layout().plane_size(addr);
                     four_state_inits.push((offset, allocated_size));
                 }
             }
@@ -936,12 +934,29 @@ impl JitBackend {
             offset,
             width,
             is_4state,
-            array_layout: None,
+            array_layout: self.shared.layout.unpacked_arrays.get(addr).map(|array| {
+                celox_runtime::SignalArrayLayout {
+                    element_width: array.element_width,
+                    element_count: array.element_count,
+                    element_stride: array.element_stride,
+                    plane_size: array.plane_size,
+                }
+            }),
         }
     }
 
     /// Set value for a variable using a pre-resolved [`SignalRef`].
     pub fn set<T: Copy>(&mut self, signal: SignalRef, value: T) {
+        if signal.array_layout.is_some() {
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    (&value as *const T).cast::<u8>(),
+                    std::mem::size_of::<T>(),
+                )
+            };
+            self.set_wide(signal, BigUint::from_bytes_le(bytes));
+            return;
+        }
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let provided_size = std::mem::size_of::<T>();
@@ -982,6 +997,24 @@ impl JitBackend {
 
     /// Set value for a variable using a pre-resolved [`SignalRef`] and `BigUint`.
     pub fn set_wide(&mut self, signal: SignalRef, value: BigUint) {
+        if let Some(array) = signal.array_layout {
+            celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
+            let mem = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.memory.as_mut_ptr().cast::<u8>(),
+                    self.memory.len_words() * 8,
+                )
+            };
+            let end = signal.offset + array.element_extent();
+            array.scatter(&mut mem[signal.offset..end], &value);
+            if self.shared.options.four_state && signal.is_4state {
+                array.scatter(
+                    &mut mem[signal.offset + array.plane_size..end + array.plane_size],
+                    &BigUint::from(0u8),
+                );
+            }
+            return;
+        }
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
         let mut bytes = value.to_bytes_le();
@@ -1006,6 +1039,16 @@ impl JitBackend {
 
     /// Get value of a variable using a pre-resolved [`SignalRef`].
     pub fn get(&self, signal: SignalRef) -> BigUint {
+        if let Some(array) = signal.array_layout {
+            let mem = unsafe {
+                std::slice::from_raw_parts(
+                    self.memory.as_ptr().cast::<u8>(),
+                    self.memory.len_words() * 8,
+                )
+            };
+            let end = signal.offset + array.element_extent();
+            return array.gather(&mem[signal.offset..end]);
+        }
         let byte_size = super::get_byte_size(signal.width);
         let ptr: *const u8 = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         let byte_slice = unsafe { std::slice::from_raw_parts(ptr, byte_size) };
@@ -1022,6 +1065,19 @@ impl JitBackend {
     /// Get value of a variable as a specific integer type without creating a `BigUint`.
     /// The type `T` must be large enough to hold the signal width.
     pub fn get_as<T: Default + Copy>(&self, signal: SignalRef) -> T {
+        if signal.array_layout.is_some() {
+            assert!(get_byte_size(signal.width) <= std::mem::size_of::<T>());
+            let bytes = self.get(signal).to_bytes_le();
+            let mut value = T::default();
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    bytes.as_ptr(),
+                    (&mut value as *mut T).cast::<u8>(),
+                    bytes.len(),
+                );
+            }
+            return value;
+        }
         let byte_size = super::get_byte_size(signal.width);
         let ptr: *const u8 = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         let byte_slice = unsafe { std::slice::from_raw_parts(ptr, byte_size) };
@@ -1065,6 +1121,24 @@ impl JitBackend {
     /// - `(v=1, m=1)` → X (unknown)
     /// - `(v=0, m=1)` → Z (high-impedance)
     pub fn set_four_state(&mut self, signal: SignalRef, value: BigUint, mask: BigUint) {
+        if let Some(array) = signal.array_layout {
+            celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
+            let mem = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.memory.as_mut_ptr().cast::<u8>(),
+                    self.memory.len_words() * 8,
+                )
+            };
+            let end = signal.offset + array.element_extent();
+            array.scatter(&mut mem[signal.offset..end], &value);
+            if self.shared.options.four_state && signal.is_4state {
+                array.scatter(
+                    &mut mem[signal.offset + array.plane_size..end + array.plane_size],
+                    &mask,
+                );
+            }
+            return;
+        }
         celox_runtime::backend::SimBackend::mark_vcd_signal(self, signal);
         let allocated_size = get_byte_size(signal.width);
 
@@ -1108,6 +1182,24 @@ impl JitBackend {
     /// - `(v=1, m=1)` → X (unknown)
     /// - `(v=0, m=1)` → Z (high-impedance)
     pub fn get_four_state(&self, signal: SignalRef) -> (BigUint, BigUint) {
+        if let Some(array) = signal.array_layout {
+            let mem = unsafe {
+                std::slice::from_raw_parts(
+                    self.memory.as_ptr().cast::<u8>(),
+                    self.memory.len_words() * 8,
+                )
+            };
+            let end = signal.offset + array.element_extent();
+            let value = array.gather(&mem[signal.offset..end]);
+            return (
+                value,
+                if self.shared.options.four_state && signal.is_4state {
+                    array.gather(&mem[signal.offset + array.plane_size..end + array.plane_size])
+                } else {
+                    BigUint::from(0u8)
+                },
+            );
+        }
         let byte_size = get_byte_size(signal.width);
         let v_ptr: *const u8 = unsafe { (self.memory.as_ptr() as *const u8).add(signal.offset) };
         let v_slice = unsafe { std::slice::from_raw_parts(v_ptr, byte_size) };

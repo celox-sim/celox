@@ -1,0 +1,28 @@
+{
+  "case": "system_functions::typename_aggregates",
+  "source": "src/sv/cases/system_functions.vtest",
+  "standard": "IEEE 1800-2023 20.6.1: typedefs resolve to the type itself (a), an enumeration is written with its named constants and their encoded values (e), and its example writes them as `A=32'sd0` separated by commas; the base type of an enumeration (6.19) and the `packed` and `signed` of a struct (7.2.1) are part of its type, and the typedef name is prefixed with its package or scope (f).",
+  "method": "The reduced source runs without the suite adapters: verilator --binary -Wno-fatal --top Top and the built model, iverilog -g2012 -s Top and vvp -n, xezim -s Top, and the Celox sv_tests driver in simulation mode. The output of each tool is compared with the 20.6.1 spelling, which Celox prints.",
+  "reduced_source": "package p;\n    typedef enum logic [1:0] {R, G = 2} color_t;\nendpackage\nmodule Top;\n    import p::*;\n    typedef struct packed signed {logic [3:0] x; bit y;} signed_t;\n    color_t c;\n    signed_t s;\n    initial begin\n        $display(\"%s\", $typename(c));\n        $display(\"%s\", $typename(s));\n    end\nendmodule\n",
+  "observations": [
+    {
+      "tool": "verilator",
+      "version": "Verilator 5.052 2026-09-05 rev v5.052",
+      "stdout": "enum{R=2'h0;G=2'h2;}p::color_t\nstruct{logic[3:0] x;bit y;}Top.signed_t\n"
+    },
+    {
+      "tool": "icarus",
+      "version": "Icarus Verilog 13.0",
+      "stdout": "aggregates.vvp: Program not runnable, 2 errors.\n"
+    },
+    {
+      "tool": "xezim",
+      "version": "xezim 0.11.3",
+      "stdout": "enum reg[1:0] p::color_t\nstruct packed Top.signed_t\n"
+    },
+    {
+      "tool": "celox",
+      "stdout": "enum logic[1:0]{R=2'd0,G=2'd2}p::color_t\nstruct packed signed{logic[3:0] x;bit y;}Top.signed_t\n"
+    }
+  ]
+}

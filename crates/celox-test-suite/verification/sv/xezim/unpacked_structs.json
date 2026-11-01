@@ -134,6 +134,144 @@
     },
     {
       "category": "Types",
+      "detail": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_assignment_context",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_declaration_scope",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_four_state",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_local_lifetimes",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
+      "detail": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+      "expectation": "Simulation",
+      "name": "unpacked_structs::member_initial_values_specialized_functions",
+      "phase": "skip",
+      "status": "ignored",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": [],
+      "known_issue": {
+        "id": "sv_xezim_struct_member_initial_values",
+        "category": "simulator_disagreement",
+        "phase": "execute",
+        "observed_version": "xezim version 0.11.4",
+        "reason": "Xezim 0.11.4 does not apply the declared member initial values to these module-scope unpacked-structure variables (the package-scoped value reads 0 instead of 11), and reinitializes a static structure local on each call (two calls sum to 8 instead of 9). IEEE 1800-2023 7.2.2 defines member initial values and 6.21 gives static locals their simulation-long lifetime. The class-property case passes.",
+        "upstream": [],
+        "evidence": [
+          "verification/sv/limitations/struct-member-defaults-xezim.json",
+          "LIMITATIONS.md#systemverilog-suite"
+        ]
+      }
+    },
+    {
+      "category": "Types",
       "detail": "",
       "expectation": "Simulation",
       "name": "unpacked_structs::members_whole_copies_and_equality",

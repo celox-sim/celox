@@ -1,0 +1,103 @@
+{
+  "cases": [
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_associative at 90:27: assert_eq flags: expected 0x3f, got 0x0",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_associative",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_class_predicates at 190:27: assert_eq flags: expected 0x7f, got 0x13",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_class_predicates",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_find at 31:27: assert_eq flags: expected 0xff, got 0x7e",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_find",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_fixed at 129:27: assert_eq flags: expected 0x7f, got 0x5",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_fixed",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_fixed_struct_enum at 266:27: assert_eq flags: expected 0xf, got 0x7",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_fixed_struct_enum",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_four_state at 239:27: assert_eq flags: expected 0x1f, got 0xf",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_four_state",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_index_argument at 210:27: assert_eq flags: expected 0x7, got 0x4",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_index_argument",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_min_max_unique at 60:27: assert_eq flags: expected 0x7f, got 0x5c",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_min_max_unique",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "array_locators::array_locator_struct_elements at 309:27: assert_eq flags: expected 0x1f, got 0xf",
+      "expectation": "Simulation",
+      "name": "array_locators::array_locator_struct_elements",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
+    }
+  ]
+}

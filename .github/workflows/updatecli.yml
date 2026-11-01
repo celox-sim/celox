@@ -1,4 +1,4 @@
-name: Update Python and cocotb
+name: Update dependencies
 
 on:
   schedule:
@@ -9,14 +9,14 @@ permissions:
   contents: read
 
 concurrency:
-  group: updatecli-python-cocotb
+  group: updatecli-dependencies
   cancel-in-progress: false
 
 jobs:
   update:
     name: Updatecli
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
 
@@ -36,8 +36,17 @@ jobs:
         with:
           version-file: .updatecli-version
 
-      - name: Test Python compatibility selector
-        run: python3 -m unittest discover -s .updatecli/tests -v
+      - name: Install Nix for reference simulator updates
+        uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31
+
+      - name: Test update policies
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s .updatecli/tests -v
+
+      - name: Validate update manifests
+        run: updatecli --experimental manifest validate --config .updatecli/updatecli.d --strict
+        env:
+          UPDATECLI_GITHUB_ACTOR: ${{ github.actor }}
+          UPDATECLI_GITHUB_TOKEN: ${{ steps.automation-token.outputs.token }}
 
       - name: Preview update policy
         run: updatecli pipeline diff --config .updatecli/updatecli.d

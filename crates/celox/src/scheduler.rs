@@ -38,9 +38,10 @@ use slice::CombSlicer;
 use celox_design::{
     CounterKind, DomainKind, ProcessStatus, RuntimeEventKind, SCHEDULER_CLOCKS,
     SCHEDULER_FLAG_WIDTH, SCHEDULER_TIME_WIDTH, STABLE_REGION, SchedulerExit, SchedulerSlots,
-    TIME_SLOT_WIDTH, schedule::ScheduleModel,
+    TIME_SLOT_WIDTH, edges::LEVEL_UNKNOWN, schedule::ScheduleModel,
 };
 use celox_sir::{BinaryOp, SIRBuilder, SIRSwitchCase, SIRValue};
+use num_bigint::BigUint;
 use std::collections::BTreeSet;
 
 use crate::{
@@ -54,8 +55,10 @@ use crate::{
 type Unit = ExecutionUnit<RegionedAbsoluteAddr>;
 type Builder = SIRBuilder<RegionedAbsoluteAddr>;
 
-/// The most events whose edges one slot can record.
-const MAX_EVENTS: usize = 64;
+/// The narrowest event mask: one 64-bit word, which every design with at
+/// most 64 events uses. A design with more uses as many words as its events
+/// need.
+const MIN_EVENT_BITS: usize = 64;
 
 /// The most kernels the ready mask of a slot holds.
 const MAX_KERNELS: usize = 64;
@@ -147,6 +150,42 @@ pub(crate) fn attach(program: &mut LaidOutProgram, wiring_clocks: bool) {
     testbench::attach(program, lazy);
 }
 
+/// `program` with its compiled scheduler, and the testbench unit that
+/// inlines it, generated without fused domain units: a domain that reads
+/// combinational state settles first, so the units hold one copy of the
+/// settle instead of one per domain. A first execution tier compiles them
+/// sooner and runs the same schedule.
+pub(crate) fn without_fused_domains(
+    mut program: LaidOutProgram,
+    wiring_clocks: bool,
+) -> LaidOutProgram {
+    let Some(schema) = program.runtime.runtime_schema.scheduler.clone() else {
+        return program;
+    };
+    let Some(unit) = schema.unit else {
+        return program;
+    };
+    let Ok(mut plan) = Plan::new(&program, &schema.slots, wiring_clocks) else {
+        return program;
+    };
+    let Some(lazy) = &mut plan.lazy else {
+        return program;
+    };
+    let mut fused = false;
+    for domain in &mut lazy.domains {
+        if matches!(domain, DomainSettle::Fused(_)) {
+            *domain = DomainSettle::Settled;
+            fused = true;
+        }
+    }
+    if !fused {
+        return program;
+    }
+    program.sir.processes[unit] = plan.generate(&program, &schema.slots);
+    testbench::regenerate(&mut program, true);
+    program
+}
+
 /// An event the scheduler records edges of.
 struct Event {
     /// The canonical event address, which is also its signal.
@@ -220,6 +259,9 @@ struct Plan {
     /// combinationally from them, with those clocks: their edges are judged
     /// when the source changes.
     gating: Vec<(usize, Vec<usize>)>,
+    /// The width of an event mask: one bit per event, at least
+    /// [`MIN_EVENT_BITS`] and a whole number of words.
+    event_bits: usize,
 }
 
 /// Deferred settles. The reference loop settles after every pass of the
@@ -273,9 +315,6 @@ impl Plan {
     ) -> Result<Self, String> {
         let schema = &program.runtime.runtime_schema;
         let model = ScheduleModel::derive(&program.design, schema);
-        if program.layout().four_state {
-            return Err("the design is four-state".into());
-        }
         if !model.counted.is_empty() {
             return Err("the design counts event occurrences".into());
         }
@@ -283,7 +322,6 @@ impl Plan {
         if !schema.comb_observers.is_empty() {
             return Err("the design observes combinational processes".into());
         }
-        const _: () = assert!(MAX_EVENTS <= SCHEDULER_CLOCKS);
         if slots.wake.len() != schema.processes.len() {
             return Err("the scheduler slots do not match the kernels".into());
         }
@@ -306,8 +344,19 @@ impl Plan {
         let shared = program.shared_storage();
         let storage = |address: AbsoluteAddr| shared.get(&address).copied().unwrap_or(address);
         let addresses = crate::edge_plans::event_addresses(program);
-        if addresses.len() > MAX_EVENTS {
-            return Err(format!("the design has more than {MAX_EVENTS} events"));
+        let event_bits = addresses.len().next_multiple_of(64).max(MIN_EVENT_BITS);
+        // The masks of the edges and levels of a slot live in these slots,
+        // which the frontend sized for the events it expected.
+        for (name, slot) in [
+            ("levels", slots.levels),
+            ("unknown_levels", slots.unknown_levels),
+            ("exit_arg", slots.exit_arg),
+        ] {
+            if program.layout().widths.get(&slot).copied().unwrap_or(0) < event_bits {
+                return Err(format!(
+                    "the design has more events than its scheduler's {name} slot holds"
+                ));
+            }
         }
         let mut events = Vec::with_capacity(addresses.len());
         let mut event_storage = HashMap::default();
@@ -321,14 +370,31 @@ impl Plan {
             };
             let units =
                 |map: &HashMap<AbsoluteAddr, Vec<Unit>>| -> Result<Option<Vec<Unit>>, String> {
-                    let aliased = map
-                        .keys()
-                        .any(|key| *key != signal && topology.canonical(*key) == signal);
+                    // An alias's domain must be the event's own; one with
+                    // nothing to run is no domain at all.
+                    let aliased = map.iter().any(|(key, units)| {
+                        *key != signal && topology.canonical(*key) == signal && !units.is_empty()
+                    });
                     if aliased {
                         return Err("an event domain has no separate units".into());
                     }
                     Ok(map.get(&signal).cloned())
                 };
+            let eval_only = units(&sir.eval_only_ffs)?;
+            let apply = units(&sir.apply_ffs)?;
+            // An event no RTL process waits for, such as a TB clock that
+            // only paces initial processes, has an empty domain.
+            let eval_apply = match units(&sir.eval_apply_ffs)? {
+                Some(units) => units,
+                None if eval_only.is_none() && apply.is_none() => Vec::new(),
+                None => return Err("an event domain has no separate units".into()),
+            };
+            // Nothing to evaluate is also nothing to apply.
+            let (eval_only, apply) = if eval_apply.is_empty() {
+                (eval_only.or(Some(Vec::new())), apply.or(Some(Vec::new())))
+            } else {
+                (eval_only, apply)
+            };
             let event = Event {
                 signal,
                 width: *program
@@ -338,13 +404,12 @@ impl Plan {
                     .ok_or("an event signal has no storage")?,
                 active,
                 clock,
-                eval_apply: units(&sir.eval_apply_ffs)?
-                    .ok_or("an event domain has no separate units")?,
+                eval_apply,
                 aliases: wiring_clocks
                     .then(|| crate::clock_aliases::extract(program, signal))
                     .flatten(),
-                eval_only: units(&sir.eval_only_ffs)?,
-                apply: units(&sir.apply_ffs)?,
+                eval_only,
+                apply,
             };
             if event_storage
                 .insert(storage(signal), events.len())
@@ -436,17 +501,41 @@ impl Plan {
                     })
                 && !nba_targets.contains_key(&signal)
         };
+        // The resets a compiled testbench writes: its unit applies those
+        // writes as edges of their slots, with its clocks'. A reset other
+        // events derive from combinationally keeps its writes in the host:
+        // a slot would make those derived events, which a run otherwise
+        // holds stable, cost every slot their waves.
+        let testbench_resets: HashSet<AbsoluteAddr> = program
+            .runtime
+            .testbench
+            .iter()
+            .flat_map(|tb| tb.statements())
+            .flat_map(testbench_resets)
+            .filter(|&reset| {
+                topology
+                    .combinational_derived
+                    .get(&reset)
+                    .is_none_or(|derived| derived.is_empty())
+            })
+            .map(storage)
+            .collect();
         let clocks: Vec<usize> = events
             .iter()
             .enumerate()
             .filter(|(index, event)| {
-                event.clock
+                (event.clock || testbench_resets.contains(&storage(event.signal)))
                     && event.width == 1
                     && !active_commits.contains(index)
                     && undriven(storage(event.signal))
             })
             .map(|(index, _)| index)
             .collect();
+        if clocks.len() > SCHEDULER_CLOCKS {
+            return Err(format!(
+                "the design has more than {SCHEDULER_CLOCKS} host clock events"
+            ));
+        }
 
         let mut kernels: Vec<Option<Kernel>> = Vec::with_capacity(schema.processes.len());
         let mut fallback = Vec::with_capacity(schema.processes.len());
@@ -736,6 +825,11 @@ impl Plan {
                     if !event.eval_apply.iter().any(reads) {
                         return DomainSettle::Pending;
                     }
+                    // An asynchronous reset has few edges: a fused copy of
+                    // the settle for them would only lengthen the build.
+                    if !event.clock {
+                        return DomainSettle::Settled;
+                    }
                     let fused = &sir.eval_comb_apply_ffs;
                     let aliased = fused.keys().any(|key| {
                         *key != event.signal && topology.canonical(*key) == event.signal
@@ -792,6 +886,7 @@ impl Plan {
             lazy,
             derived: Vec::new(),
             gating: Vec::new(),
+            event_bits,
         };
         let edged = plan.edged();
         // The clocks derived from the events the slots change, transitively:
@@ -1009,6 +1104,16 @@ impl Plan {
             continuations: Vec::new(),
             eager: None,
             eager_continuations: Vec::new(),
+            four_state: program
+                .layout()
+                .four_state
+                .then_some(&program.layout().is_4states),
+            event_bits: self.event_bits,
+            event_batch: {
+                let capacity = program.layout().runtime_event_capacity;
+                (capacity > 0 && !schema.runtime_event_sites.is_empty())
+                    .then_some((capacity / 8).max(1) as u64)
+            },
         };
         let waits: Vec<(usize, &Wait)> = self
             .kernels
@@ -1168,7 +1273,7 @@ impl Plan {
         let count = g.binary(SCHEDULER_TIME_WIDTH, count, BinaryOp::Add, one);
         g.store(slots.count, SCHEDULER_TIME_WIDTH, count);
         for &slot in &schema.time_slots {
-            g.store(slot, TIME_SLOT_WIDTH, time);
+            g.store_state(slot, 0, TIME_SLOT_WIDTH, time);
         }
         if schema.time_slots.iter().any(|&slot| g.settle_reads(slot)) {
             g.mark_dirty();
@@ -1177,25 +1282,21 @@ impl Plan {
         // exit in the middle of the slot; those of the clocks' events below,
         // when the run has clocks, unless the slot's waves compare against
         // them: a host clock no clock drives keeps the level the host set.
-        let mut levels = g.constant(0, MAX_EVENTS);
+        let mut levels = g.no_levels();
         for (bit, &event) in tracked.iter().enumerate() {
             if self.clocks.contains(&event) && self.derived.is_empty() {
                 continue;
             }
             let level = g.level(&self.events[event]);
-            let set = g.constant(1 << bit, MAX_EVENTS);
-            let unset = g.constant(0, MAX_EVENTS);
-            let value = g.b.alloc_bit(MAX_EVENTS, false);
-            g.b.emit(SIRInstruction::Mux(value, level, set, unset));
-            levels = g.binary(MAX_EVENTS, levels, BinaryOp::Or, value);
+            levels = g.with_level(levels, level, bit);
         }
-        g.store(slots.levels, SCHEDULER_TIME_WIDTH, levels);
+        g.store_levels(levels);
         // The host clocks due now set their levels, in event order, before
         // any kernel runs; their edges start the slot's edges, which
         // collect in `exit_arg`. A clock whose edge applied waits for its
         // next edge until the slot ends. A run without clocks skips them.
-        let zero = g.constant(0, MAX_EVENTS);
-        g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, zero);
+        let zero = g.constant(0, self.event_bits);
+        g.store(slots.exit_arg, self.event_bits, zero);
         let finish_exit = g.exit_block(SchedulerExit::Finish);
         let internal_exit = g.exit_block(SchedulerExit::Internal);
         let pick = g.b.new_block();
@@ -1209,8 +1310,8 @@ impl Plan {
             g.b.switch_to_block(apply);
             let values = g.load(slots.clock_value, SCHEDULER_TIME_WIDTH);
             let mut fired = g.constant(0, SCHEDULER_CLOCKS);
-            let mut edges = g.constant(0, MAX_EVENTS);
-            let mut levels = g.load(slots.levels, MAX_EVENTS);
+            let mut edges = g.constant(0, self.event_bits);
+            let mut levels = g.load_levels();
             for (bit, &index) in self.clocks.iter().enumerate() {
                 let event = &self.events[index];
                 let next_edge = g.clock_next(bit);
@@ -1223,11 +1324,30 @@ impl Plan {
                     .iter()
                     .position(|&tracked| tracked == index)
                     .expect("clocks are tracked");
-                let level = g.bit(was, position);
-                levels = g.binary(MAX_EVENTS, levels, BinaryOp::Or, level);
-                let is = g.b.alloc_bit(1, false);
-                g.b.emit(SIRInstruction::Mux(is, due, value, was));
-                g.store(event.signal, 1, is);
+                levels = g.with_level(levels, was, position);
+                let is = if g.four_state.is_none() {
+                    let is = g.b.alloc_bit(1, false);
+                    g.b.emit(SIRInstruction::Mux(is, due, value, was));
+                    g.store(event.signal, 1, is);
+                    is
+                } else {
+                    // A clock that is not due keeps its state, unknown
+                    // bits included; one that is gets a known level.
+                    let current = g.load_state(event.signal, 0, 1);
+                    let set = if g.keeps_unknowns(event.signal) {
+                        g.b.alloc_logic(1)
+                    } else {
+                        g.b.alloc_bit(1, false)
+                    };
+                    g.b.emit(SIRInstruction::Mux(set, due, value, current));
+                    g.store_state(event.signal, 0, 1, set);
+                    let zero = g.constant(0, 1);
+                    let known = g.b.alloc_bit(2, false);
+                    g.b.emit(SIRInstruction::Concat(known, vec![zero, value]));
+                    let is = g.b.alloc_bit(2, false);
+                    g.b.emit(SIRInstruction::Mux(is, due, known, was));
+                    is
+                };
                 let changed = g.binary(1, was, BinaryOp::Ne, is);
                 if let Some(aliases) = &event.aliases {
                     for unit in aliases {
@@ -1240,15 +1360,14 @@ impl Plan {
                     let dirty = g.binary(SCHEDULER_FLAG_WIDTH, dirty, BinaryOp::Or, changed);
                     g.store(slots.dirty, SCHEDULER_FLAG_WIDTH, dirty);
                 }
-                let active = g.equals(is, u64::from(event.active));
-                let edge = g.binary(1, changed, BinaryOp::And, active);
-                let edge = g.bit(edge, index);
-                edges = g.binary(MAX_EVENTS, edges, BinaryOp::Or, edge);
+                let edge = g.edge(event, was, is);
+                let edge = g.event_bit(edge, index);
+                edges = g.binary(self.event_bits, edges, BinaryOp::Or, edge);
                 let bit = g.bit(due, bit);
                 fired = g.binary(SCHEDULER_CLOCKS, fired, BinaryOp::Or, bit);
             }
-            g.store(slots.levels, SCHEDULER_TIME_WIDTH, levels);
-            g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, edges);
+            g.store_levels(levels);
+            g.store(slots.exit_arg, self.event_bits, edges);
             let all = g.constant(u64::MAX, SCHEDULER_CLOCKS);
             let unfired = g.binary(SCHEDULER_CLOCKS, fired, BinaryOp::Xor, all);
             let armed = g.binary(SCHEDULER_CLOCKS, armed, BinaryOp::And, unfired);
@@ -1376,16 +1495,14 @@ impl Plan {
 
                     // The edges of this run, against the levels before it.
                     g.b.switch_to_block(resumed);
-                    let mut edges = g.load(slots.exit_arg, MAX_EVENTS);
+                    let mut edges = g.load(slots.exit_arg, self.event_bits);
                     for (&event, &was) in kernel.writes.iter().zip(&before) {
                         let is = g.level(&self.events[event]);
-                        let changed = g.binary(1, was, BinaryOp::Ne, is);
-                        let active = g.equals(is, u64::from(self.events[event].active));
-                        let edge = g.binary(1, changed, BinaryOp::And, active);
-                        let bit = g.bit(edge, event);
-                        edges = g.binary(MAX_EVENTS, edges, BinaryOp::Or, bit);
+                        let edge = g.edge(&self.events[event], was, is);
+                        let bit = g.event_bit(edge, event);
+                        edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
                     }
-                    g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, edges);
+                    g.store(slots.exit_arg, self.event_bits, edges);
                 }
                 Some(wait) => {
                     // A kernel runs at most once a slot (see `Plan::new`), so
@@ -1413,7 +1530,7 @@ impl Plan {
                     let flag = g.constant(1, SCHEDULER_FLAG_WIDTH);
                     g.store(slots.waiting[index], SCHEDULER_FLAG_WIDTH, flag);
                     let level = g.signal_level(wait.signal);
-                    let level = g.widen(level, SCHEDULER_FLAG_WIDTH);
+                    let level = g.baseline_byte(level);
                     g.store(slots.baseline[index], SCHEDULER_FLAG_WIDTH, level);
                     g.b.seal_block(SIRTerminator::Jump(resumed, Vec::new()));
                     g.b.switch_to_block(resumed);
@@ -1480,8 +1597,8 @@ impl Plan {
             self.batch(&mut g, &tracked, slot_end, finish_exit);
         } else {
             let staged: Vec<&Staged> = waits.iter().flat_map(|(_, wait)| &wait.sites).collect();
-            let mask = g.load(slots.exit_arg, MAX_EVENTS);
-            let zero = g.constant(0, MAX_EVENTS);
+            let mask = g.load(slots.exit_arg, self.event_bits);
+            let zero = g.constant(0, self.event_bits);
             let quiet = g.binary(1, mask, BinaryOp::Eq, zero);
             let triggered = g.b.new_block();
             let untriggered = g.b.new_block();
@@ -1521,9 +1638,9 @@ impl Plan {
                 // No event can have an edge; the mask stays empty.
                 g.b.seal_block(SIRTerminator::Jump(evaluated, Vec::new()));
             } else {
-                let one = g.constant(1, MAX_EVENTS);
-                let lower = g.binary(MAX_EVENTS, mask, BinaryOp::Sub, one);
-                let others = g.binary(MAX_EVENTS, mask, BinaryOp::And, lower);
+                let one = g.constant(1, self.event_bits);
+                let lower = g.binary(self.event_bits, mask, BinaryOp::Sub, one);
+                let others = g.binary(self.event_bits, mask, BinaryOp::And, lower);
                 let single = g.binary(1, others, BinaryOp::Eq, zero);
                 let one_domain = g.b.new_block();
                 let domains = g.b.new_block();
@@ -1540,7 +1657,7 @@ impl Plan {
                 let written = self.written();
                 for &index in written.iter().chain(&self.clocks) {
                     let event = &self.events[index];
-                    let bit = g.constant(1 << index, MAX_EVENTS);
+                    let bit = g.single(index, self.event_bits);
                     let this = g.binary(1, mask, BinaryOp::Eq, bit);
                     let unit = g.b.new_block();
                     let next = g.b.new_block();
@@ -1598,14 +1715,14 @@ impl Plan {
                         let evaluate = g.b.new_block();
                         g.settle_then(evaluate);
                         g.b.switch_to_block(evaluate);
-                        mask = g.load(slots.exit_arg, MAX_EVENTS);
-                        zero = g.constant(0, MAX_EVENTS);
+                        mask = g.load(slots.exit_arg, self.event_bits);
+                        zero = g.constant(0, self.event_bits);
                     }
                     for phase in [Phase::Evaluate, Phase::Apply] {
                         for &index in &edged {
                             let event = &self.events[index];
-                            let bit = g.constant(1 << index, MAX_EVENTS);
-                            let selected = g.binary(MAX_EVENTS, mask, BinaryOp::And, bit);
+                            let bit = g.single(index, self.event_bits);
+                            let selected = g.binary(self.event_bits, mask, BinaryOp::And, bit);
                             let this = g.binary(1, selected, BinaryOp::Ne, zero);
                             let unit = g.b.new_block();
                             let next = g.b.new_block();
@@ -1725,7 +1842,23 @@ impl Plan {
             g.b.seal_block(SIRTerminator::Jump(rearmed, Vec::new()));
             g.b.switch_to_block(rearmed);
         }
-        g.b.seal_block(SIRTerminator::Jump(header, Vec::new()));
+        // The run returns after the slot that reaches its budget, or in
+        // which its runtime events reach a batch, so that the host drains
+        // them before the ring buffer overflows.
+        let count = g.load(slots.count, SCHEDULER_TIME_WIDTH);
+        let budget = g.load(slots.budget, SCHEDULER_TIME_WIDTH);
+        let mut returns = g.binary(1, count, BinaryOp::GeU, budget);
+        if let Some(batch) = g.event_batch {
+            let events = g.load(slots.events, SCHEDULER_TIME_WIDTH);
+            let batch = g.constant(batch, SCHEDULER_TIME_WIDTH);
+            let full = g.binary(1, events, BinaryOp::GeU, batch);
+            returns = g.binary(1, returns, BinaryOp::Or, full);
+        }
+        g.b.seal_block(SIRTerminator::Branch {
+            cond: returns,
+            true_block: (stopped, Vec::new()),
+            false_block: (header, Vec::new()),
+        });
         g.emit_settle(&program.sir.eval_comb, finish_exit, internal_exit);
         if let Some(lazy) = &self.lazy {
             g.emit_eager(&lazy.eager, finish_exit, internal_exit);
@@ -1754,7 +1887,7 @@ impl Plan {
     ) {
         let slots = g.slots;
         let wave = g.b.new_block();
-        let mask = g.b.alloc_bit(MAX_EVENTS, false);
+        let mask = g.b.alloc_bit(self.event_bits, false);
         let fire = g.b.new_block_with(vec![mask]);
         let judge = g.b.new_block();
         // A pass of the process phase settles before the domains; a
@@ -1767,40 +1900,37 @@ impl Plan {
         }
 
         g.b.switch_to_block(judge);
-        let active = g.load(slots.exit_arg, MAX_EVENTS);
-        let levels = g.load(slots.levels, MAX_EVENTS);
+        let active = g.load(slots.exit_arg, self.event_bits);
+        let levels = g.load_levels();
         let stable = self.stable_edges(g, tracked, levels);
-        let mut gated_edges = g.constant(0, MAX_EVENTS);
+        let mut gated_edges = g.constant(0, self.event_bits);
         let mut judged = levels;
         for (source, gated) in &self.gating {
             let source_bit = position(tracked, *source);
-            let was = g.mask_bit(levels, source_bit);
+            let was = g.saved_level(levels, source_bit);
             let is = g.level(&self.events[*source]);
             let changed = g.binary(1, was, BinaryOp::Ne, is);
             for &clock in gated {
                 let clock_bit = position(tracked, clock);
-                let was = g.mask_bit(levels, clock_bit);
+                let was = g.saved_level(levels, clock_bit);
                 let is = g.level(&self.events[clock]);
                 let edge = g.edge(&self.events[clock], was, is);
                 let edge = g.binary(1, edge, BinaryOp::And, changed);
-                let bit = g.bit(edge, clock);
-                gated_edges = g.binary(MAX_EVENTS, gated_edges, BinaryOp::Or, bit);
+                let bit = g.event_bit(edge, clock);
+                gated_edges = g.binary(self.event_bits, gated_edges, BinaryOp::Or, bit);
                 // The judged level is the clock's baseline from now on.
-                let level = g.b.alloc_bit(1, false);
+                let level = g.b.alloc_bit(g.level_width(), false);
                 g.b.emit(SIRInstruction::Mux(level, changed, is, was));
-                let keep = g.constant(!(1u64 << clock_bit), MAX_EVENTS);
-                let kept = g.binary(MAX_EVENTS, judged, BinaryOp::And, keep);
-                let bit = g.bit(level, clock_bit);
-                judged = g.binary(MAX_EVENTS, kept, BinaryOp::Or, bit);
+                judged = g.replace_level(judged, level, clock_bit);
             }
         }
-        g.store(slots.levels, SCHEDULER_TIME_WIDTH, judged);
-        let zero = g.constant(0, MAX_EVENTS);
+        g.store_levels(judged);
+        let zero = g.constant(0, self.event_bits);
         let edged = g.binary(1, active, BinaryOp::Ne, zero);
-        let sources = g.binary(MAX_EVENTS, active, BinaryOp::Or, gated_edges);
-        let triggers = g.b.alloc_bit(MAX_EVENTS, false);
+        let sources = g.binary(self.event_bits, active, BinaryOp::Or, gated_edges);
+        let triggers = g.b.alloc_bit(self.event_bits, false);
         g.b.emit(SIRInstruction::Mux(triggers, edged, sources, stable));
-        g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, triggers);
+        g.store(slots.exit_arg, self.event_bits, triggers);
         let quiet = g.binary(1, triggers, BinaryOp::Eq, zero);
         let first = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
@@ -1813,13 +1943,13 @@ impl Plan {
 
         // A wave after a commit: the domains not run yet whose clocks moved.
         g.b.switch_to_block(wave);
-        let fired = g.load(slots.exit_arg, MAX_EVENTS);
-        let levels = g.load(slots.levels, MAX_EVENTS);
+        let fired = g.load(slots.exit_arg, self.event_bits);
+        let levels = g.load_levels();
         let stable = self.stable_edges(g, tracked, levels);
-        let all = g.constant(u64::MAX, MAX_EVENTS);
-        let unfired = g.binary(MAX_EVENTS, fired, BinaryOp::Xor, all);
-        let ready = g.binary(MAX_EVENTS, stable, BinaryOp::And, unfired);
-        let zero = g.constant(0, MAX_EVENTS);
+        let all = g.ones(self.event_bits);
+        let unfired = g.binary(self.event_bits, fired, BinaryOp::Xor, all);
+        let ready = g.binary(self.event_bits, stable, BinaryOp::And, unfired);
+        let zero = g.constant(0, self.event_bits);
         let quiet = g.binary(1, ready, BinaryOp::Eq, zero);
         let next = g.b.new_block();
         g.b.seal_block(SIRTerminator::Branch {
@@ -1828,17 +1958,17 @@ impl Plan {
             false_block: (next, Vec::new()),
         });
         g.b.switch_to_block(next);
-        let fired = g.binary(MAX_EVENTS, fired, BinaryOp::Or, ready);
-        g.store(slots.exit_arg, SCHEDULER_TIME_WIDTH, fired);
+        let fired = g.binary(self.event_bits, fired, BinaryOp::Or, ready);
+        g.store(slots.exit_arg, self.event_bits, fired);
         g.b.seal_block(SIRTerminator::Jump(fire, vec![ready]));
 
         // A wave: one domain evaluates and commits at once, several
         // evaluate, then commit, in event order; then logic settles.
         g.b.switch_to_block(fire);
-        let zero = g.constant(0, MAX_EVENTS);
-        let one = g.constant(1, MAX_EVENTS);
-        let lower = g.binary(MAX_EVENTS, mask, BinaryOp::Sub, one);
-        let others = g.binary(MAX_EVENTS, mask, BinaryOp::And, lower);
+        let zero = g.constant(0, self.event_bits);
+        let one = g.constant(1, self.event_bits);
+        let lower = g.binary(self.event_bits, mask, BinaryOp::Sub, one);
+        let others = g.binary(self.event_bits, mask, BinaryOp::And, lower);
         let single = g.binary(1, others, BinaryOp::Eq, zero);
         let alone = g.b.new_block();
         let together = g.b.new_block();
@@ -1882,22 +2012,26 @@ impl Plan {
 
     /// The tracked events whose levels moved to their active edge against
     /// `levels`, their baselines, as bits by event index.
-    fn stable_edges(
-        &self,
-        g: &mut Generator<'_>,
-        tracked: &[usize],
-        levels: RegisterId,
-    ) -> RegisterId {
-        let mut edges = g.constant(0, MAX_EVENTS);
+    fn stable_edges(&self, g: &mut Generator<'_>, tracked: &[usize], levels: Levels) -> RegisterId {
+        let mut edges = g.constant(0, self.event_bits);
         for (position, &index) in tracked.iter().enumerate() {
-            let was = g.mask_bit(levels, position);
+            let was = g.saved_level(levels, position);
             let is = g.level(&self.events[index]);
             let edge = g.edge(&self.events[index], was, is);
-            let bit = g.bit(edge, index);
-            edges = g.binary(MAX_EVENTS, edges, BinaryOp::Or, bit);
+            let bit = g.event_bit(edge, index);
+            edges = g.binary(self.event_bits, edges, BinaryOp::Or, bit);
         }
         edges
     }
+}
+
+/// Edge levels of the tracked events, one bit per event (see
+/// [`SchedulerSlots::levels`]).
+#[derive(Clone, Copy)]
+struct Levels {
+    values: RegisterId,
+    /// Their unknown bits, in a four-state design.
+    unknown: Option<RegisterId>,
 }
 
 /// The place of event `index` among `tracked`, the bit of its level.
@@ -1929,14 +2063,43 @@ struct Generator<'a> {
     eager: Option<celox_sir::BlockId>,
     /// Where it continues, as [`Self::continuations`].
     eager_continuations: Vec<celox_sir::BlockId>,
+    /// In a four-state design, which state objects keep unknown bits: their
+    /// loads and stores move both planes, and edge levels are four-state
+    /// (see [`Self::level_at`]). `None` in a two-state design.
+    four_state: Option<&'a crate::HashMap<AbsoluteAddr, bool>>,
+    /// See [`Plan::event_bits`].
+    event_bits: usize,
+    /// The runtime events after which a run returns at the end of its slot
+    /// ([`SchedulerSlots::events`]), when the inlined units count theirs.
+    event_batch: Option<u64>,
 }
 
 impl Generator<'_> {
     fn constant(&mut self, value: u64, width: usize) -> RegisterId {
+        self.wide_constant(BigUint::from(value), width)
+    }
+
+    fn wide_constant(&mut self, value: BigUint, width: usize) -> RegisterId {
         let register = self.b.alloc_bit(width, false);
         self.b
             .emit(SIRInstruction::Imm(register, SIRValue::new(value)));
         register
+    }
+
+    /// The `width`-bit value with only bit `bit` set.
+    fn single(&mut self, bit: usize, width: usize) -> RegisterId {
+        self.wide_constant(BigUint::from(1u8) << bit, width)
+    }
+
+    /// The `width`-bit value with every bit but `bit` set.
+    fn all_but(&mut self, bit: usize, width: usize) -> RegisterId {
+        let ones = (BigUint::from(1u8) << width) - 1u8;
+        self.wide_constant(ones ^ (BigUint::from(1u8) << bit), width)
+    }
+
+    /// The `width`-bit value with every bit set.
+    fn ones(&mut self, width: usize) -> RegisterId {
+        self.wide_constant((BigUint::from(1u8) << width) - 1u8, width)
     }
 
     fn binary(
@@ -2006,30 +2169,237 @@ impl Generator<'_> {
     /// Whether bit `bit` of `mask` is set.
     fn mask_bit(&mut self, mask: RegisterId, bit: usize) -> RegisterId {
         let width = self.b.register(&mask).width();
-        let selector = self.constant(1 << bit, width);
+        let selector = self.single(bit, width);
         let selected = self.binary(width, mask, BinaryOp::And, selector);
         let zero = self.constant(0, width);
         self.binary(1, selected, BinaryOp::Ne, zero)
     }
 
     /// The edge level of `event`'s signal, as the runtime reads it: whether
-    /// its low byte, within its width, is not zero.
+    /// its low byte, within its width, is not zero (see [`Self::level_at`]).
     fn level(&mut self, event: &Event) -> RegisterId {
-        let width = event.width.min(8);
-        let value = self.load(event.signal, width);
-        let zero = self.constant(0, width);
-        self.binary(1, value, BinaryOp::Ne, zero)
+        self.level_at(event.signal, event.width.min(8))
+    }
+
+    /// The edge level of the low `width` bits of `address`: one bit, whether
+    /// they are not zero, or in a four-state design two, as
+    /// `celox_design::edges` encodes it: that bit, and above it whether any
+    /// of them is unknown (`edge_level`).
+    fn level_at(&mut self, address: AbsoluteAddr, width: usize) -> RegisterId {
+        if self.four_state.is_none() {
+            let value = self.load(address, width);
+            let zero = self.constant(0, width);
+            return self.binary(1, value, BinaryOp::Ne, zero);
+        }
+        let (value, unknown) = if self.keeps_unknowns(address) {
+            // Both planes, from the 64-bit planes of the bits widened.
+            let bits = self.load_state(address, 0, width);
+            debug_assert!(width < 64, "an edge level reads the low byte");
+            let wide = self.b.alloc_logic(64);
+            let zero = self.b.alloc_logic(64 - width);
+            self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+            self.b.emit(SIRInstruction::Concat(wide, vec![zero, bits]));
+            let planes = self.b.alloc_bit(128, false);
+            self.b.emit(SIRInstruction::Unary(
+                planes,
+                celox_design::UnaryOp::ToPlanes,
+                wide,
+            ));
+            let plane = |g: &mut Self, offset: usize| {
+                let bits = g.b.alloc_bit(width, false);
+                g.b.emit(SIRInstruction::Slice(bits, planes, offset, width));
+                let zero = g.constant(0, width);
+                g.binary(1, bits, BinaryOp::Ne, zero)
+            };
+            (plane(self, 0), plane(self, 64))
+        } else {
+            let value = self.load(address, width);
+            let zero = self.constant(0, width);
+            (
+                self.binary(1, value, BinaryOp::Ne, zero),
+                self.constant(0, 1),
+            )
+        };
+        let level = self.b.alloc_bit(2, false);
+        self.b
+            .emit(SIRInstruction::Concat(level, vec![unknown, value]));
+        level
+    }
+
+    /// The width of an edge level (see [`Self::level_at`]).
+    fn level_width(&self) -> usize {
+        if self.four_state.is_some() { 2 } else { 1 }
     }
 
     /// Whether a change of `event`'s level from `was` to `is` is its active
     /// edge.
     fn edge(&mut self, event: &Event, was: RegisterId, is: RegisterId) -> RegisterId {
-        let changed = self.binary(1, was, BinaryOp::Ne, is);
-        let active = self.equals(is, u64::from(event.active));
-        self.binary(1, changed, BinaryOp::And, active)
+        self.level_edge(event.active != 0, was, is)
     }
 
-    /// Run `body` when bit `index` of the 64-bit `mask` is set.
+    /// Whether a change of an edge level from `was` to `is` is a rising
+    /// (`rising`) or a falling edge, as `celox_design::edges::level_edge`
+    /// judges it: in a four-state design, one that leaves the level the edge
+    /// starts from or reaches the one it ends at, other than between unknown
+    /// levels (IEEE 1800-2023 Table 9-2).
+    fn level_edge(&mut self, rising: bool, was: RegisterId, is: RegisterId) -> RegisterId {
+        let (from, to) = if rising { (0, 1) } else { (1, 0) };
+        if self.four_state.is_none() {
+            let changed = self.binary(1, was, BinaryOp::Ne, is);
+            let active = self.equals(is, to);
+            return self.binary(1, changed, BinaryOp::And, active);
+        }
+        let to = self.constant(to, 2);
+        let leaves = self.binary(1, was, BinaryOp::Ne, to);
+        let from = self.constant(from, 2);
+        let reaches = self.binary(1, is, BinaryOp::Ne, from);
+        let edge = self.binary(1, leaves, BinaryOp::And, reaches);
+        let both = self.binary(2, was, BinaryOp::And, is);
+        let unknown = self.constant(u64::from(LEVEL_UNKNOWN), 2);
+        let both = self.binary(2, both, BinaryOp::And, unknown);
+        let zero = self.constant(0, 2);
+        let known = self.binary(1, both, BinaryOp::Eq, zero);
+        self.binary(1, edge, BinaryOp::And, known)
+    }
+
+    /// Whether `address` keeps unknown bits: a four-state object of a
+    /// four-state design.
+    fn keeps_unknowns(&self, address: AbsoluteAddr) -> bool {
+        self.four_state
+            .is_some_and(|objects| objects.get(&address).copied().unwrap_or(false))
+    }
+
+    /// Load design state, both planes of an object that keeps unknown bits.
+    fn load_state(&mut self, address: AbsoluteAddr, offset: usize, width: usize) -> RegisterId {
+        if !self.keeps_unknowns(address) {
+            return self.load_at(address, offset, width);
+        }
+        let register = self.b.alloc_logic(width);
+        self.b.emit(SIRInstruction::Load(
+            register,
+            stable(address),
+            SIROffset::Static(offset),
+            width,
+        ));
+        register
+    }
+
+    /// Store `value` into design state: into an object that keeps unknown
+    /// bits as a four-state value, a two-state one with its mask clear;
+    /// into one that does not, without its unknown bits.
+    fn store_state(
+        &mut self,
+        address: AbsoluteAddr,
+        offset: usize,
+        width: usize,
+        value: RegisterId,
+    ) {
+        let logic = matches!(
+            self.b.register(&value),
+            celox_sir::RegisterType::Logic { .. }
+        );
+        let value = match (self.keeps_unknowns(address), logic) {
+            (true, false) => {
+                let zero = self.b.alloc_logic(width);
+                self.b.emit(SIRInstruction::Imm(zero, SIRValue::new(0u64)));
+                let known = self.b.alloc_logic(width);
+                self.b
+                    .emit(SIRInstruction::Binary(known, value, BinaryOp::Or, zero));
+                known
+            }
+            (false, true) => {
+                let known = self.b.alloc_bit(width, false);
+                self.b.emit(SIRInstruction::Unary(
+                    known,
+                    celox_design::UnaryOp::ToTwoState,
+                    value,
+                ));
+                known
+            }
+            _ => value,
+        };
+        self.store_at(address, offset, width, value);
+    }
+
+    /// The saved level of the event at bit `bit` of `levels`.
+    fn saved_level(&mut self, levels: Levels, bit: usize) -> RegisterId {
+        let value = self.mask_bit(levels.values, bit);
+        match levels.unknown {
+            None => value,
+            Some(unknown) => {
+                let unknown = self.mask_bit(unknown, bit);
+                let level = self.b.alloc_bit(2, false);
+                self.b
+                    .emit(SIRInstruction::Concat(level, vec![unknown, value]));
+                level
+            }
+        }
+    }
+
+    /// `levels` with `level` at bit `bit`, which was clear.
+    fn with_level(&mut self, levels: Levels, level: RegisterId, bit: usize) -> Levels {
+        let (value, unknown) = self.level_planes(level);
+        let set = self.event_bit(value, bit);
+        let values = self.binary(self.event_bits, levels.values, BinaryOp::Or, set);
+        let unknown = levels.unknown.map(|levels| {
+            let set = self.event_bit(unknown.expect("a four-state level"), bit);
+            self.binary(self.event_bits, levels, BinaryOp::Or, set)
+        });
+        Levels { values, unknown }
+    }
+
+    /// `levels` with `level` in place of the one at bit `bit`.
+    fn replace_level(&mut self, levels: Levels, level: RegisterId, bit: usize) -> Levels {
+        let keep = self.all_but(bit, self.event_bits);
+        let values = self.binary(self.event_bits, levels.values, BinaryOp::And, keep);
+        let unknown = levels
+            .unknown
+            .map(|unknown| self.binary(self.event_bits, unknown, BinaryOp::And, keep));
+        self.with_level(Levels { values, unknown }, level, bit)
+    }
+
+    /// The value bit of an edge level, and in a four-state design its
+    /// unknown bit.
+    fn level_planes(&mut self, level: RegisterId) -> (RegisterId, Option<RegisterId>) {
+        if self.four_state.is_none() {
+            return (level, None);
+        }
+        let plane = |g: &mut Self, offset: usize| {
+            let bit = g.b.alloc_bit(1, false);
+            g.b.emit(SIRInstruction::Slice(bit, level, offset, 1));
+            bit
+        };
+        (plane(self, 0), Some(plane(self, 1)))
+    }
+
+    /// No saved levels: every event at 0.
+    fn no_levels(&mut self) -> Levels {
+        let values = self.constant(0, self.event_bits);
+        let unknown = self
+            .four_state
+            .is_some()
+            .then(|| self.constant(0, self.event_bits));
+        Levels { values, unknown }
+    }
+
+    /// The levels of [`SchedulerSlots::levels`].
+    fn load_levels(&mut self) -> Levels {
+        let values = self.load(self.slots.levels, self.event_bits);
+        let unknown = self
+            .four_state
+            .is_some()
+            .then(|| self.load(self.slots.unknown_levels, self.event_bits));
+        Levels { values, unknown }
+    }
+
+    fn store_levels(&mut self, levels: Levels) {
+        self.store(self.slots.levels, self.event_bits, levels.values);
+        if let Some(unknown) = levels.unknown {
+            self.store(self.slots.unknown_levels, self.event_bits, unknown);
+        }
+    }
+
+    /// Run `body` when bit `index` of `mask` is set.
     fn if_bit(&mut self, mask: RegisterId, index: usize, body: impl FnOnce(&mut Self)) {
         let set = self.mask_bit(mask, index);
         let run = self.b.new_block();
@@ -2053,18 +2423,42 @@ impl Generator<'_> {
         block
     }
 
-    /// Bit `index` of a 64-bit mask, set when `condition` holds.
+    /// Bit `index` of a kernel or clock mask, set when `condition` holds.
     fn bit(&mut self, condition: RegisterId, index: usize) -> RegisterId {
-        let set = self.constant(1 << index, MAX_KERNELS);
-        let unset = self.constant(0, MAX_KERNELS);
-        let bit = self.b.alloc_bit(MAX_KERNELS, false);
+        self.bit_of(condition, index, MAX_KERNELS)
+    }
+
+    /// Bit `index` of an event mask, set when `condition` holds.
+    fn event_bit(&mut self, condition: RegisterId, index: usize) -> RegisterId {
+        self.bit_of(condition, index, self.event_bits)
+    }
+
+    fn bit_of(&mut self, condition: RegisterId, index: usize, width: usize) -> RegisterId {
+        let set = self.single(index, width);
+        let unset = self.constant(0, width);
+        let bit = self.b.alloc_bit(width, false);
         self.b.emit(SIRInstruction::Mux(bit, condition, set, unset));
         bit
     }
 
-    /// The value of the one-bit signal `address`.
+    /// The edge level of the one-bit signal `address` (see
+    /// [`Self::level_at`]).
     fn signal_level(&mut self, address: AbsoluteAddr) -> RegisterId {
-        self.load(address, 1)
+        if self.four_state.is_none() {
+            return self.load(address, 1);
+        }
+        self.level_at(address, 1)
+    }
+
+    /// An edge level as the byte of a wait's baseline slot.
+    fn baseline_byte(&mut self, level: RegisterId) -> RegisterId {
+        if self.four_state.is_none() {
+            return self.widen(level, SCHEDULER_FLAG_WIDTH);
+        }
+        let zero = self.constant(0, SCHEDULER_FLAG_WIDTH - 2);
+        let byte = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
+        self.b.emit(SIRInstruction::Concat(byte, vec![zero, level]));
+        byte
     }
 
     /// The one-bit `value` as a `width`-bit number.
@@ -2088,17 +2482,29 @@ impl Generator<'_> {
         for &(index, ordinal, signal, kind) in waits {
             let waiting = self.waiting(index);
             let baseline = self.load(self.slots.baseline[index], SCHEDULER_FLAG_WIDTH);
-            let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
-            let was = self.binary(1, baseline, BinaryOp::Ne, zero);
             let is = self.signal_level(signal);
-            let changed = self.binary(1, was, BinaryOp::Ne, is);
-            let occurred = match kind {
-                CounterKind::Changes => changed,
-                CounterKind::Rises => self.binary(1, changed, BinaryOp::And, is),
-                CounterKind::Falls => self.binary(1, changed, BinaryOp::And, was),
+            let occurred = if self.four_state.is_none() {
+                let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
+                let was = self.binary(1, baseline, BinaryOp::Ne, zero);
+                let changed = self.binary(1, was, BinaryOp::Ne, is);
+                match kind {
+                    CounterKind::Changes => changed,
+                    CounterKind::Rises => self.binary(1, changed, BinaryOp::And, is),
+                    CounterKind::Falls => self.binary(1, changed, BinaryOp::And, was),
+                }
+            } else {
+                // The baseline byte holds the level (`baseline_byte`); the
+                // edges are those of `timing::occurs`, Table 9-2's.
+                let was = self.b.alloc_bit(2, false);
+                self.b.emit(SIRInstruction::Slice(was, baseline, 0, 2));
+                match kind {
+                    CounterKind::Changes => self.binary(1, was, BinaryOp::Ne, is),
+                    CounterKind::Rises => self.level_edge(true, was, is),
+                    CounterKind::Falls => self.level_edge(false, was, is),
+                }
             };
             let wake = self.binary(1, occurred, BinaryOp::And, waiting);
-            let level = self.widen(is, SCHEDULER_FLAG_WIDTH);
+            let level = self.baseline_byte(is);
             let next = self.b.alloc_bit(SCHEDULER_FLAG_WIDTH, false);
             self.b
                 .emit(SIRInstruction::Mux(next, waiting, level, baseline));
@@ -2131,15 +2537,8 @@ impl Generator<'_> {
             self.b.switch_to_block(publish);
             let clear = self.constant(0, 1);
             self.store(site.pending, 1, clear);
-            let value = self.load(site.value, site.width);
-            self.b.emit(SIRInstruction::Store(
-                stable(site.target),
-                SIROffset::Static(site.lsb),
-                site.width,
-                value,
-                Vec::new(),
-                Vec::new(),
-            ));
+            let value = self.load_state(site.value, 0, site.width);
+            self.store_state(site.target, site.lsb, site.width, value);
             if self.settle_reads(site.target) {
                 self.mark_dirty();
             }
@@ -2364,12 +2763,18 @@ impl Generator<'_> {
     /// Inline `unit`. A `$finish` record it emits ends the run after it, as
     /// the reference loop ends the slot after the unit that emitted one.
     fn inline(&mut self, unit: &Unit, finish_exit: celox_sir::BlockId) {
-        if self.finish_sites.is_empty() || !emits_finish(unit, self.finish_sites) {
+        let finishes = !self.finish_sites.is_empty() && emits_finish(unit, self.finish_sites);
+        let counts = self.event_batch.is_some()
+            && instructions(unit).any(|inst| matches!(inst, SIRInstruction::RuntimeEvent { .. }));
+        if !finishes && !counts {
             self.b.inline_execution_unit(unit);
             return;
         }
-        let instrumented = self.instrument(unit);
+        let instrumented = self.instrument(unit, counts);
         self.b.inline_execution_unit(&instrumented);
+        if !finishes {
+            return;
+        }
         let finished = self.load(self.slots.finish, SCHEDULER_FLAG_WIDTH);
         let zero = self.constant(0, SCHEDULER_FLAG_WIDTH);
         let set = self.binary(1, finished, BinaryOp::Ne, zero);
@@ -2383,8 +2788,8 @@ impl Generator<'_> {
     }
 
     /// A copy of `unit` that sets the finish slot after every `$finish`
-    /// record.
-    fn instrument(&self, unit: &Unit) -> Unit {
+    /// record, and when `counts`, counts every record in the events slot.
+    fn instrument(&self, unit: &Unit, counts: bool) -> Unit {
         let mut unit = unit.clone();
         let mut next = unit
             .register_map
@@ -2393,12 +2798,38 @@ impl Generator<'_> {
             .max()
             .unwrap_or(0);
         let mut registers = Vec::new();
+        let mut wide = Vec::new();
         for block in unit.blocks.values_mut() {
             let mut instructions = Vec::with_capacity(block.instructions.len());
             for inst in block.instructions.drain(..) {
                 let finish = matches!(&inst, SIRInstruction::RuntimeEvent { site_id, .. }
                     if self.finish_sites.contains(site_id));
+                let record = matches!(&inst, SIRInstruction::RuntimeEvent { .. });
                 instructions.push(inst);
+                if counts && record {
+                    let [count, one, sum] = std::array::from_fn(|index| RegisterId(next + index));
+                    next += 3;
+                    wide.extend([count, one, sum]);
+                    let events = stable(self.slots.events);
+                    instructions.extend([
+                        SIRInstruction::Load(
+                            count,
+                            events,
+                            SIROffset::Static(0),
+                            SCHEDULER_TIME_WIDTH,
+                        ),
+                        SIRInstruction::Imm(one, SIRValue::new(1u64)),
+                        SIRInstruction::Binary(sum, count, BinaryOp::Add, one),
+                        SIRInstruction::Store(
+                            events,
+                            SIROffset::Static(0),
+                            SCHEDULER_TIME_WIDTH,
+                            sum,
+                            Vec::new(),
+                            Vec::new(),
+                        ),
+                    ]);
+                }
                 if finish {
                     // Each site defines its own register.
                     let one = RegisterId(next);
@@ -2422,6 +2853,15 @@ impl Generator<'_> {
                 register,
                 crate::ir::RegisterType::Bit {
                     width: SCHEDULER_FLAG_WIDTH,
+                    signed: false,
+                },
+            );
+        }
+        for register in wide {
+            unit.register_map.insert(
+                register,
+                crate::ir::RegisterType::Bit {
+                    width: SCHEDULER_TIME_WIDTH,
                     signed: false,
                 },
             );
@@ -2641,6 +3081,32 @@ fn fails(unit: &Unit) -> bool {
         .any(|block| matches!(block.terminator, SIRTerminator::Error(_)))
 }
 
+/// The signals `statement` writes that may be reset events: those of
+/// `rst.assert` and of assignments.
+fn testbench_resets(
+    statement: &celox_testbench::SemanticStatement<AbsoluteAddr>,
+) -> Vec<AbsoluteAddr> {
+    use celox_testbench::SemanticStatement as S;
+    match statement {
+        S::ResetAssert {
+            reset_event: Some(event),
+            ..
+        } => vec![*event],
+        S::Assign { dst, .. } => vec![dst.signal.address],
+        S::If {
+            then_block,
+            else_block,
+            ..
+        } => then_block
+            .iter()
+            .chain(else_block)
+            .flat_map(testbench_resets)
+            .collect(),
+        S::For { body, .. } => body.iter().flat_map(testbench_resets).collect(),
+        _ => vec![],
+    }
+}
+
 /// Whether `unit` may record a `$finish`, one of `finish_sites`.
 fn emits_finish(unit: &Unit, finish_sites: &HashSet<u32>) -> bool {
     instructions(unit).any(|inst| {
@@ -2846,5 +3312,143 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "systemverilog"))]
+mod wide_event_tests {
+    use num_bigint::BigUint;
+
+    const CLOCKS: usize = 70;
+    const PERIODS: usize = 7;
+    const END: u64 = 100;
+
+    /// 70 clocks, each clocking a counter. One process per period toggles
+    /// its clocks, so the events exceed a word while the kernels stay few.
+    fn more_than_64_events() -> String {
+        let mut source = String::from("`timescale 1ns/1ns\nmodule Top;\n");
+        for index in 0..CLOCKS {
+            source += &format!(
+                "  logic c{index} = 0;\n  logic [7:0] n{index} = 0;\n  \
+                 always_ff @(posedge c{index}) n{index} <= n{index} + 8'd1;\n"
+            );
+        }
+        for period in 1..=PERIODS {
+            let toggles: String = (0..CLOCKS)
+                .filter(|index| index % PERIODS + 1 == period)
+                .map(|index| format!(" c{index} = ~c{index};"))
+                .collect();
+            source += &format!("  always #{period} begin{toggles} end\n");
+        }
+        source + "endmodule\n"
+    }
+
+    fn builder(source: &str) -> crate::SimulatorBuilder<'_, crate::Simulation> {
+        crate::Simulation::from_sv_sources(vec![(source, std::path::Path::new("events.sv"))], "Top")
+    }
+
+    /// Run to `END` and check every counter against its clock's edges;
+    /// returns the slots the compiled scheduler ran.
+    fn counts_every_edge<B: crate::SimBackend>(
+        backend: &str,
+        mut sim: crate::Simulation<B>,
+    ) -> u64 {
+        sim.run_until(END).unwrap();
+        for index in 0..CLOCKS {
+            // A clock with half period `p` rises at p, 3p, 5p, ...
+            let period = (index % PERIODS + 1) as u64;
+            let rises = (END / period).div_ceil(2);
+            let counter = sim.signal(&format!("n{index}"));
+            assert_eq!(
+                sim.get(counter),
+                BigUint::from(rises),
+                "{backend}: n{index}"
+            );
+        }
+        sim.scheduler_stats().compiled_slots
+    }
+
+    /// A design with more events than one word of a mask holds runs in
+    /// the compiled scheduler, and every domain sees each of its edges.
+    #[test]
+    fn more_than_64_events_run_in_the_compiled_scheduler() {
+        let source = more_than_64_events();
+        let mut sim = builder(&source).build().unwrap();
+        let scheduler = sim
+            .simulator
+            .program
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .unwrap();
+        assert!(scheduler.unit.is_some(), "{:?}", scheduler.fallback);
+        assert!(scheduler.events.len() > 64);
+        assert!(scheduler.fallback.iter().all(Option::is_none));
+        sim.run_until(1).unwrap();
+        assert!(sim.scheduler_stats().compiled_slots > 0);
+        counts_every_edge("native", sim);
+        // Every step of the compiled scheduler agrees with the reference
+        // loop.
+        let mut checked = builder(&source)
+            .scheduler_mode(crate::SchedulerMode::Differential)
+            .build()
+            .unwrap();
+        checked.run_until(END).unwrap();
+        assert!(checked.scheduler_stats().checked_steps > 0);
+    }
+
+    /// 70 instances on one clock: the frontend's estimate counts the clock
+    /// once per instance and widens the scheduler's slots, while the design
+    /// has few events. A `$finish` ends a compiled slot early.
+    #[test]
+    fn wide_slots_with_few_events_finish_on_every_backend() {
+        let mut source = String::from(
+            "`timescale 1ns/1ns\nmodule Counter(input logic clk, output logic [7:0] n);\n  \
+             initial n = 0;\n  always_ff @(posedge clk) n <= n + 8'd1;\nendmodule\n\
+             module Top;\n  logic clk = 0;\n  always #1 clk = ~clk;\n  initial #20 $finish;\n",
+        );
+        for index in 0..CLOCKS {
+            source +=
+                &format!("  logic [7:0] n{index};\n  Counter u{index}(.clk(clk), .n(n{index}));\n");
+        }
+        source += "endmodule\n";
+        fn finishes<B: crate::SimBackend>(backend: &str, mut sim: crate::Simulation<B>) {
+            sim.run_until(100).unwrap();
+            assert!(sim.is_finished(), "{backend}");
+            for index in 0..CLOCKS {
+                let counter = sim.signal(&format!("n{index}"));
+                assert_eq!(sim.get(counter), BigUint::from(10u8), "{backend}: n{index}");
+            }
+        }
+        let wide = builder(&source).build().unwrap();
+        let scheduler = wide
+            .simulator
+            .program
+            .runtime_schema
+            .scheduler
+            .as_ref()
+            .unwrap();
+        assert!(scheduler.events.len() <= 64);
+        assert!(wide.simulator.layout().widths[&scheduler.slots.levels] > 64);
+        finishes("native", wide);
+        finishes("interpreter", builder(&source).build_interpreter().unwrap());
+        finishes("tiered", builder(&source).build_tiered().unwrap());
+        #[cfg(feature = "cranelift")]
+        finishes("cranelift", builder(&source).build_cranelift().unwrap());
+        #[cfg(feature = "wasm-runtime")]
+        finishes("wasm", builder(&source).build_wasm().unwrap());
+    }
+
+    /// The runtime reads the wide scheduler slots on every backend.
+    #[test]
+    fn more_than_64_events_run_on_every_backend() {
+        let source = more_than_64_events();
+        counts_every_edge("interpreter", builder(&source).build_interpreter().unwrap());
+        counts_every_edge("tiered", builder(&source).build_tiered().unwrap());
+        // Cranelift's wide comparisons once ran every domain (#2102).
+        #[cfg(feature = "cranelift")]
+        assert!(counts_every_edge("cranelift", builder(&source).build_cranelift().unwrap()) > 0);
+        #[cfg(feature = "wasm-runtime")]
+        counts_every_edge("wasm", builder(&source).build_wasm().unwrap());
     }
 }

@@ -151,13 +151,119 @@ fn static_locals_written_before_they_are_read_are_temporaries() {
 }
 
 #[test]
-fn static_task_locals_that_keep_their_value_remain_unsupported() {
-    let detail = error(
-        "module Top(input logic clk, output int y);
-        task count(output int result); static int saved=0; saved++; result=saved; endtask
-        always @(posedge clk) count(y); endmodule",
+fn static_task_locals_keep_their_value() {
+    assert_eq!(
+        ticks(
+            "module Top(input logic clk, output int y);
+               task count(output int result); static int saved=0; saved++; result=saved; endtask
+               always @(posedge clk) count(y);
+             endmodule",
+            3
+        ),
+        [1, 2, 3]
     );
-    assert!(detail.contains("static variable `saved`"), "{detail}");
+}
+
+/// A task that blocks in a scheduler operation suspends like one that waits:
+/// the call at time 1 writes the static local while the first call is
+/// blocked (IEEE 1800-2023 6.21, 15.3).
+#[test]
+fn static_task_locals_are_shared_across_blocking_operations() {
+    let source = "`timescale 1ns/1ns
+        module Top(output int a, b);
+          semaphore sem = new(0);
+          int n = 0;
+          task take(output int r);
+            static int seen;
+            n++;
+            seen = n;
+            sem.get(1);
+            r = seen;
+          endtask
+          initial begin a = 0; take(a); end
+          initial begin b = 0; #1; take(b); end
+          initial begin #2; sem.put(2); end
+        endmodule";
+    let mut simulation =
+        Simulation::from_sv_sources(vec![(source, std::path::Path::new("lifetimes.sv"))], "Top")
+            .build()
+            .unwrap_or_else(|error| panic!("{error}"));
+    simulation.run_until(3).unwrap();
+    let a = simulation.signal("a");
+    let b = simulation.signal("b");
+    assert_eq!(u64::try_from(simulation.get(a)).unwrap(), 2);
+    assert_eq!(u64::try_from(simulation.get(b)).unwrap(), 2);
+}
+
+/// A static output formal of a task that a call leaves unassigned copies
+/// out the value of an earlier call (IEEE 1800-2023 6.21, 13.5).
+#[test]
+fn static_task_outputs_keep_their_value() {
+    assert_eq!(
+        ticks(
+            "module Top(input logic clk, output int y);
+               task maybe(input bit set, output int r); if (set) r = 5; endtask
+               int v; bit s = 1;
+               always @(posedge clk) begin maybe(s, v); s = 0; y <= v; end
+             endmodule",
+            3
+        ),
+        [5, 5, 5]
+    );
+}
+
+/// The initializer of a static local runs once, before time zero (IEEE
+/// 1800-2023 6.8, 6.21), also in a task that suspends; it cannot read a
+/// formal, which only a call gives a value.
+#[test]
+fn static_initializers_of_timed_tasks_run_at_time_zero() {
+    let mut simulation = Simulation::from_sv_sources(
+        vec![(
+            "`timescale 1ns/1ns
+             module Top(output int y);
+               int m = 4;
+               task t(output int r); static int x = m + 1; #1 x++; r = x; endtask
+               initial begin int a; t(a); t(y); y += a; end
+             endmodule",
+            std::path::Path::new("lifetimes.sv"),
+        )],
+        "Top",
+    )
+    .build()
+    .unwrap_or_else(|error| panic!("{error}"));
+    simulation.run_until(3).unwrap();
+    let y = simulation.signal("y");
+    assert_eq!(u64::try_from(simulation.get(y)).unwrap(), 13);
+    let detail = error(
+        "module Top(output int y);
+           task t(input int a); static int x = a; #1 y = x; endtask
+           initial t(1);
+         endmodule",
+    );
+    assert!(
+        detail.contains("initializer that is not constant"),
+        "{detail}"
+    );
+}
+
+/// A run-time static initializer of a function may read another static
+/// local, also one that the calls only read.
+#[test]
+fn static_initializers_of_functions_read_other_static_locals() {
+    assert_eq!(
+        settled(
+            "module Top(output logic [7:0] y);
+               function int f();
+                 static int a = 2;
+                 static int b = a;
+                 b++;
+                 return b;
+               endfunction
+               initial begin static int k = f(); y = k + 10 * f(); end
+             endmodule"
+        ),
+        43
+    );
 }
 
 #[test]

@@ -59,6 +59,12 @@ pub enum StmtBase<E, L> {
         rhs: E,
         nonblocking: bool,
     },
+    /// A nonblocking assignment scheduled by an intra-assignment delay.
+    /// The control describes the delay; it does not suspend the caller.
+    DelayedNonblocking {
+        control: Box<StmtBase<E, L>>,
+        assignment: Box<StmtBase<E, L>>,
+    },
     If {
         condition: E,
         then_body: Vec<StmtBase<E, L>>,
@@ -135,6 +141,8 @@ pub enum StmtBase<E, L> {
     WaitImplicit(Vec<StmtBase<E, L>>),
     WaitFork,
     DisableFork,
+    /// An internal scheduling boundary in the current Active region (4.7).
+    DeferActive,
     /// Internal region boundary of a concurrent assertion monitor.
     AssertionRegion {
         reactive: bool,
@@ -273,6 +281,13 @@ impl<E, L> StmtBase<E, L> {
             stmts.into_iter().map(|stmt| stmt.map(fe, fl)).collect()
         }
         match self {
+            StmtBase::DelayedNonblocking {
+                control,
+                assignment,
+            } => StmtBase::DelayedNonblocking {
+                control: Box::new(control.map(fe, fl)),
+                assignment: Box::new(assignment.map(fe, fl)),
+            },
             StmtBase::Assign {
                 lhs,
                 rhs,
@@ -405,6 +420,7 @@ impl<E, L> StmtBase<E, L> {
                     .collect(),
             ),
             StmtBase::AssertionRegion { reactive } => StmtBase::AssertionRegion { reactive },
+            StmtBase::DeferActive => StmtBase::DeferActive,
             StmtBase::WaitFork => StmtBase::WaitFork,
             StmtBase::DisableFork => StmtBase::DisableFork,
             StmtBase::Wait(condition) => StmtBase::Wait(fe(condition)),
@@ -431,6 +447,13 @@ impl<E, L> StmtBase<E, L> {
             }
         }
         match self {
+            StmtBase::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                control.visit_mut(fe, fl, fname);
+                assignment.visit_mut(fe, fl, fname);
+            }
             StmtBase::Assign { lhs, rhs, .. } => {
                 fl(lhs);
                 fe(rhs);
@@ -528,7 +551,10 @@ impl<E, L> StmtBase<E, L> {
                     }
                 }
             }
-            StmtBase::WaitFork | StmtBase::DisableFork | StmtBase::AssertionRegion { .. } => {}
+            StmtBase::DeferActive
+            | StmtBase::WaitFork
+            | StmtBase::DisableFork
+            | StmtBase::AssertionRegion { .. } => {}
             StmtBase::Wait(condition) => fe(condition),
             StmtBase::WaitImplicit(reads) => body(reads, fe, fl, fname),
         }
@@ -543,6 +569,13 @@ impl<E, L> StmtBase<E, L> {
             }
         };
         match self {
+            StmtBase::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                control.walk_mut(f);
+                assignment.walk_mut(f);
+            }
             StmtBase::If {
                 then_body,
                 else_body,
@@ -596,6 +629,13 @@ impl<E, L> StmtBase<E, L> {
             }
         };
         match self {
+            StmtBase::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                control.walk_scoped(f, detached);
+                assignment.walk_scoped(f, detached);
+            }
             StmtBase::If {
                 then_body,
                 else_body,
