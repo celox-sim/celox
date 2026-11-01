@@ -1,10 +1,10 @@
-//! Member selects of elements of unpacked arrays, such as `m[i].y`.
+//! Member selects of elements of fixed arrays, such as `m[i].y`.
 
 use super::*;
 use semantic_types::{ArrayKind, Packed, PackedElement, TyData};
 
-/// A member select of an element of an unpacked array variable: the
-/// variable, the index of each of its unpacked dimensions, outermost first,
+/// A member select of an element of a fixed array variable: the
+/// variable, the index of each array dimension, outermost first,
 /// and the member path in the element.
 pub(in crate::ast) struct ElementMember {
     pub name: String,
@@ -12,7 +12,7 @@ pub(in crate::ast) struct ElementMember {
     pub members: Vec<String>,
 }
 
-/// The member select `root` of an element of a fixed-size unpacked array
+/// The member select `root` of an element of a fixed-size array
 /// variable of a structure or packed union type, such as `m[i].y`, if it is
 /// one. The index selects take elements of the variable (IEEE 1800-2023
 /// 7.4.5) and the member selects then select from the element (7.2.1, 7.3.1),
@@ -56,11 +56,11 @@ pub(in crate::ast) fn element_member(
     }
     // The variable, or a parameter table of a package, such as `p::T`.
     let name = direct::call_name(tree, id, native)?;
+    let shape = dimensions.get(&name)?;
+    let packed_indices = indices.len().checked_sub(shape.unpacked.len())?;
     let table = &mut session.types;
-    let mut ty = dimensions
-        .get(&name)?
-        .type_id(table, &tree.functions, &dimensions.const_env)?;
-    for _ in &indices {
+    let mut ty = shape.type_id(table, &tree.functions, &dimensions.const_env)?;
+    for _ in &shape.unpacked {
         let TyData::Array {
             kind: ArrayKind::Fixed(_),
             element,
@@ -75,8 +75,8 @@ pub(in crate::ast) fn element_member(
             element: PackedElement::Aggregate(_),
             dims,
             ..
-        }) if dims.len() == 1 => {}
-        TyData::UnpackedStruct(_) => {}
+        }) if dims.len() == packed_indices + 1 => {}
+        TyData::UnpackedStruct(_) if packed_indices == 0 => {}
         _ => return None,
     }
     members.reverse();
