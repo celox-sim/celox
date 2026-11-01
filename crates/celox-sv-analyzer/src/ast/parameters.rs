@@ -1016,8 +1016,27 @@ pub(super) fn enum_initializer_fits_base_type(
     }
 }
 
-/// Collect enum member constants declared by module-level `typedef enum`
-/// declarations. Native initializer nodes may reference preceding members;
+/// IEEE 1800-2023 6.19: truncation may discard only zeros for an unsigned
+/// base, or copies of the result's sign bit for a signed base.
+fn enum_literal_fits_base_type(literal: &typecheck::IntegralLiteral, base: ExprType) -> bool {
+    if literal.width <= base.width {
+        return true;
+    }
+    if base.width == 0 {
+        return false;
+    }
+    let extension = (num_bigint::BigUint::from(1u8) << (literal.width - base.width))
+        - num_bigint::BigUint::from(1u8);
+    let expected = if base.signed && literal.value.bit((base.width - 1) as u64) {
+        extension
+    } else {
+        Default::default()
+    };
+    (&literal.value >> base.width) == expected
+}
+
+/// Collect enum member constants declared by module-level typedefs and
+/// variable declarations. Native initializer nodes may reference preceding members;
 /// implicit successors and type coercion retain the existing semantic kernel.
 pub(super) fn enum_member_constants_from_scope(
     syntax_tree: &AnalysisContext<'_>,
@@ -1045,16 +1064,35 @@ pub(super) fn enum_member_constants_from_items(
     type_aliases: &HashMap<String, Type>,
     parameter_overrides: &HashMap<String, ConstExpr>,
 ) -> Result<EnumMemberConstants, AnalyzerError> {
-    use celox_sv_syntax::{BodyItemKind, DataTypeKind, TypeAliasTarget};
+    use celox_sv_syntax::{BodyItemKind, DataDeclaration, DataTypeKind, TypeAliasTarget};
     let native = syntax_tree.declarations();
     let enum_type = |id| {
-        let BodyItemKind::TypeAlias(alias) = native.body_item(id).kind else {
-            return None;
+        let data_type = match native.body_item(id).kind {
+            BodyItemKind::TypeAlias(alias) => {
+                let TypeAliasTarget::DataType(id) = native.type_alias(alias).target else {
+                    return None;
+                };
+                id
+            }
+            BodyItemKind::Data(id) => match native.data_declaration(id) {
+                DataDeclaration::Variables(declaration)
+                | DataDeclaration::Constructed(declaration) => {
+                    // Ranged enumerators still use the existing declaration-only
+                    // path. This collector cannot expand their generated names;
+                    // do not reject previously accepted unused declarations.
+                    if let DataTypeKind::Enum { items, .. } =
+                        &native.data_type(declaration.data_type).kind
+                        && items.iter().any(|item| !item.dimensions.is_empty())
+                    {
+                        return None;
+                    }
+                    declaration.data_type
+                }
+                DataDeclaration::Unconverted(_) => return None,
+            },
+            _ => return None,
         };
-        let TypeAliasTarget::DataType(id) = native.type_alias(alias).target else {
-            return None;
-        };
-        matches!(native.data_type(id).kind, DataTypeKind::Enum { .. }).then_some(id)
+        matches!(native.data_type(data_type).kind, DataTypeKind::Enum { .. }).then_some(data_type)
     };
     if !declarations.iter().any(|id| enum_type(*id).is_some()) {
         return Ok(EnumMemberConstants::default());
@@ -1155,6 +1193,7 @@ pub(super) fn enum_members_of(
     let member_type = expr_type_from_type(&syntax_tree.functions, &member_base, &*eval_env)
         .ok_or_else(|| unsupported("enum base type"))?;
     let mut next_enum_value = 0i128;
+    let mut previous_literal: Option<typecheck::IntegralLiteral> = None;
     for new in items {
         let name = instances::normalize_identifier(&new.name.spelling);
         if !new.dimensions.is_empty() {
@@ -1171,11 +1210,35 @@ pub(super) fn enum_members_of(
             )?
             .ok_or_else(|| unsupported(format!("enum member `{name}` value")))?,
             // An unvalued member follows its predecessor (the first is 0).
-            None => ConstExpr::Literal(format_typed_parameter_literal(
-                next_enum_value,
-                member_type.width,
-                member_type.signed,
-            )),
+            None => {
+                if let Some(mut previous) = previous_literal.take() {
+                    if previous.mask != Default::default() {
+                        return Err(unsupported(format!(
+                            "enum member `{name}` cannot implicitly increment an X/Z value"
+                        )));
+                    }
+                    let magnitude_bits = member_type.width - usize::from(member_type.signed);
+                    let maximum = (num_bigint::BigUint::from(1u8) << magnitude_bits)
+                        - num_bigint::BigUint::from(1u8);
+                    if previous.value == maximum {
+                        return Err(unsupported(format!(
+                            "enum member `{name}` cannot increment the maximum base value"
+                        )));
+                    }
+                    previous.value += 1u8;
+                    ConstExpr::Literal(resize_integral_literal_for_cast(
+                        previous,
+                        member_type.width,
+                        member_type.signed,
+                    ))
+                } else {
+                    ConstExpr::Literal(format_typed_parameter_literal(
+                        next_enum_value,
+                        member_type.width,
+                        member_type.signed,
+                    ))
+                }
+            }
         };
         let value = match value {
             ConstExpr::Literal(literal) => ConstExpr::Literal(
@@ -1198,6 +1261,7 @@ pub(super) fn enum_members_of(
             &constants.exprs,
         );
         let value = expr_to_const(session, substituted).unwrap_or(value);
+        let number = eval_ast_const_expr(&syntax_tree.functions, &value, &*eval_env);
         if let Some(literal) = typecheck::eval_const_integral_literal_with_lookup(
             &value.clone().into(),
             eval_env,
@@ -1205,31 +1269,42 @@ pub(super) fn enum_members_of(
                 dimensions::parameter_type_from_const_env(eval_env, name)
                     .map(|ty| (ty.width, ty.signed))
             },
-        ) && literal.mask != Default::default()
+        ) && (literal.mask != Default::default() || number.is_none())
         {
-            // validate_enum_initializers has checked the explicit four-state
-            // base and forbids implicit increments following an X/Z member.
+            if literal.mask == Default::default()
+                && !enum_literal_fits_base_type(&literal, member_type)
+            {
+                return Err(unsupported(format!(
+                    "enum member `{name}` value does not fit its base type"
+                )));
+            }
+            // Substitution of a wide predecessor may reveal an X/Z value
+            // that signature-time initializer validation could not resolve.
+            if literal.mask != Default::default()
+                && (base.is_none() || member_base.kind == TypeKind::Bit)
+            {
+                return Err(unsupported(format!(
+                    "enum member `{name}` X/Z value requires an explicit four-state base type"
+                )));
+            }
+            // The numeric environment cannot represent X/Z or large known
+            // values. Preserve their full literal for subsequent references.
+            let literal =
+                resize_integral_literal_for_cast(literal, member_type.width, member_type.signed);
+            previous_literal = typecheck::parse_integral_literal(&literal);
             eval_env.remove(&name);
             insert_parameter_type_markers(eval_env, &name, member_type);
             constants.types.insert(name.clone(), member_type);
-            constants.exprs.insert(
-                name,
-                Expr::Literal(resize_integral_literal_for_cast(
-                    literal,
-                    member_type.width,
-                    member_type.signed,
-                )),
-            );
+            constants.exprs.insert(name, Expr::Literal(literal));
             continue;
         }
         let value_type = infer_const_expr_type(&value, &parameter_types_from_const_env(eval_env))
             .ok_or_else(|| {
             AnalyzerError::Unsupported(format!("enum member `{name}` value type"))
         })?;
-        let number =
-            eval_ast_const_expr(&syntax_tree.functions, &value, &*eval_env).ok_or_else(|| {
-                AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
-            })?;
+        let number = number.ok_or_else(|| {
+            AnalyzerError::Unsupported(format!("unresolved enum member `{name}` value"))
+        })?;
         if !enum_initializer_fits_base_type(number, value_type, member_type) {
             return Err(AnalyzerError::Unsupported(format!(
                 "enum member `{name}` value does not fit its base type"
@@ -1237,6 +1312,7 @@ pub(super) fn enum_members_of(
         }
         let number = coerce_const_parameter_value(number, member_type.width, member_type.signed);
         next_enum_value = number.wrapping_add(1);
+        previous_literal = None;
         constants.numbers.insert(name.clone(), number);
         eval_env.insert(name.clone(), number);
         insert_parameter_type_markers(eval_env, &name, member_type);
