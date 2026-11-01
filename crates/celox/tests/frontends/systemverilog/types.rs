@@ -1,6 +1,12 @@
 use super::*;
 
 sv_backends! {
+    fn package_enum_unknown_constants(sim) {
+        @case "types::package_enum_unknown_constants";
+    }
+    fn package_enum_unknown_storage(sim) {
+        @case "types::package_enum_unknown_storage";
+    }
     fn inherited_parameter_aliases_materialize_replication_masks(sim) {
         @case "types::inherited_parameter_aliases_materialize_replication_masks";
     }
