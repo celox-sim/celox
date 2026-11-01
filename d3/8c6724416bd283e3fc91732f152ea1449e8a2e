@@ -1,1 +1,3 @@
 Rebase PR #2822 onto current master as requested; integrate overlapping SV expression typing, method lookup and array support changes and validate the resulting analyzer.
+
+Preserve master parenless method lookup and discovery cache eviction; share semantic result lookup across both call forms, include element-selection context in memo invalidation, and add two integration regressions. Revalidated analyzer 972 tests and SV matrix 9,048 tests on 5e0d624ec0.
