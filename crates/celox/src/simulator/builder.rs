@@ -4944,6 +4944,72 @@ endmodule"#;
         }
     }
 
+    #[cfg(all(
+        feature = "systemverilog",
+        any(
+            all(target_arch = "x86_64", not(feature = "arm64-codegen")),
+            all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
+        )
+    ))]
+    #[test]
+    fn unrelated_active_updates_allow_a_procedural_clock_cone() {
+        let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0, d = 0, en = 0, q = 0;
+    bit [1:0] select_clock = 0;
+    bit gated;
+    int count = 0;
+    always #1 clk = !clk;
+    always @* case (select_clock)
+        0: gated = clk;
+        1: gated = !clk;
+        default: gated = 0;
+    endcase
+    always_latch if (!en) q = d;
+    always @(posedge clk) begin d = 1; en <= 1; end
+    always @(posedge gated) count <= count + 1;
+    initial begin
+        #6;
+        if (q != 1 || count != 3) $fatal(1, "procedural clock or latch lost an update");
+        $finish;
+    end
+endmodule"#;
+        for level in [crate::OptLevel::O0, crate::OptLevel::O2] {
+            for four_state in [false, true] {
+                let mut simulation = crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("procedural-clock.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+                .opt_level(level)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_with_backend(
+                    crate::MemoryLayoutMode::ElementStrided,
+                    true,
+                    |program, options| {
+                        assert!(
+                            program
+                                .design
+                                .events
+                                .combinational_derived
+                                .values()
+                                .flatten()
+                                .any(|clock| clock.gate.is_none() && clock.inputs.is_some()),
+                            "the fixture must need the full dependency cone"
+                        );
+                        crate::NativeBackend::new(program, options)
+                    },
+                )
+                .unwrap();
+                simulation.run_until(7).unwrap();
+                assert!(simulation.is_finished());
+                let stats = simulation.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(stats.checked_steps > 0, "{stats:?}");
+            }
+        }
+    }
+
     /// A first tier settles before a domain instead of compiling a fused
     /// copy of the settle into the scheduler for it.
     #[test]

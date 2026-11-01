@@ -521,7 +521,10 @@ impl Plan {
                     celox_design::GateOp::Load { address, .. } => Some(storage(*address)),
                     _ => None,
                 })),
-                None => unknown_gate = true,
+                None => match &clock.inputs {
+                    Some(inputs) => active_observers.extend(inputs.iter().copied().map(storage)),
+                    None => unknown_gate = true,
+                },
             }
         }
         let active_commits: HashSet<usize> = events
@@ -1047,6 +1050,18 @@ impl Plan {
             for (source, clocks) in &topology.combinational_derived {
                 for clock in clocks {
                     let Some(gate) = &clock.gate else {
+                        if clock.inputs.as_ref().is_some_and(|inputs| {
+                            inputs
+                                .iter()
+                                .all(|input| !active_stores.contains_key(&storage(*input)))
+                        }) {
+                            continue;
+                        }
+                        tracing::debug!(target: "celox::scheduler",
+                            source = ?program.get_path(source),
+                            clock = ?program.get_path(&clock.clock),
+                            active_stores = ?active_stores.keys().map(|address| program.get_path(address)).collect::<Vec<_>>(),
+                            "compiled scheduler rejected an unknown Active clock cone");
                         return Err(
                             "an Active-region clock has an unknown combinational cone".into()
                         );
@@ -3834,6 +3849,29 @@ pub(crate) fn defers_settles_for_test(program: &LaidOutProgram) -> (bool, bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compiler_clock_hints_preserve_the_image_encoding() {
+        #[derive(serde::Serialize)]
+        struct LegacyClock {
+            clock: u32,
+            gate: Option<Vec<celox_design::GateOp<u32>>>,
+        }
+        let legacy = LegacyClock {
+            clock: 1,
+            gate: None,
+        };
+        let clock = celox_design::CombDerivedClock {
+            clock: legacy.clock,
+            gate: legacy.gate.clone(),
+            inputs: Some(vec![1, 2, 3]),
+        };
+        let bytes = postcard::to_allocvec(&clock).unwrap();
+        assert_eq!(bytes, postcard::to_allocvec(&legacy).unwrap());
+        let decoded: celox_design::CombDerivedClock<u32> = postcard::from_bytes(&bytes).unwrap();
+        assert_eq!(decoded.clock, clock.clock);
+        assert!(decoded.inputs.is_none());
+    }
 
     #[test]
     fn retention_uses_logical_ranges_for_packed_elements() {
