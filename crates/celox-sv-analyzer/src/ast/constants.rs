@@ -172,7 +172,7 @@ pub(super) fn substitute_assignment_constants_with_parameter_literals(
     parameter_literals: &HashMap<String, Expr>,
 ) -> Assignment {
     Assignment::new(
-        substitute_lvalue_constants(assignment.lhs, const_env),
+        substitute_lvalue_constants(assignment.lhs, const_env, parameter_literals),
         substitute_expr_constants_with_parameter_literals(
             tree,
             session,
@@ -186,6 +186,7 @@ pub(super) fn substitute_assignment_constants_with_parameter_literals(
 pub(super) fn substitute_lvalue_constants(
     lvalue: LValue,
     const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
 ) -> LValue {
     match lvalue {
         LValue::Ident(name) => LValue::Ident(name),
@@ -199,11 +200,12 @@ pub(super) fn substitute_lvalue_constants(
             is_2state,
         } => LValue::Select {
             name,
-            msb: substitute_const_expr_constants(msb, const_env),
-            lsb: substitute_const_expr_constants(lsb, const_env),
+            msb: substitute_const_expr_constants_with_literals(msb, const_env, parameter_literals),
+            lsb: substitute_const_expr_constants_with_literals(lsb, const_env, parameter_literals),
             signed,
-            array_slice_width: array_slice_width
-                .map(|width| substitute_const_expr_constants(width, const_env)),
+            array_slice_width: array_slice_width.map(|width| {
+                substitute_const_expr_constants_with_literals(width, const_env, parameter_literals)
+            }),
             array_slice_reversed,
             is_2state,
         },
@@ -260,8 +262,8 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 const_env,
                 parameter_literals,
             )),
-            msb: substitute_const_expr_constants(msb, const_env),
-            lsb: substitute_const_expr_constants(lsb, const_env),
+            msb: substitute_const_expr_constants_with_literals(msb, const_env, parameter_literals),
+            lsb: substitute_const_expr_constants_with_literals(lsb, const_env, parameter_literals),
             signed,
         },
         Expr::Concat(parts) => Expr::Concat(
@@ -279,7 +281,11 @@ pub(super) fn substitute_expr_constants_with_parameter_literals(
                 .collect(),
         ),
         Expr::RepeatConcat { count, parts } => Expr::RepeatConcat {
-            count: substitute_const_expr_constants(count, const_env),
+            count: substitute_const_expr_constants_with_literals(
+                count,
+                const_env,
+                parameter_literals,
+            ),
             parts: parts
                 .into_iter()
                 .map(|part| {
@@ -443,21 +449,31 @@ pub(super) fn substitute_const_expr_constants(
     expr: ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> ConstExpr {
-    substitute_const_expr_constants_impl(expr, const_env, false, false)
+    substitute_const_expr_constants_impl(expr, const_env, false, false, None)
 }
 
 pub(super) fn substitute_dimension_constants(
     expr: ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> ConstExpr {
-    substitute_const_expr_constants_impl(expr, const_env, true, false)
+    substitute_const_expr_constants_impl(expr, const_env, true, false, None)
 }
 
 pub(super) fn substitute_const_expr_constants_preserving_enum_types(
     expr: ConstExpr,
     const_env: &HashMap<String, i128>,
 ) -> ConstExpr {
-    substitute_const_expr_constants_impl(expr, const_env, false, true)
+    substitute_const_expr_constants_impl(expr, const_env, false, true, None)
+}
+
+/// Selection bounds and repeat counts can read a small element of a
+/// parameter whose complete value does not fit the numeric environment.
+fn substitute_const_expr_constants_with_literals(
+    expr: ConstExpr,
+    const_env: &HashMap<String, i128>,
+    parameter_literals: &HashMap<String, Expr>,
+) -> ConstExpr {
+    substitute_const_expr_constants_impl(expr, const_env, false, false, Some(parameter_literals))
 }
 
 fn substitute_const_expr_constants_impl(
@@ -465,9 +481,15 @@ fn substitute_const_expr_constants_impl(
     const_env: &HashMap<String, i128>,
     include_local_parameters: bool,
     preserve_enum_types: bool,
+    parameter_literals: Option<&HashMap<String, Expr>>,
 ) -> ConstExpr {
     match expr {
         ConstExpr::Ident(name) => {
+            if let Some(Expr::Literal(value)) =
+                parameter_literals.and_then(|values| values.get(&name))
+            {
+                return ConstExpr::Literal(value.clone());
+            }
             let Some(value) = const_env.get(&name).filter(|_| {
                 !const_env.contains_key(&parameter_marker(&name))
                     || include_local_parameters
@@ -502,18 +524,21 @@ fn substitute_const_expr_constants_impl(
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
             msb: Box::new(substitute_const_expr_constants_impl(
                 *msb,
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
             lsb: Box::new(substitute_const_expr_constants_impl(
                 *lsb,
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
             signed,
         },
@@ -523,12 +548,14 @@ fn substitute_const_expr_constants_impl(
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
             bit: Box::new(substitute_const_expr_constants_impl(
                 *bit,
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
         },
         ConstExpr::Function { callee, args, site } => ConstExpr::Function {
@@ -542,6 +569,7 @@ fn substitute_const_expr_constants_impl(
                         const_env,
                         include_local_parameters,
                         preserve_enum_types,
+                        parameter_literals,
                     )
                 })
                 .collect(),
@@ -556,6 +584,7 @@ fn substitute_const_expr_constants_impl(
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
             width,
             signed,
@@ -567,6 +596,7 @@ fn substitute_const_expr_constants_impl(
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
         },
         ConstExpr::Binary { left, op, right } => ConstExpr::Binary {
@@ -575,6 +605,7 @@ fn substitute_const_expr_constants_impl(
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
             op,
             right: Box::new(substitute_const_expr_constants_impl(
@@ -582,6 +613,7 @@ fn substitute_const_expr_constants_impl(
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
         },
         ConstExpr::Mux {
@@ -594,18 +626,21 @@ fn substitute_const_expr_constants_impl(
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
             then_expr: Box::new(substitute_const_expr_constants_impl(
                 *then_expr,
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
             else_expr: Box::new(substitute_const_expr_constants_impl(
                 *else_expr,
                 const_env,
                 include_local_parameters,
                 preserve_enum_types,
+                parameter_literals,
             )),
         },
     }
