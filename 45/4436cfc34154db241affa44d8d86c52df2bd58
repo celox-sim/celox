@@ -1,0 +1,6 @@
+Revision history for #2954:
+
+rev 2 (content) 2026-11-01 20:01 UTC — Tag checks: every member of the value path goes through packed_structs::member_guards against the value it selects from (reads) or the local that holds it when assigned (writes)
+rev 1 (initial) 2026-11-01 20:01 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2954,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"8db99a9ed313fb692439afa89d2da64e3401cfc2","timestamp_iso":"2026-11-01T20:01:35Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"content","old_sha":"8db99a9ed313fb692439afa89d2da64e3401cfc2","new_sha":"1e7c260321e62c04bf10459f0cfa675ad15ff1fb","timestamp_iso":"2026-11-01T20:01:35Z","reason":"Tag checks: every member of the value path goes through packed_structs::member_guards against the value it selects from (reads) or the local that holds it when assigned (writes)","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/8db99a9ed313fb692439afa89d2da64e3401cfc2...1e7c260321e62c04bf10459f0cfa675ad15ff1fb"}]} -->
