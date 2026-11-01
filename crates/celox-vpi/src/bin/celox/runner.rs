@@ -58,6 +58,9 @@ pub(super) struct ExecutionArgs {
     native_memory_width: Option<usize>,
     #[arg(long, value_enum)]
     x86_slp: Option<OnOff>,
+    /// Record waveform changes at each simulation time step.
+    #[arg(long, value_name = "FILE", conflicts_with = "compile_only")]
+    pub vcd: Option<PathBuf>,
     /// Simulation threads, including the calling thread.
     #[arg(long, default_value_t = 1, value_parser = clap::value_parser!(u32).range(1..=64))]
     pub threads: u32,
@@ -130,6 +133,7 @@ struct Options {
     opt_level: OptLevel,
     backend: Backend,
     four_state: bool,
+    vcd: Option<PathBuf>,
     compile_only: bool,
     native_image_output: Option<PathBuf>,
     native_image_input: Option<PathBuf>,
@@ -225,6 +229,7 @@ pub(super) fn run(
         opt_level: design.opt_level.unwrap_or(OptLevel::O2),
         backend,
         four_state: design.four_state.unwrap_or(false),
+        vcd: cli.vcd,
         compile_only: cli.compile_only,
         native_image_output: cli.native_image_output,
         native_image_input: cli.native_image_input,
@@ -484,6 +489,9 @@ pub(super) fn run(
         .four_state(opts.four_state)
         .threads(opts.threads as usize)
         .diagnostics_from_env();
+    if let Some(path) = &opts.vcd {
+        builder = builder.vcd(path);
+    }
     builder = opts.design.apply_parameters(builder);
     if opts.always_partition {
         builder = builder.parallel_partition(celox::ParallelPartition::Always);
@@ -657,6 +665,7 @@ pub(super) fn run(
                 } else {
                     (run_compiled_testbench(&mut sim, &testbench), 0, false)
                 };
+                sim.flush_vcd()?;
                 #[cfg(any(
                     all(target_arch = "x86_64", not(feature = "arm64-codegen")),
                     all(target_arch = "aarch64", not(feature = "x86_64-codegen"))
@@ -873,6 +882,7 @@ pub(super) fn run(
             } else {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
+            sim.flush_vcd()?;
             let jit_execute_elapsed = sim
                 .finish_native_execution_timing()
                 .map(|timing| timing.elapsed());
@@ -911,6 +921,7 @@ pub(super) fn run(
             } else {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
+            sim.flush_vcd()?;
             (
                 result,
                 ticks,
@@ -940,6 +951,7 @@ pub(super) fn run(
             } else {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
+            sim.flush_vcd()?;
             (
                 result,
                 ticks,
@@ -970,6 +982,7 @@ pub(super) fn run(
             } else {
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
+            sim.flush_vcd()?;
             (
                 result,
                 ticks,
@@ -1007,6 +1020,7 @@ pub(super) fn run(
                 (run_compiled_testbench(&mut sim, &testbench), 0, false)
             };
             let execute_elapsed = execute_start.elapsed();
+            sim.flush_vcd()?;
             let timing = sim.finish_tiered_execution_timing();
             let stats = sim.tiered_execution_stats();
             let promotion_error = sim.promotion_error().map(ToString::to_string);
