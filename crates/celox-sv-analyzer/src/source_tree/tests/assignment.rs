@@ -107,10 +107,10 @@ fn native_continuous_assignment_ids_preserve_selected_generate_and_loop_scopes()
 #[test]
 fn native_continuous_assignment_delay_restrictions_preserve_captured_scopes() {
     for body in [
-        "assign #1 y=0;",
-        "if(1)begin:g assign #1 y=0;end",
-        "checker C;assign #1 y=0;endchecker",
-        "module N;assign #1 y=0;endmodule",
+        "assign #(1,2) y=0;",
+        "if(1)begin:g assign #(1,2) y=0;end",
+        "checker C;assign #(1,2) y=0;endchecker",
+        "module N;assign #(1,2) y=0;endmodule",
     ] {
         let code = format!("module M(output wire y);{body} endmodule");
         let tree = parse_source(&code, Path::new("native-assign-delay-validation.sv")).unwrap();

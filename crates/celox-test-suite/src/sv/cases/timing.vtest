@@ -1,11 +1,119 @@
 (group timing (category sequential))
 
+(case continuous_delay_selected_drivers
+  (source "continuous_delay.sv" #"
+module Top(input bit [3:0] a, output wire [3:0] y);
+  assign #2 y[1:0] = a[1:0];
+  assign #4 y[3:2] = a[3:2];
+endmodule
+"#)
+  (top Top) (run_until 4) (assert_eq y 0)
+  (set a 15) (run_until 6) (assert_eq y 3)
+  (run_until 8) (assert_eq y 15)
+  (set a 3) (run_until 12) (assert_eq y 3))
+
+(case continuous_delay_generate_parameters
+  (source "continuous_delay.sv" #"
+module Top(input bit a, output wire [1:0] y);
+  for (genvar i = 0; i < 2; i++) begin : g
+    localparam int D = i + 2;
+    assign #(D) y[i] = a;
+  end
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq y 0)
+  (set a 1) (run_until 5) (assert_eq y 1)
+  (run_until 6) (assert_eq y 3))
+
+(case continuous_delay_zero
+  (source "continuous_delay.sv" #"
+module Top(output wire y);
+  bit a;
+  assign #0 y = a;
+  initial begin #1 a=1; #1 a=0; end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq y 0)
+  (run_until 1) (assert_eq y 1)
+  (run_until 2) (assert_eq y 0))
+
+(case continuous_delay_inertial
+  (source "continuous_delay.sv" #"
+module Top(input bit a, output wire y);
+  assign #5 y = a;
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq y 0)
+  (set a 1) (run_until 8) (assert_eq y 0)
+  (set a 0) (run_until 12) (assert_eq y 0)
+  (set a 1) (run_until 16) (assert_eq y 0)
+  (run_until 17) (assert_eq y 1))
+
+(case continuous_delay_unchanged_rhs
+  (source "continuous_delay.sv" #"
+module Top(input bit a, b, output wire y);
+  assign #5 y = a | b;
+endmodule
+"#)
+  (top Top) (run_until 5) (assert_eq y 0)
+  (set a 1) (run_until 8) (set b 1)
+  (run_until 10) (assert_eq y 1)
+  (set a 0) (set b 0) (run_until 15) (assert_eq y 0))
+
+(case continuous_delay_sized_vector
+  (source "continuous_delay.sv" #"
+module Top(input bit [7:0] a, output wire [3:0] y);
+  assign #(4) y = a;
+endmodule
+"#)
+  (top Top) (run_until 4) (assert_eq y 0)
+  (set a 0x11) (run_until 6) (set a 0x21)
+  (run_until 8) (assert_eq y 1)
+  (set a 0xf2) (run_until 12) (assert_eq y 2)
+  (set a 3) (run_until 14) (set a 4)
+  (run_until 17) (assert_eq y 2)
+  (run_until 18) (assert_eq y 4))
+
+(case continuous_delay_four_state
+  (source "continuous_delay.sv" #"
+module Top(output bit same);
+  logic a;
+  wire y;
+  assign #3 y = a;
+  initial begin
+    a = 1'bz;
+    #2; same = y === 1'bx;
+    #2; same = same && y === 1'bz;
+    a = 1'bx;
+    #4; same = same && y === 1'bx;
+    a = 1'b1;
+    #4; same = same && y === 1'b1;
+  end
+endmodule
+"#)
+  (four_state) (top Top) (run_until 12) (assert_eq same 1))
+
 ; Procedural timing controls: `#delay`, `@(event)` and `wait (condition)` in
 ; `initial` blocks and `always` processes. The script advances time with
 ; `run_until` and `run_to_finish`; the design generates its own clocks.
 ; Every script begins with one of them, so the design's time-zero initial
 ; blocks, `always` processes and variable initializers have run before the
 ; script drives an input: no case depends on host values staged before them.
+
+(case continuous_delay_wide_context
+  (source "continuous_delay_wide.sv" #"
+module Top(output wire [128:0] y, s);
+  bit [3:0] a=15, b=1;
+  bit signed [7:0] negative=-1;
+  assign #2 y=a+b;
+  assign #3 s=negative;
+  initial begin #5 a=0; #5 negative=-2; end
+endmodule
+"#)
+  (top Top) (run_until 3) (assert_eq y 16)
+  (assert_eq s (- (<< 1 129) 1))
+  (run_until 7) (assert_eq y 1)
+  (run_until 13) (assert_eq s (- (<< 1 129) 2)))
 
 (case delays_resume_initial_blocks_at_later_times
   (source "delays.sv" #"

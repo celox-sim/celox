@@ -230,8 +230,16 @@ fn validate_body_items(
     while let Some(id) = pending.pop() {
         match &native.body_item(id).kind {
             BodyItemKind::Procedure(id) => validate_procedure(native.procedure(*id), native)?,
-            BodyItemKind::Assign(id) if native.assign_statement(*id).delay.is_some() => {
-                return Err(unsupported("delayed continuous assignment"));
+            BodyItemKind::Assign(id)
+                if native
+                    .assign_statement(*id)
+                    .delay
+                    .as_ref()
+                    .is_some_and(|delay| delay.values.len() != 1) =>
+            {
+                return Err(unsupported(
+                    "delayed continuous assignment with rise/fall/turn-off delays",
+                ));
             }
             BodyItemKind::Region(items)
             | BodyItemKind::Block { items, .. }

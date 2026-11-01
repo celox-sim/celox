@@ -313,9 +313,11 @@ fn continuous_assignments(
             "invalid native continuous assignment membership".into(),
         ));
     }
-    if native.delay.is_some() {
-        return Err(unsupported("delayed continuous assignment"));
-    }
+    let delay = native
+        .delay
+        .as_ref()
+        .map(|delay| continuous_delays::ticks(delay, tree, session, dimensions))
+        .transpose()?;
     native
         .assignments
         .iter()
@@ -449,6 +451,12 @@ fn continuous_assignments(
                 None,
                 vec![Assignment::new(lhs, rhs)],
             ))
+        })
+        .map(|process: Converted<CombProcess>| {
+            process.map(|mut process| {
+                process.delay = delay;
+                process
+            })
         })
         .collect()
 }
