@@ -1,4 +1,6 @@
 sv_backends! {
+    fn complete_case_after_local_mux(sim) { @case "always_comb::complete_case_after_local_mux"; }
+
     fn simulates_systemverilog_always_comb_dependency(sim) {
         @case "always_comb::simulates_systemverilog_always_comb_dependency";
     }
