@@ -5972,6 +5972,210 @@ endmodule"#
         );
         (backend.get_as::<u64>(count), fused)
     }
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    #[test]
+    fn partitioned_host_clock_glue_invalidates_its_comb_readers() {
+        let source = r#"module Top(clk: input clock, d: input bit<8>, low: output bit<8>, probe: output bit<8>, side: output bit<8>, q: output bit<8>) {
+            assign low = (clk as u8) + d;
+            assign probe = low + 1;
+            assign side = d ^ 3;
+            always_ff { q = probe; }
+        }"#;
+        for four_state in [false, true] {
+            let mut sim = crate::Simulation::builder(source, "Top")
+                .four_state(four_state)
+                .settle_partition(crate::SettlePartition::Always)
+                .settle_check(true)
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+            assert!(
+                sim.simulator
+                    .program
+                    .runtime_schema
+                    .settle_partitions
+                    .is_some()
+            );
+            let d = sim.signal("d");
+            sim.modify(|io| io.set(d, 7u8)).unwrap();
+            sim.add_clock("clk", 2, 1);
+            sim.run_until(8).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 9u8.into());
+            assert_eq!(sim.get(sim.signal("probe")), 8u8.into());
+            let stats = sim.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn partitioned_compiled_run_marks_native_nbas() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output logic [7:0] q, output wire [7:0] y, output wire clock_echo);
+    bit clk = 0;
+    wire [7:0] a = q + 3;
+    wire [7:0] b = a ^ 8'h35;
+    assign y = b + 7;
+    assign clock_echo = clk;
+    always #1 clk = !clk;
+    initial begin q = 0; #2; q <= 5; #3; q <= 12; #3; q <= 7; #2; $write("q=%0d", q); end
+endmodule"#;
+        for four_state in [false, true] {
+            let mut sim = crate::Simulation::from_sv_sources(
+                vec![(source, std::path::Path::new("partitioned-native-nba.sv"))],
+                "Top",
+            )
+            .four_state(four_state)
+            .settle_partition(crate::SettlePartition::Always)
+            .settle_check(true)
+            .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+            .build_native()
+            .unwrap();
+            sim.run_until(12).unwrap();
+            assert_eq!(sim.get(sim.signal("q")), 7u8.into());
+            assert_eq!(sim.get(sim.signal("y")), (((7u8 + 3) ^ 0x35) + 7).into());
+            let stats = sim.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn incremental_clock_settle_matches_full_reference_with_mixed_writes() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output wire [1023:0] padding, output wire observed_clock, output logic [7:0] held, output wire [63:0] now_value);
+    bit clk = 0;
+    logic [7:0] epoch = 0;
+    logic enable = 1;
+    logic [31:0] payload = 1;
+    integer seen = 0;
+    wire watched = ^padding;
+    assign observed_clock = clk ^ enable ^ epoch[1];
+    assign now_value = $time;
+    always_latch if (enable) held = payload[7:0];
+    always #1 begin clk = !clk; epoch = epoch + 1; end
+    always @(posedge clk) payload <= payload + 1;
+    initial forever begin @(watched); seen = seen + 1; end
+    for (genvar i = 0; i < 32; i = i + 1) begin
+        assign padding[i*32 +: 32] = (payload + i) * (payload ^ (i + 1));
+    end
+    initial begin #4; enable = 'x; #4; enable = 'z; #4; enable = 0; #4; enable = 1; end
+    initial begin #24; if (seen == 0) $fatal(1, "wait never woke"); $finish; end
+endmodule"#;
+        for four_state in [false, true] {
+            let builder = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("incremental-clock.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let (program, _, _, _, _) = builder()
+                .emit_triggers()
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+                .unwrap();
+            assert!(
+                crate::scheduler::incremental_inputs_for_test(&program)
+                    .is_some_and(|inputs| inputs >= 2),
+                "clock-only writes must use the small cone"
+            );
+            let mut simulation = builder()
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+            simulation.run_until(28).unwrap();
+            assert!(simulation.is_finished());
+            let stats = simulation.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
+
+    #[cfg(all(
+        feature = "systemverilog",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    #[test]
+    fn combinational_rtl_wait_inputs_keep_unrelated_outputs_deferred() {
+        let source = r#"`timescale 1ns/1ns
+module Top(output wire [1023:0] padding);
+    bit clk = 0;
+    logic [31:0] payload = 1;
+    integer seen = 0;
+    wire watched = clk ^ payload[0];
+    always #1 clk = !clk;
+    always @(posedge clk) payload <= payload + 1;
+    initial forever begin @(watched); seen = seen + 1; end
+    for (genvar i = 0; i < 32; i = i + 1) begin
+        assign padding[i*32 +: 32] = (payload + i) * (payload ^ (i + 1));
+    end
+    initial begin #20; if (seen == 0) $fatal(1, "wait never woke"); $finish; end
+endmodule"#;
+        for four_state in [false, true] {
+            let builder = || {
+                crate::Simulation::from_sv_sources(
+                    vec![(source, std::path::Path::new("deferred-wait-inputs.sv"))],
+                    "Top",
+                )
+                .four_state(four_state)
+            };
+            let (mut program, _, _, _, _) = builder()
+                .emit_triggers()
+                .into_laid_out_program(crate::MemoryLayoutMode::Packed, false)
+                .unwrap();
+            let (deferred, _) = crate::scheduler::defers_settles_for_test(&program);
+            assert!(
+                deferred,
+                "a small observed cone must not force whole-circuit settling"
+            );
+            // State-retention metadata is captured before optimization. Model
+            // a removed comb writer whose home remains readable as an input.
+            let clock = program.get_addr(&[], &["clk"]).unwrap();
+            let stale = crate::ir::RegionedAbsoluteAddr::from_absolute_addr(
+                celox_design::STABLE_REGION,
+                clock,
+            );
+            program.sir.eval_comb_stateful.as_mut().unwrap().push(stale);
+            // Also model an old self-read eliminated from a surviving writer.
+            let padding = program.get_addr(&[], &["padding"]).unwrap();
+            program.sir.eval_comb_stateful.as_mut().unwrap().push(
+                crate::ir::RegionedAbsoluteAddr::from_absolute_addr(
+                    celox_design::STABLE_REGION,
+                    padding,
+                ),
+            );
+
+            assert!(
+                crate::scheduler::defers_settles_for_test(&program).0,
+                "a stateful target without a remaining comb writer must not disable deferral"
+            );
+            let mut simulation = builder()
+                .scheduler_mode(crate::SchedulerMode::DifferentialRuns)
+                .build_native()
+                .unwrap();
+            simulation.run_until(24).unwrap();
+            assert!(simulation.is_finished());
+            let stats = simulation.scheduler_stats();
+            assert!(
+                stats.compiled_slots > 0 && stats.checked_steps > 0,
+                "{stats:?}"
+            );
+        }
+    }
 }
 
 #[cfg(feature = "host-runtime")]
