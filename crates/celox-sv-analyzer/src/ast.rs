@@ -210,6 +210,7 @@ mod bound_patterns;
 mod case;
 mod casts;
 mod classes;
+pub(crate) use classes::ClassIndex;
 mod comb_process;
 mod events;
 mod mailboxes;
