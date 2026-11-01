@@ -913,3 +913,54 @@ fn rejects_width_default_and_direction_mismatches() {
     );
     assert!(lookup_plans(&wide_result).roots.is_empty());
 }
+
+#[test]
+fn extern_results_use_encodable_masks_at_every_width() {
+    for width in [1, 8, 31, 32, 33, 35, 40, 63, 64] {
+        for four_state in [false, true] {
+            let result = RegisterId(0);
+            let input = RegisterId(1);
+            let unit = ExecutionUnit {
+                entry_block_id: SirBlockId(0),
+                register_map: HashMap::from_iter([
+                    (
+                        result,
+                        RegisterType::Bit {
+                            width,
+                            signed: false,
+                        },
+                    ),
+                    (
+                        input,
+                        RegisterType::Bit {
+                            width: 64,
+                            signed: false,
+                        },
+                    ),
+                ]),
+                blocks: HashMap::from_iter([(
+                    SirBlockId(0),
+                    BasicBlock {
+                        id: SirBlockId(0),
+                        params: vec![],
+                        instructions: vec![
+                            SIRInstruction::Imm(input, SIRValue::new(1.5f64.to_bits())),
+                            SIRInstruction::Unary(
+                                result,
+                                UnaryOp::Float {
+                                    op: celox_sir::FloatUnaryOp::ToUnsigned { width, round: true },
+                                    precision: celox_sir::FloatPrecision::F64,
+                                },
+                                input,
+                            ),
+                        ],
+                        terminator: SIRTerminator::Return,
+                    },
+                )]),
+            };
+            let function = lower_execution_unit(&unit, &empty_layout(), four_state);
+            super::super::super::mir_verify::verify_function(&function)
+                .unwrap_or_else(|error| panic!("width={width} four_state={four_state}: {error}"));
+        }
+    }
+}
