@@ -61,7 +61,7 @@ fn key(item: &Item) -> Key {
         Arc::as_ptr(&item.shadowed) as usize,
         Arc::as_ptr(&item.parameter_dimensions) as usize,
         item.qualified_types.identity(),
-        item.enum_constants.identity(),
+        item.constant_types.identity(),
     ]
 }
 

@@ -35,7 +35,7 @@ struct ScopeEntry {
     source: String,
     unique: Option<String>,
     shadowed_dimensions: Option<VariableDimensions>,
-    shadowed_enum_constant: Option<enums::ConstantType>,
+    shadowed_constant_type: Option<semantic_types::ConstantType>,
     shadowed_constants: Vec<(String, Option<i128>)>,
     shadowed_literal: Option<String>,
     shadowed_parameter_value: Option<Expr>,
@@ -503,13 +503,13 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             }
         }
         for entry in scope.entries.into_iter().rev() {
-            match entry.shadowed_enum_constant {
+            match entry.shadowed_constant_type {
                 Some(binding) => {
-                    Arc::make_mut(&mut self.dims.enum_constants)
+                    Arc::make_mut(&mut self.dims.constant_types)
                         .insert(entry.source.clone(), binding);
                 }
-                None if self.dims.enum_constants.contains_key(&entry.source) => {
-                    Arc::make_mut(&mut self.dims.enum_constants).remove(&entry.source);
+                None if self.dims.constant_types.contains_key(&entry.source) => {
+                    Arc::make_mut(&mut self.dims.constant_types).remove(&entry.source);
                 }
                 None => {}
             }
@@ -617,8 +617,8 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
             shadowed_literal: self.names.local_constants.remove(source),
             shadowed_parameter_value: self.dims.parameter_values.remove(source),
             shadowed_dimensions: self.dims.remove(source),
-            shadowed_enum_constant: if self.dims.enum_constants.contains_key(source) {
-                Arc::make_mut(&mut self.dims.enum_constants).remove(source)
+            shadowed_constant_type: if self.dims.constant_types.contains_key(source) {
+                Arc::make_mut(&mut self.dims.constant_types).remove(source)
             } else {
                 None
             },
@@ -635,7 +635,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
         self.dims.class_scope = Some(class.name.clone());
         let constants =
             classes::specializations::enum_constants(self.tree, self.session, &class.name);
-        Arc::make_mut(&mut self.dims.enum_constants).extend(constants);
+        Arc::make_mut(&mut self.dims.constant_types).extend(constants);
         // The name of a property of unpacked structure type, whose members
         // are properties named by their member paths, is hidden too.
         let aggregates = class
@@ -2265,7 +2265,7 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 .expression_signedness
                 .insert(member.clone(), r#type.signed);
             if let Some(binding) = &binding {
-                Arc::make_mut(&mut self.dims.enum_constants)
+                Arc::make_mut(&mut self.dims.constant_types)
                     .insert(member.clone(), binding.clone());
             }
             self.names
@@ -2617,6 +2617,9 @@ impl<'s, 't, 'a> BodyBuilder<'s, 't, 'a> {
                 parameter_packed_dimensions(std::slice::from_ref(parameter)).remove(name)
             {
                 self.dims.insert(name.to_string(), dimensions);
+            }
+            if let Some(ty) = &parameter.semantic_type {
+                Arc::make_mut(&mut self.dims.constant_types).insert(name.into(), ty.clone());
             }
             if let Some(ty) = types.get(name) {
                 self.dims

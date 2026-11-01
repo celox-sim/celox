@@ -38,7 +38,7 @@ pub(super) struct Item {
     pub literals: SharedMap<Expr>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     qualified_types: SharedMap<Type>,
-    enum_constants: SharedMap<enums::ConstantType>,
+    constant_types: SharedMap<semantic_types::ConstantType>,
     names: SharedMap<String>,
     imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
@@ -286,14 +286,14 @@ impl Item {
     pub fn dimensions(&self, dimensions: &PackedDimensions) -> PackedDimensions {
         let mut local = dimensions.clone();
         local.const_env = self.env.clone();
-        if !self.shadowed.is_empty() || !self.names.is_empty() || !self.enum_constants.is_empty() {
-            let mut bindings = self.function_aliases((*dimensions.enum_constants).clone());
+        if !self.shadowed.is_empty() || !self.names.is_empty() || !self.constant_types.is_empty() {
+            let mut bindings = self.function_aliases((*dimensions.constant_types).clone());
             bindings.extend(
-                self.enum_constants
+                self.constant_types
                     .iter()
                     .map(|(n, t)| (n.clone(), t.clone())),
             );
-            local.enum_constants = Arc::new(bindings);
+            local.constant_types = Arc::new(bindings);
         }
         local.parameter_values =
             if self.shadowed.is_empty() && self.names.is_empty() && self.literals.is_empty() {
@@ -534,7 +534,7 @@ struct Scope {
     parameters: Vec<Parameter>,
     parameter_dimensions: Arc<VariablePackedDimensions>,
     qualified_types: SharedMap<Type>,
-    enum_constants: SharedMap<enums::ConstantType>,
+    constant_types: SharedMap<semantic_types::ConstantType>,
     names: SharedMap<String>,
     imports: SharedMap<String>,
     shadowed: Arc<HashSet<String>>,
@@ -915,7 +915,7 @@ impl<'a> Elaborator<'a, '_> {
             literals: scope.literals.clone(),
             parameter_dimensions: scope.parameter_dimensions.clone(),
             qualified_types: scope.qualified_types.clone(),
-            enum_constants: scope.enum_constants.clone(),
+            constant_types: scope.constant_types.clone(),
             names: scope.names.clone(),
             imports: scope.imports.clone(),
             shadowed: scope.shadowed.clone(),
@@ -988,6 +988,7 @@ impl<'a> Elaborator<'a, '_> {
                         "duplicate generate-local declaration `{name}`"
                     )));
                 }
+                scope.constant_types.remove(&name);
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
@@ -1012,6 +1013,7 @@ impl<'a> Elaborator<'a, '_> {
             }
         }
         let mut pending = Vec::new();
+        let mut parameter_names = HashSet::default();
         for id in children {
             let BodyItemKind::Parameter(declaration) = native.body_item(*id).kind else {
                 continue;
@@ -1031,10 +1033,12 @@ impl<'a> Elaborator<'a, '_> {
                         "duplicate generate-local declaration `{name}`"
                     )));
                 }
+                parameter_names.insert(name.clone());
                 let mut dependencies = native_type_dependencies(data_type, native);
                 if let Some(root) = default {
                     dependencies.extend(native_expression_dependencies(root, native));
                 }
+                scope.constant_types.remove(&name);
                 for key in [
                     name.clone(),
                     parameter_marker(&name),
@@ -1236,6 +1240,22 @@ impl<'a> Elaborator<'a, '_> {
             order.complete(index);
         }
         scope.parameter_dimensions = Arc::new(parameter_packed_dimensions(&scope.parameters));
+        for parameter in scope
+            .parameters
+            .iter()
+            .filter(|p| parameter_names.contains(p.name()))
+        {
+            scope.constant_types.remove(parameter.name());
+            if let Some(ty) = &parameter.semantic_type {
+                scope
+                    .constant_types
+                    .insert(parameter.name().into(), ty.clone());
+                scope.constant_types.insert(
+                    format!("{}.{}", scope.path, scope_component(parameter.name())),
+                    ty.clone(),
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1249,6 +1269,7 @@ impl<'a> Elaborator<'a, '_> {
         let mut declared = HashSet::default();
         if let Some((genvar, value)) = index {
             declared.insert(genvar.to_string());
+            scope.constant_types.remove(genvar);
             // The implicit localparam in each loop body (IEEE 1800-2023 27.4)
             // must override inherited literals during expression substitution.
             // Mark it as a bounded value parameter for queries such as $isunbounded.
@@ -1345,8 +1366,8 @@ impl<'a> Elaborator<'a, '_> {
                 aliases.insert(name, ty);
             }
             for (name, binding) in &enums.declarations {
-                scope.enum_constants.insert(name.clone(), binding.clone());
-                scope.enum_constants.insert(
+                scope.constant_types.insert(name.clone(), binding.clone());
+                scope.constant_types.insert(
                     format!("{}.{}", scope.path, scope_component(name)),
                     binding.clone(),
                 );
@@ -1431,6 +1452,9 @@ impl<'a> Elaborator<'a, '_> {
 /// Make `name` in `scope` denote the package item `target`, as an import of
 /// the generate block does.
 fn bind_import(scope: &mut Scope, name: &str, target: &str, session: &mut Session) {
+    // Every imported declaration hides an enclosing constant type, including
+    // enumerators that are exposed through the qualified module bindings.
+    scope.constant_types.remove(name);
     let imported = scope.imported.clone();
     Arc::make_mut(&mut scope.shadowed).insert(name.to_string());
     scope.names.insert(name.to_string(), target.to_string());
@@ -1484,6 +1508,9 @@ fn bind_import(scope: &mut Scope, name: &str, target: &str, session: &mut Sessio
         if let Some(value) = literal.and_then(|expr| expr_to_const(session, expr)) {
             parameter.value = Some(value);
         }
+        if let Some(ty) = &parameter.semantic_type {
+            scope.constant_types.insert(name.into(), ty.clone());
+        }
         scope.parameters.push(parameter);
     }
 }
@@ -1526,7 +1553,7 @@ fn module_constant_functions(
             literals: literals.clone().into(),
             parameter_dimensions: Arc::default(),
             qualified_types: SharedMap::default(),
-            enum_constants: SharedMap::default(),
+            constant_types: SharedMap::default(),
             names: SharedMap::default(),
             imports: SharedMap::default(),
             shadowed: Arc::default(),

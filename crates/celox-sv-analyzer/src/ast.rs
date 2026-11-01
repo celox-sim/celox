@@ -1204,9 +1204,13 @@ impl Module {
                 &const_env,
                 &type_aliases,
             );
-            packed_dimensions.enum_constants = Arc::new(enum_constants.declarations.clone());
-            for parameter in &parameters {
-                Arc::make_mut(&mut packed_dimensions.enum_constants).remove(parameter.name());
+            packed_dimensions.constant_types = Arc::new(enum_constants.declarations.clone());
+            for parameter in imported.parameters.iter().chain(&parameters) {
+                let bindings = Arc::make_mut(&mut packed_dimensions.constant_types);
+                bindings.remove(parameter.name());
+                if let Some(ty) = &parameter.semantic_type {
+                    bindings.insert(parameter.name().into(), ty.clone());
+                }
             }
             // Four-state parameter values cannot be represented by the numeric
             // environment. Keep their expressions for constant case analysis.
@@ -1997,6 +2001,7 @@ const MAX_GENERATE_LOOP_EXPANSION: usize = 10_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
     floating: Option<TypeKind>,
+    semantic_type: Option<semantic_types::ConstantType>,
     name: String,
     value: Option<ConstExpr>,
     declared_width: Option<usize>,
@@ -2027,6 +2032,7 @@ impl Parameter {
             value,
             declared_width,
             floating: None,
+            semantic_type: None,
             packed_ranges: Vec::new(),
             members: Vec::new(),
             declared_signed,
@@ -3369,7 +3375,7 @@ struct EnumMemberConstants {
     exprs: HashMap<String, Expr>,
     /// Base width and signedness retained for early constant substitution.
     types: HashMap<String, ExprType>,
-    declarations: HashMap<String, enums::ConstantType>,
+    declarations: HashMap<String, semantic_types::ConstantType>,
 }
 
 impl EnumMemberConstants {
@@ -3517,9 +3523,9 @@ struct PackedDimensions {
     /// The values of the operands whose side effects a procedural body has
     /// already executed before their statement (see [`effects`]).
     effect_values: Arc<HashMap<celox_sv_syntax::ExprId, Expr>>,
-    /// The enumerations of the members of the local enumerations of a
-    /// procedural body, which visible typedefs may have members like.
-    enum_constants: Arc<HashMap<String, enums::ConstantType>>,
+    /// The frozen declaration types of visible enumerators and scalar
+    /// parameters, independent of their numeric values.
+    constant_types: Arc<HashMap<String, semantic_types::ConstantType>>,
     /// The class property expression whose select is being bound against
     /// the property's template; every other property is read through its
     /// object.
@@ -3566,7 +3572,7 @@ impl PackedDimensions {
             locator_locals: None,
             locator_iterators: Arc::default(),
             effect_values: Arc::default(),
-            enum_constants: Arc::default(),
+            constant_types: Arc::default(),
             property_select_base: None,
             element_select: None,
         }

@@ -603,6 +603,15 @@ pub(super) fn parameters_from_native_with_environment(
                 .resolved_type(&environment.types)
                 .map(|ty| ty.width),
         )?;
+        parameter.semantic_type = native_prefix
+            .constant_type(
+                &parameter,
+                &environment.types,
+                &syntax_tree.functions,
+                &mut session.types,
+                const_env,
+            )
+            .map(|ty| ty.for_parameter(syntax_tree, native));
         environment.append(syntax_tree, session, &parameter);
         parameters.push(parameter);
     }
@@ -2058,6 +2067,16 @@ pub(super) fn infer_parameter_value_type(
     has_declared_type: bool,
     parameter_types: &HashMap<String, ExprType>,
 ) -> Option<ExprType> {
+    infer_parameter_value_type_with(value, has_declared_type, &|name| {
+        parameter_types.get(name).copied()
+    })
+}
+
+fn infer_parameter_value_type_with(
+    value: &ConstExpr,
+    has_declared_type: bool,
+    parameter_type: &dyn Fn(&str) -> Option<ExprType>,
+) -> Option<ExprType> {
     if !has_declared_type
         && let ConstExpr::Literal(literal) = value
         && matches!(
@@ -2070,7 +2089,7 @@ pub(super) fn infer_parameter_value_type(
             signed: false,
         })
     } else {
-        infer_const_expr_type(value, parameter_types)
+        infer_const_expr_type_inner(value, parameter_type, false)
     }
 }
 
@@ -2122,7 +2141,7 @@ pub(super) fn enum_constant_type(
     declaration: &Type,
     env: &HashMap<String, i128>,
     aliases: &HashMap<String, Type>,
-) -> Converted<Option<enums::ConstantType>> {
+) -> Converted<Option<semantic_types::ConstantType>> {
     let celox_sv_syntax::DataTypeKind::Enum { base, items } =
         &tree.declarations().data_type(id).kind
     else {
@@ -2138,6 +2157,97 @@ pub(super) fn enum_constant_type(
         None => type_binding::builtin_type("int", None),
     };
     Ok(base.and_then(|base| {
-        enums::ConstantType::new(base, declaration, &tree.functions, &mut session.types, env)
+        semantic_types::ConstantType::enum_member(
+            base,
+            declaration,
+            &tree.functions,
+            &mut session.types,
+            env,
+        )
     }))
+}
+
+/// A preliminary query's scalar parameter type. Settled analysis supplies a
+/// retained binding; otherwise use the declaration and its final type markers,
+/// without evaluating or materializing the parameter's numeric value.
+pub(super) fn native_constant_type(
+    parameter: &celox_sv_syntax::Parameter,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+    scalar_binding: bool,
+) -> Option<semantic_types::ConstantType> {
+    let celox_sv_syntax::ParameterKind::Value { dimensions, .. } = &parameter.kind else {
+        return None;
+    };
+    if !dimensions.is_empty() {
+        return None;
+    }
+    let prefix = declaration_types::prefix(Some(parameter), tree, &dims.type_aliases).ok()??;
+    let name = instances::normalize_identifier(&parameter.name.spelling);
+    let marker = dims.const_env.get(&unbounded_parameter_marker(&name));
+    if marker == Some(&1) {
+        return None;
+    }
+    let mut ty = if scalar_binding {
+        // A genvar iteration's implicit localparam can hide an authored
+        // parameter. Its elaborated markers, rather than that outer syntax,
+        // determine the type.
+        Type::new(TypeKind::Logic)
+    } else {
+        let celox_sv_syntax::ParameterKind::Value { data_type, .. } = parameter.kind else {
+            return None;
+        };
+        type_binding::bind(data_type, tree, session, dims).ok()??
+    };
+    if ty.container.is_some() || !ty.unpacked_ranges.is_empty() || ty.unpacked_struct.is_some() {
+        return None;
+    }
+    let implicit = scalar_binding || !prefix.has_declared_type();
+    if implicit && ty.packed_ranges.is_empty() {
+        let metadata = dimensions::parameter_type_from_const_env(&dims.const_env, &name);
+        let final_literal = dims
+            .parameter_values
+            .get(&name)
+            .cloned()
+            .and_then(|value| expr_to_const(session, value));
+        let value = if final_literal.is_some() {
+            final_literal
+        } else if metadata.is_none() {
+            let celox_sv_syntax::ParameterKind::Value {
+                default: Some(id), ..
+            } = parameter.kind
+            else {
+                return None;
+            };
+            Some(constant_binding::bind(id, tree, session, dims).ok()??)
+        } else {
+            None
+        };
+        if value
+            .as_ref()
+            .is_some_and(|value| is_unbounded(value, &dims.const_env))
+        {
+            return None;
+        }
+        if value
+            .as_ref()
+            .is_some_and(|value| typecheck::const_expr_has_real_type(&value.clone().into()))
+        {
+            ty = type_binding::builtin_type("real", None)?;
+        } else {
+            let inferred = metadata.or_else(|| {
+                infer_parameter_value_type_with(value.as_ref()?, false, &|name| {
+                    dimensions::parameter_type_from_const_env(&dims.const_env, name)
+                })
+            })?;
+            ty.is_signed = prefix.data.signed.unwrap_or(inferred.signed);
+            ty.packed_ranges.push(PackedRange {
+                left: ConstExpr::Literal((inferred.width.checked_sub(1)?).to_string()),
+                right: ConstExpr::Literal("0".into()),
+            });
+        }
+    }
+    semantic_types::ConstantType::of_type(ty, &tree.functions, &mut session.types, &dims.const_env)
+        .map(|ty| ty.for_parameter(tree, parameter))
 }
