@@ -426,3 +426,347 @@ endmodule"#;
         }
     }
 }
+
+#[test]
+fn native_file_calls_keep_output_order_without_reference_slots() {
+    let source = r#"`timescale 1ns/1ns
+module Top(input bit enabled);
+    bit clk = 0;
+    int count = 0;
+    logic [69:0] unknown_data = 'z;
+    real fraction = 1.5;
+    shortint negative = -3;
+    always #1 clk = ~clk;
+    always @(posedge clk) count <= count + 1;
+    always @(posedge clk) if (enabled) begin
+        $display("before:%0d", count);
+        $fwrite(1, "file:%0d:%h:%0.2f:%0d:%0t", count, unknown_data, fraction, negative, $time);
+        $display("after:%0d", count);
+    end
+    initial #13 $finish;
+endmodule"#;
+    for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
+        for four_state in [false, true] {
+            let build = || builder(source).four_state(four_state).opt_level(level);
+            let image = reloaded(&build().compile_native().unwrap().into_program_image());
+            let mut expected = build()
+                .scheduler_mode(SchedulerMode::Reference)
+                .build_native()
+                .unwrap();
+            let mut actual = Simulation::from_sv_sources(Vec::new(), "Top")
+                .four_state(four_state)
+                .scheduler_mode(SchedulerMode::Compiled)
+                .build_native_from_image(image)
+                .unwrap();
+            for end in [4, 6, 8, 12] {
+                if end == 6 {
+                    for simulation in [&mut expected, &mut actual] {
+                        let enabled = simulation.signal("enabled");
+                        simulation.modify(|io| io.set(enabled, 1u8)).unwrap();
+                    }
+                }
+                expected.run_until(end).unwrap();
+                actual.run_until(end).unwrap();
+                assert_eq!(
+                    actual.drain_runtime_events(),
+                    expected.drain_runtime_events()
+                );
+                assert_eq!(
+                    actual.get(actual.signal("count")),
+                    expected.get(expected.signal("count"))
+                );
+            }
+            let stats = actual.scheduler_stats();
+            assert!(stats.compiled_slots > 0, "{stats:?}");
+            assert!(
+                stats
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, celox::KernelSchedule::Compiled)),
+                "{stats:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn native_file_calls_use_each_instances_file_table() {
+    let source = r#"`timescale 1ns/1ns
+module Top(input bit [1023:0] filename, input bit enabled);
+    bit clk = 0;
+    int count = 0;
+    int fd;
+    always #1 clk = ~clk;
+    always @(posedge clk) count <= count + 1;
+    initial fd = $fopen(filename, "w");
+    always @(posedge clk) if (enabled) $fdisplay(fd, "%0d", count);
+    initial begin #12; $fclose(fd); end
+endmodule"#;
+    let directory = tempfile::tempdir().unwrap();
+    for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
+        for four_state in [false, true] {
+            let image = reloaded(
+                &builder(source)
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .compile_native()
+                    .unwrap()
+                    .into_program_image(),
+            );
+            let mut simulations = [image.clone(), image].map(|image| {
+                Simulation::from_sv_sources(Vec::new(), "Top")
+                    .four_state(four_state)
+                    .build_native_from_image(image)
+                    .unwrap()
+            });
+            let paths = [
+                directory.path().join("first"),
+                directory.path().join("second"),
+            ];
+            for (index, (simulation, path)) in simulations.iter_mut().zip(&paths).enumerate() {
+                let filename = simulation.signal("filename");
+                let enabled = simulation.signal("enabled");
+                simulation
+                    .modify(|io| {
+                        io.set_wide(
+                            filename,
+                            num_bigint::BigUint::from_bytes_be(path.to_str().unwrap().as_bytes()),
+                        );
+                        io.set(enabled, u8::from(index == 0));
+                    })
+                    .unwrap();
+                simulation.run_until(6).unwrap();
+            }
+            let enabled = simulations[1].signal("enabled");
+            simulations[1].modify(|io| io.set(enabled, 1u8)).unwrap();
+            for simulation in &mut simulations {
+                simulation.run_until(12).unwrap();
+                let stats = simulation.scheduler_stats();
+                assert!(stats.compiled_slots > 0, "{stats:?}");
+                assert!(
+                    stats
+                        .kernels
+                        .iter()
+                        .filter(|kernel| matches!(kernel, celox::KernelSchedule::Compiled))
+                        .count()
+                        >= 2,
+                    "{stats:?}"
+                );
+            }
+            assert_eq!(std::fs::read(&paths[0]).unwrap(), b"0\n1\n2\n3\n4\n5\n");
+            assert_eq!(std::fs::read(&paths[1]).unwrap(), b"3\n4\n5\n");
+        }
+    }
+}
+
+#[test]
+fn native_file_call_errors_stop_before_nba_publication() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    bit clk = 0;
+    int count = 0;
+    always #1 clk = ~clk;
+    always @(posedge clk) count <= count + 1;
+    always @(posedge clk) if (count == 1) $fwrite(32'h8000ffff, "invalid");
+endmodule"#;
+    for level in [celox::OptLevel::O0, celox::OptLevel::O2] {
+        for four_state in [false, true] {
+            let mut results = Vec::new();
+            for mode in [SchedulerMode::Reference, SchedulerMode::Compiled] {
+                let mut simulation = builder(source)
+                    .four_state(four_state)
+                    .opt_level(level)
+                    .scheduler_mode(mode)
+                    .build_native()
+                    .unwrap();
+                let error = simulation.run_until(8).unwrap_err();
+                results.push((
+                    error.to_string(),
+                    simulation.time(),
+                    simulation.get(simulation.signal("count")),
+                ));
+                if mode == SchedulerMode::Compiled {
+                    assert!(
+                        simulation.scheduler_stats().compiled_slots > 0,
+                        "{:?}",
+                        simulation.scheduler_stats()
+                    );
+                }
+            }
+            assert_eq!(results[0], results[1]);
+            assert!(results[1].0.contains("file output"), "{:?}", results[1]);
+            assert_eq!(results[1].1, 3);
+            assert_eq!(results[1].2, num_bigint::BigUint::from(1u8));
+        }
+    }
+}
+
+#[test]
+fn a_level_sensitive_kernels_startup_fence_does_not_disable_native_slots() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic [7:0] count = 0, seen = 0;
+    logic clk = 0;
+    always #1 clk = ~clk;
+    always_ff @(posedge clk) count <= count + 1;
+    always @(count[7:0]) seen = count ^ 8'h5a;
+endmodule
+"#;
+    for four_state in [false, true] {
+        for optimize in [false, true] {
+            let make = || builder(source).four_state(four_state).optimize(optimize);
+            let mut reference = make()
+                .scheduler_mode(SchedulerMode::Reference)
+                .build_native()
+                .unwrap();
+            let image = reloaded(&make().compile_native().unwrap().into_program_image());
+            let mut native = Simulation::from_sv_sources(Vec::new(), "Top")
+                .build_native_from_image(image)
+                .unwrap();
+            for end in [0, 1, 2, 5, 20] {
+                native.run_until(end).unwrap();
+                reference.run_until(end).unwrap();
+                for name in ["count", "seen"] {
+                    assert_eq!(
+                        native.get(native.signal(name)),
+                        reference.get(reference.signal(name))
+                    );
+                }
+            }
+            assert!(
+                native
+                    .scheduler_stats()
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, celox::KernelSchedule::Compiled)),
+                "{:?}",
+                native.scheduler_stats()
+            );
+            assert!(native.scheduler_stats().compiled_slots > 0);
+        }
+    }
+}
+
+#[test]
+fn source_delays_inside_level_sensitive_bodies_keep_their_scheduler_boundary() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic [7:0] count = 0, seen = 0;
+    logic clk = 0;
+    always #1 clk = ~clk;
+    always_ff @(posedge clk) count <= count + 1;
+    always @(count) begin #0; seen = count; end
+endmodule
+"#;
+    let mut sim = builder(source)
+        .four_state(false)
+        .scheduler_mode(SchedulerMode::DifferentialRuns)
+        .build_native()
+        .unwrap();
+    sim.run_until(20).unwrap();
+    assert!(
+        sim.scheduler_stats()
+            .kernels
+            .iter()
+            .any(|kernel| matches!(kernel, celox::KernelSchedule::Reference(_)))
+    );
+    assert_eq!(sim.get(sim.signal("seen")), 10u8.into());
+}
+
+#[test]
+fn native_queued_nbas_preserve_issue_order_and_waiter_occurrences() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic clk = 0, reset = 1;
+    logic [7:0] q = 0, sampled = 0, seen = 0;
+    int changes = 0;
+    always #1 clk = ~clk;
+    always_ff @(posedge clk) sampled <= q;
+    initial forever begin
+        @(posedge clk or negedge reset);
+        q <= q + 1;
+        q <= q + 2;
+    end
+    initial forever begin @(q); seen = q; changes = changes + 1; end
+endmodule
+"#;
+    for four_state in [false, true] {
+        for optimize in [false, true] {
+            let make = || builder(source).four_state(four_state).optimize(optimize);
+            let mut reference = make()
+                .scheduler_mode(SchedulerMode::Reference)
+                .build_native()
+                .unwrap();
+            let image = reloaded(&make().compile_native().unwrap().into_program_image());
+            let mut native = Simulation::from_sv_sources(Vec::new(), "Top")
+                .build_native_from_image(image)
+                .unwrap();
+            for end in [0, 1, 2, 5, 10] {
+                native.run_until(end).unwrap();
+                reference.run_until(end).unwrap();
+                for name in ["q", "sampled", "seen", "changes"] {
+                    assert_eq!(
+                        native.get(native.signal(name)),
+                        reference.get(reference.signal(name)),
+                        "{name} at {end}"
+                    );
+                }
+            }
+            assert_eq!(native.get(native.signal("q")), 10u8.into());
+            assert_eq!(native.get(native.signal("sampled")), 8u8.into());
+            assert!(native.scheduler_stats().compiled_slots > 0);
+            assert!(
+                native
+                    .scheduler_stats()
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, celox::KernelSchedule::Compiled)),
+                "{:?}",
+                native.scheduler_stats()
+            );
+        }
+    }
+}
+
+#[test]
+fn native_queued_nbas_survive_an_early_host_error_in_the_saved_state() {
+    let source = r#"`timescale 1ns/1ns
+module Top;
+    logic clk = 0;
+    logic [7:0] q = 0;
+    always #1 clk = ~clk;
+    initial forever begin
+        @(posedge clk);
+        q <= q + 1;
+        q <= q + 2;
+        $fwrite(123, "invalid descriptor");
+    end
+endmodule
+"#;
+    for four_state in [false, true] {
+        for optimize in [false, true] {
+            let make = || builder(source).four_state(four_state).optimize(optimize);
+            let mut reference = make()
+                .scheduler_mode(SchedulerMode::Reference)
+                .build_native()
+                .unwrap();
+            let mut native = make().build_native().unwrap();
+            assert!(reference.run_until(2).is_err());
+            assert!(native.run_until(2).is_err());
+            assert_eq!(native.time(), 1);
+            assert_eq!(native.get(native.signal("q")), 0u8.into());
+            assert_eq!(
+                native.save_state().unwrap(),
+                reference.save_state().unwrap()
+            );
+            assert!(native.scheduler_stats().compiled_slots > 0);
+            assert!(
+                native
+                    .scheduler_stats()
+                    .kernels
+                    .iter()
+                    .all(|kernel| matches!(kernel, celox::KernelSchedule::Compiled))
+            );
+        }
+    }
+}

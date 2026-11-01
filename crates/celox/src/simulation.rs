@@ -196,6 +196,15 @@ impl<B: SimBackend> UnitExecutor for Simulator<B> {
         Ok(())
     }
 
+    fn set_compiled_host_budgets(&mut self, rounds: u64, returns: u64) {
+        self.native_host_return_budget = returns;
+        self.native_host_round_budget = rounds;
+    }
+
+    fn take_compiled_nbas(&mut self) -> Vec<celox_runtime::NbaUpdate> {
+        self.native_nba_queue.drain(..).collect()
+    }
+
     fn host_request(
         &mut self,
         request: &celox_design::HostRequestSite<SignalRef>,

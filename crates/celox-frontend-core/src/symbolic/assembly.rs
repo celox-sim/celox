@@ -2863,7 +2863,10 @@ fn declare_scheduler_slots(
         finish: declare("finish".into(), FLAG),
         cont: declare("cont".into(), FLAG),
         dirty: declare("dirty".into(), FLAG),
-        defer_limit_settle: declare("defer_limit_settle".into(), FLAG),
+        defer_limit_settle: declare(
+            "defer_limit_settle".into(),
+            celox_design::SCHEDULER_CONTROL_WIDTH,
+        ),
         count: declare("count".into(), TIME),
         budget: declare("budget".into(), TIME),
         events: declare("events".into(), TIME),
