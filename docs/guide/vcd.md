@@ -2,6 +2,21 @@
 
 Celox can write [Value Change Dump](https://en.wikipedia.org/wiki/Value_change_dump) (VCD) files for viewing waveforms in tools like [GTKWave](https://gtkwave.sourceforge.net/) or [Surfer](https://surfer-project.org/).
 
+## CLI
+
+Use `--vcd <FILE>` with `celox run` to record a SystemVerilog or Veryl
+testbench without adding HDL dump tasks:
+
+```sh
+celox run top.sv --top Top --backend native --vcd waves.vcd
+celox run top.veryl --top Top --vcd waves.vcd
+```
+
+The CLI records each simulation time step and flushes the file when the run
+ends, including on a test failure or step limit. VCD recording keeps eligible
+compiled schedulers enabled; they return to the host at waveform boundaries.
+`--vcd` cannot be combined with `--compile-only`.
+
 ## Basic Usage
 
 Pass `vcd` with the output file path when creating a simulator:

@@ -1036,3 +1036,181 @@ fn sv_report_exposes_actual_compiled_scheduler_execution() {
         .unwrap();
     assert!(slots > 0, "{stdout}");
 }
+
+fn waveform_body(text: &str) -> &str {
+    text.split_once("$enddefinitions").unwrap().1
+}
+
+#[test]
+fn veryl_vcd_records_clock_phases_across_backends() {
+    let source = r#"
+        module Counter(clk: input clock, q: output logic<8>) {
+            always_ff (clk) { q += 1; }
+        }
+        #[test(Top)] module Top {
+            inst clk: $tb::clock_gen #(period: 2);
+            var q: logic<8>;
+            inst dut: Counter(clk, q);
+            initial { clk.next(4); $assert(q == 4); $finish(); }
+            initial { clk.next(100); }
+        }
+    "#;
+    let dir = tempfile::tempdir().unwrap();
+    let mut reference = None;
+    for backend in [
+        "interpreter",
+        "native",
+        "tiered",
+        #[cfg(feature = "cranelift")]
+        "cranelift",
+        #[cfg(feature = "wasm-runtime")]
+        "wasm",
+    ] {
+        let path = dir.path().join(format!("{backend}.vcd"));
+        let output = run(
+            &[("top.veryl", source)],
+            &["--backend", backend, "--vcd", path.to_str().unwrap()],
+        );
+        assert!(output.status.success(), "{backend}: {output:?}");
+        let text = std::fs::read_to_string(path).unwrap();
+        let body = waveform_body(&text);
+        for time in 0..=7 {
+            assert!(
+                body.lines().any(|line| line == format!("#{time}")),
+                "{backend}: {text}"
+            );
+        }
+        if let Some(reference) = &reference {
+            assert_eq!(body, reference, "{backend}");
+        } else {
+            reference = Some(body.to_string());
+        }
+    }
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn sv_vcd_preserves_compiled_slots_and_matches_interpreter() {
+    let source = r#"`timescale 1ns/1ns
+    module Top;
+        bit clk = 0;
+        bit [7:0] q = 0;
+        always #1 clk = !clk;
+        always_ff @(posedge clk) q <= q + 1;
+        initial begin #20; if (q != 10) $fatal(1, "bad count"); $finish; end
+    endmodule"#;
+    let dir = tempfile::tempdir().unwrap();
+    let mut reference = None;
+    for backend in ["interpreter", "native"] {
+        let path = dir.path().join(format!("{backend}.vcd"));
+        let output = run(
+            &[("top.sv", source)],
+            &[
+                "--backend",
+                backend,
+                "--report",
+                "--vcd",
+                path.to_str().unwrap(),
+            ],
+        );
+        assert!(output.status.success(), "{backend}: {output:?}");
+        if backend == "native" {
+            let stdout = String::from_utf8(output.stdout).unwrap();
+            let line = stdout
+                .lines()
+                .find(|line| line.starts_with("CELOX_SCHEDULER phase=finished "))
+                .unwrap();
+            let slots: u64 = line
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("compiled_slots="))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!(slots > 0, "{stdout}");
+        }
+        let text = std::fs::read_to_string(path).unwrap();
+        let body = waveform_body(&text);
+        for time in 0..=20 {
+            assert!(
+                body.lines().any(|line| line == format!("#{time}")),
+                "{backend}: {text}"
+            );
+        }
+        if let Some(reference) = &reference {
+            assert_eq!(body, reference, "{backend}");
+        } else {
+            reference = Some(body.to_string());
+        }
+    }
+}
+
+#[test]
+fn vcd_rejects_compile_only_and_reports_invalid_output_paths() {
+    let source = "#[test(Top)] module Top { initial { $finish(); } }";
+    let output = run(
+        &[("top.veryl", source)],
+        &["--compile-only", "--vcd", "unused.vcd"],
+    );
+    assert_eq!(output.status.code(), Some(2), "{output:?}");
+    let dir = tempfile::tempdir().unwrap();
+    let output = run(
+        &[("top.veryl", source)],
+        &["--vcd", dir.path().to_str().unwrap()],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+}
+
+#[test]
+fn vcd_is_flushed_when_a_veryl_run_hits_the_tick_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("limited.vcd");
+    let source = "#[test(Top)] module Top { inst clk: $tb::clock_gen #(period: 2); initial { clk.next(100); $finish(); } }";
+    let output = run(
+        &[("top.veryl", source)],
+        &[
+            "--backend",
+            "native",
+            "--max-steps",
+            "3",
+            "--vcd",
+            path.to_str().unwrap(),
+        ],
+    );
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(
+        waveform_body(&text)
+            .lines()
+            .any(|line| line.starts_with('#')),
+        "{text}"
+    );
+}
+
+#[cfg(feature = "systemverilog")]
+#[test]
+fn vcd_is_flushed_when_an_sv_run_fails_or_hits_the_step_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    for ending in ["#3 $fatal(1, \"failure\");", "#100 $finish;"] {
+        let path = dir.path().join("failed.vcd");
+        let source = format!(
+            "`timescale 1ns/1ns\nmodule Top; bit clk; always #1 clk = !clk; initial begin {ending} end endmodule"
+        );
+        let output = run(
+            &[("top.sv", &source)],
+            &[
+                "--backend",
+                "native",
+                "--max-steps",
+                "5",
+                "--vcd",
+                path.to_str().unwrap(),
+            ],
+        );
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            waveform_body(&text).lines().any(|line| line == "#2"),
+            "{text}"
+        );
+    }
+}
