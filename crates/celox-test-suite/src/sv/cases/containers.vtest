@@ -1764,3 +1764,92 @@ endmodule
   (modify (set a 0))
   (tick clk)
   (assert_eq y 0))
+
+(case functions_returning_containers
+  (source "returns.sv" #"
+module Top(output int total, output bit done);
+    typedef int queue_t[$];
+    typedef int array_t[];
+    typedef int map_t[string];
+    class Item;
+        int v;
+    endclass
+    class Box;
+        typedef Item items_t[$];
+        Item items[$];
+        function void add(int v);
+            Item item;
+            item = new;
+            item.v = v;
+            items.push_back(item);
+        endfunction
+        virtual function items_t get_items();
+            return items;
+        endfunction
+        function int count();
+            Item all[$];
+            all = this.get_items;
+            return all.size();
+        endfunction
+        function int sum();
+            Item all[$];
+            all = get_items();
+            sum = 0;
+            foreach (all[i])
+                sum += all[i].v;
+        endfunction
+    endclass
+    int source_q[$];
+    function automatic queue_t make_queue(int n);
+        queue_t q;
+        for (int i = 0; i < n; i++)
+            q.push_back(i * 10);
+        return q;
+    endfunction
+    function automatic array_t make_array();
+        array_t a;
+        a = new[3];
+        foreach (a[i])
+            a[i] = i + 1;
+        return a;
+    endfunction
+    function automatic map_t make_map();
+        map_t m;
+        m["one"] = 1;
+        m["two"] = 2;
+        return m;
+    endfunction
+    function automatic int total_of(int q[$]);
+        total_of = 0;
+        foreach (q[i])
+            total_of += q[i];
+    endfunction
+    function automatic queue_t copy();
+        return source_q;
+    endfunction
+    initial begin
+        int q[$];
+        int a[];
+        int m[string];
+        Box box;
+        q = make_queue(3);
+        $display("%0d %0d %0d", q.size(), q[1], q[2]);
+        a = make_array();
+        $display("%0d %0d", a.size(), a[2]);
+        m = make_map();
+        $display("%0d %0d", m.num(), m["two"]);
+        source_q.push_back(5);
+        q = copy();
+        source_q[0] = 6;
+        $display("%0d %0d %0d", q.size(), q[0], total_of(make_queue(3)));
+        box = new;
+        box.add(4);
+        box.add(7);
+        total = box.sum();
+        $display("%0d %0d", total, box.count());
+        done = 1;
+    end
+endmodule
+"#)
+  (top Top) (run_until 0) (assert_eq done 1) (assert_eq total 11)
+  (expect_output "3 10 20\n3 3\n2 2\n1 5 30\n11 2\n"))

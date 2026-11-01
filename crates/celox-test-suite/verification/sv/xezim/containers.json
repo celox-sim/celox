@@ -189,6 +189,17 @@
       "stronger_than_sv": false,
       "tag_reasons": {},
       "tags": []
+    },
+    {
+      "category": "Types",
+      "detail": "containers::functions_returning_containers at 1628:3: expect_output: expected [51, 32, 49, 48, 32, 50, 48, 10, 51, 32, 51, 10, 50, 32, 50, 10, 49, 32, 53, 32, 51, 48, 10, 49, 49, 32, 50, 10], got [49, 32, 48, 32, 48, 10, 49, 32, 48, 10, 48, 32, 48, 10, 49, 32, 53, 32, 53, 10, 49, 49, 32, 49, 10]",
+      "expectation": "Simulation",
+      "name": "containers::functions_returning_containers",
+      "phase": "execute",
+      "status": "mismatch",
+      "stronger_than_sv": false,
+      "tag_reasons": {},
+      "tags": []
     }
   ]
 }

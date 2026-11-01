@@ -1588,6 +1588,19 @@ as UVM's factory does with `{m_type_overrides, m_inst_overrides}` (IEEE
 [the Icarus containers report](verification/sv/icarus/containers.json).
 No assertions or exclusions are weakened.
 
+### Functions returning containers
+
+`containers::functions_returning_containers` assigns the results of functions
+that return a typedef of a queue, a dynamic array and an associative array,
+and of a virtual method returning a queue of class handles, called with and
+without parentheses, as UVM's `get_elements()` does (IEEE 1800-2023 13.4.1,
+7.5, 7.8, 7.10). Verilator 5.052 passes. Icarus 13.0 rejects the queue
+typedef ("Type names are not valid expressions here"). xezim 0.11.3, in a
+module instantiated below the top, returns containers built in an automatic
+local with elements missing (`sv_container_returns_in_instance_functions`, see
+the [probe](verification/repros/sv_container_returns_in_instance_functions_xezim.json)).
+No assertions or exclusions are weakened.
+
 ### Semaphores
 
 The 3 `semaphores::*` cases check semaphores (IEEE 1800-2023 15.3): a semaphore

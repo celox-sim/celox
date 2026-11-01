@@ -7,6 +7,7 @@ sv_backends! {
     fn shuffle_wide(sim) { @case "containers::shuffle_wide"; }
     fn shuffle_nested_receivers(sim) { @case "containers::shuffle_nested_receivers"; }
 
+    fn functions_returning_containers(sim) { @case "containers::functions_returning_containers"; }
     fn associative_default_strings(sim) { @case "containers::associative_default_strings"; }
     fn associative_default_copy(sim) { @case "containers::associative_default_copy"; }
     fn associative_default_four_state(sim) { @case "containers::associative_default_four_state"; }

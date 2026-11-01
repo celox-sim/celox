@@ -184,6 +184,14 @@ pub(super) fn native_type(
     session: &mut Session,
     dims: &PackedDimensions,
 ) -> Converted<Option<Arc<ContainerType>>> {
+    // The result of a function or method call that returns a container
+    // (IEEE 1800-2023 13.4.1), whose callee may also name a variable.
+    let ungrouped = expression_binding::ungroup(id, native);
+    if let ExprKind::Call { expression, .. } = &native.expression(ungrouped).kind
+        && let Some(container) = returned_container(*expression, true, native, tree, session, dims)
+    {
+        return Ok(Some(container));
+    }
     // A variable, also a package variable named `p::q` (IEEE 1800-2023
     // 26.3).
     if let Some(name) = expression_binding::native_name(tree, id, native)
@@ -220,6 +228,13 @@ pub(super) fn native_type(
     {
         return Ok(Some(inner));
     }
+    // The result of a method called without parentheses, `h.m` (13.4.1,
+    // 13.5.5).
+    if matches!(native.expression(ungrouped).kind, ExprKind::Member { .. })
+        && let Some(container) = returned_container(ungrouped, false, native, tree, session, dims)
+    {
+        return Ok(Some(container));
+    }
     // A queue slice retains the element type; an index into a container of
     // containers selects its inner type, as for `m[a]` of `m[a][b]`.
     if let ExprKind::Select {
@@ -251,6 +266,27 @@ pub(super) fn native_type(
         session,
         dims,
     )
+}
+
+/// The container type that callee `callee` returns: a method's, or with
+/// `called`, a function's.
+fn returned_container(
+    callee: ExprId,
+    called: bool,
+    native: &celox_sv_syntax::Declarations,
+    tree: &AnalysisContext<'_>,
+    session: &mut Session,
+    dims: &PackedDimensions,
+) -> Option<Arc<ContainerType>> {
+    let name = match expression_binding::object_method(tree, session, callee, native, dims)
+        .ok()
+        .flatten()
+    {
+        Some((name, ..)) => name,
+        None if called => expression_binding::callable_name(tree, callee, native)?,
+        None => return None,
+    };
+    dims.function_return_types.get(&name)?.container.clone()
 }
 
 pub(super) fn call(op: ContainerOp, layout: ContainerLayout, args: Vec<Expr>) -> Expr {

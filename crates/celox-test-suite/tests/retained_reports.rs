@@ -751,6 +751,14 @@ fn systemverilog_retained_reports_explain_exclusions_and_executed_failures() {
                         ("icarus", "virtual_interfaces::unit_import_package_variables") => {
                             ("compile_error", "compile", "source_0.sv:17: syntax error")
                         }
+                        ("icarus", "containers::functions_returning_containers") => (
+                            "compile_error",
+                            "compile",
+                            "Type names are not valid expressions here.",
+                        ),
+                        ("xezim", "containers::functions_returning_containers") => {
+                            ("mismatch", "execute", "got [49, 32, 48, 32, 48, 10")
+                        }
                         ("icarus", "class::enumeration_constants_of_classes") => {
                             ("compile_error", "compile", "source_0.sv:12: syntax error")
                         }
