@@ -10,26 +10,30 @@ use celox_heap::ops;
 use sv::ir::{HandleProperty, ObjectOp};
 
 impl Ff<'_, '_> {
-    /// Real `expr` converted for integral property `field`: rounded to the
-    /// nearest integer of the property's width (IEEE 1800-2023 6.12.1).
-    /// `None` when `expr` is not real.
+    /// `expr` converted for property `field` when either is real: a real
+    /// value rounds to the nearest integer of an integral property's width,
+    /// and a real property holds the real value of `expr` (IEEE 1800-2023
+    /// 6.12.1). `None` when neither is real.
     fn real_field_value(
         &mut self,
         expr: &sv::ir::Expr,
         field: &sv::ir::ObjectField,
     ) -> Result<Option<RegisterId>, sv::AnalyzerError> {
-        let Some(from) = self.m.expr_float_precision(expr) else {
+        let from = self.m.expr_float_precision(expr);
+        let to = floating::field_precision(field);
+        if from.is_none() && to.is_none() {
             return Ok(None);
-        };
+        }
+        let signed = self.expr_signed(expr);
         let mut arena = SLTNodeArena::new();
         let node = self.expr_slt(expr, None, &mut arena)?;
         let node = floating::convert(
             &mut arena,
             node,
-            Some(from),
-            None,
+            from,
+            to,
             field.width as usize,
-            field.signed,
+            if from.is_none() { signed } else { field.signed },
             true,
         )
         .ok_or_else(|| unsupported("real property conversion"))?;
@@ -74,10 +78,11 @@ impl Ff<'_, '_> {
                         _ => (64, false),
                     }
                 };
-                // A real value keeps its type until the store converts it.
+                // A real value, or any value of a real property, keeps its
+                // type and width until the store converts it.
                 let real = index == 1
-                    && matches!(op, ObjectOp::Store(_))
-                    && self.m.expr_float_precision(arg).is_some();
+                    && matches!(op, ObjectOp::Store(field)
+                        if field.real || self.m.expr_float_precision(arg).is_some());
                 *arg = self.heap_operand(
                     arg,
                     (!real).then_some((width, signed)),
@@ -371,6 +376,9 @@ impl Ff<'_, '_> {
         };
         if let Some(kind) = kind {
             self.m.variables.get_mut(&temp).unwrap().value_kind = kind;
+        }
+        if let ObjectOp::Load(field) = op {
+            self.m.variables.get_mut(&temp).unwrap().float = floating::field_precision(field);
         }
         self.store(temp, SIROffset::Static(0), width, value);
         Ok(sv::ir::Expr::Ident(name))

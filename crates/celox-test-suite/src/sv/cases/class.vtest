@@ -4055,3 +4055,63 @@ endmodule
 "#)
   (top Top) (run_until 0)
   (assert_eq k 3) (assert_eq n (trunc 32 -3)) (assert_eq t 4) (assert_eq f 4) (assert_eq l 5))
+
+; A real or shortreal property holds a real value (IEEE 1800-2023 6.12): an
+; integral value assigned to it converts to real, and it converts by rounding
+; when assigned to an integral variable (6.12.1).
+(case real_properties
+  (source "class.sv" #"
+module Top(output logic [63:0] initial_r, output logic [63:0] initial_s, output logic [63:0] sum,
+           output logic [63:0] doubled, output logic [63:0] chained, output logic [63:0] copied,
+           output int rounded, output bit greater, output logic [63:0] incremented_from,
+           output logic [63:0] incremented, output logic [63:0] widened);
+    class T;
+        real r = 1.5;
+        shortreal s = 0.25;
+        int i;
+        T peer;
+        function real twice(); return r * 2; endfunction
+        function void set(real v); r = v; endfunction
+    endclass
+    function longint big(); return 64'h100000000; endfunction
+    T t, u;
+    initial begin
+        t = new;
+        initial_r = $realtobits(t.r);
+        initial_s = $realtobits(t.s * 1.0);
+        t.r = 3;
+        t.r += 0.25;
+        t.s = t.r / 2;
+        sum = $realtobits(t.r + t.s);
+        t.i = t.r;
+        rounded = t.i;
+        greater = t.r > 3.0;
+        t.set(-1.75);
+        doubled = $realtobits(t.twice());
+        t.peer = new;
+        t.peer.r = t.r * 2;
+        chained = $realtobits(t.peer.r);
+        u = new t;
+        copied = $realtobits(u.r);
+        // A postincrement reads the real value it replaces (11.4.2).
+        u.r = 1.5;
+        incremented_from = $realtobits(u.r++);
+        incremented = $realtobits(u.r);
+        // An integral value converts at its own width (6.12.1).
+        u.s = big();
+        widened = $realtobits(u.s * 1.0);
+    end
+endmodule
+"#)
+  (top Top) (run_until 0)
+  (assert_eq initial_r 0x3ff8000000000000)
+  (assert_eq initial_s 0x3fd0000000000000)
+  (assert_eq sum 0x4013800000000000)
+  (assert_eq rounded 3)
+  (assert_eq greater 1)
+  (assert_eq doubled 0xc00c000000000000)
+  (assert_eq chained 0xc00c000000000000)
+  (assert_eq copied 0xbffc000000000000)
+  (assert_eq incremented_from 0x3ff8000000000000)
+  (assert_eq incremented 0x4004000000000000)
+  (assert_eq widened 0x41f0000000000000))
