@@ -58,6 +58,7 @@ In a timed `Simulation`, `initial` and plain `always` processes can suspend:
 | `#delay` | integral and real delays, `#(min:typ:max)` (the typical value), package-scoped values such as `#pkg::D`, and [time literals](#time-literal-delays); an X or Z delay counts as zero |
 | `@(...)` | variables, `posedge` / `negedge` / `edge`, items joined by `or` or `,`, bit, part and run-time index selects, any expression including calls of pure functions, `iff` conditions on items (not in `always_ff`), and `@*` / `@(*)`, which waits on the variables its statement reads |
 | `wait (condition)` | any condition; an X or Z condition counts as false |
+| Delayed nonblocking assignments | `lhs <= #constant rhs` in `initial` and ordinary `always`, for integral constant delays and time literals. The value and destination position are captured immediately; the update is queued in the NBA region of the target time without suspending the caller (IEEE 1800-2023 10.4.2). Pending updates survive checkpoints and state files. |
 | Assignments | blocking and nonblocking, to any target a blocking assignment takes, including unpacked array elements and run-time positions; nonblocking updates take effect in the NBA region of the time slot, at the position evaluated when the assignment executes, and bits outside the target or at a position with an X or Z bit are not written |
 
 An `always` whose sensitivity list names exactly the variables its statement
@@ -361,7 +362,7 @@ it. The error carries the number of the issue that tracks the construct;
 constructs without a dedicated issue point to the frontend roadmap, [#88](https://github.com/celox-sim/celox/issues/88).
 
 - Class features beyond those [listed](#classes): `$cast` to a variable that is not a class handle, anonymous enumeration, struct and union types and named four-state or string constants of a module or package as class parameter values (a class passes its own such parameters on by name), module-local classes as type arguments to package-class specializations, properties that are `real` or arrays, reads of bit and part selects of a property not declared `[N-1:0]`, selects of a member of a property of unpacked structure type, packed structure members of a property, properties as `output` or `inout` arguments, and randomization or constraints over 4-state properties. Recursive calls remain unsupported.
-- Behavioral and verification constructs: intra-assignment timing controls (`a = #1 b`),
+- Behavioral and verification constructs: nonblocking intra-assignment event controls and nonconstant delays,
   delayed continuous assignments ([#444](https://github.com/celox-sim/celox/issues/444)),
   `wait fork` / `disable fork`, temporal concurrent assertions beyond the Boolean subset below, `force` / `release`.
 - Named events beyond those [listed](#named-events): arrays of events, event ports,

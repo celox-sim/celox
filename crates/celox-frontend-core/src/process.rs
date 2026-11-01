@@ -229,6 +229,13 @@ impl<A: Copy> ProcessKernelBuilder<A> {
         self.suspend(ProcessStatus::Yield)
     }
 
+    /// Give other runnable work priority before the next statement, without
+    /// leaving the current Active/Reactive region (IEEE 1800-2023 4.7).
+    pub fn defer_active(&mut self) -> Result<(), ProcessKernelError> {
+        self.slots.const_delays = false;
+        self.suspend(ProcessStatus::DeferActive)
+    }
+
     /// Reserve one entry point for each child, then return to the runtime to spawn them.
     /// The caller lowers each child into its entry block and ends it with `complete`.
     pub fn fork(
@@ -364,8 +371,8 @@ impl<A: Copy> ProcessKernelBuilder<A> {
     }
 
     /// The nonblocking assignment of nonblocking site `index` of this
-    /// process, described by `site`: schedule a value for the NBA region of
-    /// the current time (IEEE 1800-2023 10.4.2). `lower` lowers the
+    /// process, described by `site`: schedule a value for the NBA region at
+    /// the current time plus `site.delay` (IEEE 1800-2023 10.4.2). `lower` lowers the
     /// right-hand side at the open block and returns the value, a register
     /// of `site.width` bits, and for a site with a run-time position the bit
     /// offset and the number of bits written, unsigned two-state registers

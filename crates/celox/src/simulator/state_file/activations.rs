@@ -629,6 +629,7 @@ impl<B: SimBackend> Simulator<B> {
             .map(|(id, _)| id)
             .chain(record.waiters.iter().map(|w| &w.process))
             .chain(&record.ready)
+            .chain(&record.deferred_ready)
             .chain(&record.inactive)
             .chain(&record.reactive)
             .chain(&record.observed)

@@ -1633,8 +1633,8 @@ chapter-9/9.4.3--event_sequence_controls.sv	2state	pass
 chapter-9/9.4.3--event_sequence_controls.sv	4state	pass
 chapter-9/9.4.5--event_blocking_assignment_delay.sv	2state	pass
 chapter-9/9.4.5--event_blocking_assignment_delay.sv	4state	pass
-chapter-9/9.4.5--event_nonblocking_assignment_delay.sv	2state	fail
-chapter-9/9.4.5--event_nonblocking_assignment_delay.sv	4state	fail
+chapter-9/9.4.5--event_nonblocking_assignment_delay.sv	2state	pass
+chapter-9/9.4.5--event_nonblocking_assignment_delay.sv	4state	pass
 chapter-9/9.4.5--event_nonblocking_assignment_event.sv	2state	pass
 chapter-9/9.4.5--event_nonblocking_assignment_event.sv	4state	pass
 chapter-9/9.4.5--event_nonblocking_assignment_repeat.sv	2state	pass

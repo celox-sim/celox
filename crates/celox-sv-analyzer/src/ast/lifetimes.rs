@@ -640,6 +640,13 @@ impl Flow<'_> {
 
     fn stmt(&self, stmt: &Stmt, written: bool) -> Result<Exits, Observed> {
         match stmt {
+            Stmt::DelayedNonblocking {
+                control,
+                assignment,
+            } => {
+                self.stmt(control, written)?;
+                self.stmt(assignment, written)
+            }
             Stmt::Assign {
                 lhs,
                 rhs,
@@ -815,9 +822,10 @@ impl Flow<'_> {
                 self.read(expr, written)?;
                 Ok(Exits::next(written))
             }
-            Stmt::AssertionRegion { .. } | Stmt::WaitFork | Stmt::DisableFork => {
-                Ok(Exits::next(written))
-            }
+            Stmt::DeferActive
+            | Stmt::AssertionRegion { .. }
+            | Stmt::WaitFork
+            | Stmt::DisableFork => Ok(Exits::next(written)),
             Stmt::WaitEvent(items) => {
                 for item in items {
                     self.read(&item.expr, written)?;
@@ -976,7 +984,9 @@ pub(super) fn stmt_exprs(stmt: &Stmt) -> Vec<&Expr> {
             .flat_map(|item| std::iter::once(&item.expr).chain(&item.iff))
             .collect(),
         // The statements of an `@*` describe its reads and do not run.
-        Stmt::Fork { .. }
+        Stmt::DelayedNonblocking { .. }
+        | Stmt::Fork { .. }
+        | Stmt::DeferActive
         | Stmt::AssertionRegion { .. }
         | Stmt::WaitFork
         | Stmt::DisableFork

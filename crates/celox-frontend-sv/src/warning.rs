@@ -65,6 +65,18 @@ pub enum FrontendWarningKind {
     /// IEEE 1800-2023 24.7 ignores.
     #[error("`$exit` outside a program block is ignored")]
     ExitOutsideProgram,
+    /// A variable that only several `always @*` blocks write is a temporary
+    /// of each block, so its writes do not wake the other blocks as IEEE
+    /// 1800-2023 9.4.2.2 requires. Applied only when the diagnostic is not
+    /// an error.
+    #[error(
+        "`{signal}` in `{module}` is treated as a temporary of each `always @*` block that writes it ({blocks}): its writes do not wake the other blocks"
+    )]
+    SharedAlwaysTemporary {
+        module: String,
+        signal: String,
+        blocks: String,
+    },
 }
 
 /// Where a warning is in the source.
@@ -176,6 +188,7 @@ impl miette::Diagnostic for FrontendWarning {
             FrontendWarningKind::InferredLatch => "inferred_latch",
             FrontendWarningKind::MemoryFileWordCount { .. } => "memory_file_word_count",
             FrontendWarningKind::ExitOutsideProgram => "exit_outside_program",
+            FrontendWarningKind::SharedAlwaysTemporary { .. } => "shared_always_temporary",
         }))
     }
 
@@ -208,6 +221,9 @@ impl miette::Diagnostic for FrontendWarning {
             }
             FrontendWarningKind::ExitOutsideProgram => {
                 "end the simulation with `$finish`, or remove the call"
+            }
+            FrontendWarningKind::SharedAlwaysTemporary { .. } => {
+                "a language deviation enabled by shared_always_temporary=warn or allow; declare the variable inside each block to keep IEEE 1800-2023 semantics"
             }
         }))
     }

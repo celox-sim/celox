@@ -123,9 +123,45 @@
   (assert_eq prev 8)
   (assert_eq i_q 8))
 
+; Level-sensitive always processes may share a variable as well (IEEE
+; 1800-2023 6.5, 9.2.2), and each waits on the variables it reads (9.4.2.2):
+; here the second block's writes to `j` wake the first one, which reads it,
+; while the first block's loop writes wake nothing. Which block writes `j`
+; last is not defined, so the output leaves it out.
+(case level_processes_share_a_written_variable
+  (source "shared_level.sv" #"
+                module Top;
+                    logic [3:0] a, b;
+                    logic any_a, any_b;
+                    integer j;
+                    always @(*) begin
+                        any_a = 1'b0;
+                        for (j = 0; j < 4; j = j + 1) any_a = any_a | a[j];
+                    end
+                    always @(*) begin
+                        j = 0;
+                        any_b = b[1];
+                    end
+                    initial begin
+                        a = 4'b0000;
+                        b = 4'b0000;
+                        #1 $display("%b %b", any_a, any_b);
+                        a = 4'b0100;
+                        #1 $display("%b %b", any_a, any_b);
+                        b = 4'b0010;
+                        #1 $display("%b %b", any_a, any_b);
+                        $finish;
+                    end
+                endmodule
+            "#)
+  (top Top)
+  (run_to_finish)
+  (expect_output "0 0\n1 0\n1 1\n"))
+
 ; Processes of different clocks share a variable. A write at one edge is
 ; visible to a process of a later edge, and survives a coincident edge whose
 ; process does not write the variable.
+
 (case edge_processes_of_two_clocks_share_a_blocking_variable
   (source "shared_clocks.sv" #"
                 module Top(input logic ca, input logic cb, input logic en,

@@ -55,6 +55,7 @@ outline: [2, 3]
 | `#delay` | 整数と実数の遅延、`#(min:typ:max)`（typ の値）、`#pkg::D` のような package スコープの値、[時間リテラル](#time-literal-delays)。X / Z の遅延は 0 として扱う |
 | `@(...)` | 変数、`posedge` / `negedge` / `edge`、`or` または `,` で並べた項目、ビット選択・部分選択・実行時添字の選択、pure な関数呼び出しを含む任意の式、項目の `iff` 条件（`always_ff` を除く）、文が読む変数を待つ `@*` / `@(*)` |
 | `wait (condition)` | 任意の条件。X / Z の条件は偽として扱う |
+| 遅延付きノンブロッキング代入 | `initial` と通常の `always` での `lhs <= #constant rhs`。整数の定数遅延と時間リテラルに対応します。右辺と代入先の位置を即時に評価し、呼び出し元を中断せず指定時刻の NBA 領域で更新します（IEEE 1800-2023 10.4.2）。予約更新はチェックポイントと state file にも保持します。 |
 | 代入 | ブロッキング代入とノンブロッキング代入。代入先はブロッキング代入と同じで、unpacked 配列の要素や実行時に決まる位置も使えます。ノンブロッキング代入は代入を実行した時点で評価した位置に、そのタイムスロットの NBA 領域で反映します。代入先の範囲外のビットと、X や Z のビットを含む位置には書き込みません |
 
 文が読む変数をちょうど並べたセンシティビティリスト（`@*` が求めるもの、IEEE 1800-2023 9.4.2.2）を持つ
@@ -239,7 +240,7 @@ unpacked 構造体（IEEE 1800-2023 7.2）のメンバには、整数型、列�
   ANSI ヘッダーのポートは、クロック入力やパラメータ依存の幅も含めて modport 経由で渡せます。
   interface 自体と入れ子の interface は対応しています。型パラメータはインスタンスごとに解決し、modport ポート経由でも伝搬します。
   再帰する特殊化と64段を超える入れ子は拒否します。細かな制約は[英語版の一覧](/guide/systemverilog-reference#interface-restrictions)を参照してください。
-- 振る舞い記述・検証向けの構文：`final`、代入内のタイミング制御（`a = #1 b`）、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
+- 振る舞い記述・検証向けの構文：`final`、ノンブロッキング代入内のイベント制御と定数でない遅延、遅延付き継続代入（[#444](https://github.com/celox-sim/celox/issues/444)）、
   `fork` / `join`、`wait fork` / `disable fork`、下記のBoolean部分集合を超える並行アサーション、`force` / `release`。
 - [対応範囲](#named-events)を超える named event：event の配列、event のポート、unpacked 構造体の event メンバ、event を返す関数、
   `always_comb` / `always_latch` の中の trigger、
