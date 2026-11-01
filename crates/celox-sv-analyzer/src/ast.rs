@@ -313,7 +313,7 @@ use parameters::{
 };
 use scoped_map::{ScopedMap, Signedness};
 use selects::{add_expr, product_expr};
-use shared_map::SharedMap;
+use shared_map::{SharedMap, ToShared};
 use statements::{
     assignment_op_expr, coerce_procedural_assignment_rhs, expr_from_lvalue, lvalue_expr_type,
 };
@@ -886,7 +886,9 @@ impl Module {
                 functions.extend_missing(&imported.constant_functions);
                 functions
             };
-            let mut type_aliases = type_aliases_from_scope(syntax_tree, session)?;
+            // The scope's tables are shared with the contexts that bind in it.
+            let mut type_aliases: SharedMap<Type> =
+                type_aliases_from_scope(syntax_tree, session)?.into();
             // Constant functions see the module constants known so far; they are
             // collected again once the parameters are known.
             let preliminary = syntax_tree.with_functions(with_imported(
@@ -919,9 +921,10 @@ impl Module {
             if name == override_module_name {
                 apply_parameter_overrides(&mut parameters, parameter_overrides)?;
             }
-            let mut const_env = imported.const_env.clone();
+            let mut const_env: SharedMap<i128> = imported.const_env.clone().into();
             const_env.extend(const_env_from_parameters(syntax_tree, session, &parameters));
-            type_aliases = type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?;
+            type_aliases =
+                type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?.into();
             let mut enum_constants = enum_member_constants_from_scope(
                 syntax_tree,
                 session,
@@ -939,7 +942,8 @@ impl Module {
             enum_constants.extend_missing(&imported.enum_constants);
             // Alias ranges may themselves contain casts sized by enum members.
             // Rebuild them before assigning declared parameter widths.
-            type_aliases = type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?;
+            type_aliases =
+                type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?.into();
             // Constant casts are evaluated while parameter syntax is lowered.
             // Repeat that lowering after enum constants become available so a
             // cast operand such as `byte_t'(ENUM_MEMBER)` is not permanently
@@ -966,7 +970,8 @@ impl Module {
                 apply_parameter_overrides(&mut parameters, parameter_overrides)?;
             }
             extend_const_env_with_parameters(syntax_tree, session, &mut const_env, &parameters);
-            type_aliases = type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?;
+            type_aliases =
+                type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?.into();
             // Contract dependency analysis must see module parameter references
             // before the normal procedural lowering substitutes default literals.
             let symbolic_parameters = parameters
@@ -1093,7 +1098,8 @@ impl Module {
                             &parameters,
                         );
                         type_aliases =
-                            type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?;
+                            type_aliases_from_scope_with_env(syntax_tree, session, &const_env)?
+                                .into();
                         array_parameters = array_parameters::array_parameters_from_scope(
                             syntax_tree,
                             session,
@@ -1774,7 +1780,7 @@ impl Module {
                 declarations_only: imported.declarations_only,
                 type_parameter_bindings: HashMap::default(),
                 pattern_parameter_bindings: HashMap::default(),
-                const_env: const_env.clone(),
+                const_env: (*const_env).clone(),
                 parameter_values: parameter_values.clone(),
                 parameters: parameters.clone(),
                 // A class of the scope is a type of it (IEEE 1800-2023 8.3).
@@ -3540,13 +3546,13 @@ struct PackedDimensions {
 impl PackedDimensions {
     fn new(
         variables: impl Into<ScopedMap<VariableDimensions>>,
-        const_env: &HashMap<String, i128>,
-        type_aliases: &HashMap<String, Type>,
+        const_env: impl ToShared<i128>,
+        type_aliases: impl ToShared<Type>,
     ) -> Self {
         Self {
             variables: variables.into(),
-            const_env: const_env.clone().into(),
-            type_aliases: type_aliases.clone().into(),
+            const_env: const_env.to_shared(),
+            type_aliases: type_aliases.to_shared(),
             function_return_types: SharedMap::default(),
             functions: Arc::default(),
             parameter_values: SharedMap::default(),

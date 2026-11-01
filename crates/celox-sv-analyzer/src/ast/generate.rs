@@ -179,6 +179,15 @@ impl Item {
         Cow::Owned(self.block_imports().type_aliases(&all).into_owned())
     }
 
+    /// [`Self::type_aliases`] of a shared table, which stays shared when
+    /// the item sees it unchanged.
+    pub fn shared_type_aliases(&self, aliases: &SharedMap<Type>) -> SharedMap<Type> {
+        match self.type_aliases(aliases) {
+            Cow::Borrowed(_) => aliases.clone(),
+            Cow::Owned(visible) => visible.into(),
+        }
+    }
+
     /// `tree` calling the constant functions this item sees.
     pub fn enter<'a>(&self, tree: &AnalysisContext<'a>) -> AnalysisContext<'a> {
         match self
@@ -740,7 +749,7 @@ impl<'a> Elaborator<'a, '_> {
             &self.tree,
             self.session,
             &scope.env,
-            &self.aliases,
+            &*self.aliases,
         )?
         else {
             return Ok(None);

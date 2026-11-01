@@ -89,7 +89,11 @@ fn type_aliases_in_scope(
     defer_class_defaults: bool,
     generate_scope: Option<&str>,
 ) -> Converted<HashMap<String, Type>> {
-    let mut aliases = scope::imported(syntax_tree).type_aliases.clone();
+    // Each alias binds in a context that shares the tables; it is dropped
+    // before the next alias is added, so the table grows without copies.
+    let const_env: SharedMap<i128> = const_env.clone().into();
+    let const_env = &const_env;
+    let mut aliases: SharedMap<Type> = scope::imported(syntax_tree).type_aliases.clone().into();
     aliases.extend(
         inherited
             .iter()
@@ -158,6 +162,7 @@ fn type_aliases_in_scope(
                     session,
                     &context,
                 )?;
+                drop(context);
                 ty.name_declaration(|| declaration_name(syntax_tree, alias, generate_scope));
                 aliases.insert(instances::normalize_identifier(&alias.name.spelling), ty);
             }
@@ -199,7 +204,7 @@ fn type_aliases_in_scope(
             }
         }
     }
-    Ok(aliases)
+    Ok(aliases.into_inner())
 }
 
 /// The name of typedef `alias`, qualified by the module, interface, program
@@ -249,8 +254,8 @@ fn add_type_parameter(
     key: celox_sv_syntax::ParameterId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
-    aliases: &mut HashMap<String, Type>,
+    env: &SharedMap<i128>,
+    aliases: &mut SharedMap<Type>,
 ) -> Converted<()> {
     let ParameterKind::Type { default } = parameter.kind else {
         return Ok(());
@@ -259,8 +264,10 @@ fn add_type_parameter(
     if let Some(bound) = scope::imported(tree).type_parameter_bindings.get(&key) {
         aliases.insert(name, bound.clone());
     } else if let Some(id) = default {
-        let context = PackedDimensions::new(HashMap::default(), env, aliases);
-        if let Some(ty) = type_binding::bind(id, tree, session, &context)? {
+        let context = PackedDimensions::new(HashMap::default(), env, &*aliases);
+        let ty = type_binding::bind(id, tree, session, &context)?;
+        drop(context);
+        if let Some(ty) = ty {
             aliases.insert(name, ty);
         }
     }

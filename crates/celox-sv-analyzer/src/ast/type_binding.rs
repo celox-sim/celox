@@ -125,8 +125,8 @@ pub(super) fn implicit_subroutine_type(
     id: TypeId,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    env: impl ToShared<i128>,
+    aliases: impl ToShared<Type>,
 ) -> Converted<Type> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     let data = tree.declarations().data_type(id);
@@ -291,8 +291,8 @@ pub(super) fn procedural_type(
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    env: impl ToShared<i128>,
+    aliases: impl ToShared<Type>,
 ) -> Converted<Option<Type>> {
     let context = PackedDimensions::new(HashMap::default(), env, aliases);
     binding::bind_in(id, native, tree, session, &context)
@@ -315,8 +315,8 @@ pub(super) fn alias_base_type(
     native: &celox_sv_syntax::Declarations,
     tree: &AnalysisContext<'_>,
     session: &mut Session,
-    env: &HashMap<String, i128>,
-    aliases: &HashMap<String, Type>,
+    env: impl ToShared<i128>,
+    aliases: impl ToShared<Type>,
     defer_class_defaults: bool,
 ) -> Converted<Option<Type>> {
     // Typedef type-reference inference is outside the supported alias path.
