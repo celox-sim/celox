@@ -3,6 +3,9 @@
 use super::*;
 
 sv_backends! {
+    fn unpacked_struct_clock_and_reset_events(sim) { @case "unpacked_structs::clock_and_reset_events"; }
+    fn unpacked_struct_clock_four_state_edges(sim) { @case "unpacked_structs::clock_four_state_edges"; }
+
     fn unpacked_struct_integral_array_member_defaults(sim) { @case "unpacked_structs::integral_array_member_defaults"; }
     fn unpacked_struct_integral_array_member_defaults_four_state(sim) { @case "unpacked_structs::integral_array_member_defaults_four_state"; }
 

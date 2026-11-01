@@ -1440,3 +1440,68 @@ module Top(output bit done);
 endmodule
 "#)
   (top Top) (four_state) (run_until 3) (assert_eq done 1))
+
+(case clock_and_reset_events
+  (source "member_events.sv" #"
+    typedef struct { logic clk; logic rst_n; logic neighbor; } clocks_t;
+    module Top(output logic [7:0] q);
+      typedef struct { clocks_t inner; } nested_t;
+      nested_t pins;
+      logic host_clk = 0, host_rst_n = 1, neighbor = 0;
+      assign pins.inner.clk = host_clk;
+      assign pins.inner.rst_n = host_rst_n;
+      assign pins.inner.neighbor = neighbor;
+      always_ff @(posedge pins.inner.clk or negedge pins.inner.rst_n)
+        if (!pins.inner.rst_n) q <= 0;
+        else q <= q + 1;
+      initial begin
+        #1 host_rst_n = 0;
+        #1 host_rst_n = 1;
+        #1 neighbor = 1;
+        #1 host_clk = 1;
+        #1 host_clk = 0;
+        #1 neighbor = 0;
+        #1 host_clk = 1;
+        #1 host_rst_n = 0;
+        #1 host_rst_n = 1;
+        #1 host_clk = 0;
+        #1 host_clk = 1;
+      end
+    endmodule
+  "#)
+  (top Top)
+  (run_until 2) (assert_eq q 0)
+  (run_until 3) (assert_eq q 0)
+  (run_until 4) (assert_eq q 1)
+  (run_until 6) (assert_eq q 1)
+  (run_until 7) (assert_eq q 2)
+  (run_until 8) (assert_eq q 0)
+  (run_until 11) (assert_eq q 1))
+
+(case clock_four_state_edges
+  (source "member_edges.sv" #"
+    module Top(output int q);
+      int counter = 0;
+      assign q = counter;
+      typedef struct { logic clk; logic neighbor; } clocks_t;
+      clocks_t pins;
+      always_ff @(posedge pins.clk) counter <= counter + 1;
+      initial begin
+        pins.clk = 0;
+        pins.neighbor = 0;
+        #1 pins.clk = 1'bx;
+        #1 pins.neighbor = 1;
+        #1 pins.clk = 1;
+        #1 pins.clk = 0;
+        #1 pins.clk = 1'bz;
+        #1 pins.clk = 1;
+      end
+    endmodule
+  "#)
+  (four_state) (top Top)
+  (run_until 1) (assert_eq q 1)
+  (run_until 2) (assert_eq q 1)
+  (run_until 3) (assert_eq q 2)
+  (run_until 4) (assert_eq q 2)
+  (run_until 5) (assert_eq q 3)
+  (run_until 6) (assert_eq q 4))
