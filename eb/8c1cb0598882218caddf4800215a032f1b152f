@@ -1,1 +1,1 @@
-Address review 5729304455 and sync after #2922 merged
+Fix review 5729304455: normalize sensitivity offsets and include omitted-argument function writes; accept the two verified always_latch conformance improvements
