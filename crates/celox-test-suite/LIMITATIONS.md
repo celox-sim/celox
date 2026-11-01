@@ -1968,3 +1968,22 @@ xezim report 4/4 and retain the NUL. Celox counts the four bytes consumed but
 stores the three-byte string `AB LF`: 6.16 prohibits NUL characters in string
 variables. The probe records these differences separately from its portable
 assertions. No new shared-case exclusion or historical passing row is added.
+
+### File error descriptions
+
+`file_io::ferror_success_clears_description` requires `$ferror` to return zero
+and clear both string and 640-bit packed descriptions after successful I/O
+(IEEE 1800-2023 21.3.7). Icarus 13.0 and Celox pass. Verilator 5.052 writes
+`Success`, and xezim 0.11.4 writes `No error`, into both output forms instead.
+The [standalone probe](verification/repros/sv_ferror_clears_description.sv)
+reproduces these values on a newly opened file, outside the suite adapters.
+The exact [Verilator](verification/sv/limitations/ferror-verilator.json) and
+[xezim](verification/sv/limitations/ferror-xezim.json) failures are retained;
+only this case is excluded for those tools. Passing cases add no baseline rows.
+
+Celox-specific temporary-file and injected-filesystem tests additionally cover
+per-descriptor errors, successful-operation reset, repeated queries, EOF,
+closed descriptors, output selection order, reference arguments and replay
+of core plus file-handler snapshots. Error codes and descriptions depend on
+the host; tests require zero/nonzero status and text presence rather than a
+particular operating-system errno or wording.

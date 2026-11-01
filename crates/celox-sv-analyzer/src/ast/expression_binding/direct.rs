@@ -1892,8 +1892,9 @@ fn bind_value_in(
                             let mut operands = operands;
                             // Bind selected string outputs as targets: the read path
                             // wraps handles and folds invalid indices to empty strings.
-                            if function == SystemFunction::Fgets
-                                && let Some(Some(destination)) = args.first()
+                            let output = usize::from(function == SystemFunction::Ferror);
+                            if matches!(function, SystemFunction::Fgets | SystemFunction::Ferror)
+                                && let Some(Some(destination)) = args.get(output)
                                 && strings::fixed_array_element(
                                     tree,
                                     *destination,
@@ -1901,7 +1902,7 @@ fn bind_value_in(
                                     dimensions,
                                 )
                             {
-                                operands[0] = match lvalues::variable_lvalue(
+                                operands[output] = match lvalues::variable_lvalue(
                                     *destination,
                                     native,
                                     tree,
@@ -1976,6 +1977,7 @@ fn bind_value_in(
                                     | SystemFunction::System
                                     | SystemFunction::Fopen
                                     | SystemFunction::Fgets
+                                    | SystemFunction::Ferror
                                     | SystemFunction::Ftell
                                     | SystemFunction::Fseek
                                     | SystemFunction::Rewind
@@ -2015,7 +2017,10 @@ fn bind_value_in(
                                     {
                                         return Err(AnalyzerError::InvalidSystemTfCall {
                                             name: name.clone(),
-                                            detail: if function == SystemFunction::Fgets {
+                                            detail: if function == SystemFunction::Ferror {
+                                                "output argument must be a writable text variable"
+                                                    .into()
+                                            } else if function == SystemFunction::Fgets {
                                                 "output argument must be a writable string variable"
                                                     .into()
                                             } else if matches!(

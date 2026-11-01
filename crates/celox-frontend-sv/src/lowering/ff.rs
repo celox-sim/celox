@@ -1691,10 +1691,13 @@ impl<'p, 'a> Ff<'p, 'a> {
                 ..
             } => self.fread(args)?,
             Expr::Call {
-                callee: sv::ir::Callee::System(sv::ir::SystemFunction::Fgets),
+                callee:
+                    sv::ir::Callee::System(
+                        function @ (sv::ir::SystemFunction::Fgets | sv::ir::SystemFunction::Ferror),
+                    ),
                 args,
                 ..
-            } => self.fgets(args)?,
+            } => self.string_file_function(*function, args)?,
             Expr::Call {
                 callee:
                     sv::ir::Callee::System(

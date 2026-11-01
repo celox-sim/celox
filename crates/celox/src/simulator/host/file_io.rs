@@ -70,6 +70,27 @@ impl<B: SimBackend> Simulator<B> {
         if site.operation == 13 {
             return self.run_fread_request(site);
         }
+        if site.operation == 15 {
+            let (descriptor, mask) = self.backend.get_four_state(site.args[0].id);
+            if mask != BigUint::default() {
+                return Err(Halt::Error(SimulatorErrorCode::Runtime {
+                    message: "$ferror descriptor contains X or Z".into(),
+                    signals: Vec::new(),
+                }));
+            }
+            let descriptor = descriptor.to_u32_digits().first().copied().unwrap_or(0);
+            let (code, message) = self.file_io.error(descriptor);
+            let bytes: Vec<_> = message.bytes().filter(|byte| *byte != 0).collect();
+            let result = if site.results[1].value_kind == celox_design::ValueKind::StrRef {
+                BigUint::from(self.backend.heap_mut().intern(&bytes))
+            } else {
+                BigUint::from_bytes_be(&bytes)
+            };
+            self.backend.set_wide(site.results[1].id, result);
+            self.backend.set(site.results[0].id, code);
+            self.dirty = true;
+            return Ok(());
+        }
         if site.operation == 14 {
             return self.run_fgets_request(site);
         }

@@ -131,6 +131,8 @@ pub enum SystemFunction {
     Fread,
     /// Line input into a string variable (21.3.4.2).
     Fgets,
+    /// Most recent file I/O error and its description (21.3.7).
+    Ferror,
     /// File position and byte input functions (21.3.4–8).
     Ftell,
     Fseek,
@@ -218,6 +220,7 @@ impl SystemFunction {
                 | Self::System
                 | Self::Fread
                 | Self::Fgets
+                | Self::Ferror
                 | Self::Ftell
                 | Self::Fseek
                 | Self::Rewind
@@ -347,6 +350,7 @@ impl SystemFunction {
             Self::System => "$system",
             Self::Fread => "$fread",
             Self::Fgets => "$fgets",
+            Self::Ferror => "$ferror",
             Self::Ftell => "$ftell",
             Self::Fseek => "$fseek",
             Self::Rewind => "$rewind",
@@ -406,6 +410,7 @@ impl SystemFunction {
                     | Self::System
                     | Self::Fread
                     | Self::Fgets
+                    | Self::Ferror
                     | Self::Ftell
                     | Self::Fseek
                     | Self::Rewind
@@ -466,6 +471,7 @@ impl SystemFunction {
             ) && position == 0)
             || (self == Self::ValuePlusargs && position == 1)
             || (matches!(self, Self::Fread | Self::Fgets) && position == 0)
+            || (self == Self::Ferror && position == 1)
             || (matches!(self, Self::Sscanf | Self::Fscanf) && position >= 2)
             || (matches!(
                 self,
@@ -544,6 +550,7 @@ impl SystemFunction {
             | Self::ValuePlusargs
             | Self::Fread
             | Self::Fgets
+            | Self::Ferror
             | Self::Ftell
             | Self::Fseek
             | Self::Rewind
@@ -2080,7 +2087,7 @@ pub const SYSTEM_TFS: &[SystemTf] = &[
     function(SystemFunction::Fseek, 3, Some(3)),
     function(SystemFunction::Rewind, 1, Some(1)),
     task(SystemTask::Fflush, ProceduralAndInitial, 0, Some(1)),
-    unsupported("$ferror", Function),
+    function(SystemFunction::Ferror, 2, Some(2)),
     function(SystemFunction::Feof, 1, Some(1)),
     // 21.4 Loading memory array data from a file
     task(

@@ -309,6 +309,30 @@ impl BodyBuilder<'_, '_, '_> {
                         .is_some_and(SystemFunction::has_unevaluated_operand),
                     _ => false,
                 };
+                // An update in $ferror's output index is lifted into the
+                // prelude. Save the preceding FD first, including its calls,
+                // so that the prelude cannot reorder the two arguments.
+                if matches!(&native.expression(*expression).kind,
+                    ExprKind::Name(name) if name.spelling == "$ferror")
+                    && let [fd, output] = arguments.as_slice()
+                    && let (Some(fd), Some(output)) = (fd.value, output.value)
+                    && updating.contains(&output)
+                {
+                    self.effect(fd, updating, stmts)?;
+                    let mut rhs = self.native_chandle_value(fd)?;
+                    let (source, unique) = self.hidden(
+                        type_binding::builtin_type("integer", None).expect("a builtin type"),
+                    );
+                    self.rename_expr(&mut rhs);
+                    stmts.push(Stmt::Assign {
+                        lhs: LValue::Ident(unique),
+                        rhs,
+                        nonblocking: false,
+                    });
+                    self.bind_effect(fd, Expr::Ident(source));
+                    self.effect(output, updating, stmts)?;
+                    return Ok(());
+                }
                 for argument in arguments
                     .iter()
                     .skip(usize::from(unevaluated))
