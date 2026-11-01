@@ -231,6 +231,7 @@ mod expression_binding;
 mod expression_types;
 mod expressions;
 mod ff_process;
+mod function_returns;
 mod functions;
 mod generate;
 pub(crate) mod imports;
@@ -1493,59 +1494,19 @@ impl Module {
                     .entry(name.clone())
                     .or_insert_with(|| metadata.clone());
             }
-            let semantic_returns = packed_dimensions
-                .function_return_types
-                .iter()
-                .filter_map(|(name, metadata)| metadata.semantic_type.map(|ty| (name.clone(), ty)))
-                .collect::<HashMap<_, _>>();
             packed_dimensions
                 .function_return_types
                 .extend(functions.iter().map(|(name, function)| {
                     (
                         name.clone(),
-                        FunctionReturnMetadata {
-                            semantic_type: semantic_returns.get(name).copied(),
-                            arguments: Some(function_argument_metadata(&function.params)),
-                            width: function.return_width,
-                            first_packed_dimension_width: function
-                                .return_first_packed_dimension_width,
-                            dimensions: function.return_dimensions,
-                            signed: function.return_signed,
-                            is_2state: function.return_is_2state,
-                            string: function.return_string,
-                            chandle: function.return_chandle,
-                            pattern_type: function.return_type.clone(),
-                            enum_domain: function.return_enum_domain.clone(),
-                            class: function.return_class.clone(),
-                            virtual_interface: function.return_virtual_interface.clone(),
-                        },
+                        FunctionReturnMetadata::from_function(function),
                     )
                 }));
             packed_dimensions
                 .function_return_types
                 .extend(dpi_imports.iter().filter_map(|import| {
-                    let r#type = import.return_type()?;
-                    Some((
-                        import.name().to_string(),
-                        FunctionReturnMetadata {
-                            semantic_type: None,
-                            arguments: Some(dpi_argument_metadata(import)),
-                            width: Some(r#type.width()),
-                            first_packed_dimension_width: (r#type.width() > 1)
-                                .then_some(r#type.width()),
-                            dimensions: Some(usize::from(
-                                r#type.width() > 1 && r#type != crate::ir::DpiType::Chandle,
-                            )),
-                            signed: r#type.is_signed(),
-                            is_2state: !r#type.is_4state(),
-                            string: r#type == crate::ir::DpiType::String,
-                            chandle: r#type == crate::ir::DpiType::Chandle,
-                            pattern_type: None,
-                            enum_domain: None,
-                            class: None,
-                            virtual_interface: None,
-                        },
-                    ))
+                    FunctionReturnMetadata::from_dpi(import, &mut session.types)
+                        .map(|metadata| (import.name().to_string(), metadata))
                 }));
             // Class methods are subroutines `class::method` (IEEE 1800-2023 8.6).
             dimensions::all_class_signatures(syntax_tree, session, &mut packed_dimensions);
@@ -3213,6 +3174,8 @@ impl ConditionalAssignment {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Function {
+    /// The resolved return type, retained through body binding and renaming.
+    return_semantic_type: Option<semantic_types::TyId>,
     /// The aggregate return type, frozen in its declaration scope.
     return_type: Option<Type>,
     return_real: bool,
@@ -3512,9 +3475,6 @@ struct FunctionReturnMetadata {
     pattern_type: Option<Type>,
     /// The members of an enumerated return type, for its methods.
     enum_domain: Option<Arc<enums::EnumDomain>>,
-    /// The class of a class handle result, whose members a call may select
-    /// (IEEE 1800-2023 8.4).
-    class: Option<String>,
     /// The function returns a virtual interface of this type.
     virtual_interface: Option<Arc<virtual_interfaces::VirtualInterface>>,
 }

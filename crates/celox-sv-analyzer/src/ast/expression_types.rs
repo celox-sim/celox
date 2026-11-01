@@ -159,14 +159,14 @@ fn resolve(
                 through_super,
             )
             .ok()??;
-            named_function_result(tree, session, &name, dims)
+            named_function_result(&name, dims)
         }
         // A static property `C::p`, or a static method called without
         // parentheses (13.5.5).
         ExprKind::Member { separator, .. } if separator == "::" => {
             property_type(tree, session, id, native, dims).or_else(|| {
                 let (name, ..) = objects::method(tree, session, id, native, dims).ok()??;
-                named_function_result(tree, session, &name, dims)
+                named_function_result(&name, dims)
             })
         }
         _ => property_type(tree, session, id, native, dims),
@@ -188,46 +188,20 @@ pub(super) fn function_result(
         Ok(None) => expression_binding::callable_name(tree, callee, native)?,
         Err(_) => return None,
     };
-    named_function_result(tree, session, &name, dims)
+    named_function_result(&name, dims)
 }
 
 /// The result of an already resolved subroutine, including a method called
 /// without parentheses. Both call forms consult the same signature metadata.
-fn named_function_result(
-    tree: &AnalysisContext<'_>,
-    session: &mut Session,
-    name: &str,
-    dims: &PackedDimensions,
-) -> Option<TyId> {
-    if let Some(returns) = dims.function_return_types.get(name) {
-        if let Some(ty) = returns.semantic_type {
-            return Some(ty);
-        }
-        if let Some(ty) = returns.pattern_type.as_ref() {
-            return semantic_types::of_type(
-                &mut session.types,
-                &tree.functions,
-                ty,
-                &dims.const_env,
-            );
-        }
-        if let Some(name) = &returns.class {
-            return Some(
-                session
-                    .types
-                    .intern(TyData::Class(Decl::Class(name.as_str().into()))),
-            );
-        }
-        if returns.string {
-            return Some(session.types.intern(TyData::String));
-        }
-    }
-    // Older bound-function contexts have no signature entry yet. Preserve
-    // their string-result query until every registry carries semantic types.
-    dims.functions
+fn named_function_result(name: &str, dims: &PackedDimensions) -> Option<TyId> {
+    dims.function_return_types
         .get(name)
-        .is_some_and(|function| function.return_string)
-        .then(|| session.types.intern(TyData::String))
+        .and_then(|returns| returns.semantic_type)
+        .or_else(|| {
+            dims.functions
+                .get(name)
+                .and_then(|function| function.return_semantic_type)
+        })
 }
 
 /// Self-determined selection types, independent of an assignment context

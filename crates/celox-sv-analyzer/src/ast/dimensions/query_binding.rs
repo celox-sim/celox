@@ -1062,7 +1062,6 @@ mod tests {
                 chandle: false,
                 pattern_type: None,
                 enum_domain: None,
-                class: None,
                 virtual_interface: None,
             },
         );
