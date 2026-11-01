@@ -1,1 +1,6 @@
-Lower PRs #2853 and #2855 merged while validation ran; remove their already-applied commits and retarget the raw-wait PR to master.
+Revision history for #2868:
+
+rev 2 (rebase) 2026-11-01 10:51 UTC — Lower PRs #2853 and #2855 merged while validation ran; remove their already-applied commits and retarget the raw-wait PR to master.
+rev 1 (initial) 2026-11-01 10:51 UTC
+
+<!-- mergify-revision-data: {"schema_version":1,"pull_number":2868,"entries":[{"number":1,"change_type":"initial","old_sha":null,"new_sha":"956b3a25b7cd9a46dcd45cd80760e80837f04e25","timestamp_iso":"2026-11-01T10:51:35Z","reason":"","replay_sha":null,"compare_url":null},{"number":2,"change_type":"rebase","old_sha":"956b3a25b7cd9a46dcd45cd80760e80837f04e25","new_sha":"457618bc39d698fc93eea365072513a261e6a6b9","timestamp_iso":"2026-11-01T10:51:35Z","reason":"Lower PRs #2853 and #2855 merged while validation ran; remove their already-applied commits and retarget the raw-wait PR to master.","replay_sha":null,"compare_url":"https://github.com/celox-sim/celox/compare/956b3a25b7cd9a46dcd45cd80760e80837f04e25...457618bc39d698fc93eea365072513a261e6a6b9"}]} -->
